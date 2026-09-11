@@ -47,10 +47,12 @@ satisfiable plonky2 statement of the pinned circuit" is exactly (a0)
 `mleVerifierSoundness`. Splitting the premises this way makes the borrowed halves
 disjoint: no field bundles the accepted artifact with an unaccepted lowering. The
 older, monolithic "acceptance implies a satisfying witness" conclusions are still
-available with the same names and the same argument lists, but now as THEOREMS —
-`TrustBoundary.closeProofSoundness`, `TrustBoundary.withdrawalProofSoundness`,
-`TrustBoundary.postCloseProofSoundness` — proved from (a0) plus the corresponding
-lowering field, so every consumer is unchanged while nothing is assumed twice.
+available with the same statements and the same argument lists, but now as
+THEOREMS — `close_proof_soundness_of_boundary`,
+`withdrawal_proof_soundness_of_boundary`,
+`post_close_proof_soundness_of_boundary` — proved from (a0) plus the
+corresponding lowering field, so every consumer is unchanged while nothing is
+assumed twice.
 
 The single inhabitation result below is deliberately degenerate: in an
 environment where every proof adapter returns a failure and no plonky2 statement
@@ -283,7 +285,7 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   deployed circuit together with `CloseCircuit.FieldAndGadgetLowering`; neither
   the emitted gates nor the plonky2 lowering is modeled in this project. The old
   monolithic "acceptance implies a satisfying witness" form is recovered from
-  this field and (a0) by the theorem `TrustBoundary.closeProofSoundness`. -/
+  this field and (a0) by the theorem `close_proof_soundness_of_boundary`. -/
   closeStatementLowering : CloseStatementLowering m
   /-- **(b1) Withdrawal-claim statement lowering — lowering only; the MLE step is
   (a0).** `ClaimSettlementBridge` ties an accepted withdrawal claim to the exact
@@ -292,14 +294,14 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   carrying those 50 words yields a satisfying witness of
   `WithdrawalClaimCircuit.CircuitGates`. Discharged by the emitted gate set plus
   `WithdrawalClaimCircuit.FieldLowering`. The old monolithic form is recovered by
-  `TrustBoundary.withdrawalProofSoundness`. -/
+  `withdrawal_proof_soundness_of_boundary`. -/
   withdrawalStatementLowering : WithdrawalStatementLowering m
   /-- **(b2) Post-close-claim statement lowering — lowering only; the MLE step is
   (a0).** Same gap for the 57-word post-close endpoint: given (a0), a satisfiable
   plonky2 statement of the post-close adapter's pinned circuit carrying those 57
   words yields a raw witness whose public record is the bound statement and which
   satisfies `PostCloseClaimCircuit.ConstructorGates`. The old monolithic form is
-  recovered by `TrustBoundary.postCloseProofSoundness`. -/
+  recovered by `post_close_proof_soundness_of_boundary`. -/
   postCloseStatementLowering : PostCloseStatementLowering m
   /-- **(c) Close-vector backing.** The materializer credits the Manager the whole
   finalized close vector, and `CloseFunding` proves only that those amounts are
@@ -407,7 +409,7 @@ buys. -/
 the old premise (a): the word vector the pinned adapter returned is the
 public-input vector of a satisfiable plonky2 statement of the pinned close
 circuit, and it is the exact 103-word close statement (that part is proved, not
-assumed). The remaining gap to the old `closeProofSoundness` is then
+assumed). The remaining gap to the old close soundness conclusion is then
 `CloseStatementLowering` and nothing else: supplying it discharges premise (a)
 for every accepted close.
 
@@ -488,7 +490,7 @@ theorem mle_assumption_reduces_post_close_soundness_to_gate_lowering
   exact ⟨receipt, satisfiable, lowering f satisfiable⟩
 
 /-- The close composition read as premise discharge: (a0) plus the lowering give
-the old premise (a) in exactly the form `TrustBoundary.closeProofSoundness`
+the old premise (a) in exactly the form `close_proof_soundness_of_boundary`
 states, and therefore nothing weaker than the lowering can be substituted for
 it. -/
 theorem mle_assumption_with_lowering_is_close_proof_soundness
@@ -540,19 +542,20 @@ theorem mle_assumption_with_lowering_is_post_close_proof_soundness
 /-! ## The old monolithic premises, recovered as theorems
 
 Splitting the premise bundle must not cost any consumer its conclusion. The three
-theorems below carry the names, the statements and the argument lists the former
+theorems below carry the statements and the argument lists the former
 `TrustBoundary` FIELDS `closeProofSoundness`, `withdrawalProofSoundness` and
-`postCloseProofSoundness` had, so `tb.closeProofSoundness f proof accepted` still
-elaborates exactly as before — with the difference that it is now derived from
-(a0) plus the corresponding lowering field instead of being assumed outright. -/
-
-namespace TrustBoundary
+`postCloseProofSoundness` had, with the boundary instance moved to the front as
+an ordinary explicit argument: `close_proof_soundness_of_boundary tb f proof
+accepted` proves exactly what `tb.closeProofSoundness f proof accepted` used to
+— with the difference that it is now derived from (a0) plus the corresponding
+lowering field instead of being assumed outright. -/
 
 /-- **(a0) + (a) ⇒ the old premise (a).** An accepted close proof implies some
 witness satisfies `CloseCircuit.CircuitGates` for the same 103-word statement.
 This used to be a field of the structure; it is now proved from the accepted
 MLE/WHIR premise and the close statement lowering. -/
-theorem closeProofSoundness {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+theorem close_proof_soundness_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
     {Deployed Modeled Unmodeled : σ → σ → Prop}
     {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
@@ -568,7 +571,7 @@ theorem closeProofSoundness {BalanceProof AggregateProof Path Root ClaimPath Cla
 /-- **(a0) + (b1) ⇒ the old premise (b1).** An accepted withdrawal claim implies
 some witness satisfies `WithdrawalClaimCircuit.CircuitGates` for the same 50-word
 statement. Formerly a field, now proved. -/
-theorem withdrawalProofSoundness
+theorem withdrawal_proof_soundness_of_boundary
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
     {Deployed Modeled Unmodeled : σ → σ → Prop}
@@ -586,7 +589,7 @@ theorem withdrawalProofSoundness
 a raw witness whose public record is the bound 57-word statement and which
 satisfies `PostCloseClaimCircuit.ConstructorGates`. Formerly a field, now
 proved. -/
-theorem postCloseProofSoundness
+theorem post_close_proof_soundness_of_boundary
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
     {Deployed Modeled Unmodeled : σ → σ → Prop}
@@ -599,8 +602,6 @@ theorem postCloseProofSoundness
         PostCloseClaimCircuit.ConstructorGates m.postEnv w :=
   mle_assumption_with_lowering_is_post_close_proof_soundness m tb.mleVerifierSoundness
     tb.postCloseStatementLowering f proof accepted
-
-end TrustBoundary
 
 /-! ## What remains, per endpoint
 

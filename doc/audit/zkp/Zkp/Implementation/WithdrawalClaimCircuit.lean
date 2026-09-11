@@ -669,4 +669,509 @@ theorem normal_per_token_nullifier_preimage :
     (nullifierPreimage CloseCircuit.Words8.zero CloseCircuit.Words8.zero 1).length = 18 :=
   nullifier_preimage_width _ _ _
 
+/-! ## Gate lowering: the builder program read as local wire propositions
+
+Each `BuildOp` of `constructorProgram` is given a LOCAL proposition on one
+`Assignment` (the wire values of a single execution). `program_satisfied_implies_gates`
+then derives the whole hand-written `CircuitGates` predicate from those local
+propositions alone, so the `FieldLowering` gap shrinks to `PrimitiveLowering`:
+"a real satisfying plonky2 assignment yields these wire values".
+Source line numbers below refer to src/circuits/channel/withdrawal_claim_circuit.rs. -/
+
+/-- The 33-bit borrow comparison wires of `less_than_u32` (src 701-721): the 32 low
+    bits and the top bit of `split_le(b - a + 2^32, 33)`. `result` is
+    `and(no_borrow, not(is_zero(low_sum)))` (src 713-720). -/
+structure CompareWires where
+  lowBits : List Bool
+  topBit : Bool
+  deriving DecidableEq, Repr
+
+def CompareWires.result (c : CompareWires) : Bool :=
+  c.topBit && !(decide (bitCount c.lowBits = 0))
+
+/-- What the gadget plus its `connect`/`assert_one` enforce on the wires: the 33-bit
+    split, the shifted-difference equation and the asserted result bit. -/
+def CompareWires.Enforces (c : CompareWires) (a b : Nat) : Prop :=
+  c.lowBits.length = 32 ∧
+  b + wordBase = a + bitsValue c.lowBits + wordBase * bit c.topBit ∧
+  c.result = true
+
+theorem compare_wires_expose_comparison {c : CompareWires} {a b : Nat} (h : c.Enforces a b) :
+    ∃ w : Comparison33 a b, comparisonResult w = true :=
+  ⟨⟨c.lowBits,c.topBit,h.1,h.2.1⟩,by exact h.2.2⟩
+
+theorem compare_wires_force_strict_less {c : CompareWires} {a b : Nat} (h : c.Enforces a b) :
+    a < b := by
+  obtain ⟨w,hw⟩ := compare_wires_expose_comparison h
+  exact (comparison_result_iff_strict_less w).mp hw
+
+/-- The accumulated `builder.select(flag t, row t, acc)` chain (src 419-424, 431-434):
+    the last matching flag wins, the chain starts at the zero wire. -/
+def selectChain {α : Type} (flag : Nat → Bool) (row : Nat → α) (initial : α) : Nat → α
+  | 0 => initial
+  | n+1 => if flag n = true then row n else selectChain flag row initial n
+
+/-- The accumulated `flags_sum = builder.add(flags_sum, is_sel.target)` chain (src 399-402). -/
+def flagSum (flag : Nat → Bool) : Nat → Nat
+  | 0 => 0
+  | n+1 => flagSum flag n + bit (flag n)
+
+/-- `builder.is_equal(token_slot, t)` (src 400) is a safe Boolean equal to the
+    equality test; that per-gate fact is a primitive obligation, not proved here. -/
+def FlagsPinned (slot : Nat) (flag : Nat → Bool) (n : Nat) : Prop :=
+  ∀ k, k < n → (flag k = true ↔ slot = k)
+
+theorem flag_sum_is_one_hot_sum (slot : Nat) (flag : Nat → Bool) (n : Nat)
+    (pinned : FlagsPinned slot flag n) : flagSum flag n = oneHotSum slot n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    have head := pinned n (Nat.lt_succ_self n)
+    have rest : FlagsPinned slot flag n := fun k hk => pinned k (Nat.lt_succ_of_lt hk)
+    by_cases h : slot = n
+    · simp [flagSum,oneHotSum,ih rest,head.mpr h,h,bit]
+    · have hf : flag n = false := by
+        have neq : flag n ≠ true := fun hx => h (head.mp hx)
+        simpa using neq
+      simp [flagSum,oneHotSum,ih rest,hf,h,bit]
+
+theorem select_chain_is_select_loop {α : Type} (slot : Nat) (flag : Nat → Bool)
+    (row : Nat → α) (initial : α) (n : Nat) (pinned : FlagsPinned slot flag n) :
+    selectChain flag row initial n = selectLoop slot row initial n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    have head := pinned n (Nat.lt_succ_self n)
+    have rest : FlagsPinned slot flag n := fun k hk => pinned k (Nat.lt_succ_of_lt hk)
+    by_cases h : slot = n
+    · simp [selectChain,selectLoop,head.mpr h,h]
+    · have hf : flag n = false := by
+        have neq : flag n ≠ true := fun hx => h (head.mp hx)
+        simpa using neq
+      simp [selectChain,selectLoop,hf,h,ih rest]
+
+/-- The wire values of ONE execution of `WithdrawalClaimCircuit::new`'s target set
+    (src 306-546): the public-input targets (src 113-131), the witnessed header and
+    slot targets (src 314-340), the four Regev polynomials and the decryption-core
+    handle (src 451-503), plus every intermediate target the constructor creates
+    (`recomputed_h1`, `active`, the three comparison bit vectors, the ten one-hot
+    flags, `pk_digest`, `ct_digest`, `slot_leaf`, the exposed amount limbs and the
+    keccak nullifier). Field elements are integer representatives. -/
+structure Assignment {Path Core : Type} (e : Environment Path Core) where
+  closeId : Words8
+  channelId : Nat
+  h1 : Words8
+  memberPk : Words8
+  recipient : Address
+  ciphertextDigest : Words8
+  nullifier : Words8
+  amount : Words2
+  tokenSlot : Nat
+  tokenIndex : Nat
+  memberCount : Nat
+  delegateCount : Nat
+  tokenCount : Nat
+  registry : Ten Nat
+  slotRoot : Root
+  settledChain : Words8
+  accumulatorRoot : Words8
+  stateVersion : Words2
+  memberIndex : Nat
+  ciphertexts : Ten Words8
+  pendingAdds : Ten Nat
+  path : Path
+  polynomials : Polynomials
+  core : Core
+  active : Nat
+  activeCompare : CompareWires
+  memberCompare : CompareWires
+  tokenCompare : CompareWires
+  tokenFlags : Nat → Bool
+  recomputedH1 : Words8
+  pkDigest : Words8
+  ctDigest : Words8
+  slotLeaf : Root
+  amountLo : Nat
+  amountHi : Nat
+  nullifierDigest : Words8
+
+/-- Public-input wires in `to_vec` order (src 134-151). -/
+def readPublic {Path Core : Type} {e : Environment Path Core} (a : Assignment e) : PublicInputs :=
+  { closeId := a.closeId, channelId := a.channelId, h1 := a.h1, memberPk := a.memberPk,
+    recipient := a.recipient, ciphertextDigest := a.ciphertextDigest, nullifier := a.nullifier,
+    amount := a.amount, tokenSlot := a.tokenSlot, tokenIndex := a.tokenIndex }
+
+/-- H1 header scalars in `recompute_h1` argument order (src 344-355). -/
+def readHeader {Path Core : Type} {e : Environment Path Core} (a : Assignment e) : Header :=
+  { memberCount := a.memberCount, delegateCount := a.delegateCount, tokenCount := a.tokenCount,
+    registry := a.registry, slotRoot := a.slotRoot, settledChain := a.settledChain,
+    accumulatorRoot := a.accumulatorRoot, stateVersion := a.stateVersion }
+
+/-- Private wires in constructor allocation order (src 314-340, 451-503). -/
+def readWitness {Path Core : Type} {e : Environment Path Core} (a : Assignment e) :
+    Witness Path Core :=
+  { header := readHeader a, memberIndex := a.memberIndex, ciphertexts := a.ciphertexts,
+    pendingAdds := a.pendingAdds, path := a.path, polynomials := a.polynomials, core := a.core }
+
+/-- The limb group each `allocateCheckedPublic` index range-checks (src 113-131,
+    in `to_vec` order src 134-151). -/
+def publicGroup {Path Core : Type} {e : Environment Path Core} (a : Assignment e) :
+    Nat → List Nat
+  | 0 => a.closeId.words
+  | 1 => [a.channelId]
+  | 2 => a.h1.words
+  | 3 => a.memberPk.words
+  | 4 => a.recipient.words
+  | 5 => a.ciphertextDigest.words
+  | 6 => a.nullifier.words
+  | 7 => a.amount.words
+  | 8 => [a.tokenSlot]
+  | 9 => [a.tokenIndex]
+  | _ => []
+
+/-- The limbs `u32_limb`/`Bytes32Target::new(_, true)`/`U64Target::new(_, true)`
+    range-check for the header (src 316-330). -/
+def headerAllocationWords {Path Core : Type} {e : Environment Path Core} (a : Assignment e) :
+    List Nat :=
+  [a.memberCount,a.delegateCount,a.tokenCount] ++ tenList a.registry ++ a.settledChain.words ++
+    a.accumulatorRoot.words ++ a.stateVersion.words
+
+/-- The ten checked ciphertext digests and ten checked counters (src 337-340). -/
+def slotRowWords {Path Core : Type} {e : Environment Path Core} (a : Assignment e) : List Nat :=
+  digestRowWords a.ciphertexts ++ tenList a.pendingAdds
+
+/-- The registered public-input vector is exactly the ten range-checked groups
+    (src 134-151 against src 113-131). -/
+theorem public_words_are_groups {Path Core : Type} {e : Environment Path Core}
+    (a : Assignment e) :
+    (readPublic a).words = publicGroup a 0 ++ publicGroup a 1 ++ publicGroup a 2 ++
+      publicGroup a 3 ++ publicGroup a 4 ++ publicGroup a 5 ++ publicGroup a 6 ++
+      publicGroup a 7 ++ publicGroup a 8 ++ publicGroup a 9 := by
+  simp [readPublic,PublicInputs.words,publicGroup]
+
+/-- The private range-check list of `CircuitGates` is exactly the header allocation
+    limbs followed by the ten-token leaf row (src 316-340). -/
+theorem private_words_are_allocations {Path Core : Type} {e : Environment Path Core}
+    (a : Assignment e) :
+    [a.memberCount,a.delegateCount,a.tokenCount] ++ tenList a.registry ++ a.settledChain.words ++
+      a.accumulatorRoot.words ++ a.stateVersion.words ++ digestRowWords a.ciphertexts ++
+      tenList a.pendingAdds = headerAllocationWords a ++ slotRowWords a := by
+  simp only [headerAllocationWords,slotRowWords,List.append_assoc]
+
+theorem checked_append {xs ys : List Nat} (hx : Checked xs) (hy : Checked ys) :
+    Checked (xs ++ ys) := by
+  intro x mem
+  rcases List.mem_append.mp mem with h | h
+  · exact hx x h
+  · exact hy x h
+
+theorem checked_of_all_words {xs : List Nat}
+    (h : xs.all (fun x => decide (x < wordBase)) = true) : Checked xs :=
+  fun x mem => of_decide_eq_true (List.all_eq_true.mp h x mem)
+
+/-- What ONE builder call enforces on the wires it touches. Profiling reads
+    (`builder.num_gates()`), the config choice and `builder.build()` enforce nothing;
+    `allocateRawRootAndMemberIndex` enforces nothing either, because the source
+    allocates `slot_tree_root` as four RAW field elements (src 325-327) and
+    `member_index` with a bare `add_virtual_target` (src 333) — the index bound
+    comes only from the inclusion verify's `split_le` (src 493). -/
+def BuildOp.holds {Path Core : Type} {e : Environment Path Core} :
+    BuildOp → Assignment e → Prop
+  | .zeroKnowledgeConfig, _ => True
+  | .allocateCheckedPublic field width, a =>
+      Checked (publicGroup a field) ∧ (publicGroup a field).length = width
+  | .allocateCheckedHeader, a => Checked (headerAllocationWords a)
+  | .allocateRawRootAndMemberIndex, _ => True
+  | .allocateTenCheckedCiphertextsAndCounters, a => Checked (slotRowWords a)
+  | .observeInputs, _ => True
+  | .recomputeH1, a => a.recomputedH1 = e.poseidonWords (headerPreimage a.channelId (readHeader a))
+  | .connectH1, a => a.recomputedH1 = a.h1
+  | .activeSumAnd11Bits, a => a.active = a.memberCount + a.delegateCount ∧ a.active < 2^11
+  | .compareActive1025, a => a.activeCompare.Enforces a.active (maxParticipants+1)
+  | .compareMemberActive, a => a.memberCompare.Enforces a.memberIndex a.active
+  | .tenEqualityFlagsAndSumOne, a =>
+      FlagsPinned a.tokenSlot a.tokenFlags maxTokens ∧ flagSum a.tokenFlags maxTokens = 1
+  | .compareTokenCount, a => a.tokenCompare.Enforces a.tokenSlot a.tokenCount
+  | .selectEightCiphertextLimbs, a =>
+      selectChain a.tokenFlags (totalRow a.ciphertexts CloseCircuit.Words8.zero)
+        CloseCircuit.Words8.zero maxTokens = a.ciphertextDigest
+  | .selectBaseToken, a => selectChain a.tokenFlags (totalRow a.registry 0) 0 maxTokens = a.tokenIndex
+  | .observeHeaderSelectors, _ => True
+  | .allocateFourPolynomials length, a =>
+      a.polynomials.a.length = length ∧ a.polynomials.b.length = length ∧
+      a.polynomials.c1.length = length ∧ a.polynomials.c2.length = length
+  | .hashPkAndCiphertext, a =>
+      a.pkDigest = e.poseidonWords (pkPreimage a.polynomials) ∧
+      a.ctDigest = e.keccak (ctPreimage a.polynomials)
+  | .connectCiphertext, a => a.ctDigest = a.ciphertextDigest
+  | .observeDigests, _ => True
+  | .hashFullSlotLeaf, a =>
+      a.slotLeaf = e.poseidonRoot (slotPreimage a.pkDigest a.ciphertexts a.pendingAdds a.recipient)
+  | .verifyInclusion height, a =>
+      e.inclusion a.slotLeaf a.memberIndex a.path a.slotRoot ∧ a.memberIndex < 2^height
+  | .observeInclusion, _ => True
+  | .decryptExposeAmount, a => e.decryption a.polynomials a.core a.amountLo a.amountHi
+  | .connectAmountHighThenLow, a => a.amount.hi = a.amountHi ∧ a.amount.lo = a.amountLo
+  | .observeDecryption, _ => True
+  | .deriveIMW2, a => a.nullifierDigest = e.keccak (nullifierPreimage a.closeId a.pkDigest a.tokenSlot)
+  | .connectNullifier, a => a.nullifierDigest = a.nullifier
+  | .observeNullifier, _ => True
+  | .registerPublic width, a => (readPublic a).words.length = width
+  | .observeBeforePadding, _ => True
+  | .buildCircuit, _ => True
+
+def ProgramSatisfied {Path Core : Type} {e : Environment Path Core}
+    (prog : List BuildOp) (a : Assignment e) : Prop := ∀ op ∈ prog, op.holds a
+
+/-- Residual gate obligations NOT produced by any `BuildOp` of `constructorProgram`.
+    The list is EMPTY: every field of `CircuitGates` is discharged by
+    `program_satisfied_implies_gates` from program satisfaction alone, so this
+    carries no content and the main theorem takes no such premise. -/
+def EnvironmentGates {Path Core : Type} {e : Environment Path Core} (_a : Assignment e) : Prop :=
+  True
+
+theorem environment_gates_are_empty {Path Core : Type} {e : Environment Path Core}
+    (a : Assignment e) : EnvironmentGates a := trivial
+
+/-- Gate lowering, fully discharged inside the model: satisfying every LOCAL
+    proposition of the transcribed builder program forces the hand-written
+    `CircuitGates` predicate on the wires read back by `readPublic`/`readWitness`.
+    No extra premise (see `EnvironmentGates`, which is empty) and `CircuitGates`
+    is not weakened. What remains outside the model is per-primitive: that a real
+    plonky2 satisfying assignment realizes each `BuildOp.holds` (range-check,
+    connect, `is_equal`/`select`, `less_than_u32`, the Poseidon/keccak/Merkle/
+    decryption-core gadget calls) — that is `PrimitiveLowering`. -/
+theorem program_satisfied_implies_gates {Path Core : Type} (e : Environment Path Core)
+    (a : Assignment e) (h : ProgramSatisfied constructorProgram a) :
+    CircuitGates e (readPublic a) (readWitness a) := by
+  have p0 : Checked (publicGroup a 0) ∧ (publicGroup a 0).length = 8 :=
+    h (.allocateCheckedPublic 0 8) (by decide)
+  have p1 : Checked (publicGroup a 1) ∧ (publicGroup a 1).length = 1 :=
+    h (.allocateCheckedPublic 1 1) (by decide)
+  have p2 : Checked (publicGroup a 2) ∧ (publicGroup a 2).length = 8 :=
+    h (.allocateCheckedPublic 2 8) (by decide)
+  have p3 : Checked (publicGroup a 3) ∧ (publicGroup a 3).length = 8 :=
+    h (.allocateCheckedPublic 3 8) (by decide)
+  have p4 : Checked (publicGroup a 4) ∧ (publicGroup a 4).length = 5 :=
+    h (.allocateCheckedPublic 4 5) (by decide)
+  have p5 : Checked (publicGroup a 5) ∧ (publicGroup a 5).length = 8 :=
+    h (.allocateCheckedPublic 5 8) (by decide)
+  have p6 : Checked (publicGroup a 6) ∧ (publicGroup a 6).length = 8 :=
+    h (.allocateCheckedPublic 6 8) (by decide)
+  have p7 : Checked (publicGroup a 7) ∧ (publicGroup a 7).length = 2 :=
+    h (.allocateCheckedPublic 7 2) (by decide)
+  have p8 : Checked (publicGroup a 8) ∧ (publicGroup a 8).length = 1 :=
+    h (.allocateCheckedPublic 8 1) (by decide)
+  have p9 : Checked (publicGroup a 9) ∧ (publicGroup a 9).length = 1 :=
+    h (.allocateCheckedPublic 9 1) (by decide)
+  have hHeader : Checked (headerAllocationWords a) := h .allocateCheckedHeader (by decide)
+  have hRow : Checked (slotRowWords a) :=
+    h .allocateTenCheckedCiphertextsAndCounters (by decide)
+  have hRecompute : a.recomputedH1 = e.poseidonWords (headerPreimage a.channelId (readHeader a)) :=
+    h .recomputeH1 (by decide)
+  have hConnectH1 : a.recomputedH1 = a.h1 := h .connectH1 (by decide)
+  have hActive : a.active = a.memberCount + a.delegateCount ∧ a.active < 2^11 :=
+    h .activeSumAnd11Bits (by decide)
+  have hActiveCmp : a.activeCompare.Enforces a.active (maxParticipants+1) :=
+    h .compareActive1025 (by decide)
+  have hMemberCmp : a.memberCompare.Enforces a.memberIndex a.active :=
+    h .compareMemberActive (by decide)
+  have hFlags : FlagsPinned a.tokenSlot a.tokenFlags maxTokens ∧
+      flagSum a.tokenFlags maxTokens = 1 := h .tenEqualityFlagsAndSumOne (by decide)
+  have hTokenCmp : a.tokenCompare.Enforces a.tokenSlot a.tokenCount :=
+    h .compareTokenCount (by decide)
+  have hSelectCt : selectChain a.tokenFlags (totalRow a.ciphertexts CloseCircuit.Words8.zero)
+      CloseCircuit.Words8.zero maxTokens = a.ciphertextDigest :=
+    h .selectEightCiphertextLimbs (by decide)
+  have hSelectToken : selectChain a.tokenFlags (totalRow a.registry 0) 0 maxTokens = a.tokenIndex :=
+    h .selectBaseToken (by decide)
+  have hPoly : a.polynomials.a.length = regevN ∧ a.polynomials.b.length = regevN ∧
+      a.polynomials.c1.length = regevN ∧ a.polynomials.c2.length = regevN :=
+    h (.allocateFourPolynomials regevN) (by decide)
+  have hDigests : a.pkDigest = e.poseidonWords (pkPreimage a.polynomials) ∧
+      a.ctDigest = e.keccak (ctPreimage a.polynomials) := h .hashPkAndCiphertext (by decide)
+  have hConnectCt : a.ctDigest = a.ciphertextDigest := h .connectCiphertext (by decide)
+  have hLeaf : a.slotLeaf =
+      e.poseidonRoot (slotPreimage a.pkDigest a.ciphertexts a.pendingAdds a.recipient) :=
+    h .hashFullSlotLeaf (by decide)
+  have hInclusion : e.inclusion a.slotLeaf a.memberIndex a.path a.slotRoot ∧
+      a.memberIndex < 2^treeHeight := h (.verifyInclusion treeHeight) (by decide)
+  have hDecrypt : e.decryption a.polynomials a.core a.amountLo a.amountHi :=
+    h .decryptExposeAmount (by decide)
+  have hAmount : a.amount.hi = a.amountHi ∧ a.amount.lo = a.amountLo :=
+    h .connectAmountHighThenLow (by decide)
+  have hNullifier : a.nullifierDigest =
+      e.keccak (nullifierPreimage a.closeId a.pkDigest a.tokenSlot) := h .deriveIMW2 (by decide)
+  have hConnectNullifier : a.nullifierDigest = a.nullifier := h .connectNullifier (by decide)
+  have pinned : FlagsPinned a.tokenSlot a.tokenFlags maxTokens := hFlags.1
+  -- fields in `CircuitGates` declaration order.
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+  · -- publicRanges (src 113-131)
+    show Checked (readPublic a).words
+    rw [public_words_are_groups]
+    exact checked_append (checked_append (checked_append (checked_append (checked_append
+      (checked_append (checked_append (checked_append (checked_append p0.1 p1.1) p2.1) p3.1)
+        p4.1) p5.1) p6.1) p7.1) p8.1) p9.1
+  · -- privateRanges (src 316-340)
+    show Checked ([a.memberCount,a.delegateCount,a.tokenCount] ++ tenList a.registry ++
+      a.settledChain.words ++ a.accumulatorRoot.words ++ a.stateVersion.words ++
+      digestRowWords a.ciphertexts ++ tenList a.pendingAdds)
+    rw [private_words_are_allocations]
+    exact checked_append hHeader hRow
+  · -- h1Connect (src 344-356)
+    exact hRecompute.symm.trans hConnectH1
+  · -- activeBits (src 377-379)
+    show a.memberCount + a.delegateCount < 2^11
+    have bits := hActive.2
+    rw [hActive.1] at bits
+    exact bits
+  · -- activeCompare (src 380-382)
+    show ∃ c : Comparison33 (a.memberCount + a.delegateCount) (maxParticipants+1),
+      comparisonResult c = true
+    rw [← hActive.1]
+    exact compare_wires_expose_comparison hActiveCmp
+  · -- memberCompare (src 384-385)
+    show ∃ c : Comparison33 a.memberIndex (a.memberCount + a.delegateCount),
+      comparisonResult c = true
+    rw [← hActive.1]
+    exact compare_wires_expose_comparison hMemberCmp
+  · -- oneHot (src 396-404)
+    show oneHotSum a.tokenSlot maxTokens = 1
+    rw [← flag_sum_is_one_hot_sum a.tokenSlot a.tokenFlags maxTokens pinned]
+    exact hFlags.2
+  · -- tokenCompare (src 410-411)
+    show ∃ c : Comparison33 a.tokenSlot a.tokenCount, comparisonResult c = true
+    exact compare_wires_expose_comparison hTokenCmp
+  · -- selectedCiphertext (src 417-425)
+    show selectLoop a.tokenSlot (totalRow a.ciphertexts CloseCircuit.Words8.zero)
+      CloseCircuit.Words8.zero maxTokens = a.ciphertextDigest
+    rw [← select_chain_is_select_loop a.tokenSlot a.tokenFlags
+      (totalRow a.ciphertexts CloseCircuit.Words8.zero) CloseCircuit.Words8.zero maxTokens pinned]
+    exact hSelectCt
+  · -- selectedBaseToken (src 430-435)
+    show selectLoop a.tokenSlot (totalRow a.registry 0) 0 maxTokens = a.tokenIndex
+    rw [← select_chain_is_select_loop a.tokenSlot a.tokenFlags (totalRow a.registry 0) 0
+      maxTokens pinned]
+    exact hSelectToken
+  · -- polyShape (src 451-454)
+    exact hPoly
+  · -- ctConnect (src 460-461)
+    show e.keccak (ctPreimage a.polynomials) = a.ciphertextDigest
+    rw [← hDigests.2]
+    exact hConnectCt
+  · -- inclusionCall (src 457, 482-493)
+    show e.inclusion (e.poseidonRoot (slotPreimage (e.poseidonWords (pkPreimage a.polynomials))
+      a.ciphertexts a.pendingAdds a.recipient)) a.memberIndex a.path a.slotRoot
+    rw [← hDigests.1,← hLeaf]
+    exact hInclusion.1
+  · -- merkleIndexBits (src 493)
+    exact hInclusion.2
+  · -- amountConnect (src 503-509)
+    show e.decryption a.polynomials a.core a.amount.lo a.amount.hi
+    rw [hAmount.1,hAmount.2]
+    exact hDecrypt
+  · -- nullifierConnect (src 528-538)
+    show e.keccak (nullifierPreimage a.closeId (e.poseidonWords (pkPreimage a.polynomials))
+      a.tokenSlot) = a.nullifier
+    rw [← hDigests.1,← hNullifier]
+    exact hConnectNullifier
+
+/-- The remaining lowering obligation after `program_satisfied_implies_gates`: a real
+    accepting execution of the plonky2 circuit yields wire values satisfying every
+    LOCAL builder-call proposition, and reading the public/private wires back gives
+    the modeled public inputs and witness. This is per-primitive (each plonky2
+    gadget's own soundness) plus digest pinning (that the deployed circuit digest is
+    the one built by `constructorProgram`); no part of it is proved here. -/
+def PrimitiveLowering {Path Core Raw : Type} (e : Environment Path Core)
+    (accepts : Raw → PublicInputs → Witness Path Core → Prop) : Prop :=
+  ∀ raw p w, accepts raw p w →
+    ∃ a : Assignment e, ProgramSatisfied constructorProgram a ∧
+      readPublic a = p ∧ readWitness a = w
+
+theorem primitive_lowering_implies_field_lowering {Path Core Raw : Type}
+    (e : Environment Path Core) (accepts : Raw → PublicInputs → Witness Path Core → Prop)
+    (lowering : PrimitiveLowering e accepts) : FieldLowering e accepts := by
+  intro raw p w accepted
+  obtain ⟨a,satisfied,public,private'⟩ := lowering raw p w accepted
+  have gates := program_satisfied_implies_gates e a satisfied
+  rw [public,private'] at gates
+  exact gates
+
+/-! ### Non-vacuity: one concrete satisfying assignment
+
+The normal trace of `normal_token_selection` / `normal_active_delegate_slot`
+extended to a full wire assignment: one member, no delegates, the claimant at slot
+0, one live token at local slot 0 mapped to base token 7, amount 77. -/
+
+def exampleEnvironment : Environment Unit Unit :=
+  { poseidonWords := fun _ => CloseCircuit.Words8.zero
+    poseidonRoot := fun _ => ⟨0,0,0,0⟩
+    keccak := fun _ => CloseCircuit.Words8.zero
+    inclusion := fun _ _ _ _ => True
+    decryption := fun _ _ _ _ => True }
+
+def exampleCompareToOne : CompareWires := ⟨true :: List.replicate 31 false,true⟩
+def exampleCompareToCapacity : CompareWires :=
+  ⟨List.replicate 10 false ++ (true :: List.replicate 21 false),true⟩
+def exampleRegistry : Ten Nat := fun i => if i.val = 0 then 7 else 0
+def examplePolynomial : List Nat := List.replicate regevN 0
+def examplePolynomials : Polynomials :=
+  ⟨examplePolynomial,examplePolynomial,examplePolynomial,examplePolynomial⟩
+
+def examplePublicInputs : PublicInputs :=
+  { closeId := CloseCircuit.Words8.zero, channelId := 1, h1 := CloseCircuit.Words8.zero,
+    memberPk := CloseCircuit.Words8.zero, recipient := ⟨1,2,3,4,5⟩,
+    ciphertextDigest := CloseCircuit.Words8.zero, nullifier := CloseCircuit.Words8.zero,
+    amount := ⟨0,77⟩, tokenSlot := 0, tokenIndex := 7 }
+
+def exampleWitness : Witness Unit Unit :=
+  { header :=
+      { memberCount := 1, delegateCount := 0, tokenCount := 1, registry := exampleRegistry,
+        slotRoot := ⟨0,0,0,0⟩, settledChain := CloseCircuit.Words8.zero,
+        accumulatorRoot := CloseCircuit.Words8.zero, stateVersion := ⟨0,1⟩ }
+    memberIndex := 0, ciphertexts := fun _ => CloseCircuit.Words8.zero,
+    pendingAdds := fun _ => 0, path := (), polynomials := examplePolynomials, core := () }
+
+def exampleAssignment : Assignment exampleEnvironment :=
+  { closeId := CloseCircuit.Words8.zero, channelId := 1, h1 := CloseCircuit.Words8.zero,
+    memberPk := CloseCircuit.Words8.zero, recipient := ⟨1,2,3,4,5⟩,
+    ciphertextDigest := CloseCircuit.Words8.zero, nullifier := CloseCircuit.Words8.zero,
+    amount := ⟨0,77⟩, tokenSlot := 0, tokenIndex := 7,
+    memberCount := 1, delegateCount := 0, tokenCount := 1, registry := exampleRegistry,
+    slotRoot := ⟨0,0,0,0⟩, settledChain := CloseCircuit.Words8.zero,
+    accumulatorRoot := CloseCircuit.Words8.zero, stateVersion := ⟨0,1⟩,
+    memberIndex := 0, ciphertexts := fun _ => CloseCircuit.Words8.zero,
+    pendingAdds := fun _ => 0, path := (), polynomials := examplePolynomials, core := (),
+    active := 1, activeCompare := exampleCompareToCapacity, memberCompare := exampleCompareToOne,
+    tokenCompare := exampleCompareToOne, tokenFlags := fun k => decide (k = 0),
+    recomputedH1 := CloseCircuit.Words8.zero, pkDigest := CloseCircuit.Words8.zero,
+    ctDigest := CloseCircuit.Words8.zero, slotLeaf := ⟨0,0,0,0⟩, amountLo := 77, amountHi := 0,
+    nullifierDigest := CloseCircuit.Words8.zero }
+
+theorem example_program_reads_back :
+    readPublic exampleAssignment = examplePublicInputs ∧
+    readWitness exampleAssignment = exampleWitness := ⟨rfl,rfl⟩
+
+theorem example_program_satisfied : ProgramSatisfied constructorProgram exampleAssignment := by
+  simp only [ProgramSatisfied,constructorProgram,publicAllocationProgram,List.cons_append,
+    List.nil_append,List.singleton_append,List.forall_mem_cons,List.not_mem_nil,
+    List.forall_mem_nil,and_true]
+  repeat' apply And.intro
+  all_goals
+    first
+      | trivial
+      | exact checked_of_all_words (by rfl)
+      | (intro k _
+         exact ⟨fun flag => (of_decide_eq_true flag).symm,fun slot => decide_eq_true slot.symm⟩)
+      | decide
+      | simp [examplePolynomials,examplePolynomial]
+
+theorem example_program_satisfiable :
+    ∃ a : Assignment exampleEnvironment, ProgramSatisfied constructorProgram a :=
+  ⟨exampleAssignment,example_program_satisfied⟩
+
+theorem example_assignment_meets_circuit_gates :
+    CircuitGates exampleEnvironment examplePublicInputs exampleWitness :=
+  program_satisfied_implies_gates exampleEnvironment exampleAssignment example_program_satisfied
+
 end Zkp.Implementation.WithdrawalClaimCircuit

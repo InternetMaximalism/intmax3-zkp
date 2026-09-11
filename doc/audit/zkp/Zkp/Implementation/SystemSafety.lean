@@ -31,8 +31,9 @@ rather than hidden by a hypothesis.
 Explicitly NOT proved here: that an accepted proof means anything (premise a0
 together with the three statement-lowering premises a, b1, b2 — the acceptance
 step and the lowering step are separate named premises, and
-`TrustBoundary.closeProofSoundness`, `.withdrawalProofSoundness` and
-`.postCloseProofSoundness` are exactly their composition, still borrowed and
+`TrustBoundary.close_proof_soundness_of_boundary`,
+`.withdrawal_proof_soundness_of_boundary` and
+`.post_close_proof_soundness_of_boundary` are exactly their composition, still borrowed and
 still not proved), that a finalized close vector is backed by the channel's own deposits
 (premise c), that a passing aggregate check means signatures exist (premise d),
 that hashes bind (premises e1, e2), that the finality getters observe the
@@ -891,7 +892,8 @@ theorem trace_paid_bounded (cfg : ManagerValue.Config) {before after : State}
 modeled Solidity close verification pins the exact 103-word record the pinned
 adapter returned (`SettlementCloseBridge`). Only the third conjunct — that some
 witness satisfies the circuit's local gate equations for that same record — uses
-premises (a0) and (a), through the derived `TrustBoundary.closeProofSoundness`;
+premises (a0) and (a), through the derived
+`TrustBoundary.close_proof_soundness_of_boundary`;
 acceptance alone establishes nothing about truth, funding or authorization. -/
 theorem close_acceptance_binds_statement
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
@@ -912,11 +914,12 @@ theorem close_acceptance_binds_statement
   ⟨SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt m.evm m.installed
       m.keccak f proof accepted,
     CloseCircuit.public_input_word_count _,
-    tb.closeProofSoundness f proof accepted⟩
+    TrustBoundary.close_proof_soundness_of_boundary tb f proof accepted⟩
 
 /-- The claim endpoints have the same shape: the statement is pinned
 unconditionally, the witness only under premises (a0)+(b1) (respectively
-(a0)+(b2)), through the derived `TrustBoundary.withdrawalProofSoundness`. -/
+(a0)+(b2)), through the derived
+`TrustBoundary.withdrawal_proof_soundness_of_boundary`. -/
 theorem claim_acceptance_binds_statement
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
@@ -933,7 +936,7 @@ theorem claim_acceptance_binds_statement
           (ClaimSettlementBridge.withdrawalStatement f) w :=
   ⟨ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt m.evm m.installed f proof
       accepted,
-    tb.withdrawalProofSoundness f proof accepted⟩
+    TrustBoundary.withdrawal_proof_soundness_of_boundary tb f proof accepted⟩
 
 /-! ## Non-vacuous instantiation
 
@@ -1306,7 +1309,7 @@ theorem mle_assumption_does_not_imply_fund_safety
 
 /-- **Accepting the submodule does not by itself discharge the close soundness
 conclusion either.** With no balance proofs available at all, the conclusion of
-`TrustBoundary.closeProofSoundness` — some witness satisfies
+`TrustBoundary.close_proof_soundness_of_boundary` — some witness satisfies
 `CloseCircuit.CircuitGates` — is false for the accepted close, while
 `mleVerifierSoundness` still holds. This is a logical independence witness,
 deliberately degenerate: it shows only that the statement-to-gates lowering

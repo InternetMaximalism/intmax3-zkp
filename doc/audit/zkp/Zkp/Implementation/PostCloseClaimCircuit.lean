@@ -27,9 +27,21 @@ an invented decrypt-to-amount boolean that presupposes overall asset safety.
 The cryptographic functions are parameters, with only narrowly scoped binding
 assumptions when a theorem compares two openings. There is no universal hash
 injectivity assumption. Merkle fold order/leaf hashing is explicit; its tree
-authentication theorem, primitive hashes, Goldilocks/gate lowering, compiler,
-native writer/panic behavior and proof-system soundness remain boundaries.
+authentication theorem, primitive hashes, compiler, native writer/panic behavior
+and proof-system soundness remain boundaries.
 Normal examples prove local modeled satisfiability, NOT a production proof run.
+
+The former whole-predicate gate-lowering gap is now reduced, not removed. Each
+builder call of constructorProgram carries a LOCAL proposition (`OpHolds`) over
+wire values read back in source allocation/registration order, and
+`program_satisfied_implies_gates` derives every ConstructorGates field from those
+local propositions with no further hypothesis, so ConstructorGates asserts nothing
+the transcribed program does not. What remains is `PrimitiveLowering`: per
+primitive, that the actual Plonky2 gate set admits only assignments satisfying
+that primitive's local proposition — range gates over field limbs, virtual
+allocation, gadget argument widths, connects, the two inclusion verifies and the
+decryption core — plus pinning of the digest/domain constants and of the compiled
+wire layout to the ones modeled here. That obligation is never instantiated here.
 -/
 namespace Zkp.Implementation.PostCloseClaimCircuit
 
@@ -214,7 +226,9 @@ structure ConstructorGates (e : Environment) (w : RawWitness) : Prop where
   nullifierConnect : recomputedNullifier e w.p = w.p.sharedNativeNullifier
 
 /-- A genuinely unproved link from actual Plonky2 constraints/proofs to the
-    hand-written relations above; never instantiated with an axiom here. -/
+    hand-written relations above; never instantiated here. `PrimitiveLowering`
+    below splits it into one obligation per builder call and discharges the step
+    from those obligations to this predicate. -/
 def FieldAndGadgetLowering (actual : RawWitness → Prop) (e : Environment) : Prop :=
   ∀ w, actual w → ConstructorGates e w
 
@@ -386,6 +400,7 @@ def constructorProgram : List BuildOp := publicAllocationProgram ++
   [.range "sourcePk,senderDigest,receiverDigest,txRoot" 32 32,.range "sourceChannel" 1 32,
    .hash "senderWing" 17,.hash "receiverWing" 17,.hash "txLeaf" 16,
    .hash "push(txRoot,leaf)" 17,.hash "push(ids,mixed)" 17,.connect "incomingTxHash",
+   .virtual "incomingTxIndex" 1,
    .merkle "incoming: hash Bytes32 leaf, canonical PI root" accumulatorHeight,
    .range "memberCount,delegateCount,tokenCount" 3 32,.range "registry" 10 32,
    .virtual "slotRoot" 4,.range "settledChain" 8 32,.range "stateVersion" 2 32,
@@ -399,6 +414,336 @@ def constructorProgram : List BuildOp := publicAllocationProgram ++
    .hash "IMCK" 25,.connect "sharedNativeNullifier",.register 57,.build "standard_recursion_zk_config"]
 def newCircuit : List BuildOp := constructorProgram
 def defaultCircuit : List BuildOp := newCircuit
+
+/-! ### Gate lowering: one local proposition per builder call
+
+`ConstructorGates` above is a hand-written statement of the whole constraint system. The
+section below decomposes it: every entry of `constructorProgram` (the transcription of the
+`new()` builder calls) gets a LOCAL proposition `OpHolds`, saying exactly what that one
+primitive enforces on the wire values, with the source line it comes from. The wire values
+themselves are an `Assignment`, read back into the statement by `readWitness` in the source's
+allocation/registration order. `program_satisfied_implies_gates` then derives EVERY
+`ConstructorGates` field from the per-primitive propositions alone, with no extra hypothesis,
+so the residual obligation is no longer "the gate predicate as a whole" but, per primitive,
+that Plonky2's actual gate set implies that primitive's local proposition (plus the digest /
+constant pinning already listed as boundaries). Source line numbers below refer to
+src/circuits/channel/post_close_claim_circuit.rs unless another file is named. -/
+
+/-- Wire values of ONE assignment to the constructor's targets, in source allocation order.
+    The `Environment` is an index, not data: it fixes the interpretation of the keccak /
+    Poseidon / decryption-core gadget calls that this circuit instance was built with, exactly
+    as `ConstructorGates` does. Allocation order: :113-131 (public input targets), :323-327,
+    :368-372, :389-408, :446-449 (witness targets), :492 (decryption core wires). -/
+structure Assignment (e : Environment) where
+  /-- `PostCloseClaimPublicInputsTarget::new`, :113-131. -/
+  closeIntentDigest : Words8
+  receiverChannelId : Nat
+  incomingTxHash : Words8
+  receiverPkG : Words8
+  recipient : Address
+  sharedNativeNullifier : Words8
+  amount : Words2
+  finalBalanceStateH1 : Words8
+  finalAccumulatorRoot : Words8
+  tokenIndex : Nat
+  /-- Stage 3 tx_hash recompute inputs, :323-327. -/
+  sourcePkG : Words8
+  senderDeltaDigest : Words8
+  receiverDeltaDigest : Words8
+  txTreeRoot : Words8
+  sourceChannelId : Nat
+  /-- Accumulator inclusion proof wires, :368-372. -/
+  incomingSiblings : List Hash4
+  incomingIndex : Nat
+  /-- H1 header scalars and opened slot leaf wires, :389-408. -/
+  memberCount : Nat
+  delegateCount : Nat
+  tokenCount : Nat
+  registry : Ten Nat
+  slotTreeRoot : Hash4
+  settledChain : Words8
+  stateVersion : Words2
+  receiverMemberIndex : Nat
+  slotEncDigests : Ten Words8
+  slotPendingAdds : Ten Nat
+  /-- Slot inclusion proof wires, :468-471. -/
+  slotSiblings : List Hash4
+  /-- Regev key / delta ciphertext coefficient wires, :446-449. -/
+  regevA : List Nat
+  regevB : List Nat
+  deltaC1 : List Nat
+  deltaC2 : List Nat
+  /-- Decryption-core private wires and its exposed amount limbs, :492-494. -/
+  coreAssignment : List Nat
+  coreAmount : Words2
+
+/-- The public-input fields read off the registered wires. Registration order is
+    `PostCloseClaimPublicInputsTarget::to_vec`, :140-152, registered at :512. -/
+def readPublicInputs {e : Environment} (a : Assignment e) : PublicInputs :=
+  { closeIntentDigest := a.closeIntentDigest, receiverChannelId := a.receiverChannelId,
+    incomingTxHash := a.incomingTxHash, receiverPkG := a.receiverPkG, recipient := a.recipient,
+    sharedNativeNullifier := a.sharedNativeNullifier, amount := a.amount,
+    finalBalanceStateH1 := a.finalBalanceStateH1,
+    finalAccumulatorRoot := a.finalAccumulatorRoot, tokenIndex := a.tokenIndex }
+/-- The 57-word vector handed to `register_public_inputs`, :512. -/
+def registeredPublicInputs {e : Environment} (a : Assignment e) : List Nat :=
+  (readPublicInputs a).words
+/-- The statement wires of an assignment, in the source's wire order. -/
+def readWitness {e : Environment} (a : Assignment e) : RawWitness :=
+  { p := readPublicInputs a
+    sourcePkG := a.sourcePkG, senderDeltaDigest := a.senderDeltaDigest
+    receiverDeltaDigest := a.receiverDeltaDigest, txTreeRoot := a.txTreeRoot
+    sourceChannelId := a.sourceChannelId
+    incomingSiblings := a.incomingSiblings, incomingIndex := a.incomingIndex
+    slotRoot := a.slotTreeRoot, slotSiblings := a.slotSiblings
+    slotEncDigests := a.slotEncDigests, slotPendingAdds := a.slotPendingAdds
+    tokenCount := a.tokenCount, registry := a.registry
+    settledChain := a.settledChain, stateVersion := a.stateVersion
+    memberCount := a.memberCount, delegateCount := a.delegateCount
+    receiverMemberIndex := a.receiverMemberIndex
+    key := ⟨a.regevA, a.regevB⟩, delta := ⟨a.deltaC1, a.deltaC2⟩
+    coreAssignment := a.coreAssignment, coreAmount := a.coreAmount }
+def assignmentOf (e : Environment) (w : RawWitness) : Assignment e :=
+  { closeIntentDigest := w.p.closeIntentDigest, receiverChannelId := w.p.receiverChannelId
+    incomingTxHash := w.p.incomingTxHash, receiverPkG := w.p.receiverPkG
+    recipient := w.p.recipient, sharedNativeNullifier := w.p.sharedNativeNullifier
+    amount := w.p.amount, finalBalanceStateH1 := w.p.finalBalanceStateH1
+    finalAccumulatorRoot := w.p.finalAccumulatorRoot, tokenIndex := w.p.tokenIndex
+    sourcePkG := w.sourcePkG, senderDeltaDigest := w.senderDeltaDigest
+    receiverDeltaDigest := w.receiverDeltaDigest, txTreeRoot := w.txTreeRoot
+    sourceChannelId := w.sourceChannelId, incomingSiblings := w.incomingSiblings
+    incomingIndex := w.incomingIndex, memberCount := w.memberCount
+    delegateCount := w.delegateCount, tokenCount := w.tokenCount, registry := w.registry
+    slotTreeRoot := w.slotRoot, settledChain := w.settledChain, stateVersion := w.stateVersion
+    receiverMemberIndex := w.receiverMemberIndex, slotEncDigests := w.slotEncDigests
+    slotPendingAdds := w.slotPendingAdds, slotSiblings := w.slotSiblings
+    regevA := w.key.a, regevB := w.key.b, deltaC1 := w.delta.c1, deltaC2 := w.delta.c2
+    coreAssignment := w.coreAssignment, coreAmount := w.coreAmount }
+
+/-- Wires covered by each `builder.range_check` batch, keyed by the program entry's name.
+    :113-118 (`u32_limb` + `Bytes32Target::new(builder,true)` for every public limb),
+    :312-314 and :323-327 (the tx-recompute witnesses), :389-394 (header scalars + registry),
+    :399-400 (settled chain, state version), :405-408 (slot leaf fields), :437 (active sum). -/
+def rangeWires (w : RawWitness) : String → List Nat
+  | "closeIntent" => w.p.closeIntentDigest.words
+  | "receiverChannelId" => [w.p.receiverChannelId]
+  | "incomingTxHash" => w.p.incomingTxHash.words
+  | "receiverPkG" => w.p.receiverPkG.words
+  | "recipient" => w.p.recipient.words
+  | "nullifier" => w.p.sharedNativeNullifier.words
+  | "amount.hi,lo" => w.p.amount.words
+  | "finalH1" => w.p.finalBalanceStateH1.words
+  | "finalAccumulator" => w.p.finalAccumulatorRoot.words
+  | "tokenIndex" => [w.p.tokenIndex]
+  | "sourcePk,senderDigest,receiverDigest,txRoot" =>
+      w.sourcePkG.words ++ w.senderDeltaDigest.words ++ w.receiverDeltaDigest.words ++
+        w.txTreeRoot.words
+  | "sourceChannel" => [w.sourceChannelId]
+  | "memberCount,delegateCount,tokenCount" => [w.memberCount, w.delegateCount, w.tokenCount]
+  | "registry" => w.registry.values
+  | "settledChain" => w.settledChain.words
+  | "stateVersion" => w.stateVersion.words
+  | "slot ciphertext digests" => w.slotEncDigests.values.bind Words8.words
+  | "slot pending adds" => w.slotPendingAdds.values
+  | "active sum" => [w.memberCount + w.delegateCount]
+  | _ => []
+/-- Wires allocated by a bare `add_virtual_target` / `PoseidonHashOutTarget::new`, which carry
+    a Goldilocks value and no range gate: :398 (slot tree root), :372 (accumulator leaf index),
+    :404 (receiver slot index), :446-449 (the four Regev polynomials). -/
+def virtualWires (w : RawWitness) : String → List Nat
+  | "slotRoot" => w.slotRoot.words
+  | "incomingTxIndex" => [w.incomingIndex]
+  | "receiverMemberIndex" => [w.receiverMemberIndex]
+  | "a,b,c1,c2" => w.key.a ++ w.key.b ++ w.delta.c1 ++ w.delta.c2
+  | _ => []
+/-- Exact argument list of each hashing gadget call: :331-336, :338-344, :345-346, :349, :363
+    (keccak wings / leaf / chain pushes), :410-421 with h1_gadget.rs:88-109 (IMB2 header),
+    :460 with decryption_gadget.rs:611-625 (IMRP), :461-467 with h1_gadget.rs:134-150 (IMS2),
+    :482 with decryption_gadget.rs:578-600 (IMRC), :505-509 (IMCK nullifier). -/
+def hashPreimage (e : Environment) (w : RawWitness) : String → List Nat
+  | "senderWing" => txWingPreimage w.sourcePkG w.senderDeltaDigest
+  | "receiverWing" => txWingPreimage w.p.receiverPkG w.receiverDeltaDigest
+  | "txLeaf" => (e.keccak (txWingPreimage w.sourcePkG w.senderDeltaDigest)).words ++
+      (e.keccak (txWingPreimage w.p.receiverPkG w.receiverDeltaDigest)).words
+  | "push(txRoot,leaf)" => pushPreimage w.txTreeRoot (txLeaf e w)
+  | "push(ids,mixed)" => pushPreimage (txIds w) (push e w.txTreeRoot (txLeaf e w))
+  | "IMB2" => (header w).words
+  | "IMRP" => keyPreimage w.key
+  | "IMS2" => (openedSlot e w).words
+  | "IMRC" => ctPreimage w.delta
+  | "IMCK" => nullifierPreimage w.p
+  | _ => []
+/-- Each `connect` / `assert_one` the constructor emits: :365 (recomputed tx hash), :426
+    (recomputed H1), :439-440 (active <= MAX_CHANNEL_MEMBERS), :442-443 (opened slot is
+    active), :483 (IMRC digest is the signed receiver-delta digest), :496-497 (amount limbs),
+    :510 (shared native nullifier). -/
+def ConnectHolds (e : Environment) (w : RawWitness) : String → Prop
+  | "incomingTxHash" => recomputedTxHash e w = w.p.incomingTxHash
+  | "finalH1" => recomputedH1 e w = w.p.finalBalanceStateH1
+  | "active<1025" => lessThanU32 (w.memberCount + w.delegateCount) (maxSlots + 1) = true
+  | "receiverMemberIndex<active" =>
+      lessThanU32 w.receiverMemberIndex (w.memberCount + w.delegateCount) = true
+  | "receiverDeltaDigest" => e.keccak (ctPreimage w.delta) = w.receiverDeltaDigest
+  | "amount.hi,lo" => w.p.amount.hi = w.coreAmount.hi ∧ w.p.amount.lo = w.coreAmount.lo
+  | "sharedNativeNullifier" => recomputedNullifier e w.p = w.p.sharedNativeNullifier
+  | _ => True
+/-- `IncrementalMerkleProofTarget::new` + `verify`. The sibling count is the proof shape
+    (merkle_tree.rs:174-184), the index bound is `split_le index height`
+    (merkle_tree.rs:227), the fold and the root equality are `get_root` + `connect_hash`
+    (merkle_tree.rs:228-248). Accumulator wing :368-386 — `to_hash_out` at :376-378 also
+    connects the Bytes32 round-trip, which is the canonical-root conjunct. Slot wing
+    :468-477, whose leaf value is already the Poseidon leaf hash (identity `LeafableTarget`). -/
+def MerkleHolds (e : Environment) (w : RawWitness) : String → Nat → Prop
+  | "incoming: hash Bytes32 leaf, canonical PI root", height =>
+      w.incomingSiblings.length = height ∧ (∀ s ∈ w.incomingSiblings, s.canonical) ∧
+      w.incomingIndex < 2 ^ height ∧ CanonicalRoot w.p.finalAccumulatorRoot ∧
+      accumulatorRoot e w = decodeHash w.p.finalAccumulatorRoot
+  | "slot: Hash4 leaf identity", height =>
+      w.slotSiblings.length = height ∧ (∀ s ∈ w.slotSiblings, s.canonical) ∧
+      w.receiverMemberIndex < 2 ^ height ∧ slotRoot e w = w.slotRoot
+  | _, _ => True
+/-- `decryption_core(builder, inputs, expose_amount)`, :486-494. Locally it pins the four
+    polynomial lengths (decryption_gadget.rs:219-222), pins every coefficient strictly below
+    the Regev modulus (decryption_gadget.rs:230-236 via `assert_lt_q`), rejects the degenerate
+    `a`/`c1` zero polynomials (decryption_gadget.rs:239-240) and relates the private core
+    wires to the exposed amount limbs. The polynomial system behind that last relation is the
+    named dependency `Environment.decryptionCore`, not something re-derived here. -/
+def DecryptionHolds (e : Environment) (w : RawWitness) (exposeAmount : Bool) : Prop :=
+  w.key.a.length = regevN ∧ w.key.b.length = regevN ∧
+  w.delta.c1.length = regevN ∧ w.delta.c2.length = regevN ∧
+  (∀ x ∈ w.key.a ++ w.key.b ++ w.delta.c1 ++ w.delta.c2, x < regevQ) ∧
+  (∃ x ∈ w.key.a, x ≠ 0) ∧ (∃ x ∈ w.delta.c1, x ≠ 0) ∧
+  (match exposeAmount with
+   | true => e.decryptionCore w.key w.delta w.coreAssignment w.coreAmount
+   | false => ∃ amount, e.decryptionCore w.key w.delta w.coreAssignment amount)
+
+/-- What ONE builder call of `constructorProgram` enforces on the statement wires. A
+    `range_check(t, bits)` batch bounds exactly its own wires; a `add_virtual_target` only
+    says the wire carries a Goldilocks value; a hashing gadget fixes the width of its
+    argument list (a mismatch is a build-time panic, not a provable circuit) while its output
+    is the `Environment` callback applied to that list, so nothing further is asserted; a
+    `build` call constrains no wire. -/
+def OpHolds (e : Environment) (op : BuildOp) (w : RawWitness) : Prop :=
+  match op with
+  | .range name count bits =>
+      (rangeWires w name).length = count ∧ ∀ x ∈ rangeWires w name, x < 2 ^ bits
+  | .virtual name count =>
+      (virtualWires w name).length = count ∧ ∀ x ∈ virtualWires w name, x < goldilocks
+  | .hash name words => (hashPreimage e w name).length = words
+  | .connect name => ConnectHolds e w name
+  | .merkle name height => MerkleHolds e w name height
+  | .decryption exposeAmount => DecryptionHolds e w exposeAmount
+  | .register count => w.p.words.length = count
+  | .build _ => True
+def BuildOp.holds {e : Environment} (op : BuildOp) (a : Assignment e) : Prop :=
+  OpHolds e op (readWitness a)
+def ProgramSatisfied {e : Environment} (prog : List BuildOp) (a : Assignment e) : Prop :=
+  ∀ op ∈ prog, op.holds a
+
+theorem forall_mem_cons_iff {α : Type} {p : α → Prop} {x : α} {xs : List α} :
+    (∀ y ∈ x :: xs, p y) ↔ p x ∧ ∀ y ∈ xs, p y := by
+  constructor
+  · intro h
+    exact ⟨h x (List.mem_cons_self _ _), fun y hy => h y (List.mem_cons_of_mem _ hy)⟩
+  · intro h y hy
+    rcases List.mem_cons.mp hy with rfl | hy
+    · exact h.1
+    · exact h.2 y hy
+theorem forall_mem_nil_iff {α : Type} {p : α → Prop} :
+    (∀ y ∈ ([] : List α), p y) ↔ True :=
+  ⟨fun _ => trivial, fun _ y hy => absurd hy (List.not_mem_nil y)⟩
+theorem checked_words_append {xs ys : List Nat} (hx : checkedWords xs) (hy : checkedWords ys) :
+    checkedWords (xs ++ ys) := by
+  intro v hv
+  rcases List.mem_append.mp hv with h | h
+  · exact hx v h
+  · exact hy v h
+
+/-- THE gate-lowering reduction, on the statement wires. Every field of `ConstructorGates` is
+    derived from the local propositions of the individual builder calls; no field needs an
+    extra hypothesis, so `ConstructorGates` adds nothing beyond `constructorProgram`. -/
+theorem constructor_program_ops_imply_gates (e : Environment) (w : RawWitness)
+    (h : ∀ op ∈ constructorProgram, OpHolds e op w) : ConstructorGates e w := by
+  simp only [constructorProgram, publicAllocationProgram, List.cons_append, List.nil_append,
+    forall_mem_cons_iff, forall_mem_nil_iff, and_true] at h
+  obtain ⟨rCloseIntent, rChannel, rIncoming, rPk, rRecipient, rNullifier, rAmount, rH1, rAcc,
+    rToken, rPrivate, rSourceChannel, _hSenderWing, _hReceiverWing, _hTxLeaf, _hPushRoot,
+    _hPushIds, cTx, _vIncomingIndex, mIncoming, rCounts, rRegistry, vSlotRoot, rSettled,
+    rVersion, _vIndex, rEnc, rAdds, _hImb2, cH1, rActive, cActiveMax, cActiveSlot, _vPoly,
+    _hImrp, _hIms2, mSlot, _hImrc, cCt, dCore, cAmount, _hImck, cNullifier, _reg, _bld⟩ := h
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · exact checked_words_append (checked_words_append (checked_words_append
+      (checked_words_append (checked_words_append (checked_words_append
+      (checked_words_append (checked_words_append (checked_words_append
+        rCloseIntent.2 rChannel.2) rIncoming.2) rPk.2) rRecipient.2) rNullifier.2)
+        rAmount.2) rH1.2) rAcc.2) rToken.2
+  · exact checked_words_append (checked_words_append (checked_words_append
+      (checked_words_append (checked_words_append (checked_words_append rPrivate.2
+        (checked_words_append rSourceChannel.2 rCounts.2)) rRegistry.2) rSettled.2)
+        rVersion.2) rEnc.2) rAdds.2
+  · refine ⟨vSlotRoot.2, ?_⟩
+    intro s hs
+    rcases List.mem_append.mp hs with hm | hm
+    · exact mIncoming.2.1 s hm
+    · exact mSlot.2.1 s hm
+  · exact ⟨dCore.1, dCore.2.1, dCore.2.2.1, dCore.2.2.2.1⟩
+  · exact mIncoming.1
+  · exact mIncoming.2.2.1
+  · exact cTx
+  · exact mIncoming.2.2.2.1
+  · exact mIncoming.2.2.2.2
+  · exact cH1
+  · exact rActive.2 _ (List.mem_cons_self _ _)
+  · exact cActiveMax
+  · exact cActiveSlot
+  · exact mSlot.1
+  · exact mSlot.2.2.1
+  · exact mSlot.2.2.2
+  · exact cCt
+  · exact dCore.2.2.2.2.2.2.2
+  · exact cAmount.1
+  · exact cAmount.2
+  · exact cNullifier
+theorem program_satisfied_implies_gates (e : Environment) (a : Assignment e)
+    (h : ProgramSatisfied constructorProgram a) : ConstructorGates e (readWitness a) :=
+  constructor_program_ops_imply_gates e (readWitness a) h
+theorem read_witness_recovers_every_witness (e : Environment) (w : RawWitness) :
+    readWitness (assignmentOf e w) = w := rfl
+theorem registered_public_inputs_are_the_statement (e : Environment) (a : Assignment e) :
+    registeredPublicInputs a = (readWitness a).p.words := rfl
+
+/-- The obligation that remains after the reduction: the actual Plonky2 constraint system
+    admits only assignments that satisfy every primitive of `constructorProgram`, with the
+    statement read back through the source's wire order. This is strictly per-primitive
+    (range gates, virtual allocation, gadget argument widths, connects, the two Merkle
+    verifies, the decryption core) plus the digest/domain-constant pinning already named as a
+    boundary; it is never instantiated here. -/
+def PrimitiveLowering (e : Environment) (actual : RawWitness → Prop) : Prop :=
+  ∀ w, actual w → ∃ a : Assignment e, ProgramSatisfied constructorProgram a ∧ readWitness a = w
+theorem primitive_lowering_implies_field_and_gadget_lowering (e : Environment)
+    (actual : RawWitness → Prop) (h : PrimitiveLowering e actual) :
+    FieldAndGadgetLowering actual e := by
+  intro w hw
+  obtain ⟨a, prog, read⟩ := h w hw
+  have gates := program_satisfied_implies_gates e a prog
+  rwa [read] at gates
+theorem primitive_lowering_iff_every_primitive_holds (e : Environment)
+    (actual : RawWitness → Prop) :
+    PrimitiveLowering e actual ↔ ∀ w, actual w → ∀ op ∈ constructorProgram, OpHolds e op w := by
+  constructor
+  · intro h w hw op hop
+    obtain ⟨a, prog, read⟩ := h w hw
+    have single : OpHolds e op (readWitness a) := prog op hop
+    rwa [read] at single
+  · intro h w hw
+    refine ⟨assignmentOf e w, fun op hop => ?_, read_witness_recovers_every_witness e w⟩
+    show OpHolds e op (readWitness (assignmentOf e w))
+    rw [read_witness_recovers_every_witness e w]
+    exact h w hw op hop
+theorem gate_lowering_needs_no_extra_environment_hypothesis (e : Environment)
+    (a : Assignment e) (h : ∀ op ∈ constructorProgram, OpHolds e op (readWitness a)) :
+    ConstructorGates e (readWitness a) :=
+  constructor_program_ops_imply_gates e (readWitness a) h
 
 inductive WriteOp where
   | words (name : String) (values : List Nat)
@@ -549,5 +894,135 @@ theorem normal_active_delegate_claim_is_locally_satisfiable : ConstructorGates n
       accumulatorRoot,slotRoot,normalPolynomial,regevN,accumulatorHeight,slotHeight,
       lessThanU32,maxSlots,merkle_zero_stub]
   all_goals exact merkle_zero_stub _ _
+
+/-! ### The same normal witness satisfies every modeled primitive
+
+Local satisfiability of the per-primitive program, so the gate-lowering reduction above is not
+vacuous. Still only the modeled relations with stub dependencies: not a production proof run,
+not a claim that these all-zero digests are real keccak/Poseidon outputs. -/
+
+theorem normal_polynomial_length : normalPolynomial.length = regevN := by
+  simp [normalPolynomial, regevN]
+theorem normal_polynomial_coefficients_are_small (x : Nat) (h : x ∈ normalPolynomial) :
+    x < regevQ := by
+  rcases List.mem_cons.mp h with rfl | hr
+  · decide
+  · have hz : x = 0 := List.eq_of_mem_replicate hr
+    subst hz
+    decide
+theorem normal_polynomial_coefficients_are_field_elements (x : Nat) (h : x ∈ normalPolynomial) :
+    x < goldilocks :=
+  Nat.lt_trans (normal_polynomial_coefficients_are_small x h) (by decide)
+theorem normal_polynomial_is_nonzero : ∃ x ∈ normalPolynomial, x ≠ 0 :=
+  ⟨1, List.mem_cons_self _ _, by decide⟩
+theorem normal_polynomial_quadruple (x : Nat)
+    (h : x ∈ normalPolynomial ++ normalPolynomial ++ normalPolynomial ++ normalPolynomial) :
+    x ∈ normalPolynomial := by
+  rcases List.mem_append.mp h with h | h
+  · rcases List.mem_append.mp h with h | h
+    · rcases List.mem_append.mp h with h | h
+      · exact h
+      · exact h
+    · exact h
+  · exact h
+theorem normal_polynomial_quadruple_length :
+    (normalPolynomial ++ normalPolynomial ++ normalPolynomial ++ normalPolynomial).length =
+      4 * regevN := by
+  simp only [List.length_append, normal_polynomial_length]
+  omega
+theorem normal_key_preimage_length : (keyPreimage normalRaw.key).length = 2 + 2 * regevN := by
+  show ([imrp, regevN] ++ normalPolynomial ++ normalPolynomial).length = 2 + 2 * regevN
+  simp only [List.length_append, List.length_cons, List.length_nil, normal_polynomial_length]
+  omega
+theorem normal_ciphertext_preimage_length :
+    (ctPreimage normalRaw.delta).length = 2 + 2 * regevN := by
+  show ([imrc, regevN] ++ normalPolynomial ++ normalPolynomial).length = 2 + 2 * regevN
+  simp only [List.length_append, List.length_cons, List.length_nil, normal_polynomial_length]
+  omega
+
+set_option maxRecDepth 8192 in
+theorem normal_witness_satisfies_every_primitive :
+    ∀ op ∈ constructorProgram, OpHolds normalEnvironment op normalRaw := by
+  simp only [constructorProgram, publicAllocationProgram, List.cons_append, List.nil_append,
+    forall_mem_cons_iff, forall_mem_nil_iff, and_true]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_,
+    ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_,
+    ?_, ?_⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact tx_wing_has_exact_17_words _ _
+  · exact tx_wing_has_exact_17_words _ _
+  · rfl
+  · exact chain_push_has_exact_17_words _ _
+  · exact chain_push_has_exact_17_words _ _
+  · rfl
+  · exact ⟨rfl, by decide⟩
+  · refine ⟨by simp [normalRaw], ?_, by decide, rfl, merkle_zero_stub _ _⟩
+    intro s hs
+    have hz : s = Hash4.zero := List.eq_of_mem_replicate hs
+    subst hz
+    show ∀ x ∈ Hash4.zero.words, x < goldilocks
+    decide
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact ⟨rfl, by decide⟩
+  · exact header_has_exact_37_elements _
+  · rfl
+  · exact ⟨rfl, by decide⟩
+  · rfl
+  · rfl
+  · refine ⟨normal_polynomial_quadruple_length, ?_⟩
+    intro x hx
+    exact normal_polynomial_coefficients_are_field_elements x (normal_polynomial_quadruple x hx)
+  · exact normal_key_preimage_length
+  · exact slot_has_exact_104_elements _
+  · refine ⟨by simp [normalRaw], ?_, by decide, merkle_zero_stub _ _⟩
+    intro s hs
+    have hz : s = Hash4.zero := List.eq_of_mem_replicate hs
+    subst hz
+    show ∀ x ∈ Hash4.zero.words, x < goldilocks
+    decide
+  · exact normal_ciphertext_preimage_length
+  · rfl
+  · refine ⟨normal_polynomial_length, normal_polynomial_length, normal_polynomial_length,
+      normal_polynomial_length, ?_, normal_polynomial_is_nonzero, normal_polynomial_is_nonzero,
+      ⟨rfl, rfl, rfl⟩⟩
+    intro x hx
+    exact normal_polynomial_coefficients_are_small x (normal_polynomial_quadruple x hx)
+  · exact ⟨rfl, rfl⟩
+  · exact nullifier_preimage_has_exact_25_words _
+  · rfl
+  · exact exact_public_input_count normalRaw
+  · trivial
+
+def normalAssignment : Assignment normalEnvironment := assignmentOf normalEnvironment normalRaw
+theorem example_program_reads_back : readWitness normalAssignment = normalRaw := rfl
+theorem example_program_satisfiable :
+    ∃ a : Assignment normalEnvironment, ProgramSatisfied constructorProgram a :=
+  ⟨normalAssignment, fun op hop => by
+    show OpHolds normalEnvironment op (readWitness normalAssignment)
+    rw [example_program_reads_back]
+    exact normal_witness_satisfies_every_primitive op hop⟩
+/-- The lowering reduction applied to the normal example: the per-primitive propositions alone
+    already re-derive the full hand-written gate predicate. -/
+theorem normal_program_reproduces_the_gate_predicate :
+    ConstructorGates normalEnvironment normalRaw :=
+  constructor_program_ops_imply_gates normalEnvironment normalRaw
+    normal_witness_satisfies_every_primitive
 
 end Zkp.Implementation.PostCloseClaimCircuit
