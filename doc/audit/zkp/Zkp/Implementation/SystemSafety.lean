@@ -832,7 +832,8 @@ coherent, used markers are never cleared, and no already-used nullifier can be
 claimed again at the end of the trace. Lifted from
 `FundFlow.every_accounting_trace_preserves_nullifier_and_payout_index` and
 `FundFlow.submitted_claim_nullifier_was_unused`. Durability against transitions
-OUTSIDE this step relation is premise (g1), not a theorem. -/
+OUTSIDE this step relation is premise (g1') `ledgerWritersAreInventoried`, from which
+`TrustBoundary.durable_nullifier_ledger_of_boundary` recovers the monotone form. -/
 theorem trace_nullifier_single_use (cfg : ManagerValue.Config) {before after : State}
     {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow)
     (indexed : FundFlow.PayoutIndexed (before.managers cfg.manager)) :

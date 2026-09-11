@@ -2491,8 +2491,8 @@ definition transcribed from the Rust test at `gadget.rs:999-1022` — used to be
 premise (d2') `nttComputesNegacyclicProduct`, the one field of this structure a
 determined prover could discharge inside Lean.
 
-`Zkp.Implementation.NttCorrectness` discharges it, so the field is gone and this
-theorem replaces it verbatim. Note the signature: no `Models`, no `TrustBoundary`,
+`Zkp.Implementation.NttCorrectness` discharges it, so the field is gone and
+this theorem replaces it verbatim. Note the signature: no `Models`, no `TrustBoundary`,
 no hypothesis — the statement never mentioned an environment, which is exactly why
 it could be proved rather than borrowed.
 

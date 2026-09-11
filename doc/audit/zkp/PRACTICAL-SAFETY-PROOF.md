@@ -103,11 +103,11 @@ All theorem references below are `file:line` inside `doc/audit/zkp/Zkp/Implement
 
 ### 2.1 What `Step` and `Trace` model
 
-`SystemSafety.State` (`SystemSafety.lean:75`) is a triple: the Rollup value ledger
+`SystemSafety.State` (`SystemSafety.lean:81`) is a triple: the Rollup value ledger
 (`RollupValue.State`), one Manager value state per Manager address (`Nat → ManagerValue.State`),
 and the materializer's storage (`CloseFunding.State`).
 
-`SystemSafety.Step` (`SystemSafety.lean:367`) is an inductive relation
+`SystemSafety.Step` (`SystemSafety.lean:373`) is an inductive relation
 `State → State → Flow → Flow → Prop`, where the two `Flow = Nat → Nat` arguments are the per-token
 value the transition lets **in** and lets **out**. It has twelve constructors:
 
@@ -124,7 +124,7 @@ value the transition lets **in** and lets **out**. It has twelve constructors:
 | `fundingRecordPost` / `fundingRollbackPost` | the materializer's post journal and its rollback |
 | `rollupRollback` | `RollupValue.rollbackBatch` under the Rollup's own callback-frame condition |
 
-`Trace` (`SystemSafety.lean:453`) is the reflexive-transitive closure, accumulating inflow and
+`Trace` (`SystemSafety.lean:459`) is the reflexive-transitive closure, accumulating inflow and
 outflow pointwise.
 
 Three honesty notes about the relation itself, which bound everything in §2.2:
@@ -134,12 +134,12 @@ Three honesty notes about the relation itself, which bound everything in §2.2:
   in the `Unmodeled` relation of `TrustBoundary`. This is the subject of the 2026-09-11 finding in
   §6.4.
 * **Some constructors carry explicit call-frame obligations as arguments**, not as global
-  assumptions: `TokenCallFrame` (`SystemSafety.lean:119`) on the ERC20 paths,
+  assumptions: `TokenCallFrame` (`SystemSafety.lean:125`) on the ERC20 paths,
   `FundFlow.NativePullCallbackFrame` on the native pull, `RollupValue.RollbackCallbackFrame` on
   the rollback. "Unconditional" below means *free of any `TrustBoundary` premise*, not free of
   these frame arguments. They are honest side conditions about what a token or callback contract
   may do to storage, and they are not claims that real ERC20 contracts behave that way.
-* `measure` (`SystemSafety.lean:93`) is `FundFlow.accounted` = Rollup escrow for that asset +
+* `measure` (`SystemSafety.lean:99`) is `FundFlow.accounted` = Rollup escrow for that asset +
   that Manager's Rollup pending credit + the Manager's own `received` counter. It is a **counter
   total, not an observed ERC20 balance.**
 
@@ -149,7 +149,7 @@ These four take a `Trace` and nothing from `TrustBoundary`. No instance of the p
 appears in their statements.
 
 **(1) Exact per-token accounting identity** — `SystemSafety.trace_conserves_per_token`
-(`SystemSafety.lean:593`).
+(`SystemSafety.lean:599`).
 
 > Along any finite sequence of modeled steps, and for every token,
 > `measure after token + outflow token = measure before token + inflow token`.
@@ -163,13 +163,13 @@ a hypothesis.
 *What it does not say:* nothing about real token custody; nothing about whether the value that
 moved belonged to the channel that received it; nothing about any transition outside `Step`.
 
-**(2) Attribution** — `SystemSafety.trace_channel_attribution` (`SystemSafety.lean:743`).
+**(2) Attribution** — `SystemSafety.trace_channel_attribution` (`SystemSafety.lean:751`).
 
 > Given that the Manager's `received` is within its `cap` before the trace: after the trace
 > `received ≤ cap` still holds, the `cap` function is **unchanged** by every modeled step, and any
 > channel exit already latched with a non-zero digest stays latched at that digest.
 
-`SystemSafety.materialization_credits_are_the_managers_own_vector` (`SystemSafety.lean:764`) adds
+`SystemSafety.materialization_credits_are_the_managers_own_vector` (`SystemSafety.lean:772`) adds
 that every amount the materializer credits is exactly the Manager's own token-vector getter
 value, that the vector has no duplicate token, and that the channel is latched afterwards.
 
@@ -184,7 +184,7 @@ is therefore within that channel's L2 entitlement at that root. The residue is p
 (§3.5) — **not** an opaque deposit map, and **not** attached to close-intent acceptance.
 
 **(3) Nullifier single use** — `SystemSafety.trace_nullifier_single_use`
-(`SystemSafety.lean:802`).
+(`SystemSafety.lean:836`).
 
 > Given `FundFlow.PayoutIndexed` before the trace: it still holds after; every nullifier marked
 > used before the trace is still marked used after it; and for any already-used nullifier,
@@ -193,7 +193,7 @@ is therefore within that channel's L2 entitlement at that root. The residue is p
 *What it does not say:* durability against transitions outside `Step`. That is premise (g1'), and
 the consequence is recovered separately as `TrustBoundary.durable_nullifier_ledger_of_boundary`.
 
-**(4) Payout bound** — `SystemSafety.trace_paid_bounded` (`SystemSafety.lean:850`).
+**(4) Payout bound** — `SystemSafety.trace_paid_bounded` (`SystemSafety.lean:884`).
 
 > Given `paid ≤ received` per token before the trace: it holds after, and the pooled split
 > `escrow + pending + unspent + paid + outflow = measure before + inflow` holds per token.
@@ -204,7 +204,7 @@ consumed. It is a statement about one Manager's counters.
 ### 2.3 The two half-unconditional results
 
 **Close acceptance binds the statement** — `SystemSafety.close_acceptance_binds_statement`
-(`SystemSafety.lean:898`). Three conjuncts:
+(`SystemSafety.lean:932`). Three conjuncts:
 
 1. the pinned close adapter really returned exactly
    `SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val` — **unconditional**,
@@ -214,7 +214,7 @@ consumed. It is a statement about one Manager's counters.
 3. some witness satisfies `CloseCircuit.CircuitGates` for that same record — this conjunct alone
    uses premises (a0) and (a), via `TrustBoundary.close_proof_soundness_of_boundary`.
 
-`SystemSafety.claim_acceptance_binds_statement` (`SystemSafety.lean:923`) is the same shape for
+`SystemSafety.claim_acceptance_binds_statement` (`SystemSafety.lean:957`) is the same shape for
 the 50-word withdrawal-claim endpoint, under (a0) + (b1).
 
 **Acceptance alone establishes nothing about truth, funding or authorization.** Conjunct 1 says
@@ -770,8 +770,12 @@ here is a handwritten reading of source text.
 spans, to a named declaration of the mapped Lean module, checked by a compiler probe. The fixture
 parity suite (§5.4) checks that the models' decoders agree with what the real prover emitted, on
 18 fixtures. The `translated` classification covers 31,095 of 119,449 inventoried physical lines.
-**None of that is refinement**: agreement on the fixtures the prover happened to emit is one point
-of a relation, not the relation.
+The faithfulness tables (§5.7) add a mechanical check of one direction on the circuit side: 177
+structural claims of five Lean circuit transcripts were checked against the circuit the Rust
+constructor actually builds, and none disagreed. **None of that is refinement**: agreement on the
+fixtures the prover happened to emit is one point of a relation, not the relation; and a check of
+the *structural* half of a transcript says nothing about the Solidity side, the compiler, or the
+EVM.
 
 **What would refute it.** Any deployed behaviour outside the modeled step relation — which
 already happened once, at the model level: see §6.4.
@@ -815,7 +819,7 @@ between them is proved**.
 
 `TrustBoundary.materialized_credits_are_finalized_l2_balances_of_boundary`
 (`TrustBoundary.lean:2149`), lifted to the composed state as
-`SystemSafety.materialized_credits_are_backed_by_l2_entitlement` (`SystemSafety.lean:802`):
+`SystemSafety.materialized_credits_are_backed_by_l2_entitlement` (`SystemSafety.lean:802`).
 
 > From `CloseFunding.materializeSignedHead m.funding world m.managerAddress proof = .ok (after,
 > events)` there exist a backing witness `w` and the materialization plan such that
@@ -946,7 +950,7 @@ or field-ordering slip can produce the collision.
 > (`m.head.finalizedRoot (computedPublicInputs …).extendedStateCommitment.value = true`), every
 > **active** row's amount is `≤ m.l2Entitlement root channelId row.registry`.
 
-`m.l2Entitlement : Words8 → Nat → Nat → Nat` (`Models`, `TrustBoundary.lean:293`) is an **explicit
+`m.l2Entitlement : Words8 → Nat → Nat → Nat` (`Models`, `TrustBoundary.lean:301`) is an **explicit
 parameter**: `l2Entitlement root channel token` is the number of raw units of `token` the L2 ledger
 accounts to `channel` at the finalized extended-state root `root`, as the validity chain computes
 it. **Nothing in this project derives it, constrains it, or relates it to escrow.** Only (c4)
@@ -1207,6 +1211,9 @@ CI runs the chunks that fit a 16 GB runner (`common:: utils:: ethereum_types:: r
 tests); `wallet_core::`, `circuits::` and `falcon_sig::` are left to the existing dedicated
 `--test` steps, with the measured figures recorded in the workflow comments.
 
+The 18 `faithfulness*` tests of §5.7 are part of this same `lib` suite and inherit both cautions:
+they build real circuits, so they must be run `--release` and `--test-threads=1`.
+
 ### 5.7 Mechanical faithfulness evidence
 
 This is the evidence the previous revision listed as *planned and not implemented*. It now exists,
@@ -1223,8 +1230,10 @@ self-check in `src/faithfulness.rs`, one static-table test per transcribed progr
 mutation tests — and rewrites `doc/audit/zkp/evidence/faithfulness-<program>.tsv`, diffing each
 against the checked-in expectation `faithfulness-<program>.ops`. Re-blessing an `.ops` file after a
 deliberate change requires `INTMAX_FAITHFULNESS_BLESS=1`, so a silent drift cannot pass. The wall
-time and peak memory of the run are <!-- TODO: number --> — `evidence/README.md` records the
-single-threaded requirement and the OOM caveat, but no measured figures.
+time and peak memory of the run, measured on the audit machine on 2026-09-11, were 209 s wall
+for the 18 tests at a peak RSS of 26.6 GB (the touched-module regression suites that were re-run
+alongside took 1,237 s / 33.5 GB and 196 s / 8.8 GB); `evidence/README.md` records the same
+figures with the single-threaded requirement and the OOM caveat.
 
 #### What `src/faithfulness.rs` checks
 
@@ -1344,9 +1353,11 @@ quantity the system actually enforces.
 
 Every model is a handwritten reading of Rust and Solidity text. There is no verified `solc`, no
 extracted EVM semantics, and no verified Rust/plonky2 toolchain in this project. The line maps,
-the hash pins and the fixture parity narrow where a reading could be wrong; they do not make it a
-refinement. In particular the ledger-writer CI check is a **text scan**: it cannot see an inline
-`sstore` through an inherited library, a proxy upgrade, or a compiler bug.
+the hash pins, the fixture parity and the faithfulness tables narrow where a reading could be
+wrong; they do not make it a refinement. In particular the ledger-writer CI check is a **text
+scan**: it cannot see an inline `sstore` through an inherited library, a proxy upgrade, or a
+compiler bug — and the faithfulness harness inspects the circuit a *test build* produces, which is
+the same constraint system only because the probes are `#[cfg(test)]` and insert-only (§5.7).
 
 ### 6.3 The one confirmed runtime defect found and fixed
 
@@ -1541,7 +1552,7 @@ needed.
 ### 7.1 Where to start
 
 1. `doc/audit/zkp/Zkp/Implementation/SystemSafety.lean` — read the module header, then `Step`
-   (`:368`), then the four theorems of §2.2, then
+   (`:373`), then the four theorems of §2.2, then
    `materialized_credits_are_backed_by_l2_entitlement` (`:802`).
 2. `doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean` — read the module header (it is the
    narrative of how each premise reached its current shape), then `Models` (`:246`), then the
@@ -1573,7 +1584,7 @@ carries the authoritative, hash-pinned list):
 | `CancelCloseCircuit` / `CancelClosePublicInputs` | `src/circuits/channel/cancel_close_circuit.rs`, `cancel_close_pis.rs` |
 | `WithdrawalClaimCircuit` / `…PublicInputs` | `src/circuits/channel/withdrawal_claim_circuit.rs`, `withdrawal_claim_pis.rs` |
 | `PostCloseClaimCircuit` / `…PublicInputs` | `src/circuits/channel/post_close_claim_circuit.rs`, `post_close_claim_pis.rs` |
-| `CloseAssetBacking` | `src/circuits/channel/close_asset_backing_circuit.rs` |
+| `CloseAssetBacking` | `src/circuits/channel/close_asset_backing_circuit.rs`, including its 468-op `constructorProgram` transcript of `CloseAssetBackingCircuit::new` and the gate-lowering section |
 | `ChannelStateUpdate` | `src/circuits/channel/state_update_verifier.rs` |
 | `DecryptionGadget` | `src/circuits/channel/decryption_gadget.rs` |
 | `BalanceCircuit` / `BalancePublicInputs` / `SwitchBoard` | `src/circuits/balance/balance_circuit.rs`, `balance_pis.rs`, `switch_board.rs` |
@@ -1582,14 +1593,16 @@ carries the authoritative, hash-pinned list):
 | `FalconCore` / `FalconAggregate` / `FalconVendor` | `src/falcon_sig/gadget.rs`, `agg.rs`, `agg_list.rs`, `compat.rs`, the vendor tree |
 | `FalconGadgetProgram` | `src/falcon_sig/gadget.rs:651-736` as a 23-call builder transcript |
 | `FalconAggProgram` | `src/falcon_sig/agg.rs:268-305` (leaf) and `:370-479` (level) as builder transcripts |
+| `NttCorrectness` | **no new source reading** — it proves `FalconGadgetProgram.NttComputesNegacyclicProduct` about the transcript that module already carries (§2.5) |
+| `LedgerWriters` | the Solidity write-site inventory of the five flagged storage variables, plus the model-level frame theorems over every modeled Manager and materializer entrypoint (§3.4.5) |
 | `RegevCore` / `RegevProofs` | `src/regev/**` |
 | `MleProverBridge` | the MLE prover-side bridge and `src/deprecated/**` |
 | `IndexedMerkleTree`, `MerkleTrees`, `SparseTrees`, `TreeInstances` | `src/utils/trees/**`, `src/common/trees/**` |
 | `EthereumTypes`, `CommonValues`, `UtilGadgets`, `U256Arithmetic`, `H1Gadget`, `BlockTypes`, `ChannelTypes` | `src/ethereum_types/**`, `src/common/**`, `src/utils/**`, `src/constants.rs` |
 | `WitnessGenerators`, `Processors`, `FlowHarness`, `BalanceWitnesses`, `CrateLayout` | the witness/processor/e2e layers and the crate module structure |
 | `SignatureReleaseLedger` | `hosting/wallet/signature-release-ledger.mjs` |
-| **bridges** `SettlementCloseBridge`, `ClaimSettlementBridge`, `CancelCloseBridge`, `CloseEncodingBridge`, `CloseSignatureBridge`, `FundFlow` | relate two already-modeled sides; they add no new source reading |
-| **no in-repo source** `Keccak256` | reference specification of an external algorithm (EVM opcode / pinned `plonky2_keccak` crate) |
+| **bridges** `SettlementCloseBridge`, `ClaimSettlementBridge`, `CancelCloseBridge`, `CloseEncodingBridge`, `CloseSignatureBridge`, `BackingBridge`, `FundFlow` | relate two already-modeled sides; they add no new source reading. `CloseSignatureBridge` carries the signer-evidence shape the close path consumes; `BackingBridge` (new this loop) composes `CloseFunding` with `CloseAssetBacking` and proves the two big-endian limb readings agree (§3.5.1) |
+| **no in-repo source** `Keccak256` | reference specification of an external algorithm (EVM opcode / pinned `plonky2_keccak` crate); 45 theorems, four `decide`-proved test vectors (§3.4.1) |
 | **composition** `TrustBoundary`, `SystemSafety`, `LedgerWriters` | premise ledger, composed step relation, write-site inventory |
 
 ### 7.3 Line-map schema
@@ -1637,6 +1650,9 @@ parts of large files. A theorem about a parser does not cover the verifier that 
 | `.github/ci/check-ledger-writers.py` | re-derives the five Solidity write sites and fails on any other writer under `contracts/src` |
 | `doc/audit/zkp/agent-tools/validate-linemap.py` | validates one line map, including the `#check` probe |
 | `doc/audit/zkp/agent-tools/register2.py` | registers modules into `Zkp.lean`, the guard's current set, the manifest and the inventory; refuses a source-hash change unless it is explicitly accepted |
+| `doc/audit/zkp/agent-tools/shift-linemap.py` | re-bases a line map onto an edited source; **aborts unless the edit is insert-only**, which is what makes the `#[cfg(test)]` faithfulness probes auditable (§5.7) |
+| `src/faithfulness.rs` (test-only) | the copy-constraint / constant / range-width / public-input-order reader the faithfulness tables are generated from |
+| `doc/audit/zkp/evidence/` | the seven generated `faithfulness-*.tsv` tables, their checked-in `.ops` expectations, and the README that defines every `kind` and `verdict` |
 | `doc/audit/lean-current-source-manifest.json` | the pinned reviewed-source hashes, submodule pins and per-module theorem inventory |
 | `doc/audit/zkp/implementation-inventory.json` | the file/line inventory and its scope note |
 
@@ -1649,13 +1665,19 @@ Three rules, applied consistently above:
 1. **"Proved" always names a Lean theorem and its file:line.** If a sentence does not name one, it
    is not a proof claim.
 2. **"Assumed" always names a field of `TrustBoundary` by its Lean name and its label.** There are
-   eighteen; there is no nineteenth hiding in a comment, and nothing is an `axiom`.
-3. **Evidence and proof are kept apart.** Fixture agreement, test vectors, CI scans and write-site
-   inventories are evidence. They narrow where a model could be wrong. They are not refinement, and
-   this document never converts one into the other.
+   twenty-three; there is no twenty-fourth hiding in a comment, and nothing is an `axiom`. A label
+   that appears in the previous revision and not in §3 — (c), (d2'), (e1), (d), (g1), (g2) — is
+   accounted for in the table of §4, as a theorem.
+3. **Evidence and proof are kept apart.** Fixture agreement, test vectors, CI scans, write-site
+   inventories and the faithfulness tables of §5.7 are evidence. They narrow where a model could be
+   wrong. They are not refinement, and this document never converts one into the other. In
+   particular, "177 of 275 rows came back `ok`" is a statement about a check that ran, not about a
+   premise that was discharged.
 
-The composition is real and the four unconditional results are real. **They do not add up to "funds
-cannot be stolen or lost."** What they add up to is: given eighteen named obligations, four of
-which no work inside this repository can ever discharge, the modeled system's accounting,
-attribution, replay protection and payout bound hold along every modeled trace — and the places
-where that falls short of a safety guarantee are written down rather than assumed away.
+The composition is real, the four unconditional results are real, and the arithmetic theorem of
+§2.5 is real. **They do not add up to "funds cannot be stolen or lost."** What they add up to is:
+given twenty-three named obligations, four of which no work inside this repository can ever
+discharge, the modeled system's accounting, attribution, replay protection and payout bound hold
+along every modeled trace; every amount an accepted materialization credits is a Balance-certified
+L2 balance of that channel at a finalized root; and the one design residue that remains — that such
+a balance is backed by escrow — is written down as (c4) rather than assumed away.
