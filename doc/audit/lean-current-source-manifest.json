@@ -385,7 +385,7 @@
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "7ba19e363d57b7523597ccefeef14121674817d974670e124369b967eba39b95",
+      "sha256": "ad6b56054189c0579e864e4a7d688ac509d8f5d3fd8138f913ee67c49be9f170",
       "role": "spec"
     },
     {
@@ -495,7 +495,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/close-circuit.json",
-      "sha256": "a4a2f9a8d8fe72cb26513b8222a88613fef239bdb2ac87e300978f57e10581ad",
+      "sha256": "cd9a19726eab8161ded58c8fcca512bb3eaa74bcbfb825dfeacb2ff020d4af21",
       "role": "spec"
     },
     {
@@ -520,7 +520,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/CloseCircuit.lean",
-      "sha256": "858ae1fb8e1c2479785cae2ee5a08fb1d3ffe961fcc3289e324986cfa1171550",
+      "sha256": "2d148f09b429782756293070ba2b0df77db5f6c3eea455f7561fc0069e28450a",
       "role": "model"
     },
     {
@@ -600,7 +600,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/post-close-claim-circuit.json",
-      "sha256": "7961cfc62bb6b9ea3ac837acafbfaac9aa0deeba482bd2be577beff968580c75",
+      "sha256": "351208e262d5faa3fc1f33c86388a0118c81589a67c64cc1004bb2eb06e76054",
       "role": "spec"
     },
     {
@@ -610,7 +610,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/PostCloseClaimCircuit.lean",
-      "sha256": "2c8fec5ca2a0803a4f68f7ba16f6f5986a5fd2dd039c7726e7c5f0e00d1eae23",
+      "sha256": "4a03467c9f957b6499fedfb799b2617606d441cba271adfe5bc191d44be9b481",
       "role": "model"
     },
     {
@@ -630,7 +630,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/withdrawal-claim-circuit.json",
-      "sha256": "3637a015f00641b282bffcfe07916fc2312f17b435c60304e76d71db1ac127ea",
+      "sha256": "cc507a09cb494b6fa4f62e54c7bc6a5b748f40d5ea26e1d116808b9e44083922",
       "role": "spec"
     },
     {
@@ -640,7 +640,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimCircuit.lean",
-      "sha256": "eabcbc03ed44b42b2b55d0155b73ec82baa656e7c18958e98d3c3fc93c57f55e",
+      "sha256": "d5dbc5cf77a0d32a790ddb7967539b0e214af01c30277505b93acaa287999bd4",
       "role": "model"
     },
     {
@@ -1215,12 +1215,12 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/SystemSafety.lean",
-      "sha256": "46c922a4e7df6af52273e80c51f2b75f6d6b6e0bcab9dc54af461b637ea65766",
+      "sha256": "0d89a33941750351d23059e88c8cdb1187607137723c2679feacf0ad774a0d92",
       "role": "model"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "eff8aea1f66f1a33612543764d33e2f075f96d134f9f6efdfa5f92dcddbeb425",
+      "sha256": "67283d32e3294910d2fb80964c1e7d376db02d3d5ec9be6479fb739003acae31",
       "role": "model"
     },
     {
@@ -3297,7 +3297,41 @@
         "Zkp.Implementation.CloseCircuit.normal_three_member_flags_are_satisfiable",
         "Zkp.Implementation.CloseCircuit.normal_two_token_flags_are_satisfiable",
         "Zkp.Implementation.CloseCircuit.normal_freeze_successor_can_cross_a_limb",
-        "Zkp.Implementation.CloseCircuit.normal_non_genesis_funds_are_not_forced_to_zero_by_the_codec"
+        "Zkp.Implementation.CloseCircuit.normal_non_genesis_funds_are_not_forced_to_zero_by_the_codec",
+        "Zkp.Implementation.CloseCircuit.indexed_wires_length",
+        "Zkp.Implementation.CloseCircuit.indexed_wires_get",
+        "Zkp.Implementation.CloseCircuit.indexed_wires_head",
+        "Zkp.Implementation.CloseCircuit.checked_words_append",
+        "Zkp.Implementation.CloseCircuit.checked_indexed_words",
+        "Zkp.Implementation.CloseCircuit.checked_flattened_wires",
+        "Zkp.Implementation.CloseCircuit.indexed_flags_no_rise",
+        "Zkp.Implementation.CloseCircuit.indexed_flags_active_count",
+        "Zkp.Implementation.CloseCircuit.indexed_selected_keys",
+        "Zkp.Implementation.CloseCircuit.indexed_insertion_gates",
+        "Zkp.Implementation.CloseCircuit.satisfied_append",
+        "Zkp.Implementation.CloseCircuit.satisfied_append_of",
+        "Zkp.Implementation.CloseCircuit.mem_range_loop_iff",
+        "Zkp.Implementation.CloseCircuit.mem_range_iff_lt",
+        "Zkp.Implementation.CloseCircuit.satisfied_map_range",
+        "Zkp.Implementation.CloseCircuit.satisfied_map_range_of",
+        "Zkp.Implementation.CloseCircuit.satisfied_token_pairs",
+        "Zkp.Implementation.CloseCircuit.satisfied_token_pairs_of",
+        "Zkp.Implementation.CloseCircuit.indexed_get_zero_start",
+        "Zkp.Implementation.CloseCircuit.indexed_wires_head_of_pos",
+        "Zkp.Implementation.CloseCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.CloseCircuit.checked_of_all",
+        "Zkp.Implementation.CloseCircuit.example_amount_is_range_checked",
+        "Zkp.Implementation.CloseCircuit.example_member_flag_is_boolean",
+        "Zkp.Implementation.CloseCircuit.example_token_flag_is_boolean",
+        "Zkp.Implementation.CloseCircuit.example_member_flags_are_monotone",
+        "Zkp.Implementation.CloseCircuit.example_token_flags_are_monotone",
+        "Zkp.Implementation.CloseCircuit.satisfied_nil",
+        "Zkp.Implementation.CloseCircuit.satisfied_cons_of",
+        "Zkp.Implementation.CloseCircuit.example_assignment_satisfies_program",
+        "Zkp.Implementation.CloseCircuit.example_program_reads_back",
+        "Zkp.Implementation.CloseCircuit.example_program_satisfiable",
+        "Zkp.Implementation.CloseCircuit.example_satisfying_assignment_gives_circuit_gates",
+        "Zkp.Implementation.CloseCircuit.primitive_lowering_implies_field_and_gadget_lowering"
       ],
       "sources": [
         "src/circuits/channel/close_circuit.rs",
@@ -3598,7 +3632,23 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.default_uses_exact_constructor",
         "Zkp.Implementation.WithdrawalClaimCircuit.normal_token_selection",
         "Zkp.Implementation.WithdrawalClaimCircuit.normal_active_delegate_slot",
-        "Zkp.Implementation.WithdrawalClaimCircuit.normal_per_token_nullifier_preimage"
+        "Zkp.Implementation.WithdrawalClaimCircuit.normal_per_token_nullifier_preimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.flag_sum_is_one_hot_sum",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_words_are_groups",
+        "Zkp.Implementation.WithdrawalClaimCircuit.private_words_are_allocations",
+        "Zkp.Implementation.WithdrawalClaimCircuit.checked_append",
+        "Zkp.Implementation.WithdrawalClaimCircuit.checked_of_all_words",
+        "Zkp.Implementation.WithdrawalClaimCircuit.environment_gates_are_empty",
+        "Zkp.Implementation.WithdrawalClaimCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.primitive_lowering_implies_field_lowering",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_polynomial_length",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_reads_back",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_satisfied",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_satisfiable",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_assignment_meets_circuit_gates"
       ],
       "sources": [
         "doc/audit/zkp/line-map/withdrawal-claim-circuit.json",
@@ -3660,6 +3710,16 @@
         "Zkp.Implementation.PostCloseClaimCircuit.amount_matches_plaintext_under_decryption_contract",
         "Zkp.Implementation.PostCloseClaimCircuit.reference_slot_fixes_recipient_and_regev_key",
         "Zkp.Implementation.PostCloseClaimCircuit.exact_consumer_head_pins_both_opening_roots",
+        "Zkp.Implementation.PostCloseClaimCircuit.forall_mem_cons_iff",
+        "Zkp.Implementation.PostCloseClaimCircuit.forall_mem_nil_iff",
+        "Zkp.Implementation.PostCloseClaimCircuit.checked_words_append",
+        "Zkp.Implementation.PostCloseClaimCircuit.constructor_program_ops_imply_gates",
+        "Zkp.Implementation.PostCloseClaimCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.PostCloseClaimCircuit.read_witness_recovers_every_witness",
+        "Zkp.Implementation.PostCloseClaimCircuit.registered_public_inputs_are_the_statement",
+        "Zkp.Implementation.PostCloseClaimCircuit.primitive_lowering_implies_field_and_gadget_lowering",
+        "Zkp.Implementation.PostCloseClaimCircuit.primitive_lowering_iff_every_primitive_holds",
+        "Zkp.Implementation.PostCloseClaimCircuit.gate_lowering_needs_no_extra_environment_hypothesis",
         "Zkp.Implementation.PostCloseClaimCircuit.native_range_failure_precedes_all_writes",
         "Zkp.Implementation.PostCloseClaimCircuit.prove_preserves_member_index_error",
         "Zkp.Implementation.PostCloseClaimCircuit.polynomial_zip_does_not_invent_missing_coefficients",
@@ -3667,7 +3727,19 @@
         "Zkp.Implementation.PostCloseClaimCircuit.constructor_finishes_with_exact_registration",
         "Zkp.Implementation.PostCloseClaimCircuit.native_success_uses_supplied_public_inputs",
         "Zkp.Implementation.PostCloseClaimCircuit.merkle_zero_stub",
-        "Zkp.Implementation.PostCloseClaimCircuit.normal_active_delegate_claim_is_locally_satisfiable"
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_active_delegate_claim_is_locally_satisfiable",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_length",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_coefficients_are_small",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_coefficients_are_field_elements",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_is_nonzero",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_quadruple",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_polynomial_quadruple_length",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_key_preimage_length",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_ciphertext_preimage_length",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_witness_satisfies_every_primitive",
+        "Zkp.Implementation.PostCloseClaimCircuit.example_program_reads_back",
+        "Zkp.Implementation.PostCloseClaimCircuit.example_program_satisfiable",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_program_reproduces_the_gate_predicate"
       ],
       "sources": [
         "doc/audit/zkp/line-map/post-close-claim-circuit.json",
@@ -5389,14 +5461,41 @@
       "project": "doc/audit/zkp",
       "module": "Zkp.Implementation.TrustBoundary",
       "theorems": [
+        "Zkp.Implementation.TrustBoundary.close_primitive_lowering_implies_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.withdrawal_primitive_lowering_implies_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.post_close_primitive_lowering_implies_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.close_digest_pinning_and_program_lowering_give_primitive_lowering",
+        "Zkp.Implementation.TrustBoundary.withdrawal_digest_pinning_and_program_lowering_give_primitive_lowering",
+        "Zkp.Implementation.TrustBoundary.post_close_digest_pinning_and_program_lowering_give_primitive_lowering",
+        "Zkp.Implementation.TrustBoundary.close_adapter_is_pinned",
+        "Zkp.Implementation.TrustBoundary.withdrawal_adapter_is_pinned",
+        "Zkp.Implementation.TrustBoundary.post_close_adapter_is_pinned",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_reduces_close_soundness_to_gate_lowering",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_reduces_withdrawal_soundness_to_gate_lowering",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_reduces_post_close_soundness_to_gate_lowering",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_with_lowering_is_close_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_with_lowering_is_withdrawal_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_with_lowering_is_post_close_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.mle_and_primitive_lowering_is_close_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.mle_and_primitive_lowering_is_withdrawal_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.mle_and_primitive_lowering_is_post_close_proof_soundness",
+        "Zkp.Implementation.TrustBoundary.close_statement_lowering_of_boundary",
+        "Zkp.Implementation.TrustBoundary.withdrawal_statement_lowering_of_boundary",
+        "Zkp.Implementation.TrustBoundary.post_close_statement_lowering_of_boundary",
+        "Zkp.Implementation.TrustBoundary.close_proof_soundness_of_boundary",
+        "Zkp.Implementation.TrustBoundary.withdrawal_proof_soundness_of_boundary",
+        "Zkp.Implementation.TrustBoundary.post_close_proof_soundness_of_boundary",
+        "Zkp.Implementation.TrustBoundary.close_gap_is_exactly_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.withdrawal_gap_is_exactly_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.post_close_gap_is_exactly_statement_lowering",
+        "Zkp.Implementation.TrustBoundary.close_gap_is_now_per_primitive",
+        "Zkp.Implementation.TrustBoundary.withdrawal_gap_is_now_per_primitive",
+        "Zkp.Implementation.TrustBoundary.post_close_gap_is_now_per_primitive",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_close",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_claim",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_satisfies_every_premise",
         "Zkp.Implementation.TrustBoundary.close_premise_statement_has_103_words",
-        "Zkp.Implementation.TrustBoundary.close_premise_statement_is_the_adapter_receipt",
-        "Zkp.Implementation.TrustBoundary.close_adapter_is_pinned",
-        "Zkp.Implementation.TrustBoundary.mle_assumption_reduces_close_soundness_to_gate_lowering",
-        "Zkp.Implementation.TrustBoundary.mle_assumption_with_lowering_is_close_proof_soundness"
+        "Zkp.Implementation.TrustBoundary.close_premise_statement_is_the_adapter_receipt"
       ],
       "sources": [
         "doc/audit/zkp/line-map/close-circuit.json",
