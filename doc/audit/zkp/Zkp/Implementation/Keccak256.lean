@@ -474,4 +474,66 @@ theorem digest_u256_empty_is_nonzero : 0 < (digestU256 []).val := by
   rw [digest_u256_val, keccak256_empty_vector]
   decide
 
+/-! ## The big-endian packing loses nothing
+
+`digestU256` reads the 32 output bytes as one `Nat`, exactly as
+`uint256(keccak256(...))` does on the Solidity side. That step must not be able to
+manufacture a collision of its own: on canonical byte strings of equal length the
+packing is injective, so an equality of `digestU256` values on two 32-byte digests
+IS an equality of the digests. Consumers (the audit's hash-binding premise) can
+therefore state their assumption about `keccak256` itself and still use it against
+a `U256`-valued boundary function. -/
+
+/-- Big-endian packing is injective on equal-length canonical byte strings. The
+`digit * base + remainder` split is done by hand because `omega` cannot see through
+`x * 256 ^ n` for a non-literal `n`. -/
+theorem bytes_to_nat_injective :
+    ∀ (a b : List Nat), a.length = b.length → (∀ x ∈ a, x < 256) →
+      (∀ x ∈ b, x < 256) → bytesToNat a = bytesToNat b → a = b := by
+  have split : ∀ B x y d1 d2 : Nat, d1 < B → d2 < B →
+      x * B + d1 = y * B + d2 → x = y ∧ d1 = d2 := by
+    intro B x y d1 d2 h1 h2 heq
+    have key : ∀ p q e g : Nat, e < B → p < q → p * B + e < q * B + g := by
+      intro p q e g he hpq
+      have hstep : p * B + e < p * B + B := Nat.add_lt_add_left he _
+      have hgap : p * B + B ≤ q * B := by
+        have hmul : (p + 1) * B ≤ q * B := Nat.mul_le_mul_right B hpq
+        simpa [Nat.succ_mul] using hmul
+      omega
+    have hxy : x = y := by
+      rcases Nat.lt_trichotomy x y with hlt | heq' | hgt
+      · exact absurd heq (Nat.ne_of_lt (key x y d1 d2 h1 hlt))
+      · exact heq'
+      · exact absurd heq.symm (Nat.ne_of_lt (key y x d2 d1 h2 hgt))
+    subst hxy
+    exact ⟨rfl, by omega⟩
+  intro a
+  induction a with
+  | nil =>
+    intro b hlen _ _ _
+    cases b with
+    | nil => rfl
+    | cons _ _ => simp at hlen
+  | cons x xs ih =>
+    intro b hlen ha hb heq
+    cases b with
+    | nil => simp at hlen
+    | cons y ys =>
+      have hlen' : xs.length = ys.length := by simpa using hlen
+      have hdx : bytesToNat xs < 256 ^ ys.length := by
+        rw [← hlen']
+        exact bytes_to_nat_lt xs (fun z hz => ha z (by simp [hz]))
+      have hdy : bytesToNat ys < 256 ^ ys.length :=
+        bytes_to_nat_lt ys (fun z hz => hb z (by simp [hz]))
+      have heq' : x * 256 ^ ys.length + bytesToNat xs
+          = y * 256 ^ ys.length + bytesToNat ys := by
+        simp only [bytesToNat] at heq
+        rw [hlen'] at heq
+        exact heq
+      obtain ⟨hxy, hrest⟩ :=
+        split (256 ^ ys.length) x y (bytesToNat xs) (bytesToNat ys) hdx hdy heq'
+      have htail : xs = ys :=
+        ih ys hlen' (fun z hz => ha z (by simp [hz])) (fun z hz => hb z (by simp [hz])) hrest
+      rw [hxy, htail]
+
 end Zkp.Implementation.Keccak256

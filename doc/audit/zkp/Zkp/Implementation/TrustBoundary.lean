@@ -1,6 +1,8 @@
 import Zkp.Implementation.FundFlow
 import Zkp.Implementation.SettlementCloseBridge
 import Zkp.Implementation.ClaimSettlementBridge
+import Zkp.Implementation.CloseSignatureBridge
+import Zkp.Implementation.Keccak256
 
 /-!
 # The named premise classes of the implementation-model audit
@@ -9,8 +11,12 @@ This module carries NO new semantics of any source file. It gathers, as the
 fields of one `structure`, exactly the unproved obligations that the composed
 implementation models (`RollupValue`, `ManagerValue`, `CloseFunding`,
 `SettlementVerifier`, `CloseCircuit`, `WithdrawalClaimCircuit`,
-`PostCloseClaimCircuit` and the bridges between them) must borrow from outside
-Lean before a system-level fund-safety statement can be made.
+`PostCloseClaimCircuit`, `FalconAggregate`, `FalconCore` and the bridges between
+them — `SettlementCloseBridge`, `ClaimSettlementBridge`, `CloseSignatureBridge`)
+must borrow from outside Lean before a system-level fund-safety statement can be
+made. `Zkp.Implementation.Keccak256` is a reference specification of Keccak-256
+in the same sense: it is the function the two hash premises name, not a model of
+any in-repo source line.
 
 Nothing here is an axiom, and nothing here is proved. Each field is a `Prop`
 typed against the existing models, so `Zkp.Implementation.SystemSafety` can name
@@ -79,12 +85,57 @@ THEOREMS — `close_statement_lowering_of_boundary`,
 plus the corresponding per-primitive field, so every consumer is unchanged while
 nothing is assumed twice.
 
+The hash boundary is split the same way, and for the same reason. Keccak-256 is
+no longer one opaque callback that the circuit side and the contract side are
+merely assumed to share. `Zkp.Implementation.Keccak256` specifies the algorithm,
+and the boundary becomes two independent sentences about two different artifacts:
+(e1a) `solidityKeccakIsReference` — the EVM `KECCAK256` opcode computes the
+reference on canonical bytes — and (e1b) `circuitKeccakIsReference` — the pinned
+`plonky2_keccak` gadget computes the reference on the big-endian-packed u32 words.
+The old single field is recovered as the theorem
+`circuit_keccak_is_solidity_keccak_of_boundary`, and
+`reference_keccak_models_satisfy_hash_premises` exhibits the models that satisfy
+both halves, so the pair is not vacuous. Field (e2) `tokenFundsHashBinding` is
+now stated about `Keccak256.keccak256` itself rather than about the opaque
+boundary callback, `token_funds_hash_binding_of_boundary` recovers the old
+callback form from it and (e1a), and
+`token_funds_binding_is_same_length_collision` states what is left of it: a
+collision of Keccak-256 on ONE pair of 368-byte strings, the ABI-faithfulness
+half having been proved in `SettlementCloseBridge`.
+
+The signature boundary is split four ways. The old single field
+`signatureValidity` said that a passing aggregate check means the close message
+was authorized by that many of those keys — one implication bundling a
+recursive-verifier claim, a circuit-lowering claim, the aggregation tree's
+bookkeeping and the whole of Falcon's cryptography. The bookkeeping half is now
+PROVED, in `Zkp.Implementation.CloseSignatureBridge`
+(`accepted_aggregate_tree_gives_signer_evidence`), and the remaining four
+residues are carried separately: (d0) `aggregateRecursiveVerifierSoundness`,
+(d1) `aggregateStatementLowering`, (d2) `falconPredicateIsGadget` and (d3)
+`falconUnforgeability`. `signature_validity_of_boundary` composes them into
+`CloseSignatureBridge.SignerEvidence` — a strictly stronger conclusion than the
+old field's opaque `signers` relation, which no longer exists — and
+`signature_gap_is_now_per_signature` names the four residues as one conjunction.
+
+The seventeen fields, in order: (a0) `mleVerifierSoundness`, (a)
+`closePrimitiveLowering`, (b1) `withdrawalPrimitiveLowering`, (b2)
+`postClosePrimitiveLowering`, (c) `closeVectorBacked`, (d0)
+`aggregateRecursiveVerifierSoundness`, (d1) `aggregateStatementLowering`, (d2)
+`falconPredicateIsGadget`, (d3) `falconUnforgeability`, (e1a)
+`solidityKeccakIsReference`, (e1b) `circuitKeccakIsReference`, (e2)
+`tokenFundsHashBinding`, (f1) `finalizedRootObservation`, (f2)
+`finalizedHeightObservation`, (g1) `durableNullifierLedger`, (g2)
+`durableMaterializationLatch`, (h) `sourceRefinement`.
+
 The single inhabitation result below is deliberately degenerate: in an
-environment where every proof adapter returns a failure and no plonky2 statement
-is satisfiable at all, every acceptance-guarded premise holds vacuously, every
-lowering premise holds vacuously, and every storage-frame premise holds because
-no transition is admitted. That witnesses only well-formedness of the statement,
-and `rejecting_environment_accepts_no_close` records why: such an environment
+environment where every proof adapter returns a failure, no plonky2 statement is
+satisfiable at all and no Falcon signature is ever accepted, every
+acceptance-guarded premise holds vacuously, every lowering premise holds
+vacuously, the gadget-faithfulness premise holds because its antecedent is never
+met, the unforgeability premise holds because the authorization relation is
+taken to be trivial, and every storage-frame premise holds because no transition
+is admitted. That witnesses only well-formedness of the statement, and
+`rejecting_environment_accepts_no_close` records why: such an environment
 authorizes no fund movement at all.
 -/
 
@@ -95,12 +146,6 @@ of `token` that entered the Rollup escrow on behalf of `channel`. No modeled
 contract maintains this map; it is the accounting the Balance/validity circuit
 family is supposed to enforce off-chain. -/
 abbrev ChannelDeposits := Nat → Nat → Nat
-
-/-- Signer-set relation: `r message keys count` states that `message` really was
-authorized by `count` of the listed public keys. The close circuit only calls an
-opaque `verifyAggregate` predicate; this relation is what a Falcon aggregation
-proof is *intended* to mean. -/
-abbrev SignerRelation := CloseCircuit.Words8 → List CloseCircuit.Words8 → Nat → Prop
 
 /-- The environment values every premise below is indexed by. Bundling them makes
 it impossible for two premises (or a premise and the theorem that uses it) to
@@ -124,8 +169,37 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   head : RollupValue.State
   /-- Intended per-channel deposit attribution (see `ChannelDeposits`). -/
   deposits : ChannelDeposits
-  /-- Intended meaning of a successful aggregate-signature check. -/
-  signers : SignerRelation
+  /-- Aggregation-tree environment of `src/falcon_sig/agg.rs`: the opaque Poseidon
+  key-digest callback and the opaque per-slot Falcon accept callback the
+  aggregation model evaluates. Premises (d1), (d2) and the derived signer evidence
+  all speak of THIS environment, so the tree an accepted proof is claimed to have,
+  the gadget the accept callback is claimed to be, and the key digests the close
+  circuit exposes cannot drift apart. -/
+  sigEnv : FalconAggregate.SigEnv
+  /-- Hash environment of the single-signature model `FalconCore`: the
+  `hash_to_point` and Poseidon callbacks the `gadget.rs` gate set is stated over.
+  A parameter, exactly like `sigEnv`; nothing here defines Poseidon. -/
+  falconHash : FalconCore.HashEnvironment
+  /-- The negacyclic polynomial product of `Z_q[X]/(X^512+1)` that `FalconCore`'s
+  gate set multiplies with. Also a parameter: the model does not fix an
+  implementation, so (d2) and (d3) must be read against the same one. -/
+  falconMul : FalconCore.PolynomialProduct
+  /-- Pinned circuit identity of the `FalconAggCircuit` whose verifier data is
+  `closeEnv.aggregateVerifier`: the circuit digest baked into the constant
+  verifier key the close circuit verifies its aggregate proof against. It is a
+  parameter here, exactly like `pinnedCircuitDigest`; nothing in this project
+  derives it from a circuit, and nothing proves that the key the close circuit
+  pins is the key of the aggregation circuit `FalconAggregate` models. Only (d0)
+  and (d1) mention it, and the pinning claim is part of what (d1) borrows. -/
+  aggregateCircuitDigest : List Nat
+  /-- `authorized h digest` is the intended meaning of a Falcon signature: the
+  holder of the public polynomial `h` authorized the message digest `digest`
+  (as its 8 `Bytes32` limbs). It replaces the former `signers` relation one level
+  down — per SIGNATURE rather than per aggregate — and it is the relation premise
+  (d3) concludes and the derived `CloseSignatureBridge.SignerEvidence` reports.
+  Poseidon stays opaque, so nothing here ties `h` to a registered member; that
+  remains the close circuit's member-set obligation. -/
+  authorized : List Nat → List Nat → Prop
   /-- Pinned circuit identity of the adapter deployed at an address: the circuit
   digest and verification-config digest baked into that adapter's pinned
   configuration (`MleProverBridge.ConfigBody.circuitDigest` and
@@ -139,8 +213,14 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   plonky2 statement whose circuit is the one `digest` identifies, whose
   public-input vector is `words`, and which has a satisfying assignment. It is
   deliberately opaque — no model in this project defines plonky2 statements,
-  gates or assignments — and only `MleAcceptedStatementsAreSatisfiable` and the
-  three `*StatementLowering` obligations ever mention it. -/
+  gates or assignments — and only `MleAcceptedStatementsAreSatisfiable`, the
+  three `*StatementLowering` obligations and the two aggregate-signature fields
+  (d0) `aggregateRecursiveVerifierSoundness` and (d1) `aggregateStatementLowering`
+  ever mention it. The aggregate pair uses it at a DIFFERENT digest,
+  `aggregateCircuitDigest`, and behind a different verifier (the close circuit's
+  in-circuit recursive verify, not the settlement contract's MLE/WHIR call), which
+  is precisely why accepting the MLE/WHIR artifact in (a0) says nothing about
+  (d0). -/
   plonky2Satisfiable : List Nat → List Nat → Prop
 
 /-- The accepted-artifact assumption in isolation, so that a theorem can take it
@@ -516,11 +596,15 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   two named opaque halves (i) primitive-semantics faithfulness and (ii) digest
   pinning. It says nothing about the KZG
   attestation or Proof-DA availability path, which stays a distinct boundary of
-  `MleProverBridge` and `BlobJournal`. It says nothing about the correctness of
-  the public inputs a caller passes in: the Solidity binding pins which words
-  were returned, it never validates that they describe a real channel. And a
-  satisfiable statement is not by itself a safe fund movement — that step still
-  needs premises (c), (d), (e1), (e2), (f1), (f2) and (g1). See
+  `MleProverBridge` and `BlobJournal`. It says nothing about plonky2's own
+  recursive verifier, which the close circuit invokes on the Falcon aggregate
+  proof: that is (d0), a separate un-accepted premise, even though the recursive
+  verifier ships in the same pinned submodule. It says nothing about the
+  correctness of the public inputs a caller passes in: the Solidity binding pins
+  which words were returned, it never validates that they describe a real
+  channel. And a satisfiable statement is not by itself a safe fund movement —
+  that step still needs premises (c), (d0), (d1), (d2), (d3), (e1a), (e1b), (e2),
+  (f1), (f2) and (g1). See
   `mle_assumption_reduces_close_soundness_to_gate_lowering` for what the
   acceptance buys, and
   `Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety` for
@@ -598,36 +682,133 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
       SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
       ∀ i : Fin 10, i.val < f.tokenCount.val →
         (f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val
-  /-- **(d) Signature-validity oracle.** `CloseCircuit.CircuitGates.aggregateVerified`
-  is an opaque predicate call. This premise says a passing aggregate check really
-  means the close message was authorized by that many of those keys. It would be
-  discharged by a proof about the Falcon aggregation circuit and its pinned
-  verifier data, which is a pinned-proof dependency in `CloseCircuit`. -/
-  signatureValidity :
+  /-- **(d0) Aggregate recursive-verifier soundness — NOT covered by (a0).**
+  `CloseCircuit.CircuitGates.aggregateVerified` is an opaque predicate call
+  standing for plonky2's in-circuit recursive verification of the Falcon
+  aggregation proof against the constant verifier key `aggregateVerifier`. This
+  premise says a passing such check means the aggregation circuit identified by
+  `aggregateCircuitDigest` really has a satisfiable statement at the 73 aggregate
+  public-input words.
+
+  EXPLICITLY NOT COVERED BY THE ACCEPTED PREMISE (a0). The acceptance recorded in
+  (a0) is scoped to ONE artifact: the pinned MLE/WHIR verifier the settlement
+  contract calls, Rust and Solidity sides. plonky2's own recursive FRI verifier
+  ships in the same pinned `contracts/lib/polygon-plonky2` submodule, but it was
+  not accepted, it is a different proof system with a different soundness
+  argument, and it is invoked in a different place — inside the close circuit,
+  not from the chain. Sharing a submodule with an accepted artifact is not an
+  acceptance. So this is a distinct, un-accepted premise, and it would be
+  discharged only by a soundness proof of plonky2's recursive verifier at that
+  constant key. -/
+  aggregateRecursiveVerifierSoundness :
     ∀ (proof : AggregateProof) (st : CloseCircuit.AggregateStatement),
       m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st →
-      m.signers st.message st.keys st.signerCount
-  /-- **(e1) One hash function.** The circuit's `keccak` callback and the Solidity
-  `Keccak` boundary must be the same function, viewed through the model's word
-  encoding. `SettlementCloseBridge.circuitHash` is exactly that view; nothing
-  proves the deployed gadget and the deployed precompile agree. Discharged by a
-  Keccak gadget correctness proof. -/
-  circuitKeccakIsSolidityKeccak :
+      m.plonky2Satisfiable m.aggregateCircuitDigest st.words
+  /-- **(d1) Aggregate statement lowering — COARSE, whole-circuit.** From a
+  satisfiable plonky2 statement of the aggregation circuit at those 73 words to an
+  actual aggregation tree of `Zkp.Implementation.FalconAggregate` that evaluates,
+  under `sigEnv`, to exactly the statement the close circuit exposed (lowered by
+  `CloseSignatureBridge.toAggStatement`; the two public-input layouts are the same
+  vector, and THAT part is proved, by
+  `CloseSignatureBridge.to_agg_statement_public_inputs`). The width conjunct is the
+  8-limb `Bytes32` message-digest shape the tree characterization needs.
+
+  THIS FIELD IS COARSE — it names a whole circuit, the granularity fields (a),
+  (b1) and (b2) had before the per-primitive loop, and it is the only field that
+  still does. The reason is structural, not an oversight: `FalconAggregate` has no
+  `BuildOp` program, so there is nothing finer to state yet. Refining it the way
+  `constructorProgram` refined (a) is the named next step.
+
+  DIGEST PINNING IS IMPLICIT IN IT. Nothing separates "the statement at
+  `aggregateCircuitDigest` is satisfiable" from "that digest is the digest of the
+  circuit `FalconAggregate` transcribes": this field asserts both at once, where
+  the close/withdrawal/post-close endpoints keep them apart as
+  `ClosePinnedDigestIsProgramDigest` and its siblings. That is another thing the
+  per-primitive refinement would buy. -/
+  aggregateStatementLowering :
+    ∀ st : CloseCircuit.AggregateStatement,
+      m.plonky2Satisfiable m.aggregateCircuitDigest st.words →
+      ∃ t : FalconAggregate.AggTree,
+        (∀ w ∈ FalconAggregate.activeWitnesses t, w.messageDigest.length = 8) ∧
+          FalconAggregate.evalTree m.sigEnv t FalconAggregate.aggLevels =
+            .ok (CloseSignatureBridge.toAggStatement st)
+  /-- **(d2) The aggregation model's accept callback IS the Falcon gadget.**
+  `FalconAggregate.SigEnv.falconAccepts` is an opaque `Bool` callback at every leaf
+  of the aggregation tree. This premise says that whenever it accepts, the
+  `src/falcon_sig/gadget.rs` gate set that `FalconCore` models is satisfied on an
+  ACTIVE slot by a witness whose `h`, `s2` and `salt` are the slot's own and whose
+  message digest is the slot's 8 limbs packed big-endian. It would be discharged by
+  a per-gate reading of `gadget.rs` against `FalconCore.CircuitSatisfied` — the
+  same kind of obligation as the per-`holds` faithfulness inside (a), for a circuit
+  that has no `BuildOp` program yet. -/
+  falconPredicateIsGadget :
+    CloseSignatureBridge.FalconPredicateIsGadget m.sigEnv m.falconHash m.falconMul
+  /-- **(d3) Falcon unforgeability.** The lattice assumption in the form a consumer
+  can use: a satisfied active gadget instance for public polynomial `h` and message
+  digest `d` means the holder of `h` authorized `d`. This is
+  `FalconCore.LatticeHardness` / `ntruShortVectorAssumption` made into an
+  implication. It is a COMPUTATIONAL assumption about NTRU/GPV lattices and cannot
+  be discharged in this project at all; no proof about the Rust, the circuit or the
+  contracts would establish it. -/
+  falconUnforgeability :
+    CloseSignatureBridge.FalconUnforgeable m.falconHash m.falconMul m.authorized
+  /-- **(e1a) The Solidity boundary hash IS Keccak-256.** The `Keccak` callback the
+  settlement-verifier model calls stands for the EVM `KECCAK256` opcode
+  (`keccak256(abi.encodePacked(...))` in the deployed contract). This premise says
+  that callback is the reference specification `Zkp.Implementation.Keccak256`, read
+  as a `uint256` the way Solidity reads it, on canonical byte strings. It is an
+  EVM-semantics premise, kin to (h) `sourceRefinement` rather than to any circuit
+  premise: it would be discharged by an extracted EVM semantics in which the opcode
+  is specified, and by nothing inside this audit. -/
+  solidityKeccakIsReference :
+    ∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
+      m.keccak b = Keccak256.digestU256 b
+  /-- **(e1b) The in-circuit hash gadget IS Keccak-256.** The close circuit's
+  `keccak` callback stands for the external `plonky2_keccak` gadget — the crate
+  pinned in `Cargo.lock` at git rev
+  `2507786148ae6323d0ea547bf88e1752f901434e` (branch `wasm-main`), which is outside
+  this audit's translation scope. This premise says that gadget computes the
+  reference Keccak-256 of the big-endian-packed u32 words, packed back into the
+  circuit's 8-limb `Words8`.
+
+  NOT A PART OF (a). Field (a)'s per-primitive faithfulness obligation for the
+  keccak `BuildOp` cases says only that the gadget CONSTRAINS `out = e.keccak
+  preimage` — that the circuit really commits its output to the callback's value.
+  It says nothing about WHICH function `e.keccak` is; (e1b) is exactly that, and
+  nothing else. The two are independent: a faithful constraint on a wrong hash
+  and a right hash left unconstrained are different failures. Discharged by a
+  correctness proof of the pinned gadget at that revision. -/
+  circuitKeccakIsReference :
     ∀ words : List Nat,
-      m.closeEnv.keccak words = SettlementCloseBridge.circuitHash m.keccak words
-  /-- **(e2) Hash binding on the compared pair.** No global injectivity is ever
-  assumed. This premise is restricted to the finitely many token-vector preimages
-  actually compared inside an accepted close execution: if their digests agree,
-  the byte strings agree. It is the `concreteBinding` hypothesis of
-  `SettlementCloseBridge.bound_close_preserves_entire_settlement_vector`, and
-  would be discharged by collision resistance together with ABI-encoding
-  faithfulness. -/
+      m.closeEnv.keccak words =
+        SettlementCloseBridge.digest
+          (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words))
+  /-- **(e2) Keccak-256 collision resistance on ONE same-length pair.** No global
+  injectivity is ever assumed, and the premise is not about an opaque callback any
+  more: it is about the reference `Keccak256.keccak256`, restricted to the
+  token-vector preimages actually compared inside an accepted close execution — if
+  their digests agree, the byte strings agree. It is the `concreteBinding`
+  hypothesis of
+  `SettlementCloseBridge.bound_close_preserves_entire_settlement_vector` (through
+  `token_funds_hash_binding_of_boundary`, which restores the `m.keccak` form from
+  this field and (e1a)).
+
+  THE ABI HALF IS NOW PROVED, NOT BORROWED. The old docstring named "collision
+  resistance together with ABI-encoding faithfulness"; the second conjunct is gone.
+  `SettlementCloseBridge.token_funds_preimage_injective` proves the Solidity layout
+  is injective in (registry, count, amounts), and
+  `SettlementCloseBridge.token_funds_compared_strings_same_length` proves both
+  compared strings are 368 bytes long, so no length-extension, padding ambiguity,
+  domain-separation slip or field-ordering slip can produce the collision — see
+  `token_funds_binding_is_same_length_collision`. What remains is solely the
+  COMPUTATIONAL claim that Keccak-256 has no collision on that one concrete pair,
+  which cannot be discharged in this project. -/
   tokenFundsHashBinding :
     ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
       (w : CloseCircuit.PrivateWitness),
       SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
-      m.keccak (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
-          m.keccak (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+      Keccak256.keccak256 (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
+          Keccak256.keccak256 (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
             f.channelFundAmounts) →
         SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w) =
           SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount f.channelFundAmounts
@@ -1182,17 +1363,30 @@ theorem rejecting_environment_accepts_no_claim
 
 /-- The premise structure is inhabited, but only degenerately: nothing is
 accepted, no plonky2 statement of any circuit is satisfiable, no aggregate check
-passes, no finality is observed, and no transition outside the model or from the
-deployed artifact is admitted. This is a well-formedness check on the statement,
-NOT evidence that any field holds of a real deployment. In particular the
-hypotheses below describe an environment in which no close, no claim and no
+passes, no Falcon signature is accepted at any slot, the authorization relation
+is trivially true, no finality is observed, and no transition outside the model
+or from the deployed artifact is admitted. This is a well-formedness check on the
+statement, NOT evidence that any field holds of a real deployment. In particular
+the hypotheses below describe an environment in which no close, no claim and no
 materialization can ever succeed, in which the accepted MLE/WHIR premise
 `mleVerifierSoundness` holds only because the pinned adapter never returns a word
 vector at all, and in which the three PER-PRIMITIVE lowering premises (a), (b1),
 (b2) hold only because `noSatisfiableStatements` denies them their antecedent —
 no assignment of any constructor program is ever exhibited, so neither half of
 what those fields borrow (per-`holds` primitive faithfulness, digest pinning) is
-discharged here in any useful sense; they are merely vacuous. -/
+discharged here in any useful sense; they are merely vacuous.
+
+The four signature fields are vacuous or trivial in exactly the same way. (d0)
+holds because `noAggregate` denies it its antecedent, (d1) because
+`noSatisfiableStatements` does — no aggregation tree is ever exhibited, so the
+coarse lowering is not tested — (d2) because `noFalconAccept` makes its antecedent
+`false = true`, so no gadget instance is ever produced, and (d3) because
+`authorizedTrivially` makes its conclusion hold of everything, which is the
+opposite of the lattice assumption having been discharged. The two hash premises
+are the only ones supplied as equations rather than vacuously: `solidityReference`
+and `circuitReference` say the two boundary functions ARE the reference Keccak-256,
+which is what `reference_keccak_models_satisfy_hash_premises` shows is achievable,
+not something this environment proves. -/
 theorem rejecting_environment_satisfies_every_premise
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
@@ -1203,8 +1397,14 @@ theorem rejecting_environment_satisfies_every_premise
     (noSatisfiableStatements : ∀ digest words, ¬ m.plonky2Satisfiable digest words)
     (noAggregate : ∀ proof st,
       ¬ m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st)
-    (noKeccakGap : ∀ words,
-      m.closeEnv.keccak words = SettlementCloseBridge.circuitHash m.keccak words)
+    (noFalconAccept : ∀ h msg salt s2, m.sigEnv.falconAccepts h msg salt s2 = false)
+    (authorizedTrivially : ∀ h d, m.authorized h d)
+    (solidityReference : ∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
+      m.keccak b = Keccak256.digestU256 b)
+    (circuitReference : ∀ words : List Nat,
+      m.closeEnv.keccak words =
+        SettlementCloseBridge.digest
+          (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words)))
     (noFinality : ∀ root, m.funding.isFinalizedRoot root ≠ .ok true)
     (noHeight : ∀ n, m.funding.latestFinalized ≠ .ok n) :
     TrustBoundary m (fun _ _ => False) Modeled (fun _ _ => False) managerOf fundingOf where
@@ -1218,8 +1418,15 @@ theorem rejecting_environment_satisfies_every_premise
     fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
   closeVectorBacked f proof accepted :=
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
-  signatureValidity proof st verified := absurd verified (noAggregate proof st)
-  circuitKeccakIsSolidityKeccak := noKeccakGap
+  aggregateRecursiveVerifierSoundness proof st verified :=
+    absurd verified (noAggregate proof st)
+  aggregateStatementLowering :=
+    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
+  falconPredicateIsGadget w accepts :=
+    absurd (accepts.symm.trans (noFalconAccept w.h w.messageDigest w.salt w.s2)) (by decide)
+  falconUnforgeability cw digest _ _ _ := authorizedTrivially cw.h digest
+  solidityKeccakIsReference := solidityReference
+  circuitKeccakIsReference := circuitReference
   tokenFundsHashBinding f proof _ accepted :=
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
   finalizedRootObservation root observed := absurd observed (noFinality root)
