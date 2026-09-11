@@ -1048,4 +1048,529 @@ theorem ntt_forward_eval (l : List Nat) (hc : ∀ c ∈ l, c < falconQ) (j : Nat
     wire_of_map_range _ falconN j hj]
   exact ntt_forward_loop_eval (wireOf l) (wire_of_lt_q l hc) j hj
 
+/-! ## 10. The Gentleman-Sande loop inverts the Cooley-Tukey loop -/
+
+theorem two_pow_block (s h : Nat) (hsh : s + h + 1 = 9) : 2 * 2 ^ s * 2 ^ h = falconN := by
+  have e : (2 : Nat) ^ s * 2 ^ h = 2 ^ (s + h) := (Nat.pow_add 2 s h).symm
+  have e2 : s + h = 8 := by omega
+  calc 2 * 2 ^ s * 2 ^ h = 2 * (2 ^ s * 2 ^ h) := by rw [Nat.mul_assoc]
+    _ = 2 * 2 ^ (s + h) := by rw [e]
+    _ = 2 * 2 ^ 8 := by rw [e2]
+    _ = falconN := by decide
+
+theorem block_decomp (m t x : Nat) (ht : 0 < t) (hx : x < 2 * m * t) :
+    ∃ i r, i < m ∧ r < t ∧ (x = 2 * i * t + r ∨ x = 2 * i * t + r + t) := by
+  have h2t : 0 < 2 * t := by omega
+  have hdm : 2 * t * (x / (2 * t)) + x % (2 * t) = x := Nat.div_add_mod x (2 * t)
+  have hd : x % (2 * t) < 2 * t := Nat.mod_lt _ h2t
+  have hmt : 2 * m * t = 2 * t * m := by
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  have hi : x / (2 * t) < m := Nat.div_lt_of_lt_mul (by omega)
+  have hblk : 2 * (x / (2 * t)) * t = 2 * t * (x / (2 * t)) := by
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  rcases Nat.lt_or_ge (x % (2 * t)) t with hlt | hge
+  · exact ⟨x / (2 * t), x % (2 * t), hi, hlt, Or.inl (by omega)⟩
+  · exact ⟨x / (2 * t), x % (2 * t) - t, hi, by omega, Or.inr (by omega)⟩
+
+theorem ct_stage_canonical (m t : Nat) (ht : 0 < t) (b : Nat → Nat) (hb : ∀ y, b y < falconQ)
+    (y : Nat) : ctStage m t b y < falconQ := by
+  rcases Nat.lt_or_ge y (2 * m * t) with hy | hy
+  · obtain ⟨i, r, hi, hr, hcase⟩ := block_decomp m t y ht hy
+    rcases hcase with rfl | rfl
+    · rw [ct_stage_low m t ht b i r hi hr]; exact mod_q_lt _
+    · rw [ct_stage_high m t ht b i r hi hr]; exact mod_q_lt _
+  · rw [ct_stage_fixed m t ht b y hy]; exact hb y
+
+theorem scale_add (c u v : Nat) :
+    (c * u % falconQ + c * v % falconQ) % falconQ = c * ((u + v) % falconQ) % falconQ := by
+  refine eq_q_trans (eq_q_add (eq_q_mod _) (eq_q_mod _)) ?_
+  rw [← Nat.left_distrib]
+  exact eq_q_mul_left c (eq_q_symm (eq_q_mod _))
+
+theorem scale_sub_mul (c u v sw : Nat) (hv : v < falconQ) :
+    (c * u % falconQ + falconQ - c * v % falconQ) * sw % falconQ
+      = c * ((u + falconQ - v) * sw % falconQ) % falconQ := by
+  have hinner : EqQ (c * u % falconQ + falconQ - c * v % falconQ) (c * (u + falconQ - v)) := by
+    refine eq_q_sub_add _ _ _ (mod_q_lt _) ?_
+    have e1 : EqQ (c * v % falconQ + c * (u + falconQ - v)) (c * v + c * (u + falconQ - v)) :=
+      eq_q_add (eq_q_mod _) (eq_q_refl _)
+    have e2 : c * v + c * (u + falconQ - v) = c * (u + falconQ) := by
+      rw [← Nat.left_distrib]
+      congr 1
+      omega
+    have e3 : EqQ (c * (u + falconQ)) (c * u % falconQ) := by
+      refine (eq_q_iff _ _).2 ⟨0, c + c * u / falconQ, ?_⟩
+      rw [Nat.left_distrib falconQ c (c * u / falconQ)]
+      have e4 : c * (u + falconQ) = c * u + falconQ * c := by
+        rw [Nat.left_distrib, Nat.mul_comm c falconQ]
+      have e5 : c * u % falconQ + falconQ * (c * u / falconQ) = c * u := by
+        have := Nat.div_add_mod (c * u) falconQ
+        omega
+      omega
+    rw [e2] at e1
+    exact eq_q_trans e1 e3
+  refine eq_q_trans (eq_q_mul hinner (eq_q_refl sw)) ?_
+  rw [Nat.mul_assoc]
+  exact eq_q_mul_left c (eq_q_symm (eq_q_mod _))
+
+/-- Every Gentleman-Sande stage is linear over the residues. -/
+theorem gs_stage_scale (m t c : Nat) (ht : 0 < t) (b : Nat → Nat) (hb : ∀ y, b y < falconQ)
+    (x : Nat) : gsStage m t (fun y => c * b y % falconQ) x = c * gsStage m t b x % falconQ := by
+  rcases Nat.lt_or_ge x (2 * m * t) with hx | hx
+  · obtain ⟨i, r, hi, hr, hcase⟩ := block_decomp m t x ht hx
+    rcases hcase with rfl | rfl
+    · rw [gs_stage_low m t ht _ i r hi hr, gs_stage_low m t ht b i r hi hr]
+      exact scale_add c _ _
+    · rw [gs_stage_high m t ht _ i r hi hr, gs_stage_high m t ht b i r hi hr]
+      exact scale_sub_mul c _ _ _ (hb _)
+  · rw [gs_stage_fixed m t ht _ x hx, gs_stage_fixed m t ht b x hx]
+
+/-- The two halves of a Cooley-Tukey butterfly add back to twice the low input. -/
+theorem ct_pair_sum (B0 B1 g : Nat) (hg : g < falconQ) (h1 : B1 < falconQ) :
+    ((B0 + g * B1) % falconQ + (B0 + falconQ * falconQ - g * B1) % falconQ) % falconQ
+      = 2 * B0 % falconQ := by
+  have hle : g * B1 ≤ falconQ * falconQ := Nat.mul_le_mul (by omega) (by omega)
+  refine eq_q_trans (eq_q_add (eq_q_mod _) (eq_q_mod _)) ?_
+  have e : B0 + g * B1 + (B0 + falconQ * falconQ - g * B1) = 2 * B0 + falconQ * falconQ := by
+    omega
+  rw [e]
+  exact (eq_q_iff _ _).2 ⟨0, falconQ, by omega⟩
+
+/-- Their difference, twiddled by the inverse table entry, gives back twice the high input. -/
+theorem ct_pair_diff (B0 B1 g sw : Nat) (hg : g < falconQ) (h1 : B1 < falconQ)
+    (hinv : g * sw % falconQ = 1) :
+    (((B0 + g * B1) % falconQ + falconQ - (B0 + falconQ * falconQ - g * B1) % falconQ) * sw)
+        % falconQ = 2 * B1 % falconQ := by
+  have hle : g * B1 ≤ falconQ * falconQ := Nat.mul_le_mul (by omega) (by omega)
+  have hdiff : EqQ ((B0 + g * B1) % falconQ + falconQ
+      - (B0 + falconQ * falconQ - g * B1) % falconQ) (2 * (g * B1)) := by
+    refine eq_q_sub_add _ _ _ (mod_q_lt _) ?_
+    have e1 : EqQ ((B0 + falconQ * falconQ - g * B1) % falconQ + 2 * (g * B1))
+        ((B0 + falconQ * falconQ - g * B1) + 2 * (g * B1)) := eq_q_add (eq_q_mod _) (eq_q_refl _)
+    have e2 : (B0 + falconQ * falconQ - g * B1) + 2 * (g * B1)
+        = (B0 + g * B1) + falconQ * falconQ := by omega
+    rw [e2] at e1
+    refine eq_q_trans e1 ?_
+    refine eq_q_trans ((eq_q_iff _ _).2 ⟨0, falconQ, by omega⟩ :
+      EqQ (B0 + g * B1 + falconQ * falconQ) (B0 + g * B1)) ?_
+    exact eq_q_symm (eq_q_mod _)
+  refine eq_q_trans (eq_q_mul hdiff (eq_q_refl sw)) ?_
+  have e3 : 2 * (g * B1) * sw = 2 * B1 * (g * sw) := by
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  rw [e3]
+  have hgs : EqQ (g * sw) 1 := by
+    show g * sw % falconQ = 1 % falconQ
+    rw [hinv, one_mod_q]
+  have hfin : EqQ (2 * B1 * (g * sw)) (2 * B1 * 1) := eq_q_mul_left (2 * B1) hgs
+  rw [Nat.mul_one] at hfin
+  exact hfin
+
+/-- One matched stage pair: Gentleman-Sande undoes Cooley-Tukey up to the factor 2 that the
+final `n^-1` scaling of :500-508 accounts for. -/
+theorem gs_ct_inverse (m t : Nat) (ht : 0 < t) (b : Nat → Nat) (hb : ∀ y, b y < falconQ)
+    (x : Nat) (hx : x < 2 * m * t) :
+    gsStage m t (ctStage m t b) x = 2 * b x % falconQ := by
+  obtain ⟨i, r, hi, hr, hcase⟩ := block_decomp m t x ht hx
+  have hct := ct_stage_canonical m t ht b hb
+  rcases hcase with rfl | rfl
+  · rw [gs_stage_low m t ht _ i r hi hr, ct_stage_low m t ht b i r hi hr,
+      ct_stage_high m t ht b i r hi hr]
+    exact ct_pair_sum _ _ _ (psi_rev_lt _) (hb _)
+  · rw [gs_stage_high m t ht _ i r hi hr, ct_stage_low m t ht b i r hi hr,
+      ct_stage_high m t ht b i r hi hr]
+    exact ct_pair_diff _ _ _ _ (psi_rev_lt _) (hb _) (psi_rev_mul_inv _)
+
+theorem inverse_chain_step (s h c : Nat) (hsh : s + h + 1 = 9) (Y X : Nat → Nat)
+    (hY : ∀ y, Y y < falconQ) (hY0 : ∀ y, falconN ≤ y → Y y = 0)
+    (hX : ∀ y, X y = c * ctStage (2 ^ s) (2 ^ h) Y y % falconQ) (y : Nat) :
+    gsStage (2 ^ s) (2 ^ h) X y = 2 * c * Y y % falconQ := by
+  have ht : 0 < 2 ^ h := two_pow_pos h
+  have hblk : 2 * 2 ^ s * 2 ^ h = falconN := two_pow_block s h hsh
+  have hfun : X = fun z => c * ctStage (2 ^ s) (2 ^ h) Y z % falconQ := funext hX
+  subst hfun
+  rcases Nat.lt_or_ge y (2 * 2 ^ s * 2 ^ h) with hy | hy
+  · rw [gs_stage_scale _ _ c ht _ (ct_stage_canonical _ _ ht Y hY) y,
+      gs_ct_inverse _ _ ht Y hY y hy]
+    refine eq_q_trans (eq_q_mul_left c (eq_q_mod _)) ?_
+    rw [← Nat.mul_assoc, Nat.mul_comm c 2]
+    exact eq_q_refl _
+  · rw [gs_stage_fixed _ _ ht _ y hy, ct_stage_fixed _ _ ht Y y hy,
+      hY0 y (by omega), Nat.mul_zero, Nat.mul_zero]
+
+/-- The nine Cooley-Tukey stages, outermost last. -/
+def fwdRun : Nat → Nat → (Nat → Nat) → (Nat → Nat)
+  | _, 0, a => a
+  | s, h + 1, a => fwdRun (s + 1) h (ctStage (2 ^ s) (2 ^ h) a)
+
+/-- The nine Gentleman-Sande stages, in the reverse order. -/
+def invRun : Nat → Nat → (Nat → Nat) → (Nat → Nat)
+  | _, 0, a => a
+  | s, h + 1, a => gsStage (2 ^ s) (2 ^ h) (invRun (s + 1) h a)
+
+theorem fwd_run_fixed : ∀ h s : Nat, s + h = 9 → ∀ (a : Nat → Nat) (i : Nat), falconN ≤ i →
+    fwdRun s h a i = a i := by
+  intro h
+  induction h with
+  | zero => intro s _ a i _; rfl
+  | succ h ih =>
+      intro s hsh a i hi
+      have ht : 0 < 2 ^ h := two_pow_pos h
+      have hblk : 2 * 2 ^ s * 2 ^ h = falconN := two_pow_block s h (by omega)
+      show fwdRun (s + 1) h (ctStage (2 ^ s) (2 ^ h) a) i = a i
+      rw [ih (s + 1) (by omega) _ i hi, ct_stage_fixed _ _ ht a i (by omega)]
+
+theorem fwd_run_canonical : ∀ h s : Nat, s + h = 9 → ∀ a : Nat → Nat, (∀ y, a y < falconQ) →
+    ∀ y, fwdRun s h a y < falconQ := by
+  intro h
+  induction h with
+  | zero => intro s _ a ha y; exact ha y
+  | succ h ih =>
+      intro s hsh a ha y
+      show fwdRun (s + 1) h (ctStage (2 ^ s) (2 ^ h) a) y < falconQ
+      exact ih (s + 1) (by omega) _ (ct_stage_canonical _ _ (two_pow_pos h) a ha) y
+
+theorem inv_run_fwd_run : ∀ h s : Nat, s + h = 9 → ∀ a : Nat → Nat, (∀ y, a y < falconQ) →
+    (∀ y, falconN ≤ y → a y = 0) → ∀ x, invRun s h (fwdRun s h a) x = 2 ^ h * a x % falconQ := by
+  intro h
+  induction h with
+  | zero =>
+      intro s _ a ha _ x
+      show a x = 2 ^ 0 * a x % falconQ
+      rw [Nat.pow_zero, Nat.one_mul, Nat.mod_eq_of_lt (ha x)]
+  | succ h ih =>
+      intro s hsh a ha ha0 x
+      have ht : 0 < 2 ^ h := two_pow_pos h
+      have hblk : 2 * 2 ^ s * 2 ^ h = falconN := two_pow_block s h (by omega)
+      have hb := ct_stage_canonical (2 ^ s) (2 ^ h) ht a ha
+      have hb0 : ∀ y, falconN ≤ y → ctStage (2 ^ s) (2 ^ h) a y = 0 := by
+        intro y hy
+        rw [ct_stage_fixed _ _ ht a y (by omega)]
+        exact ha0 y hy
+      have hstep := ih (s + 1) (by omega) (ctStage (2 ^ s) (2 ^ h) a) hb hb0
+      show gsStage (2 ^ s) (2 ^ h)
+        (invRun (s + 1) h (fwdRun (s + 1) h (ctStage (2 ^ s) (2 ^ h) a))) x = _
+      rw [inverse_chain_step s h (2 ^ h) (by omega) a _ ha ha0 hstep x, two_pow_succ h]
+
+/-! ## 11. `ntt_inverse` inverts `ntt_forward` on canonical inputs -/
+
+theorem ntt_inverse_loop_unfold (a : Nat → Nat) :
+    nttInverseLoop 10 falconN 1 a
+      = gsStage (2 ^ 0) (2 ^ 8) (gsStage (2 ^ 1) (2 ^ 7) (gsStage (2 ^ 2) (2 ^ 6)
+          (gsStage (2 ^ 3) (2 ^ 5) (gsStage (2 ^ 4) (2 ^ 4) (gsStage (2 ^ 5) (2 ^ 3)
+            (gsStage (2 ^ 6) (2 ^ 2) (gsStage (2 ^ 7) (2 ^ 1)
+              (gsStage (2 ^ 8) (2 ^ 0) a)))))))) := by
+  simp only [nttInverseLoop, falconN, Nat.reduceMul, Nat.reduceDiv, Nat.reduceLT,
+    Nat.reducePow, reduceIte]
+
+theorem fwd_run_eq (a : Nat → Nat) : fwdRun 0 9 a = nttForwardLoop 10 1 falconN a := by
+  rw [ntt_forward_loop_unfold]
+  rfl
+
+theorem inv_run_eq (a : Nat → Nat) : invRun 0 9 a = nttInverseLoop 10 falconN 1 a := by
+  rw [ntt_inverse_loop_unfold]
+  rfl
+
+theorem ntt_inverse_loop_forward (a : Nat → Nat) (ha : ∀ y, a y < falconQ)
+    (ha0 : ∀ y, falconN ≤ y → a y = 0) (x : Nat) :
+    nttInverseLoop 10 falconN 1 (nttForwardLoop 10 1 falconN a) x = 512 * a x % falconQ := by
+  rw [← fwd_run_eq, ← inv_run_eq]
+  exact inv_run_fwd_run 9 0 rfl a ha ha0 x
+
+theorem wire_of_ext : ∀ l1 l2 : List Nat, l1.length = l2.length →
+    (∀ i, i < l1.length → wireOf l1 i = wireOf l2 i) → l1 = l2 := by
+  intro l1
+  induction l1 with
+  | nil => intro l2 hlen _; cases l2 with
+    | nil => rfl
+    | cons y ys => simp at hlen
+  | cons x xs ih =>
+      intro l2 hlen h
+      cases l2 with
+      | nil => simp at hlen
+      | cons y ys =>
+          have hx : x = y := h 0 (by simp)
+          have htail : xs = ys := by
+            refine ih ys (by simp only [List.length_cons] at hlen; omega) ?_
+            intro i hi
+            exact h (i + 1) (by simp only [List.length_cons]; omega)
+          rw [hx, htail]
+
+theorem map_range_wire_of (l : List Nat) (n : Nat) (hlen : l.length = n) :
+    (rangeList n).map (wireOf l) = l := by
+  refine wire_of_ext _ _ (by simp only [List.length_map, range_list_length, hlen]) ?_
+  intro i hi
+  have hi' : i < n := by
+    simp only [List.length_map, range_list_length] at hi
+    exact hi
+  rw [wire_of_map_range _ n i hi']
+
+theorem wire_of_vanishes (l : List Nat) (hlen : l.length = falconN) (y : Nat) (hy : falconN ≤ y) :
+    wireOf l y = 0 := wire_of_length l y (by omega)
+
+theorem wire_of_ntt_forward (l : List Nat) (hlen : l.length = falconN) :
+    wireOf (nttForward l) = nttForwardLoop 10 1 falconN (wireOf l) := by
+  funext i
+  rw [show nttForward l = (rangeList falconN).map (nttForwardLoop 10 1 falconN (wireOf l))
+    from rfl]
+  rcases Nat.lt_or_ge i falconN with hi | hi
+  · exact wire_of_map_range _ falconN i hi
+  · rw [wire_of_length _ i (by simp only [List.length_map, range_list_length]; exact hi),
+      ← fwd_run_eq, fwd_run_fixed 9 0 rfl (wireOf l) i hi]
+    exact (wire_of_vanishes l hlen i hi).symm
+
+/-- The final `n^-1` scaling of :500-508 cancels the `512` the nine stage pairs accumulate.
+Only the build-time assertion `n * n^-1 = 1` (:177) is used. -/
+theorem n_inv_cancel (v : Nat) (hv : v < falconQ) :
+    ntoNInv * (512 * v % falconQ) % falconQ = v := by
+  have h3 : EqQ (ntoNInv * 512) 1 := by
+    show ntoNInv * 512 % falconQ = 1 % falconQ
+    rw [n_inv_pinned, one_mod_q]
+  have h1 : EqQ (ntoNInv * (512 * v % falconQ)) (ntoNInv * (512 * v)) :=
+    eq_q_mul_left _ (eq_q_mod _)
+  have h2 : ntoNInv * (512 * v) = ntoNInv * 512 * v := (Nat.mul_assoc _ _ _).symm
+  have h4 : EqQ (ntoNInv * 512 * v) (1 * v) := eq_q_mul h3 (eq_q_refl v)
+  rw [Nat.one_mul] at h4
+  rw [h2] at h1
+  have hfin : EqQ (ntoNInv * (512 * v % falconQ)) v := eq_q_trans h1 h4
+  show ntoNInv * (512 * v % falconQ) % falconQ = v
+  rw [hfin, Nat.mod_eq_of_lt hv]
+
+/-- `ntt_inverse (ntt_forward l) = l` for every canonical coefficient vector. -/
+theorem ntt_inverse_forward (l : List Nat) (hlen : l.length = falconN)
+    (hc : ∀ c ∈ l, c < falconQ) : nttInverse (nttForward l) = l := by
+  have hcanon : ∀ y, wireOf l y < falconQ := wire_of_lt_q l hc
+  rw [show nttInverse (nttForward l) = (rangeList falconN).map
+      (fun i => ntoNInv * nttInverseLoop 10 falconN 1 (wireOf (nttForward l)) i % falconQ)
+    from rfl]
+  rw [map_range_list_congr (g := wireOf l) ?_]
+  · exact map_range_wire_of l falconN hlen
+  · intro j _
+    rw [wire_of_ntt_forward l hlen,
+      ntt_inverse_loop_forward (wireOf l) hcanon (wire_of_vanishes l hlen) j]
+    exact n_inv_cancel _ (hcanon j)
+
+/-! ## 12. Evaluation at the negacyclic points is a ring homomorphism -/
+
+/-- The `Int` sum of `schoolbook_negacyclic`, re-indexed. -/
+def intSumTo (f : Nat → Int) : Nat → Int
+  | 0 => 0
+  | n + 1 => intSumTo f n + f n
+
+theorem int_sum_append (l : List Int) (x : Int) : intSum (l ++ [x]) = intSum l + x := by
+  induction l with
+  | nil => show x + intSum ([] : List Int) = intSum ([] : List Int) + x; omega
+  | cons y ys ih => show y + intSum (ys ++ [x]) = (y + intSum ys) + x; rw [ih]; omega
+
+theorem int_sum_map_range (f : Nat → Int) : ∀ n, intSum ((rangeList n).map f) = intSumTo f n := by
+  intro n
+  induction n with
+  | zero => rw [range_list_zero]; rfl
+  | succ n ih =>
+      rw [range_list_succ, List.map_append]
+      simp only [List.map_cons, List.map_nil]
+      rw [int_sum_append, ih]
+      rfl
+
+theorem int_sum_to_sub (f g : Nat → Nat) : ∀ n,
+    intSumTo (fun i => (f i : Int) - (g i : Int)) n = (sumTo f n : Int) - (sumTo g n : Int) := by
+  intro n
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      show intSumTo (fun i => (f i : Int) - (g i : Int)) n + ((f n : Int) - (g n : Int)) = _
+      rw [ih]
+      simp only [sum_to_succ]
+      omega
+
+theorem int_sum_to_congr {f g : Nat → Int} {n : Nat} (h : ∀ i, i < n → f i = g i) :
+    intSumTo f n = intSumTo g n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      show intSumTo f n + f n = intSumTo g n + g n
+      rw [ih (fun i hi => h i (Nat.lt_succ_of_lt hi)), h n (Nat.lt_succ_self n)]
+
+/-- The positive (non-wrapping) part of the schoolbook convolution. -/
+def convPos (wa wb : Nat → Nat) (k : Nat) : Nat :=
+  sumTo (fun i => sumTo (fun j => if i + j = k then wa i * wb j else 0) falconN) falconN
+
+/-- The wrapping part, which `X^512 = -1` negates. -/
+def convNeg (wa wb : Nat → Nat) (k : Nat) : Nat :=
+  sumTo (fun i => sumTo (fun j => if i + j = k + falconN then wa i * wb j else 0) falconN) falconN
+
+theorem negacyclic_term_split (a b : List Nat) (k i j : Nat) :
+    negacyclicTerm a b k i j
+      = ((if i + j = k then wireOf a i * wireOf b j else 0 : Nat) : Int)
+        - ((if i + j = k + falconN then wireOf a i * wireOf b j else 0 : Nat) : Int) := by
+  simp only [negacyclicTerm]
+  by_cases h1 : i + j = k
+  · rw [if_pos h1, if_pos h1, if_neg (show ¬ (i + j = k + falconN) by simp only [falconN]; omega)]
+    simp
+  · rw [if_neg h1, if_neg h1]
+    by_cases h2 : i + j = k + falconN
+    · rw [if_pos h2, if_pos h2]
+      simp
+    · rw [if_neg h2, if_neg h2]
+      simp
+
+theorem negacyclic_coeff_split (a b : List Nat) (k : Nat) :
+    negacyclicCoeff a b k
+      = (convPos (wireOf a) (wireOf b) k : Int) - (convNeg (wireOf a) (wireOf b) k : Int) := by
+  show intSum ((rangeList falconN).map
+    (fun i => intSum ((rangeList falconN).map fun j => negacyclicTerm a b k i j))) = _
+  rw [int_sum_map_range]
+  have hinner : ∀ i, intSum ((rangeList falconN).map fun j => negacyclicTerm a b k i j)
+      = ((sumTo (fun j => if i + j = k then wireOf a i * wireOf b j else 0) falconN : Nat) : Int)
+        - ((sumTo (fun j => if i + j = k + falconN then wireOf a i * wireOf b j else 0)
+            falconN : Nat) : Int) := by
+    intro i
+    rw [int_sum_map_range, int_sum_to_congr (g := fun j =>
+      ((if i + j = k then wireOf a i * wireOf b j else 0 : Nat) : Int)
+        - ((if i + j = k + falconN then wireOf a i * wireOf b j else 0 : Nat) : Int))
+      (fun j _ => negacyclic_term_split a b k i j)]
+    exact int_sum_to_sub _ _ falconN
+  rw [int_sum_to_congr (fun i _ => hinner i), int_sum_to_sub]
+  simp only [convPos, convNeg]
+
+theorem emod_to_nat_sub (x y : Nat) :
+    (((x : Int) - (y : Int)).emod (falconQ : Int)).toNat = (x + (falconQ - 1) * y) % falconQ := by
+  have hz : ((x + (falconQ - 1) * y : Nat) : Int)
+      = ((x : Int) - (y : Int)) + (falconQ : Int) * (y : Int) := by
+    simp only [falconQ]
+    omega
+  have h1 : ((x : Int) - (y : Int) + (falconQ : Int) * (y : Int)) % (falconQ : Int)
+      = ((x : Int) - (y : Int)) % (falconQ : Int) := Int.add_mul_emod_self_left _ _ _
+  show (((x : Int) - (y : Int)) % (falconQ : Int)).toNat = _
+  rw [← h1, ← hz, ← Int.ofNat_emod]
+  generalize (x + (falconQ - 1) * y) % falconQ = z
+  omega
+
+theorem sum_to_ind (X c k0 n : Nat) :
+    sumTo (fun k => (if k0 = k then X else 0) * c ^ k) n = if k0 < n then X * c ^ k0 else 0 := by
+  by_cases h : k0 < n
+  · rw [if_pos h, sum_to_single h
+      (fun i _ hne => by rw [if_neg (fun hh => hne hh.symm), Nat.zero_mul]), if_pos rfl]
+  · rw [if_neg h, sum_to_zero_fun (fun i hi => by rw [if_neg (by omega), Nat.zero_mul])]
+
+theorem sum_to_ind_shift (X c m n : Nat) (hm : m < 2 * n) :
+    sumTo (fun k => (if m = k + n then X else 0) * c ^ k) n
+      = if n ≤ m then X * c ^ (m - n) else 0 := by
+  by_cases h : n ≤ m
+  · rw [if_pos h, sum_to_single (show m - n < n by omega)
+      (fun i _ hne => by rw [if_neg (by omega), Nat.zero_mul]), if_pos (by omega)]
+  · rw [if_neg h, sum_to_zero_fun (fun i _ => by rw [if_neg (by omega), Nat.zero_mul])]
+
+theorem eval_conv_pos (wa wb : Nat → Nat) (c : Nat) :
+    sumTo (fun k => convPos wa wb k * c ^ k) falconN
+      = sumTo (fun i => sumTo (fun j =>
+          if i + j < falconN then wa i * wb j * c ^ (i + j) else 0) falconN) falconN := by
+  have e1 : ∀ k, convPos wa wb k * c ^ k
+      = sumTo (fun i => sumTo (fun j =>
+          (if i + j = k then wa i * wb j else 0) * c ^ k) falconN) falconN := by
+    intro k
+    rw [convPos, ← sum_to_mul_right]
+    exact sum_to_congr (fun i _ => (sum_to_mul_right _ _ _).symm)
+  rw [sum_to_congr (fun k _ => e1 k),
+    sum_to_swap (fun k i => sumTo (fun j =>
+      (if i + j = k then wa i * wb j else 0) * c ^ k) falconN) falconN falconN]
+  refine sum_to_congr (fun i _ => ?_)
+  rw [sum_to_swap (fun k j => (if i + j = k then wa i * wb j else 0) * c ^ k) falconN falconN]
+  exact sum_to_congr (fun j _ => sum_to_ind (wa i * wb j) c (i + j) falconN)
+
+theorem eval_conv_neg (wa wb : Nat → Nat) (c : Nat) :
+    sumTo (fun k => convNeg wa wb k * c ^ k) falconN
+      = sumTo (fun i => sumTo (fun j =>
+          if falconN ≤ i + j then wa i * wb j * c ^ (i + j - falconN) else 0) falconN)
+          falconN := by
+  have e1 : ∀ k, convNeg wa wb k * c ^ k
+      = sumTo (fun i => sumTo (fun j =>
+          (if i + j = k + falconN then wa i * wb j else 0) * c ^ k) falconN) falconN := by
+    intro k
+    rw [convNeg, ← sum_to_mul_right]
+    exact sum_to_congr (fun i _ => (sum_to_mul_right _ _ _).symm)
+  rw [sum_to_congr (fun k _ => e1 k),
+    sum_to_swap (fun k i => sumTo (fun j =>
+      (if i + j = k + falconN then wa i * wb j else 0) * c ^ k) falconN) falconN falconN]
+  refine sum_to_congr (fun i hi => ?_)
+  rw [sum_to_swap (fun k j => (if i + j = k + falconN then wa i * wb j else 0) * c ^ k)
+    falconN falconN]
+  exact sum_to_congr (fun j hj =>
+    sum_to_ind_shift (wa i * wb j) c (i + j) falconN (by omega))
+
+theorem eval_mul_expand (wa wb : Nat → Nat) (c : Nat) :
+    evalAt wa c * evalAt wb c
+      = sumTo (fun i => sumTo (fun j => wa i * wb j * c ^ (i + j)) falconN) falconN := by
+  show sumTo (fun i => wa i * c ^ i) falconN * sumTo (fun j => wb j * c ^ j) falconN = _
+  rw [← sum_to_mul_right]
+  refine sum_to_congr (fun i _ => ?_)
+  rw [← sum_to_mul_left]
+  refine sum_to_congr (fun j _ => ?_)
+  rw [Nat.pow_add]
+  simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+
+theorem eval_conv (wa wb : Nat → Nat) (c : Nat) (hc : EqQ (c ^ falconN) (falconQ - 1)) :
+    EqQ (sumTo (fun k => (convPos wa wb k + (falconQ - 1) * convNeg wa wb k) * c ^ k) falconN)
+        (evalAt wa c * evalAt wb c) := by
+  have hsplit : sumTo (fun k => (convPos wa wb k + (falconQ - 1) * convNeg wa wb k) * c ^ k)
+      falconN = sumTo (fun k => convPos wa wb k * c ^ k) falconN
+        + (falconQ - 1) * sumTo (fun k => convNeg wa wb k * c ^ k) falconN := by
+    rw [← sum_to_mul_left, ← sum_to_add]
+    refine sum_to_congr (fun k _ => ?_)
+    rw [Nat.right_distrib, Nat.mul_assoc]
+  rw [hsplit, eval_conv_pos, eval_conv_neg, eval_mul_expand]
+  rw [← sum_to_mul_left, ← sum_to_add]
+  refine sum_to_eq_q_congr (fun i hi => ?_)
+  rw [← sum_to_mul_left, ← sum_to_add]
+  refine sum_to_eq_q_congr (fun j hj => ?_)
+  by_cases hij : i + j < falconN
+  · rw [if_pos hij, if_neg (by omega), Nat.mul_zero, Nat.add_zero]
+    exact eq_q_refl _
+  · rw [if_neg hij, if_pos (by omega), Nat.zero_add]
+    have hpow : c ^ (i + j) = c ^ (i + j - falconN) * c ^ falconN := by
+      rw [← Nat.pow_add]
+      congr 1
+      omega
+    rw [hpow, ← Nat.mul_assoc]
+    have hstep : EqQ ((falconQ - 1) * (wa i * wb j * c ^ (i + j - falconN)))
+        (wa i * wb j * c ^ (i + j - falconN) * (falconQ - 1)) := by
+      rw [Nat.mul_comm]
+      exact eq_q_refl _
+    refine eq_q_trans hstep ?_
+    exact eq_q_mul_left _ (eq_q_symm hc)
+
+theorem eval_point_pow (k : Nat) : EqQ ((powQ ntoPsi (1 + 2 * k)) ^ falconN) (falconQ - 1) := by
+  have h1 : EqQ ((powQ ntoPsi (1 + 2 * k)) ^ falconN) ((ntoPsi ^ (1 + 2 * k)) ^ falconN) :=
+    eq_q_pow (pow_q_eq_q _ _) falconN
+  have h2 : (ntoPsi ^ (1 + 2 * k)) ^ falconN = ntoPsi ^ 512 * (ntoPsi ^ 1024) ^ k := by
+    rw [← Nat.pow_mul, ← Nat.pow_mul, ← Nat.pow_add]
+    congr 1
+    simp only [falconN]
+    omega
+  rw [h2] at h1
+  refine eq_q_trans h1 ?_
+  refine eq_q_trans (eq_q_mul psi_pow_half (eq_q_pow psi_pow_order k)) ?_
+  rw [Nat.one_pow, Nat.mul_one]
+  exact eq_q_refl _
+
+/-- Evaluation at `psi^(2k+1)` carries the negacyclic product to the pointwise product. -/
+theorem eval_negacyclic_product (a b : List Nat) (k : Nat) :
+    EqQ (evalAt (wireOf (negacyclicProduct a b)) (powQ ntoPsi (1 + 2 * k)))
+        (evalAt (wireOf a) (powQ ntoPsi (1 + 2 * k))
+          * evalAt (wireOf b) (powQ ntoPsi (1 + 2 * k))) := by
+  have hcoef : ∀ d, d < falconN → wireOf (negacyclicProduct a b) d
+      = (convPos (wireOf a) (wireOf b) d + (falconQ - 1) * convNeg (wireOf a) (wireOf b) d)
+        % falconQ := by
+    intro d hd
+    rw [show negacyclicProduct a b = (rangeList falconN).map
+        (fun k => ((negacyclicCoeff a b k).emod (falconQ : Int)).toNat) from rfl,
+      wire_of_map_range _ falconN d hd, negacyclic_coeff_split, emod_to_nat_sub]
+  have hstep : EqQ (evalAt (wireOf (negacyclicProduct a b)) (powQ ntoPsi (1 + 2 * k)))
+      (sumTo (fun d => (convPos (wireOf a) (wireOf b) d
+        + (falconQ - 1) * convNeg (wireOf a) (wireOf b) d)
+        * powQ ntoPsi (1 + 2 * k) ^ d) falconN) := by
+    refine sum_to_eq_q_congr (fun d hd => ?_)
+    rw [hcoef d hd]
+    exact eq_q_mul (eq_q_mod _) (eq_q_refl _)
+  exact eq_q_trans hstep (eval_conv _ _ _ (eval_point_pow k))
+
 end Zkp.Implementation.NttCorrectness

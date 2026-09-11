@@ -1,5 +1,6 @@
 import Zkp.Implementation.CloseFunding
 import Zkp.Implementation.CloseAssetBacking
+import Zkp.Implementation.SettlementCloseBridge
 
 /-!
 # Materializer / backing-circuit public-input bridge
