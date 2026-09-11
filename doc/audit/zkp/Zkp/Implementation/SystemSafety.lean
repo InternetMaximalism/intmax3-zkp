@@ -28,8 +28,12 @@ draining the POOLED escrow. That last case is the reason a single-manager
 `accounted` total is not conserved in general, and it is visible in the theorem
 rather than hidden by a hypothesis.
 
-Explicitly NOT proved here: that an accepted proof means anything (premises a,
-b1, b2), that a finalized close vector is backed by the channel's own deposits
+Explicitly NOT proved here: that an accepted proof means anything (premise a0
+together with the three statement-lowering premises a, b1, b2 — the acceptance
+step and the lowering step are separate named premises, and
+`TrustBoundary.closeProofSoundness`, `.withdrawalProofSoundness` and
+`.postCloseProofSoundness` are exactly their composition, still borrowed and
+still not proved), that a finalized close vector is backed by the channel's own deposits
 (premise c), that a passing aggregate check means signatures exist (premise d),
 that hashes bind (premises e1, e2), that the finality getters observe the
 canonical L1 head (premises f1, f2), that storage survives unmodeled entrypoints
@@ -885,10 +889,10 @@ theorem trace_paid_bounded (cfg : ManagerValue.Config) {before after : State}
 
 /-- **Close acceptance binds the statement.** Unconditionally, a successful
 modeled Solidity close verification pins the exact 103-word record the pinned
-adapter returned (`SettlementCloseBridge`). Only the second conjunct — that some
+adapter returned (`SettlementCloseBridge`). Only the third conjunct — that some
 witness satisfies the circuit's local gate equations for that same record — uses
-premise (a); acceptance alone establishes nothing about truth, funding or
-authorization. -/
+premises (a0) and (a), through the derived `TrustBoundary.closeProofSoundness`;
+acceptance alone establishes nothing about truth, funding or authorization. -/
 theorem close_acceptance_binds_statement
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
@@ -911,7 +915,8 @@ theorem close_acceptance_binds_statement
     tb.closeProofSoundness f proof accepted⟩
 
 /-- The claim endpoints have the same shape: the statement is pinned
-unconditionally, the witness only under premises (b1)/(b2). -/
+unconditionally, the witness only under premises (a0)+(b1) (respectively
+(a0)+(b2)), through the derived `TrustBoundary.withdrawalProofSoundness`. -/
 theorem claim_acceptance_binds_statement
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
@@ -1299,15 +1304,18 @@ theorem mle_assumption_does_not_imply_fund_safety
   rw [credited, deposited] at violated
   exact absurd violated (by decide)
 
-/-- **Accepting the submodule does not by itself discharge premise (a) either.**
-With no balance proofs available at all, the conclusion of `closeProofSoundness`
-— some witness satisfies `CloseCircuit.CircuitGates` — is false for the accepted
-close, while `mleVerifierSoundness` still holds. This is a logical independence
-witness, deliberately degenerate: it shows only that the statement-to-gates
-lowering of `TrustBoundary.CloseStatementLowering` is a genuinely separate
+/-- **Accepting the submodule does not by itself discharge the close soundness
+conclusion either.** With no balance proofs available at all, the conclusion of
+`TrustBoundary.closeProofSoundness` — some witness satisfies
+`CloseCircuit.CircuitGates` — is false for the accepted close, while
+`mleVerifierSoundness` still holds. This is a logical independence witness,
+deliberately degenerate: it shows only that the statement-to-gates lowering
+premise (a) `TrustBoundary.CloseStatementLowering` is a genuinely separate
 obligation, which
 `TrustBoundary.mle_assumption_reduces_close_soundness_to_gate_lowering` must be
-handed before premise (a) follows. -/
+handed before that conclusion follows. Since (a) is now a field in its own right,
+this also witnesses that the field cannot be dropped: in this environment the
+structure's (a0) holds and its (a) fails. -/
 theorem mle_assumption_alone_does_not_yield_close_gate_soundness
     {AggregateProof Path Root ClaimPath ClaimCore : Type}
     (m : TrustBoundary.Models Empty AggregateProof Path Root ClaimPath ClaimCore) :

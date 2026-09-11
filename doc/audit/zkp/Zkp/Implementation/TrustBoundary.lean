@@ -37,11 +37,27 @@ does not buy is recorded by
 and `...mle_assumption_does_not_imply_fund_safety`, which exhibit environments
 where the accepted premise holds and the conclusion still fails.
 
+Because the acceptance is taken, all THREE proof-soundness premises are stated
+here in their REDUCED form, uniformly: the fields (a), (b1) and (b2) are the
+statement-to-`CircuitGates` LOWERING obligations
+(`CloseStatementLowering`, `WithdrawalStatementLowering`,
+`PostCloseStatementLowering`) and nothing more, because the step from "the pinned
+verifier accepted this proof" to "the returned public inputs belong to a
+satisfiable plonky2 statement of the pinned circuit" is exactly (a0)
+`mleVerifierSoundness`. Splitting the premises this way makes the borrowed halves
+disjoint: no field bundles the accepted artifact with an unaccepted lowering. The
+older, monolithic "acceptance implies a satisfying witness" conclusions are still
+available with the same names and the same argument lists, but now as THEOREMS —
+`TrustBoundary.closeProofSoundness`, `TrustBoundary.withdrawalProofSoundness`,
+`TrustBoundary.postCloseProofSoundness` — proved from (a0) plus the corresponding
+lowering field, so every consumer is unchanged while nothing is assumed twice.
+
 The single inhabitation result below is deliberately degenerate: in an
-environment where every proof adapter returns a failure, every acceptance-guarded
-premise holds vacuously and every storage-frame premise holds because no
-transition is admitted. That witnesses only well-formedness of the statement, and
-`rejecting_environment_accepts_no_close` records why: such an environment
+environment where every proof adapter returns a failure and no plonky2 statement
+is satisfiable at all, every acceptance-guarded premise holds vacuously, every
+lowering premise holds vacuously, and every storage-frame premise holds because
+no transition is admitted. That witnesses only well-formedness of the statement,
+and `rejecting_environment_accepts_no_close` records why: such an environment
 authorizes no fund movement at all.
 -/
 
@@ -96,8 +112,8 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   plonky2 statement whose circuit is the one `digest` identifies, whose
   public-input vector is `words`, and which has a satisfying assignment. It is
   deliberately opaque — no model in this project defines plonky2 statements,
-  gates or assignments — and only `MleAcceptedStatementsAreSatisfiable` and
-  `CloseStatementLowering` ever mention it. -/
+  gates or assignments — and only `MleAcceptedStatementsAreSatisfiable` and the
+  three `*StatementLowering` obligations ever mention it. -/
   plonky2Satisfiable : List Nat → List Nat → Prop
 
 /-- The accepted-artifact assumption in isolation, so that a theorem can take it
@@ -114,6 +130,84 @@ def MleAcceptedStatementsAreSatisfiable
     adapter ∈ m.installed.adapters.list →
     m.evm.verifyCompactPublicInputs adapter proof = .ok words →
     m.plonky2Satisfiable (m.pinnedCircuitDigest adapter) words
+
+/-! ## The three statement-lowering obligations
+
+Each proof endpoint (close, withdrawal claim, post-close claim) splits its
+soundness gap the same way. The step from "the pinned verifier accepted this
+proof" to "the returned words are the public inputs of a SATISFIABLE plonky2
+statement of the pinned circuit" is the accepted artifact assumption (a0)
+`MleAcceptedStatementsAreSatisfiable`, once, for all endpoints. The step from
+there to "some witness satisfies the handwritten `CircuitGates` of the model" is
+per-endpoint and is NOT covered by the acceptance: it needs the emitted gate set
+of the deployed circuit and the corresponding field/gadget lowering. The three
+definitions below are exactly those three remaining steps, and they are what the
+premise structure carries as fields (a), (b1), (b2). -/
+
+/-- The step the accepted MLE/WHIR premise does NOT cover on the close path: that
+the plonky2 statement identified by the close adapter's pinned circuit digest,
+carrying the very words the Solidity side bound, is the circuit
+`Zkp.Implementation.CloseCircuit` models — so that a satisfying assignment of it
+yields a satisfying witness of `CloseCircuit.CircuitGates`. Discharging it needs
+the emitted gate set of the deployed circuit and `CloseCircuit.FieldAndGadgetLowering`;
+neither the emitted gates nor the plonky2 lowering is modeled in this project. -/
+def CloseStatementLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ f : SettlementVerifier.CloseFields,
+    m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
+        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words →
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w
+
+/-- The same step on the withdrawal-claim path: that the plonky2 statement
+identified by the withdrawal adapter's pinned circuit digest, carrying the exact
+50 words `ClaimSettlementBridge.withdrawalStatement` describes, is the circuit
+`Zkp.Implementation.WithdrawalClaimCircuit` models. Discharging it needs the
+emitted gate set of the deployed claim circuit together with
+`WithdrawalClaimCircuit.FieldLowering`; neither is modeled here. -/
+def WithdrawalStatementLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ f : SettlementVerifier.WithdrawalFields,
+    m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.withdrawal)
+        (ClaimSettlementBridge.withdrawalStatement f).words →
+      ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+        WithdrawalClaimCircuit.CircuitGates m.claimEnv
+          (ClaimSettlementBridge.withdrawalStatement f) w
+
+/-- The same step on the post-close-claim path: that the plonky2 statement
+identified by the post-close adapter's pinned circuit digest, carrying the exact
+57 words `ClaimSettlementBridge.postCloseStatement` describes, is the circuit
+`Zkp.Implementation.PostCloseClaimCircuit` models — so that a satisfying
+assignment yields a RAW witness whose own public record is that statement and
+which satisfies `PostCloseClaimCircuit.ConstructorGates`. -/
+def PostCloseStatementLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ f : SettlementVerifier.PostCloseFields,
+    m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.postClose)
+        (ClaimSettlementBridge.postCloseStatement f).words →
+      ∃ w : PostCloseClaimCircuit.RawWitness,
+        w.p = ClaimSettlementBridge.postCloseStatement f ∧
+          PostCloseClaimCircuit.ConstructorGates m.postEnv w
+
+/-- The close adapter is one of the four adapters the settlement verifier pins,
+so premise (a0) — which is stated only about pinned adapters — does apply to the
+close endpoint. -/
+theorem close_adapter_is_pinned (installed : SettlementVerifier.Installed) :
+    installed.adapters.close ∈ installed.adapters.list := by
+  simp [SettlementVerifier.Adapters.list]
+
+/-- The withdrawal-claim adapter is pinned too, so (a0) applies to the withdrawal
+endpoint. -/
+theorem withdrawal_adapter_is_pinned (installed : SettlementVerifier.Installed) :
+    installed.adapters.withdrawal ∈ installed.adapters.list := by
+  simp [SettlementVerifier.Adapters.list]
+
+/-- The post-close-claim adapter is pinned too, so (a0) applies to the post-close
+endpoint. -/
+theorem post_close_adapter_is_pinned (installed : SettlementVerifier.Installed) :
+    installed.adapters.postClose ∈ installed.adapters.list := by
+  simp [SettlementVerifier.Adapters.list]
 
 /-!
 ## The premises
@@ -132,19 +226,6 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
     (Deployed Modeled Unmodeled : σ → σ → Prop)
     (managerOf : σ → ManagerValue.State) (fundingOf : σ → CloseFunding.State) : Prop where
-  /-- **(a) Close-proof soundness.** `SettlementCloseBridge` proves only WHICH
-  103-word statement a successful `verifyCloseIntent` returned, never that the
-  statement is true. This premise says the pinned close adapter is sound: an
-  accepted proof implies some witness satisfies `CloseCircuit.CircuitGates` for
-  that same statement. It would be discharged by a proof about the plonky2/MLE
-  backend and by `CloseCircuit.FieldAndGadgetLowering` for the raw gate set;
-  neither the backend nor the emitted gates are modeled in this project. -/
-  closeProofSoundness :
-    ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
-      SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
-      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
-        CloseCircuit.CircuitGates m.closeEnv
-          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w
   /-- **(a0) Pinned MLE/WHIR verifier soundness — an ACCEPTED trust assumption,
   not a proved property.** For an adapter the settlement verifier actually pins,
   if the modeled EVM view's `verifyCompactPublicInputs` returns a word vector for
@@ -178,9 +259,9 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   compact-proof codec, and the agreement of its Rust and Solidity sides.
 
   (iii) WHAT IT DOES NOT COVER. It says nothing about the circuit-to-gates
-  lowering: that the plonky2 statement the digest identifies is the circuit these
-  models describe is a separate obligation, stated as `CloseStatementLowering`
-  and still required by `closeProofSoundness`. It says nothing about the KZG
+  lowering: that the plonky2 statement a digest identifies is the circuit these
+  models describe is a separate obligation per endpoint, and is exactly what the
+  three fields (a), (b1), (b2) below still require. It says nothing about the KZG
   attestation or Proof-DA availability path, which stays a distinct boundary of
   `MleProverBridge` and `BlobJournal`. It says nothing about the correctness of
   the public inputs a caller passes in: the Solidity binding pins which words
@@ -192,26 +273,34 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   `Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety` for
   an environment in which this premise holds and fund safety fails anyway. -/
   mleVerifierSoundness : MleAcceptedStatementsAreSatisfiable m
-  /-- **(b1) Withdrawal-claim soundness.** `ClaimSettlementBridge` ties an accepted
-  withdrawal claim to the exact 50-word statement only. This premise adds the
-  missing direction: acceptance implies a satisfying witness of
-  `WithdrawalClaimCircuit.CircuitGates`. Discharged by backend soundness plus
-  `WithdrawalClaimCircuit.FieldLowering`. -/
-  withdrawalProofSoundness :
-    ∀ (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes),
-      SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true →
-      ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
-        WithdrawalClaimCircuit.CircuitGates m.claimEnv
-          (ClaimSettlementBridge.withdrawalStatement f) w
-  /-- **(b2) Post-close-claim soundness.** Same gap for the 57-word post-close
-  endpoint: acceptance implies a raw witness whose public record is the bound
-  statement and which satisfies `PostCloseClaimCircuit.ConstructorGates`. -/
-  postCloseProofSoundness :
-    ∀ (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes),
-      SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true →
-      ∃ w : PostCloseClaimCircuit.RawWitness,
-        w.p = ClaimSettlementBridge.postCloseStatement f ∧
-          PostCloseClaimCircuit.ConstructorGates m.postEnv w
+  /-- **(a) Close statement lowering — the ONLY remaining half of close-proof
+  soundness; the MLE step is (a0).** `SettlementCloseBridge` proves only WHICH
+  103-word statement a successful `verifyCloseIntent` returned, never that the
+  statement is true. Given (a0), what is still missing is the lowering: a
+  satisfiable plonky2 statement of the close adapter's pinned circuit, carrying
+  those 103 words, yields a witness satisfying `CloseCircuit.CircuitGates` for
+  the same statement. It would be discharged by the emitted gate set of the
+  deployed circuit together with `CloseCircuit.FieldAndGadgetLowering`; neither
+  the emitted gates nor the plonky2 lowering is modeled in this project. The old
+  monolithic "acceptance implies a satisfying witness" form is recovered from
+  this field and (a0) by the theorem `TrustBoundary.closeProofSoundness`. -/
+  closeStatementLowering : CloseStatementLowering m
+  /-- **(b1) Withdrawal-claim statement lowering — lowering only; the MLE step is
+  (a0).** `ClaimSettlementBridge` ties an accepted withdrawal claim to the exact
+  50-word statement only. Given (a0), the missing direction is the lowering: a
+  satisfiable plonky2 statement of the withdrawal adapter's pinned circuit
+  carrying those 50 words yields a satisfying witness of
+  `WithdrawalClaimCircuit.CircuitGates`. Discharged by the emitted gate set plus
+  `WithdrawalClaimCircuit.FieldLowering`. The old monolithic form is recovered by
+  `TrustBoundary.withdrawalProofSoundness`. -/
+  withdrawalStatementLowering : WithdrawalStatementLowering m
+  /-- **(b2) Post-close-claim statement lowering — lowering only; the MLE step is
+  (a0).** Same gap for the 57-word post-close endpoint: given (a0), a satisfiable
+  plonky2 statement of the post-close adapter's pinned circuit carrying those 57
+  words yields a raw witness whose public record is the bound statement and which
+  satisfies `PostCloseClaimCircuit.ConstructorGates`. The old monolithic form is
+  recovered by `TrustBoundary.postCloseProofSoundness`. -/
+  postCloseStatementLowering : PostCloseStatementLowering m
   /-- **(c) Close-vector backing.** The materializer credits the Manager the whole
   finalized close vector, and `CloseFunding` proves only that those amounts are
   the Manager's own getter values. Nothing in the modeled contracts relates them
@@ -300,6 +389,322 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   toolchain. -/
   sourceRefinement : ∀ s t : σ, Deployed s t → Modeled s t
 
+/-! ## What accepting the pinned MLE/WHIR artifact buys
+
+The old premise "acceptance implies a satisfying witness" was one implication
+with two independent halves: from "the pinned verifier accepted this proof" to
+"the returned public inputs belong to a satisfiable plonky2 statement of the
+pinned circuit" (the accepted premise (a0)), and from there to "some witness
+satisfies the handwritten `CircuitGates` for the very same statement" (the
+lowering). The first half is what the operator has decided to accept; the second
+half is NOT covered by that decision and is carried separately as fields (a),
+(b1), (b2) so it cannot be smuggled in. The theorems below are the composition of
+the two, per endpoint, and they are the whole of what accepting the submodule
+buys. -/
+
+/-- **The composition, stated exactly.** Under the accepted MLE/WHIR premise
+(a0), a successful modeled close verification already yields the first half of
+the old premise (a): the word vector the pinned adapter returned is the
+public-input vector of a satisfiable plonky2 statement of the pinned close
+circuit, and it is the exact 103-word close statement (that part is proved, not
+assumed). The remaining gap to the old `closeProofSoundness` is then
+`CloseStatementLowering` and nothing else: supplying it discharges premise (a)
+for every accepted close.
+
+Note what is quantified where. `lowering` is a hypothesis of this theorem, not a
+consequence of it; accepting the submodule does not make it more likely to hold.
+And the conclusion is still only about gates: even with both halves, it is a
+satisfying witness, never a safe payment. -/
+theorem mle_assumption_reduces_close_soundness_to_gate_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : CloseStatementLowering m)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
+        .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
+      m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
+        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w := by
+  have receipt : m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
+      .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words :=
+    SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt
+      m.evm m.installed m.keccak f proof accepted
+  have satisfiable := mleSound m.installed.adapters.close proof _
+    (close_adapter_is_pinned m.installed) receipt
+  exact ⟨receipt, satisfiable, lowering f satisfiable⟩
+
+/-- The withdrawal-claim analogue: (a0) plus the exact 50-word adapter receipt of
+`ClaimSettlementBridge` give the satisfiable plonky2 statement, and
+`WithdrawalStatementLowering` is the only step left to the old premise (b1). -/
+theorem mle_assumption_reduces_withdrawal_soundness_to_gate_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : WithdrawalStatementLowering m)
+    (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.withdrawal proof =
+        .ok (ClaimSettlementBridge.withdrawalStatement f).words ∧
+      m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.withdrawal)
+        (ClaimSettlementBridge.withdrawalStatement f).words ∧
+      ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+        WithdrawalClaimCircuit.CircuitGates m.claimEnv
+          (ClaimSettlementBridge.withdrawalStatement f) w := by
+  have receipt : m.evm.verifyCompactPublicInputs m.installed.adapters.withdrawal proof =
+      .ok (ClaimSettlementBridge.withdrawalStatement f).words :=
+    ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt
+      m.evm m.installed f proof accepted
+  have satisfiable := mleSound m.installed.adapters.withdrawal proof _
+    (withdrawal_adapter_is_pinned m.installed) receipt
+  exact ⟨receipt, satisfiable, lowering f satisfiable⟩
+
+/-- The post-close-claim analogue: (a0) plus the exact 57-word adapter receipt
+give the satisfiable plonky2 statement, and `PostCloseStatementLowering` is the
+only step left to the old premise (b2). -/
+theorem mle_assumption_reduces_post_close_soundness_to_gate_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : PostCloseStatementLowering m)
+    (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.postClose proof =
+        .ok (ClaimSettlementBridge.postCloseStatement f).words ∧
+      m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.postClose)
+        (ClaimSettlementBridge.postCloseStatement f).words ∧
+      ∃ w : PostCloseClaimCircuit.RawWitness,
+        w.p = ClaimSettlementBridge.postCloseStatement f ∧
+          PostCloseClaimCircuit.ConstructorGates m.postEnv w := by
+  have receipt : m.evm.verifyCompactPublicInputs m.installed.adapters.postClose proof =
+      .ok (ClaimSettlementBridge.postCloseStatement f).words :=
+    ClaimSettlementBridge.accepted_post_close_has_exact_adapter_receipt
+      m.evm m.installed f proof accepted
+  have satisfiable := mleSound m.installed.adapters.postClose proof _
+    (post_close_adapter_is_pinned m.installed) receipt
+  exact ⟨receipt, satisfiable, lowering f satisfiable⟩
+
+/-- The close composition read as premise discharge: (a0) plus the lowering give
+the old premise (a) in exactly the form `TrustBoundary.closeProofSoundness`
+states, and therefore nothing weaker than the lowering can be substituted for
+it. -/
+theorem mle_assumption_with_lowering_is_close_proof_soundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : CloseStatementLowering m) :
+    ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
+      SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w :=
+  fun f proof accepted =>
+    (mle_assumption_reduces_close_soundness_to_gate_lowering m mleSound lowering f proof
+      accepted).2.2
+
+/-- The same discharge on the withdrawal-claim endpoint: (a0) plus
+`WithdrawalStatementLowering` give the old premise (b1) verbatim. -/
+theorem mle_assumption_with_lowering_is_withdrawal_proof_soundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : WithdrawalStatementLowering m) :
+    ∀ (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes),
+      SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true →
+      ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+        WithdrawalClaimCircuit.CircuitGates m.claimEnv
+          (ClaimSettlementBridge.withdrawalStatement f) w :=
+  fun f proof accepted =>
+    (mle_assumption_reduces_withdrawal_soundness_to_gate_lowering m mleSound lowering f proof
+      accepted).2.2
+
+/-- The same discharge on the post-close-claim endpoint: (a0) plus
+`PostCloseStatementLowering` give the old premise (b2) verbatim. -/
+theorem mle_assumption_with_lowering_is_post_close_proof_soundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : PostCloseStatementLowering m) :
+    ∀ (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes),
+      SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true →
+      ∃ w : PostCloseClaimCircuit.RawWitness,
+        w.p = ClaimSettlementBridge.postCloseStatement f ∧
+          PostCloseClaimCircuit.ConstructorGates m.postEnv w :=
+  fun f proof accepted =>
+    (mle_assumption_reduces_post_close_soundness_to_gate_lowering m mleSound lowering f proof
+      accepted).2.2
+
+/-! ## The old monolithic premises, recovered as theorems
+
+Splitting the premise bundle must not cost any consumer its conclusion. The three
+theorems below carry the names, the statements and the argument lists the former
+`TrustBoundary` FIELDS `closeProofSoundness`, `withdrawalProofSoundness` and
+`postCloseProofSoundness` had, so `tb.closeProofSoundness f proof accepted` still
+elaborates exactly as before — with the difference that it is now derived from
+(a0) plus the corresponding lowering field instead of being assumed outright. -/
+
+namespace TrustBoundary
+
+/-- **(a0) + (a) ⇒ the old premise (a).** An accepted close proof implies some
+witness satisfies `CloseCircuit.CircuitGates` for the same 103-word statement.
+This used to be a field of the structure; it is now proved from the accepted
+MLE/WHIR premise and the close statement lowering. -/
+theorem closeProofSoundness {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
+    ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+      CloseCircuit.CircuitGates m.closeEnv
+        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w :=
+  mle_assumption_with_lowering_is_close_proof_soundness m tb.mleVerifierSoundness
+    tb.closeStatementLowering f proof accepted
+
+/-- **(a0) + (b1) ⇒ the old premise (b1).** An accepted withdrawal claim implies
+some witness satisfies `WithdrawalClaimCircuit.CircuitGates` for the same 50-word
+statement. Formerly a field, now proved. -/
+theorem withdrawalProofSoundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true) :
+    ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+      WithdrawalClaimCircuit.CircuitGates m.claimEnv
+        (ClaimSettlementBridge.withdrawalStatement f) w :=
+  mle_assumption_with_lowering_is_withdrawal_proof_soundness m tb.mleVerifierSoundness
+    tb.withdrawalStatementLowering f proof accepted
+
+/-- **(a0) + (b2) ⇒ the old premise (b2).** An accepted post-close claim implies
+a raw witness whose public record is the bound 57-word statement and which
+satisfies `PostCloseClaimCircuit.ConstructorGates`. Formerly a field, now
+proved. -/
+theorem postCloseProofSoundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true) :
+    ∃ w : PostCloseClaimCircuit.RawWitness,
+      w.p = ClaimSettlementBridge.postCloseStatement f ∧
+        PostCloseClaimCircuit.ConstructorGates m.postEnv w :=
+  mle_assumption_with_lowering_is_post_close_proof_soundness m tb.mleVerifierSoundness
+    tb.postCloseStatementLowering f proof accepted
+
+end TrustBoundary
+
+/-! ## What remains, per endpoint
+
+Each of the three theorems below says the same thing about one endpoint: with the
+accepted premise (a0) in hand, the ONLY step left between "the pinned verifier
+accepted this proof" and "the model's gate system is satisfied for the bound
+statement" is that endpoint's `*StatementLowering`.
+
+The converse direction is stated only in the form that is actually provable. From
+the old monolithic soundness one can recover the lowering's conclusion for every
+`f` that HAS an accepted proof — and nothing more. The full converse (soundness
+⇒ the lowering for all `f`) is NOT provable and is deliberately not asserted:
+`plonky2Satisfiable` is an opaque relation, so for fields that no proof was ever
+accepted for it may hold while no gate witness exists at all. That asymmetry is
+the point — the lowering is a strictly separate obligation, not a repackaging of
+acceptance. -/
+
+/-- **Close: the whole remaining gap is `CloseStatementLowering`.** Forward: with
+(a0), the lowering yields the old premise (a). Backward, in the only provable
+form: the old premise (a) yields the lowering's conclusion exactly on the fields
+that have an accepted proof. -/
+theorem close_gap_is_exactly_statement_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m) :
+    (CloseStatementLowering m →
+        ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
+          ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+            CloseCircuit.CircuitGates m.closeEnv
+              (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w) ∧
+      ((∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
+          ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+            CloseCircuit.CircuitGates m.closeEnv
+              (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w) →
+        ∀ f : SettlementVerifier.CloseFields,
+          (∃ proof : SettlementVerifier.Bytes,
+            SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) →
+          m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
+              (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words →
+            ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+              CloseCircuit.CircuitGates m.closeEnv
+                (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w) :=
+  ⟨fun lowering => mle_assumption_with_lowering_is_close_proof_soundness m mleSound lowering,
+    fun sound f accepted _ => accepted.elim (fun proof call => sound f proof call)⟩
+
+/-- **Withdrawal: the whole remaining gap is `WithdrawalStatementLowering`.** Same
+shape as `close_gap_is_exactly_statement_lowering`, including the same reason the
+backward direction is restricted to fields that have an accepted proof. -/
+theorem withdrawal_gap_is_exactly_statement_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m) :
+    (WithdrawalStatementLowering m →
+        ∀ (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true →
+          ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+            WithdrawalClaimCircuit.CircuitGates m.claimEnv
+              (ClaimSettlementBridge.withdrawalStatement f) w) ∧
+      ((∀ (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true →
+          ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+            WithdrawalClaimCircuit.CircuitGates m.claimEnv
+              (ClaimSettlementBridge.withdrawalStatement f) w) →
+        ∀ f : SettlementVerifier.WithdrawalFields,
+          (∃ proof : SettlementVerifier.Bytes,
+            SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true) →
+          m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.withdrawal)
+              (ClaimSettlementBridge.withdrawalStatement f).words →
+            ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+              WithdrawalClaimCircuit.CircuitGates m.claimEnv
+                (ClaimSettlementBridge.withdrawalStatement f) w) :=
+  ⟨fun lowering => mle_assumption_with_lowering_is_withdrawal_proof_soundness m mleSound lowering,
+    fun sound f accepted _ => accepted.elim (fun proof call => sound f proof call)⟩
+
+/-- **Post-close: the whole remaining gap is `PostCloseStatementLowering`.** Same
+shape again, with the same restriction on the backward direction. -/
+theorem post_close_gap_is_exactly_statement_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m) :
+    (PostCloseStatementLowering m →
+        ∀ (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true →
+          ∃ w : PostCloseClaimCircuit.RawWitness,
+            w.p = ClaimSettlementBridge.postCloseStatement f ∧
+              PostCloseClaimCircuit.ConstructorGates m.postEnv w) ∧
+      ((∀ (f : SettlementVerifier.PostCloseFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true →
+          ∃ w : PostCloseClaimCircuit.RawWitness,
+            w.p = ClaimSettlementBridge.postCloseStatement f ∧
+              PostCloseClaimCircuit.ConstructorGates m.postEnv w) →
+        ∀ f : SettlementVerifier.PostCloseFields,
+          (∃ proof : SettlementVerifier.Bytes,
+            SettlementVerifier.verifyPostCloseClaim m.evm m.installed f proof = .ok true) →
+          m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.postClose)
+              (ClaimSettlementBridge.postCloseStatement f).words →
+            ∃ w : PostCloseClaimCircuit.RawWitness,
+              w.p = ClaimSettlementBridge.postCloseStatement f ∧
+                PostCloseClaimCircuit.ConstructorGates m.postEnv w) :=
+  ⟨fun lowering => mle_assumption_with_lowering_is_post_close_proof_soundness m mleSound lowering,
+    fun sound f accepted _ => accepted.elim (fun proof call => sound f proof call)⟩
+
 /-! ## Well-formedness witness -/
 
 /-- In an environment whose adapters always revert, `verifyCloseIntent` cannot
@@ -328,13 +733,17 @@ theorem rejecting_environment_accepts_no_claim
       SettlementVerifier.verifyClaimEndpoint, rejects]
 
 /-- The premise structure is inhabited, but only degenerately: nothing is
-accepted, no aggregate check passes, no finality is observed, and no transition
-outside the model or from the deployed artifact is admitted. This is a
-well-formedness check on the statement, NOT evidence that any field holds of a
-real deployment. In particular the hypotheses below describe an environment in
-which no close, no claim and no materialization can ever succeed, and in which
-the accepted MLE/WHIR premise `mleVerifierSoundness` holds only because the
-pinned adapter never returns a word vector at all. -/
+accepted, no plonky2 statement of any circuit is satisfiable, no aggregate check
+passes, no finality is observed, and no transition outside the model or from the
+deployed artifact is admitted. This is a well-formedness check on the statement,
+NOT evidence that any field holds of a real deployment. In particular the
+hypotheses below describe an environment in which no close, no claim and no
+materialization can ever succeed, in which the accepted MLE/WHIR premise
+`mleVerifierSoundness` holds only because the pinned adapter never returns a word
+vector at all, and in which the three statement-lowering premises hold only
+because `noSatisfiableStatements` denies them their antecedent — the lowering
+obligations are not discharged here in any useful sense, they are merely
+vacuous. -/
 theorem rejecting_environment_satisfies_every_premise
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
@@ -342,6 +751,7 @@ theorem rejecting_environment_satisfies_every_premise
     (managerOf : σ → ManagerValue.State) (fundingOf : σ → CloseFunding.State)
     (rejects : ∀ adapter proof,
       m.evm.verifyCompactPublicInputs adapter proof = .error [])
+    (noSatisfiableStatements : ∀ digest words, ¬ m.plonky2Satisfiable digest words)
     (noAggregate : ∀ proof st,
       ¬ m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st)
     (noKeccakGap : ∀ words,
@@ -349,14 +759,14 @@ theorem rejecting_environment_satisfies_every_premise
     (noFinality : ∀ root, m.funding.isFinalizedRoot root ≠ .ok true)
     (noHeight : ∀ n, m.funding.latestFinalized ≠ .ok n) :
     TrustBoundary m (fun _ _ => False) Modeled (fun _ _ => False) managerOf fundingOf where
-  closeProofSoundness f proof accepted :=
-    absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
   mleVerifierSoundness adapter proof _ _ returned :=
     Except.noConfusion (returned.symm.trans (rejects adapter proof))
-  withdrawalProofSoundness f proof accepted :=
-    absurd accepted (rejecting_environment_accepts_no_claim m rejects f ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩ proof).1
-  postCloseProofSoundness f proof accepted :=
-    absurd accepted (rejecting_environment_accepts_no_claim m rejects ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩ f proof).2
+  closeStatementLowering :=
+    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
+  withdrawalStatementLowering :=
+    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
+  postCloseStatementLowering :=
+    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
   closeVectorBacked f proof accepted :=
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
   signatureValidity proof st verified := absurd verified (noAggregate proof st)
@@ -390,92 +800,5 @@ theorem close_premise_statement_is_the_adapter_receipt
       .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words :=
   SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt
     m.evm m.installed m.keccak f proof accepted
-
-/-! ## What accepting the pinned MLE/WHIR artifact buys
-
-Premise (a) `closeProofSoundness` is one implication with two independent halves:
-from "the pinned verifier accepted this proof" to "the returned public inputs
-belong to a satisfiable plonky2 statement of the pinned circuit" (the accepted
-premise (a0)), and from there to "some witness satisfies the handwritten
-`CloseCircuit.CircuitGates` for the very same statement" (the lowering below).
-The first half is what the operator has decided to accept; the second half is
-NOT covered by that decision and is stated separately so it cannot be smuggled
-in. `mle_assumption_reduces_close_soundness_to_gate_lowering` is the composition
-of the two, and it is the whole of what accepting the submodule buys on the close
-path. -/
-
-/-- The step the accepted MLE/WHIR premise does NOT cover on the close path: that
-the plonky2 statement identified by the close adapter's pinned circuit digest,
-carrying the very words the Solidity side bound, is the circuit
-`Zkp.Implementation.CloseCircuit` models — so that a satisfying assignment of it
-yields a satisfying witness of `CloseCircuit.CircuitGates`. Discharging it needs
-the emitted gate set of the deployed circuit and `CloseCircuit.FieldAndGadgetLowering`;
-neither the emitted gates nor the plonky2 lowering is modeled in this project. -/
-def CloseStatementLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
-    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
-  ∀ f : SettlementVerifier.CloseFields,
-    m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
-        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words →
-      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
-        CloseCircuit.CircuitGates m.closeEnv
-          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w
-
-/-- The close adapter is one of the four adapters the settlement verifier pins,
-so premise (a0) — which is stated only about pinned adapters — does apply to the
-close endpoint. -/
-theorem close_adapter_is_pinned (installed : SettlementVerifier.Installed) :
-    installed.adapters.close ∈ installed.adapters.list := by
-  simp [SettlementVerifier.Adapters.list]
-
-/-- **The composition, stated exactly.** Under the accepted MLE/WHIR premise
-(a0), a successful modeled close verification already yields the first half of
-premise (a): the word vector the pinned adapter returned is the public-input
-vector of a satisfiable plonky2 statement of the pinned close circuit, and it is
-the exact 103-word close statement (that part is proved, not assumed). The
-remaining gap to `closeProofSoundness` is then `CloseStatementLowering` and
-nothing else: supplying it discharges premise (a) for every accepted close.
-
-Note what is quantified where. `lowering` is a hypothesis of this theorem, not a
-consequence of it; accepting the submodule does not make it more likely to hold.
-And `closeProofSoundness` is still only about gates: even with both halves, the
-conclusion is a satisfying witness, never a safe payment. -/
-theorem mle_assumption_reduces_close_soundness_to_gate_lowering
-    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
-    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
-    (mleSound : MleAcceptedStatementsAreSatisfiable m)
-    (lowering : CloseStatementLowering m)
-    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
-    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
-    m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
-        .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
-      m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
-        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
-      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
-        CloseCircuit.CircuitGates m.closeEnv
-          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w := by
-  have receipt : m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
-      .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words :=
-    SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt
-      m.evm m.installed m.keccak f proof accepted
-  have satisfiable := mleSound m.installed.adapters.close proof _
-    (close_adapter_is_pinned m.installed) receipt
-  exact ⟨receipt, satisfiable, lowering f satisfiable⟩
-
-/-- The same composition read as premise discharge: (a0) plus the lowering give
-premise (a) in the exact form `TrustBoundary.closeProofSoundness` demands, and
-therefore nothing weaker than the lowering can be substituted for it. -/
-theorem mle_assumption_with_lowering_is_close_proof_soundness
-    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
-    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
-    (mleSound : MleAcceptedStatementsAreSatisfiable m)
-    (lowering : CloseStatementLowering m) :
-    ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
-      SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
-      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
-        CloseCircuit.CircuitGates m.closeEnv
-          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w :=
-  fun f proof accepted =>
-    (mle_assumption_reduces_close_soundness_to_gate_lowering m mleSound lowering f proof
-      accepted).2.2
 
 end Zkp.Implementation.TrustBoundary
