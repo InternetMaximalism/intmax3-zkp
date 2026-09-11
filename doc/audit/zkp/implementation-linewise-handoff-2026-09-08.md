@@ -40,7 +40,7 @@ python3 -B .github/ci/lean-fixture-parity.py       # 18 fixtures / 177 fields / 
 git diff --check
 ```
 
-期待値：main guard は **125 Lean modules / 現行 72 modules / 470 reviewed-source hashes / 1 submodule pin**、
+期待値：main guard は **127 Lean modules / 現行 74 modules / 473 reviewed-source hashes / 1 submodule pin**（2026-09-11 第 2 ループ後）、
 line guard は **169 source maps**、行分類は
 `translated 31,085 / dependency-boundary 10,850 / non-executable 9,816 / test-only 23,834 / untranslated 41,783`。
 
@@ -92,13 +92,22 @@ submitClaim、claimCredit payout、close の request / cancel / finalize、rollb
 いずれも手書きモデル同士の照合ではなく、回路側の語列・byte 列が Solidity 実装モデルの計算と
 一致することを導出したものです。
 
-### 4.4 名前付き前提 13 個（`Zkp.Implementation.TrustBoundary`）
+### 4.4 名前付き前提 17 個（`Zkp.Implementation.TrustBoundary`）
 
 `mleVerifierSoundness` (a0) / `closePrimitiveLowering` (a) / `withdrawalPrimitiveLowering` (b1) /
-`postClosePrimitiveLowering` (b2) /
-`closeVectorBacked` / `signatureValidity` / `circuitKeccakIsSolidityKeccak` /
-`tokenFundsHashBinding` / `finalizedRootObservation` / `finalizedHeightObservation` /
-`durableNullifierLedger` / `durableMaterializationLatch` / `sourceRefinement`。
+`postClosePrimitiveLowering` (b2) / `closeVectorBacked` (c) /
+`aggregateRecursiveVerifierSoundness` (d0) / `aggregateStatementLowering` (d1) /
+`falconPredicateIsGadget` (d2) / `falconUnforgeability` (d3) /
+`solidityKeccakIsReference` (e1a) / `circuitKeccakIsReference` (e1b) / `tokenFundsHashBinding` (e2) /
+`finalizedRootObservation` (f1) / `finalizedHeightObservation` (f2) /
+`durableNullifierLedger` (g1) / `durableMaterializationLatch` (g2) / `sourceRefinement` (h)。
+
+**2026-09-11 第 2 ループで (d)(e1)(e2) を分解しました。** 旧 (d)(e1)(e2) の結論は
+`signature_validity_of_boundary`・`circuit_keccak_is_solidity_keccak_of_boundary`・
+`token_funds_hash_binding_of_boundary` として定理です。参照 Keccak-256 は `Keccak256`
+（ベクトル 4 本を kernel 証明）、署名側の橋は `CloseSignatureBridge`。放電不能なもの：
+(d3) 格子仮定、(e2) 衝突耐性、(e1a) EVM 意味論。(d1) は構造中で唯一残る回路丸ごとの前提
+（`FalconAggregate` に `BuildOp` プログラムが無いため）。
 
 **2026-09-11 以降、(a)(b1)(b2) は「回路全体の lowering」ではなく「命令単位の lowering」です。**
 各回路の `program_satisfied_implies_gates` が `ProgramSatisfied constructorProgram a ⇒ CircuitGates` を
@@ -126,8 +135,10 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
    lib 711 件の全数実行も 2026-09-10 に完了し全通過（進捗文書の同日節）。`wallet_core::` /
    `circuits::` / `falcon_sig::` は 16 GB runner に載らないため routine step 外に留めています。
 4. **残る前提の削減。** ~~`CloseStatementLowering` と claim 側 (b1, b2) の lowering~~ は 2026-09-11 に
-   命令単位まで縮小済み（進捗文書の同日節）。次は hash binding (e1, e2) と署名妥当性 (d)。
-   (f) finality と (h) refinement は形式化しても仮定のままです。
+   命令単位まで縮小済み。~~hash binding (e1, e2) と署名妥当性 (d)~~ も同日第 2 ループで分解済み
+   （進捗文書の同日節）。残る候補は (d1) の命令単位化（`FalconAggregate` に `BuildOp` プログラムを
+   与えて `agg.rs` を per-primitive に落とす）と (d2) の gadget.rs 逐 gate 照合。
+   (c) は設計上の隙間、(d3)(e2) は計算量仮定、(e1a)(f)(h) は環境意味論で、形式化しても仮定のままです。
 5. **未翻訳 41,783 行**は MLE 33,974 行（受容済み）＋残り約 7,800 行（falcon vendor の f64 FFT、
    各 module が untranslated と明記した部分）。無理に translated へ付け替えないこと。
 

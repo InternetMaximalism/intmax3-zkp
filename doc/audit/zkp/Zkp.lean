@@ -110,3 +110,5 @@ import Zkp.Implementation.MleProverBridge
 import Zkp.Implementation.RegevCore
 import Zkp.Implementation.RegevProofs
 import Zkp.Implementation.TreeInstances
+import Zkp.Implementation.CloseSignatureBridge
+import Zkp.Implementation.Keccak256

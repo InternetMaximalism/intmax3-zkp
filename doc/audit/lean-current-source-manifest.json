@@ -155,7 +155,7 @@
     },
     {
       "path": ".github/ci/lean-safety-guard.py",
-      "sha256": "dc7196c6a8ef054d19ed7caa245521691f2b4d3ebb8a65d91306f467248cab43",
+      "sha256": "822f12b51935340f1438edaab1ff9d483906e7099d3f1d80bff8bfc1e31b0f1b",
       "role": "tooling"
     },
     {
@@ -185,7 +185,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp.lean",
-      "sha256": "ceca9acf16575d999090742f1295eec226814baa3f2684f9224f69725a34462f",
+      "sha256": "e35db743118b267b7e9d25bd4b917c93be28148275d77743d566d775b2d47a77",
       "role": "tooling"
     },
     {
@@ -385,7 +385,7 @@
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "ad6b56054189c0579e864e4a7d688ac509d8f5d3fd8138f913ee67c49be9f170",
+      "sha256": "3fdceb2363a4cef78909a108ab0aa4da412c5a0c24b561ec6bf47d8d0f7835dd",
       "role": "spec"
     },
     {
@@ -660,7 +660,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/SettlementCloseBridge.lean",
-      "sha256": "f1b14d8109c5b276c464a1c563ed580e87a9f78d64e7bf67d573298d183508ec",
+      "sha256": "3663f92e644e1aa58a91490bac684feeb61ca306b5e7d67e14a2eba16619b69c",
       "role": "model"
     },
     {
@@ -1220,7 +1220,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "67283d32e3294910d2fb80964c1e7d376db02d3d5ec9be6479fb739003acae31",
+      "sha256": "7f2cf55d523ba95a7b663f809bd93a65af01b174652dee3e20d0fd9a75a662a2",
       "role": "model"
     },
     {
@@ -2357,6 +2357,21 @@
       "path": "doc/audit/zkp/line-map/tx-v2-tree.json",
       "sha256": "5476fcd4dcadf342331c1e3da6eaee1a8e71cbd34fe5943a8440662f45c386f0",
       "role": "spec"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e2589ef15ad209c06dd4e43f8bfb5e0d887eb046f57e92f069a90e43391c21c2",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CloseSignatureBridge.lean",
+      "sha256": "2ab865aecd954608827d40fdc1e071886683e7b294adbc8fb0331bf3bcf2756e",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/Keccak256.lean",
+      "sha256": "6e615e19d95daaa2026cc68b9aad420eeedf7f1f9a384114b1f6429647413a29",
+      "role": "model"
     }
   ],
   "theorem_checks": [
@@ -3440,7 +3455,16 @@
         "Zkp.Implementation.SettlementCloseBridge.word_byte_encoding_injective_on_checked_words",
         "Zkp.Implementation.SettlementCloseBridge.token_words_are_checked",
         "Zkp.Implementation.SettlementCloseBridge.witness_token_preimage_is_checked",
-        "Zkp.Implementation.SettlementCloseBridge.bound_close_preserves_entire_settlement_vector"
+        "Zkp.Implementation.SettlementCloseBridge.bound_close_preserves_entire_settlement_vector",
+        "Zkp.Implementation.SettlementCloseBridge.token_funds_preimage_length",
+        "Zkp.Implementation.SettlementCloseBridge.word_bytes_length",
+        "Zkp.Implementation.SettlementCloseBridge.witness_token_preimage_length",
+        "Zkp.Implementation.SettlementCloseBridge.be_bytes_mod_eq_of_eq",
+        "Zkp.Implementation.SettlementCloseBridge.be_bytes_injective",
+        "Zkp.Implementation.SettlementCloseBridge.be_bytes_prefix_injective",
+        "Zkp.Implementation.SettlementCloseBridge.ten_be_bytes_join_injective",
+        "Zkp.Implementation.SettlementCloseBridge.token_funds_preimage_injective",
+        "Zkp.Implementation.SettlementCloseBridge.token_funds_compared_strings_same_length"
       ],
       "sources": [
         "contracts/src/ChannelSettlementVerifier.sol",
@@ -5491,6 +5515,14 @@
         "Zkp.Implementation.TrustBoundary.close_gap_is_now_per_primitive",
         "Zkp.Implementation.TrustBoundary.withdrawal_gap_is_now_per_primitive",
         "Zkp.Implementation.TrustBoundary.post_close_gap_is_now_per_primitive",
+        "Zkp.Implementation.TrustBoundary.word_bytes_are_canonical_bytes",
+        "Zkp.Implementation.TrustBoundary.token_funds_preimage_bytes_are_canonical",
+        "Zkp.Implementation.TrustBoundary.circuit_keccak_is_solidity_keccak_of_boundary",
+        "Zkp.Implementation.TrustBoundary.token_funds_hash_binding_of_boundary",
+        "Zkp.Implementation.TrustBoundary.token_funds_binding_is_same_length_collision",
+        "Zkp.Implementation.TrustBoundary.reference_keccak_models_satisfy_hash_premises",
+        "Zkp.Implementation.TrustBoundary.signature_validity_of_boundary",
+        "Zkp.Implementation.TrustBoundary.signature_gap_is_now_per_signature",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_close",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_claim",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_satisfies_every_premise",
@@ -8146,6 +8178,94 @@
         "src/common/trees/tx_tree.rs",
         "doc/audit/zkp/line-map/tx-v2-tree.json",
         "src/common/trees/tx_v2_tree.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CloseSignatureBridge",
+      "theorems": [
+        "Zkp.Implementation.CloseSignatureBridge.flatten_amounts_is_join",
+        "Zkp.Implementation.CloseSignatureBridge.to_agg_statement_message",
+        "Zkp.Implementation.CloseSignatureBridge.to_agg_statement_count",
+        "Zkp.Implementation.CloseSignatureBridge.to_agg_statement_pks",
+        "Zkp.Implementation.CloseSignatureBridge.to_agg_statement_slots_well_formed",
+        "Zkp.Implementation.CloseSignatureBridge.to_agg_statement_public_inputs",
+        "Zkp.Implementation.CloseSignatureBridge.limb_base_pinned",
+        "Zkp.Implementation.CloseSignatureBridge.digest_of_limbs_nil",
+        "Zkp.Implementation.CloseSignatureBridge.digest_of_limbs_cons",
+        "Zkp.Implementation.CloseSignatureBridge.digest_of_limbs_lt",
+        "Zkp.Implementation.CloseSignatureBridge.base_split_unique",
+        "Zkp.Implementation.CloseSignatureBridge.digest_of_limbs_injective",
+        "Zkp.Implementation.CloseSignatureBridge.accepted_slot_meets_the_native_norm_bound",
+        "Zkp.Implementation.CloseSignatureBridge.agg_levels_slot_count",
+        "Zkp.Implementation.CloseSignatureBridge.accepted_aggregate_tree_gives_signer_evidence",
+        "Zkp.Implementation.CloseSignatureBridge.example_two_signer_tree_evaluates",
+        "Zkp.Implementation.CloseSignatureBridge.example_pinned_tree_evaluates",
+        "Zkp.Implementation.CloseSignatureBridge.example_predicate_is_gadget",
+        "Zkp.Implementation.CloseSignatureBridge.example_unforgeable",
+        "Zkp.Implementation.CloseSignatureBridge.example_tree_digest_width",
+        "Zkp.Implementation.CloseSignatureBridge.example_two_signer_tree_gives_signer_evidence"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/close-circuit.json",
+        "src/circuits/channel/close_circuit.rs",
+        "doc/audit/zkp/line-map/falcon-agg.json",
+        "src/falcon_sig/agg.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.Keccak256",
+      "theorems": [
+        "Zkp.Implementation.Keccak256.lane_bits_pinned",
+        "Zkp.Implementation.Keccak256.lane_mod_pinned",
+        "Zkp.Implementation.Keccak256.rho_offsets_length",
+        "Zkp.Implementation.Keccak256.rho_pi_table_length",
+        "Zkp.Implementation.Keccak256.rho_pi_table_matches_permutation",
+        "Zkp.Implementation.Keccak256.round_constants_length",
+        "Zkp.Implementation.Keccak256.round_constants_are_lanes",
+        "Zkp.Implementation.Keccak256.rate_pinned",
+        "Zkp.Implementation.Keccak256.capacity_pinned",
+        "Zkp.Implementation.Keccak256.rate_plus_capacity_is_state",
+        "Zkp.Implementation.Keccak256.digest_bytes_length_pinned",
+        "Zkp.Implementation.Keccak256.initial_state_length",
+        "Zkp.Implementation.Keccak256.lane_to_le_bytes_length",
+        "Zkp.Implementation.Keccak256.lane_to_le_bytes_canonical",
+        "Zkp.Implementation.Keccak256.bytes_to_lanes_length",
+        "Zkp.Implementation.Keccak256.block_lanes_length",
+        "Zkp.Implementation.Keccak256.xor_lanes_length",
+        "Zkp.Implementation.Keccak256.theta_length",
+        "Zkp.Implementation.Keccak256.rho_pi_length",
+        "Zkp.Implementation.Keccak256.chi_length",
+        "Zkp.Implementation.Keccak256.iota_length",
+        "Zkp.Implementation.Keccak256.keccak_round_length",
+        "Zkp.Implementation.Keccak256.keccak_rounds_length",
+        "Zkp.Implementation.Keccak256.keccak_f_length",
+        "Zkp.Implementation.Keccak256.absorb_blocks_length",
+        "Zkp.Implementation.Keccak256.keccak256_state_has_25_lanes",
+        "Zkp.Implementation.Keccak256.squeeze_length",
+        "Zkp.Implementation.Keccak256.keccak256_length",
+        "Zkp.Implementation.Keccak256.squeeze_canonical",
+        "Zkp.Implementation.Keccak256.keccak256_bytes_canonical",
+        "Zkp.Implementation.Keccak256.bytes_to_nat_nil",
+        "Zkp.Implementation.Keccak256.bytes_to_nat_lt",
+        "Zkp.Implementation.Keccak256.two_pow_256_eq",
+        "Zkp.Implementation.Keccak256.digest_u256_val",
+        "Zkp.Implementation.Keccak256.keccak256_empty_vector",
+        "Zkp.Implementation.Keccak256.keccak256_abc_vector",
+        "Zkp.Implementation.Keccak256.pad_boundary_message_length",
+        "Zkp.Implementation.Keccak256.pad_boundary_pad_is_single_byte",
+        "Zkp.Implementation.Keccak256.keccak256_pad_boundary_vector",
+        "Zkp.Implementation.Keccak256.two_block_message_length",
+        "Zkp.Implementation.Keccak256.two_block_message_padded_length",
+        "Zkp.Implementation.Keccak256.keccak256_two_block_vector",
+        "Zkp.Implementation.Keccak256.bytes_to_nat_example",
+        "Zkp.Implementation.Keccak256.digest_u256_empty_is_nonzero",
+        "Zkp.Implementation.Keccak256.bytes_to_nat_injective"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/close-circuit.json",
+        "src/circuits/channel/close_circuit.rs"
       ]
     }
   ]

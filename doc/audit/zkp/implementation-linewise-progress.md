@@ -147,6 +147,60 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-11（第 2 ループ）：hash binding (e1, e2) と署名妥当性 (d) の前提を縮小
+
+役割分担は前ループと同じ（Fable 5.1 が計画と検証、Opus 5 が実装）。計画は
+`tasks/loop-2026-09-11-hash-signature-plan.md`。`TrustBoundary` は 13 field → **17 field**、
+`Models` から不透明な `signers` 関係を外し、`sigEnv`・`falconHash`・`falconMul`・
+`aggregateCircuitDigest`・`authorized`（署名 1 本の粒度の「鍵保持者が承認した」関係）を加えました。
+
+**K：Keccak-256 の参照仕様（新 module `Keccak256`、45 定理）。** Keccak-f[1600]・rate 1088・
+原 Keccak padding（`0x01…0x80`）を `List Nat` 上に定義し、出力長 32・byte 正準性・big-endian
+`bytesToNat` の単射性を証明。公開ベクトル 2 本（空文字列、`"abc"`）と自作 2 本（135 byte の
+padding 境界、200 byte の 2 block）を **`decide` による kernel 証明**として収録（各 1〜4 秒；
+Lean 4.10 の kernel は `Nat.land/lor/xor/shiftLeft/shiftRight` を GMP 加速します）。
+4 本すべてをランタイム自身の `keccak-hash 0.8.0` crate で独立に再計算し一致を確認しました。
+この module は in-repo の source 行を持ちません（回路側は Cargo.lock で
+`2507786148ae…` に固定された外部 crate `plonky2_keccak`、契約側は EVM opcode）。
+Cargo.lock を manifest の tooling hash に加え、pin の変更が guard に見えるようにしました。
+
+**E：token-funds preimage の ABI 忠実性（`SettlementCloseBridge`、+9 定理）。** Solidity 側の
+`tokenFundsPreimage` が 368 byte 固定長で `(registry, count, amounts)` に単射であること、回路側の
+`wordBytes (tokenFundsPreimage w)` も `Shape` の下で 368 byte であることを証明
+（`token_funds_preimage_injective`、`token_funds_compared_strings_same_length`、`be_bytes_injective`）。
+旧 (e2) の docstring が「衝突耐性と ABI 符号化の忠実性」と呼んでいた 2 つのうち後者は消えました。
+
+**D1：署名の橋（新 module `CloseSignatureBridge`、21 定理）。** close 回路の
+`AggregateStatement` と `FalconAggregate.AggStatement` の 73 word layout が同一であること
+（`to_agg_statement_public_inputs`）、受理された level-3 集約木から `SignerEvidence`
+（署名者数・左詰めの鍵 digest 列と零 suffix・単一 message・各 active slot の承認）が出ること
+（`accepted_aggregate_tree_gives_signer_evidence`）を証明。`SlotWitness` と `FalconCore.CircuitWitness`
+の対応は field ごとに恒等で、唯一の変換 `digestOfLimbs`（8 limb の big-endian 詰め、
+bytes32.rs:18-22 / hash_to_point.rs:73-76 / gadget.rs:378-380）は単射性を証明済み。
+2 署名者の具体木で 4 前提すべてを満たす非空性例を持ちます。
+
+**T：field の置換（`TrustBoundary` 35 → 43 定理）。**
+
+| 旧 field | 新 field | 旧 field の結論 |
+|---|---|---|
+| (e1) `circuitKeccakIsSolidityKeccak` | (e1a) `solidityKeccakIsReference`（EVM opcode = 参照仕様）、(e1b) `circuitKeccakIsReference`（`plonky2_keccak` = 参照仕様、(a) の「gadget が `out = e.keccak preimage` を強制する」とは独立） | `circuit_keccak_is_solidity_keccak_of_boundary` |
+| (e2) `tokenFundsHashBinding`（不透明 callback） | (e2) 同名、参照 `Keccak256.keccak256` 上の同一 pair に対する衝突耐性 | `token_funds_hash_binding_of_boundary` |
+| (d) `signatureValidity`（集約検証 ⇒ 不透明 `signers`） | (d0) `aggregateRecursiveVerifierSoundness`、(d1) `aggregateStatementLowering`、(d2) `falconPredicateIsGadget`、(d3) `falconUnforgeability` | `signature_validity_of_boundary`（⇒ `SignerEvidence`） |
+
+(d0) は plonky2 の FRI 再帰検証器の健全性で、**(a0) の受容には含めません**（同じ pinned
+サブモジュールに同居しますが、運用者の受容は MLE/WHIR 検証器に限定した判断です）。
+(d1) は `FalconAggregate` に `BuildOp` プログラムがまだ無いため、構造中で唯一残る回路丸ごとの前提
+（digest pinning も内包）。(d3) は NTRU/GPV 格子仮定、(e2) は Keccak-256 の衝突耐性で、どちらも
+このプロジェクト内では原理的に放電できません。`rejecting_environment_satisfies_every_premise`
+は新 field 用の仮説（参照等式 2 本、`noFalconAccept`、`authorizedTrivially`）を取り、
+`reference_keccak_models_satisfy_hash_premises` が hash 前提対の非空性を示します。
+`SystemSafety` は無変更（`signers`・旧 field を参照していません）。
+
+検証：main guard PASS（127 modules / 現行 74 / 473 hashes / 1 submodule pin）、line guard PASS
+（169 maps、新 module は既存 map への合成登録）、回帰 3 suite・fixture parity green、
+`--require-complete` は exit 1。現行 named theorems 4,858（implementation 69 module・4,639）。
+runtime 差分なし。
+
 ### 2026-09-11：gate lowering の前提を回路全体から命令単位へ縮小
 
 対象は `CloseStatementLowering` と claim 側の前提 (b1)(b2) です。「受理された plonky2 statement から
