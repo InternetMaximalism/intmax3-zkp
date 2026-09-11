@@ -93,6 +93,9 @@ CURRENT = {
         "Zkp.Implementation.TreeInstances",
         "Zkp.Implementation.CloseSignatureBridge",
         "Zkp.Implementation.Keccak256",
+        "Zkp.Implementation.FalconAggProgram",
+        "Zkp.Implementation.FalconGadgetProgram",
+        "Zkp.Implementation.LedgerWriters",
     ),
 }
 ARCH_ROOTS = frozenset({

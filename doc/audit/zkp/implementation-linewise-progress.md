@@ -147,6 +147,64 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-11（第 3 ループ）：集約スタックの命令単位化と replay ledger の書込元 inventory
+
+計画は `tasks/loop-2026-09-11-aggregate-program-plan.md`。前ループで構造中に唯一残った回路丸ごとの前提
+(d1) と、不透明 callback を gate 集合に結ぶ (d2) を、close 系回路と同じ命令単位に落としました。
+併せて (g1)(g2) を Solidity の書込元 inventory に還元しています。`TrustBoundary` は 17 → **18 field**。
+
+**G：Falcon gadget の命令列（新 module `FalconGadgetProgram`、47 定理）。** `FalconSigVerifyTarget::build`
+（gadget.rs:651-736）の builder 呼び出し 23 個を `GadgetOp` として転記（`True` は 3 個：twiddle table、
+β 定数、build）。**NTT は畳み込まず具体的に転記**（`powModQ`・`bitReverse9`・CT-DIT 9 段の
+`nttForward`・GS の `nttInverse`・`pointwise`、mod-q 還元 15,872 箇所の商 wire に `modQGates` を課す）。
+`gadget_program_satisfied_implies_circuit_satisfied : ProgramSatisfied gadgetProgram a → CircuitSatisfied e circuitProduct (readWitness a)`
+を**副仮定なし**で証明。従来の不透明 `PolynomialProduct.mul` は具体的 `circuitProduct` に置き換わり、
+残る境界は「この転記された NTT が negacyclic 積に等しい」（`NttComputesNegacyclicProduct`、
+`schoolbook_negacyclic` から転記、未証明）だけです。ψ の位数・`n⁻¹`・twiddle の spot check を `decide` で固定。
+
+**A：集約木の命令列（新 module `FalconAggProgram`、78 定理）。** leaf 回路（agg.rs:268-305、8 op）と
+level 回路（:370-479、level k で 23 + 8·2^(k−1) op）を転記。Goldilocks 上の `sub/mul/add` を法演算として
+`holds` に書き、範囲仮定（count ≤ 2^(k−1)、limb < 2^32）から Nat 等式を導出。
+`leaf_program_satisfied_implies_statement`、`level_program_satisfied_implies_compose`
+（既存の `levelCompose` に一致）、抽象的な充足関係 `Sat` 上の帰納定理
+`satisfiable_top_level_gives_witness_list`（level 3 の充足 ⇒ 1〜8 個の `CircuitSatisfied` 証人と
+左詰めの鍵 digest 列）、`sigEnvOf e`（`pkDigest := limbsOfNat ∘ falconPkDigest e`）経由の
+`SignerEvidence` 導出、そして gadget 命令列を leaf に継ぎ込んだ `GadgetLevelLowering`
+（どの conjunct も builder 呼び出しの転記で、gate 構造を丸ごと含まない）を証明。
+2 署名者の level-1 具体例あり。
+
+**I：replay ledger の書込元 inventory（新 module `LedgerWriters`、57 定理）。** 読取専用の調査で、
+(g1)(g2) の対象 storage は各 1 箇所しか書込元がないことを確認しました：
+`usedWithdrawalNullifiers` :2231（set のみ）、`receivedChannelFunds` :2364、`totalCreditedOut` :2398、
+`finalizedChannelFundAmount` :1681（`+=` のみ）、`materializedChannelExit` :461（`== 0` guard 付き）。
+proxy・`delegatecall`・`selfdestruct`・assembly `sstore` は無く、Rollup は Manager storage を書けません。
+Lean 側では 13 個の Manager entrypoint と 7 個の Materializer entrypoint を列挙し、
+`manager_entrypoints_are_ledger_monotone`、`non_step_manager_entrypoints_are_ledger_neutral_except_cap`、
+`finalize_close_only_raises_cap`（増分の厳密形）、`materializer_entrypoints_keep_the_latch` を証明。
+inventory は `.github/ci/check-ledger-writers.py` が Solidity を走査して照合し（self-test 6 件）、CI に配線しました。
+
+**発見：旧 (g1) の `cap t = cap s` 節は配備契約に反証されます。** `finalizeCloseGuarded`
+（`_finalizeClose` :1681 で `cap += …`）は `ManagerValue.finalizeCloseCore` としてモデル化済みですが
+`SystemSafety.Step` の constructor ではないため、`Unmodeled` な遷移が `cap` を書きます。
+`SystemSafety` は (g1)(g2) を消費していないので下流は無変更のまま、節を単調 `cap s ≤ cap t` に訂正し、
+`only_cap_writer_is_outside_step` が唯一の例外として pin しています。
+
+**T2：field の置換。**
+
+| 旧 | 新 | 旧結論の定理 |
+|---|---|---|
+| (d1) `aggregateStatementLowering`（回路丸ごと）、(d2) `falconPredicateIsGadget`、`Models.sigEnv`/`falconMul` | (d0') `levelRecursionSoundness`（各 level の定数鍵での再帰検証健全性）、(d1') `aggregatePrimitiveLowering`（`GadgetLevelLowering`）、(d2') `nttComputesNegacyclicProduct` | `signature_validity_of_boundary`（結論は `SignerEvidence (sigEnvOf m.falconHash) …`）、`level_lowering_of_boundary` |
+| (g1) `durableNullifierLedger`、(g2) `durableMaterializationLatch` | (g1') `ledgerWritersAreInventoried`、(g2') `latchWritersAreInventoried`（(h) 同種の source refinement：「対象 storage に触れるモデル外遷移は inventory 済み entrypoint の実行」） | `durable_nullifier_ledger_of_boundary`（cap 単調）、`durable_materialization_latch_of_boundary`（旧文そのまま） |
+
+`Models` は `aggregateLevelDigest : Nat → List Nat`（level 0〜3）と `aggEnv`（level 回路内の不透明な
+子検証関係）を持ちます。digest pinning は `AggregateLevelPinnedDigestIsProgramDigest` として分離。
+`signature_gap_is_now_per_primitive` が残余 4 前提を列挙します。**構造中に回路を丸ごと仮定する field は
+もう存在しません。** `SystemSafety`・各回路 module・`FalconAggregate`・`FalconCore` は無変更。
+
+検証：main guard PASS（130 modules / 現行 77 / 478 hashes / 1 submodule pin）、line guard PASS（169 maps）、
+回帰 3 suite + ledger-writers self-test green、fixture parity green、`--require-complete` は exit 1。
+現行 named theorems 5,043（implementation 72 module・4,824）。runtime 差分なし。
+
 ### 2026-09-11（第 2 ループ）：hash binding (e1, e2) と署名妥当性 (d) の前提を縮小
 
 役割分担は前ループと同じ（Fable 5.1 が計画と検証、Opus 5 が実装）。計画は
