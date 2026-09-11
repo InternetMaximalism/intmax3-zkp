@@ -1129,4 +1129,898 @@ theorem example_normal_vector_satisfies_all_local_vector_gates : VectorGates 3 n
   · simp [normalRows, PaddingGates, bit, Words8.zero, Words8.words]
   · simp [UniqueGates, normalRows, List.replicate_succ]
 
+/-! ### Gate lowering: per-primitive satisfaction semantics for `constructorProgram`
+
+`CircuitConstraints` above is the hand-written gate predicate; `constructorProgram`
+is the ordered transcript of the builder calls in `CloseAssetBackingCircuit::new`
+(`src/circuits/channel/close_asset_backing_circuit.rs:400-527`). This section
+closes the gap between the two INSIDE the model: an `Assignment` values every
+wire the constructor allocates, `BuildOp.holds` states exactly the local
+proposition the named plonky2 primitive enforces on those wires, and
+`program_satisfied_implies_constraints` derives every `CircuitConstraints` field
+from the ordered program alone, with no extra admission premise and no residual
+side hypothesis.
+
+What stays outside the model is therefore PER-PRIMITIVE rather than
+whole-circuit: (i) each `holds` case must match the real gate set emitted by that
+one builder call (`range_check`, `connect`, `add_virtual_bool_target_safe`,
+`add`/`sub`/`mul`, `not`, `assert_one`, `is_equal`/`and`,
+`PoseidonHashOutTarget::select`, `keccak256`, `hash_inputs`,
+`add_proof_target_and_verify_cyclic`, `SparseMerkleProofTarget::
+conditional_verify`/`get_root`), and (ii) the digest and verifier-data pinning —
+`Environment.hash`, `Environment.merkle` and `Environment.recursive` must be the
+real gadgets and the real pinned Balance circuit. Neither is proved here.
+
+Field arithmetic is modeled over `Nat`. That is sound for these gates because
+every quantity in an arithmetic gate here is Boolean, a 32-bit range-checked
+limb, or a sum of at most ten Boolean limbs, so it stays far below the Goldilocks
+modulus and the field equations force the `Nat` equations used below. The two
+truncated subtractions (`one - bit` at :440 and `not` at :452) are only ever
+evaluated at a limb the same op list has already constrained Boolean.
+-/
+
+/-- The opaque dependencies of one circuit instance, bundled so that a single
+    `Assignment` can mention all three. Nothing new is assumed: these are the
+    same `MerkleContract`, `HashFunctions` and `RecursiveVerifierContract` that
+    `CircuitConstraints` already takes as parameters. -/
+structure Environment (Proof Path : Type) where
+  merkle : MerkleContract Hash4 Path
+  hash : HashFunctions
+  recursive : RecursiveVerifierContract Proof
+
+def indexedWires {α : Type} (f : Nat → α) (start : Nat) : Nat → List α
+  | 0 => []
+  | n + 1 => f start :: indexedWires f (start + 1) n
+
+def sumWires (w : Nat → Nat) (start : Nat) : Nat → Nat
+  | 0 => 0
+  | n + 1 => w start + sumWires w (start + 1) n
+
+theorem indexed_wires_length {α : Type} (f : Nat → α) (n : Nat) :
+    ∀ s, (indexedWires f s n).length = n := by
+  induction n with
+  | zero => intro s; rfl
+  | succ n ih => intro s; simp [indexedWires, ih]
+
+theorem indexed_wires_head {α : Type} (f : Nat → α) (n s : Nat) :
+    (indexedWires f s (n + 1)).head? = some (f s) := by
+  simp [indexedWires]
+
+theorem mem_indexed_wires {α : Type} (f : Nat → α) (n : Nat) :
+    ∀ s x, x ∈ indexedWires f s n → ∃ i, i < n ∧ x = f (s + i) := by
+  induction n with
+  | zero => intro s x hx; exact absurd hx (by simp [indexedWires])
+  | succ n ih =>
+      intro s x hx
+      simp only [indexedWires, List.mem_cons] at hx
+      rcases hx with rfl | hx
+      · exact ⟨0, Nat.succ_pos n, rfl⟩
+      · obtain ⟨i, hi, hx⟩ := ih (s + 1) x hx
+        exact ⟨i + 1, by omega, hx.trans (congrArg f (by omega))⟩
+
+theorem map_indexed_wires {α β : Type} (g : α → β) (f : Nat → α) (n : Nat) :
+    ∀ s, (indexedWires f s n).map g = indexedWires (fun i => g (f i)) s n := by
+  induction n with
+  | zero => intro s; rfl
+  | succ n ih => intro s; simp [indexedWires, ih]
+
+theorem sum_wires_snoc (w : Nat → Nat) (n : Nat) :
+    ∀ s, sumWires w s (n + 1) = sumWires w s n + w (s + n) := by
+  induction n with
+  | zero => intro s; simp [sumWires]
+  | succ n ih =>
+      intro s
+      have step : sumWires w s (n + 1 + 1) = w s + sumWires w (s + 1) (n + 1) := rfl
+      rw [step, ih (s + 1)]
+      have hidx : s + 1 + n = s + (n + 1) := by omega
+      rw [hidx, ← Nat.add_assoc]
+      rfl
+
+theorem bit_of_boolean_wire (x : Nat) (h : x = 0 ∨ x = 1) : bit (x == 1) = x := by
+  rcases h with h | h <;> simp [h, bit]
+
+theorem not_bit_of_boolean_wire (x : Nat) (h : x = 0 ∨ x = 1) :
+    bit (!(x == 1)) = 1 - x := by
+  rcases h with h | h <;> simp [h, bit]
+
+theorem range_loop_append (n : Nat) : ∀ ns : List Nat,
+    List.range.loop n ns = List.range n ++ ns := by
+  induction n with
+  | zero => intro ns; rfl
+  | succ n ih =>
+      intro ns
+      have h1 : List.range.loop (n + 1) ns = List.range.loop n (n :: ns) := rfl
+      have h2 : List.range (n + 1) = List.range.loop n [n] := rfl
+      rw [h1, ih (n :: ns), h2, ih [n], List.append_assoc]
+      rfl
+
+theorem range_succ_snoc (n : Nat) : List.range (n + 1) = List.range n ++ [n] := by
+  have h2 : List.range (n + 1) = List.range.loop n [n] := rfl
+  rw [h2, range_loop_append]
+
+theorem length_range_eq (n : Nat) : (List.range n).length = n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [range_succ_snoc]; simp [ih]
+
+theorem mem_range_loop_iff (n : Nat) : ∀ (ns : List Nat) (i : Nat),
+    i ∈ List.range.loop n ns ↔ (i < n ∨ i ∈ ns) := by
+  induction n with
+  | zero => intro ns i; simp [List.range.loop]; omega
+  | succ n ih =>
+      intro ns i
+      rw [show List.range.loop (n + 1) ns = List.range.loop n (n :: ns) from rfl, ih]
+      constructor
+      · rintro (h | h)
+        · exact Or.inl (by omega)
+        · rcases List.mem_cons.mp h with rfl | h
+          · exact Or.inl (by omega)
+          · exact Or.inr h
+      · rintro (h | h)
+        · rcases Nat.lt_or_ge i n with h2 | h2
+          · exact Or.inl h2
+          · exact Or.inr (List.mem_cons.mpr (Or.inl (by omega)))
+        · exact Or.inr (List.mem_cons.mpr (Or.inr h))
+
+theorem mem_range_iff_lt (i n : Nat) : i ∈ List.range n ↔ i < n := by
+  simpa using mem_range_loop_iff n [] i
+
+/-- The inner `((List.range n).drop (i+1))` of the ordered duplicate-registry
+    loop enumerates exactly the strictly later positions. -/
+theorem mem_drop_range_iff (n : Nat) : ∀ k j : Nat,
+    j ∈ (List.range n).drop k ↔ (k ≤ j ∧ j < n) := by
+  induction n with
+  | zero =>
+      intro k j
+      constructor
+      · intro h
+        have : (List.range 0).drop k = [] := by simp [List.range, List.range.loop]
+        rw [this] at h
+        exact absurd h (by simp)
+      · intro h; omega
+  | succ n ih =>
+      intro k j
+      rcases Nat.lt_or_ge n k with hk | hk
+      · have hlen : (List.range (n + 1)).length ≤ k := by rw [length_range_eq]; omega
+        rw [List.drop_eq_nil_of_le hlen]
+        constructor
+        · intro h; exact absurd h (by simp)
+        · intro h; omega
+      · have hlen : k ≤ (List.range n).length := by rw [length_range_eq]; exact hk
+        rw [range_succ_snoc, List.drop_append_of_le_length hlen, List.mem_append, ih k j]
+        constructor
+        · rintro (h | h)
+          · exact ⟨h.1, by omega⟩
+          · have hj : j = n := by simpa using h
+            omega
+        · intro h
+          rcases Nat.lt_or_ge j n with hj | hj
+          · exact Or.inl ⟨h.1, hj⟩
+          · have hj2 : j = n := by omega
+            exact Or.inr (by simp [hj2])
+
+theorem words8_zero_limb : ∀ j, j < 8 → Words8.zero.words.getD j 0 = 0
+  | 0, _ => rfl
+  | 1, _ => rfl
+  | 2, _ => rfl
+  | 3, _ => rfl
+  | 4, _ => rfl
+  | 5, _ => rfl
+  | 6, _ => rfl
+  | 7, _ => rfl
+  | _ + 8, h => absurd h (by omega)
+
+theorem words8_mem_is_a_limb (w : Words8) (x : Nat) (h : x ∈ w.words) :
+    ∃ j, j < 8 ∧ w.words.getD j 0 = x := by
+  cases w with
+  | mk a b c d e f g i =>
+      simp only [Words8.words, List.mem_cons, List.not_mem_nil, or_false] at h
+      rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+      · exact ⟨0, by omega, rfl⟩
+      · exact ⟨1, by omega, rfl⟩
+      · exact ⟨2, by omega, rfl⟩
+      · exact ⟨3, by omega, rfl⟩
+      · exact ⟨4, by omega, rfl⟩
+      · exact ⟨5, by omega, rfl⟩
+      · exact ⟨6, by omega, rfl⟩
+      · exact ⟨7, by omega, rfl⟩
+
+/-- Every wire `CloseAssetBackingCircuit::new` allocates or derives, in source
+    order: the recursively verified Balance proof target together with the
+    public inputs `BalanceFullPublicInputsTarget::from_pis` re-slices out of it
+    (:409-414), the witnessed `PrivateStateTarget` and its Poseidon opening
+    (:416-418), the checked `ExtendedPublicStateTarget` (:420), the token count,
+    ten registry limbs, ten checked U256 funds, ten safe activity bits and ten
+    height-32 asset paths (:425-435), the arithmetic intermediates of the
+    prefix/padding/duplicate loops (:437-466), the reconstructed-root chain
+    (:471-494), the digest preimage and the two recomputed commitments
+    (:496-510), and the 26 registered public wires (:511-518). -/
+structure Assignment {Proof Path : Type} (e : Environment Proof Path) where
+  balanceProofWire : BalanceProofView Proof
+  privateStateWire : PrivateState
+  openedPrivateCommitmentWire : Hash4
+  extendedStateWire : ExtendedPublicState
+  tokenCountWire : Nat
+  registryWire : Nat → Nat
+  amountWire : Nat → Words8
+  activityWire : Nat → Nat
+  pathWire : Nat → Path
+  zeroWire : Nat
+  oneWire : Nat
+  oneMinusActivityWire : Nat → Nat
+  riseProductWire : Nat → Nat
+  activitySumWire : Nat → Nat
+  inactiveWire : Nat → Nat
+  dirtyRegistryWire : Nat → Nat
+  dirtyAmountWire : Nat → Nat → Nat
+  registryEqualWire : Nat → Nat → Nat
+  duplicateActiveWire : Nat → Nat → Nat
+  zeroLeafWire : Words8
+  rootWire : Nat → Hash4
+  insertedRootWire : Nat → Hash4
+  tokenFundsDomainWire : Nat
+  amountLimbsWire : List Nat
+  digestPreimageWire : List Nat
+  tokenFundsDigestWire : Words8
+  extendedCommitmentWire : Words8
+  publicWire : PublicInputs
+
+/-- One token position as the model's `Row`: the four parallel arrays of
+    `close_asset_backing_circuit.rs:387-390` read at the same index. -/
+def rowWire {Proof Path : Type} {e : Environment Proof Path} (a : Assignment e)
+    (i : Nat) : Row Path :=
+  { registry := a.registryWire i
+    amount := a.amountWire i
+    active := a.activityWire i == 1
+    path := a.pathWire i }
+
+def assignedRows {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) : List (Row Path) := indexedWires (rowWire a) 0 maxTokens
+
+/-- The 26 registered public wires, in `to_vec` order (:180-189, :518). -/
+def readPublic {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) : PublicInputs := a.publicWire
+
+/-- The witness half, at the widths `fill_witness` writes (:527-560). An
+    activity WIRE decodes to the Boolean the model uses; `allocateSafeBoolean` is
+    what makes that decoding lossless. -/
+def readWitness {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) : Witness Proof Path where
+  finalBalanceProof := a.balanceProofWire
+  extendedState := a.extendedStateWire
+  privateState := a.privateStateWire
+  tokenCount := a.tokenCountWire
+  rows := assignedRows a
+
+theorem read_witness_rows {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) : (readWitness a).rows = assignedRows a := rfl
+
+theorem row_wire_active_iff {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) (i : Nat) : (rowWire a i).active = true ↔ a.activityWire i = 1 := by
+  simp [rowWire]
+
+theorem row_wire_if_active {Proof Path : Type} {e : Environment Proof Path}
+    {α : Type} (a : Assignment e) (i : Nat) (x y : α) :
+    (if (rowWire a i).active = true then x else y) = (if a.activityWire i = 1 then x else y) := by
+  by_cases h : a.activityWire i = 1
+  · rw [if_pos ((row_wire_active_iff a i).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((row_wire_active_iff a i).mp hc)), if_neg h]
+
+/-- Local satisfaction semantics of one builder call, wire by wire. Source lines
+    are `src/circuits/channel/close_asset_backing_circuit.rs`.
+
+* `assertBalancePiShape` — :401-405, the build-time
+  `assert_eq!(balance_vd.common.num_public_inputs, BALANCE_PUBLIC_INPUTS_LEN +
+  vd_vec_len(config))` pins the consumed proof to the canonical cyclic width.
+* `startStandardRecursionZk` — :406-407, config selection; emits no gate.
+* `allocateProofAndVerifyPinnedCyclic` — :409, the three effects of
+  `add_proof_target_and_verify_cyclic`: constant verifier data, the cyclic
+  self-VD connect and the recursive verification, i.e. exactly
+  `RecursiveVerifierContract.circuitAccepts`.
+* `decodeBalanceTargetPis` — :410-414, pure re-slicing of the verified proof's
+  public-input targets into `balance_pis`; no gate, so the op is `True` and the
+  aliasing is carried by `Assignment.balanceProofWire.statement`.
+* `allocatePrivateUnchecked` — :416, `PrivateStateTarget::new`
+  (src/common/private_state.rs:141-152) allocates four raw Poseidon roots, a raw
+  nonce and a raw salt with NO range check, so this op constrains nothing.
+* `computePrivatePoseidon` — :417, `hash_inputs` over the 21-element `to_vec`.
+* `connectPrivateCommitment` — :418.
+* `allocateExtendedChecked` — :420, `ExtendedPublicStateTarget::new(_, true)`
+  (src/circuits/validity/block_hash_chain/ext_public_state.rs:154-166)
+  range-checks the block number, both timestamp limbs, the deposit count and all
+  four Bytes32 chains; the three inner Poseidon roots stay unconstrained.
+* `connectInnerPublicState` — :421-423.
+* `allocateCount` :425 (raw), `rangeCount32` :426.
+* `allocateRegistry` :428 (raw), `rangeRegistry32` :429.
+* `allocateCheckedU256` — :432, `U256Target::new(_, true)` range-checks all
+  eight limbs.
+* `allocateSafeBoolean` — :433, `add_virtual_bool_target_safe` constrains the
+  limb to {0,1}.
+* `allocatePath` — :434-435, `AssetMerkleProofTarget::new` allocates the 32
+  sibling hashes; every gate it takes part in is emitted later by
+  `conditional_verify`/`get_root`, so the allocation itself constrains nothing.
+* `constantZero` :437 — the `zero` constant, which is also the seed of the
+  activity accumulator at :444 and the right-hand side of every
+  `connect(_, zero)` below. `constantOne` :438.
+* `subtractActivityFromOne` :440, `multiplyNextActivity` :441,
+  `connectNoRiseZero` :442.
+* `addActivityToSum` :445-447, `connectSumToCount` :448, `assertFirstActive`
+  :449.
+* `notActivity` :452, `multiplyInactiveRegistry` :453,
+  `connectInactiveRegistryZero` :454, `multiplyInactiveAmount` :455-456,
+  `connectInactiveAmountZero` :457.
+* `equalRegistry` :462, `andEqualWithLaterActive` :463, `connectDuplicateZero`
+  :464.
+* `constantZeroLeaf` :471, `constantEmptyRoot` :472-473.
+* `conditionalVerifyZeroPath` — :475-481, `SparseMerkleProofTarget::
+  conditional_verify` asserts the opened root equals the running root ONLY when
+  the activity bit is one.
+* `computeInsertedRoot` :482-486, `selectUpdatedRoot` :487-492,
+  `connectFinalAssetRoot` :494.
+* `constantTokenFundsDomain` :496, `flattenAmountLimbs` :497-500,
+  `concatenateDigestPreimage` :501-507, `computeKeccakTokenFunds` :508-509,
+  `computeExtendedPoseidonBytes` :510, `assembleComputedPublicInputs` :511-517.
+* `registerPublicInputs` — :518, `register_public_inputs(to_vec())` at the
+  exact `CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN` width asserted at :163.
+* `buildCircuit` — :520, emits no constraint. -/
+def BuildOp.holds {Proof Path : Type} {e : Environment Proof Path}
+    (op : BuildOp) (a : Assignment e) : Prop :=
+  match op with
+  | .assertBalancePiShape =>
+      a.balanceProofWire.publicInputCount = e.recursive.expectedBalancePiCount
+  | .startStandardRecursionZk => True
+  | .allocateProofAndVerifyPinnedCyclic => e.recursive.circuitAccepts a.balanceProofWire
+  | .decodeBalanceTargetPis => True
+  | .allocatePrivateUnchecked => True
+  | .computePrivatePoseidon =>
+      e.hash.privateCommitment a.privateStateWire.words = a.openedPrivateCommitmentWire
+  | .connectPrivateCommitment =>
+      a.openedPrivateCommitmentWire = a.balanceProofWire.statement.privateCommitment
+  | .allocateExtendedChecked => a.extendedStateWire.Checked
+  | .connectInnerPublicState =>
+      a.balanceProofWire.statement.publicState = a.extendedStateWire.inner
+  | .allocateCount => True
+  | .rangeCount32 => a.tokenCountWire < wordBase
+  | .allocateRegistry _ => True
+  | .rangeRegistry32 row => a.registryWire row < wordBase
+  | .allocateCheckedU256 row => (a.amountWire row).Checked
+  | .allocateSafeBoolean row => a.activityWire row = 0 ∨ a.activityWire row = 1
+  | .allocatePath _ _ => True
+  | .constantZero => a.zeroWire = 0 ∧ a.activitySumWire 0 = a.zeroWire
+  | .constantOne => a.oneWire = 1
+  | .subtractActivityFromOne row =>
+      a.oneMinusActivityWire row = a.oneWire - a.activityWire row
+  | .multiplyNextActivity row =>
+      a.riseProductWire row = a.activityWire (row + 1) * a.oneMinusActivityWire row
+  | .connectNoRiseZero row => a.riseProductWire row = a.zeroWire
+  | .addActivityToSum row =>
+      a.activitySumWire (row + 1) = a.activitySumWire row + a.activityWire row
+  | .connectSumToCount => a.activitySumWire maxTokens = a.tokenCountWire
+  | .assertFirstActive => a.activityWire 0 = 1
+  | .notActivity row => a.inactiveWire row = 1 - a.activityWire row
+  | .multiplyInactiveRegistry row =>
+      a.dirtyRegistryWire row = a.inactiveWire row * a.registryWire row
+  | .connectInactiveRegistryZero row => a.dirtyRegistryWire row = a.zeroWire
+  | .multiplyInactiveAmount row limb =>
+      a.dirtyAmountWire row limb = a.inactiveWire row * (a.amountWire row).words.getD limb 0
+  | .connectInactiveAmountZero row limb => a.dirtyAmountWire row limb = a.zeroWire
+  | .equalRegistry earlier later =>
+      a.registryEqualWire earlier later =
+        (if a.registryWire earlier = a.registryWire later then 1 else 0)
+  | .andEqualWithLaterActive earlier later =>
+      a.duplicateActiveWire earlier later =
+        a.registryEqualWire earlier later * a.activityWire later
+  | .connectDuplicateZero earlier later => a.duplicateActiveWire earlier later = a.zeroWire
+  | .constantZeroLeaf => a.zeroLeafWire = Words8.zero
+  | .constantEmptyRoot => a.rootWire 0 = e.merkle.emptyRoot
+  | .conditionalVerifyZeroPath row =>
+      a.activityWire row = 1 →
+        e.merkle.pathRoot (a.pathWire row) a.zeroLeafWire (a.registryWire row) = a.rootWire row
+  | .computeInsertedRoot row =>
+      a.insertedRootWire row =
+        e.merkle.pathRoot (a.pathWire row) (a.amountWire row) (a.registryWire row)
+  | .selectUpdatedRoot row =>
+      a.rootWire (row + 1) =
+        (if a.activityWire row = 1 then a.insertedRootWire row else a.rootWire row)
+  | .connectFinalAssetRoot => a.rootWire maxTokens = a.privateStateWire.assetTreeRoot
+  | .constantTokenFundsDomain => a.tokenFundsDomainWire = tokenFundsDomain
+  | .flattenAmountLimbs => a.amountLimbsWire = amountWords (assignedRows a)
+  | .concatenateDigestPreimage =>
+      a.digestPreimageWire =
+        [a.tokenFundsDomainWire] ++ registryWords (assignedRows a) ++ [a.tokenCountWire] ++
+          a.amountLimbsWire
+  | .computeKeccakTokenFunds =>
+      a.tokenFundsDigestWire = e.hash.tokenFundsHash a.digestPreimageWire
+  | .computeExtendedPoseidonBytes =>
+      a.extendedCommitmentWire = e.hash.extendedCommitment a.extendedStateWire.words
+  | .assembleComputedPublicInputs =>
+      a.publicWire =
+        { channelId := a.balanceProofWire.statement.channelId
+          settledTxChain := a.balanceProofWire.statement.settledTxChain
+          tokenFundsDigest := a.tokenFundsDigestWire
+          extendedStateCommitment := a.extendedCommitmentWire
+          anchorBlockNumber := a.extendedStateWire.inner.blockNumber }
+  | .registerPublicInputs count => a.publicWire.words.length = count
+  | .buildCircuit => True
+
+def ProgramSatisfied {Proof Path : Type} {e : Environment Proof Path}
+    (prog : List BuildOp) (a : Assignment e) : Prop := ∀ op ∈ prog, op.holds a
+
+theorem satisfied_append {Proof Path : Type} {e : Environment Proof Path}
+    {l r : List BuildOp} {a : Assignment e} (h : ProgramSatisfied (l ++ r) a) :
+    ProgramSatisfied l a ∧ ProgramSatisfied r a :=
+  ⟨fun op hm => h op (List.mem_append.mpr (Or.inl hm)),
+   fun op hm => h op (List.mem_append.mpr (Or.inr hm))⟩
+
+theorem satisfied_append_of {Proof Path : Type} {e : Environment Proof Path}
+    {l r : List BuildOp} {a : Assignment e}
+    (hl : ProgramSatisfied l a) (hr : ProgramSatisfied r a) : ProgramSatisfied (l ++ r) a := by
+  intro op hm
+  rcases List.mem_append.mp hm with h | h
+  · exact hl op h
+  · exact hr op h
+
+theorem satisfied_nil {Proof Path : Type} {e : Environment Proof Path}
+    {a : Assignment e} : ProgramSatisfied [] a := by
+  intro op hop
+  exact absurd hop (List.not_mem_nil op)
+
+theorem satisfied_cons_of {Proof Path : Type} {e : Environment Proof Path}
+    {op : BuildOp} {rest : List BuildOp} {a : Assignment e}
+    (hhead : op.holds a) (htail : ProgramSatisfied rest a) : ProgramSatisfied (op :: rest) a := by
+  intro o ho
+  rcases List.mem_cons.mp ho with rfl | ho
+  · exact hhead
+  · exact htail o ho
+
+theorem satisfied_map_range {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → BuildOp} {n : Nat} {a : Assignment e}
+    (h : ProgramSatisfied ((List.range n).map g) a) : ∀ i, i < n → (g i).holds a :=
+  fun i hi => h (g i) (List.mem_map.mpr ⟨i, (mem_range_iff_lt _ _).mpr hi, rfl⟩)
+
+theorem satisfied_map_range_of {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → BuildOp} {n : Nat} {a : Assignment e}
+    (h : ∀ i, i < n → (g i).holds a) : ProgramSatisfied ((List.range n).map g) a := by
+  intro op hm
+  obtain ⟨i, hi, rfl⟩ := List.mem_map.mp hm
+  exact h i ((mem_range_iff_lt _ _).mp hi)
+
+theorem satisfied_bind_range {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → List BuildOp} {n : Nat} {a : Assignment e}
+    (h : ProgramSatisfied ((List.range n).bind g) a) :
+    ∀ i, i < n → ProgramSatisfied (g i) a := by
+  intro i hi op hop
+  exact h op (List.mem_bind.mpr ⟨i, (mem_range_iff_lt _ _).mpr hi, hop⟩)
+
+theorem satisfied_bind_range_of {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → List BuildOp} {n : Nat} {a : Assignment e}
+    (h : ∀ i, i < n → ProgramSatisfied (g i) a) :
+    ProgramSatisfied ((List.range n).bind g) a := by
+  intro op hop
+  obtain ⟨i, hi, hop⟩ := List.mem_bind.mp hop
+  exact h i ((mem_range_iff_lt _ _).mp hi) op hop
+
+theorem satisfied_ordered_pairs {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → Nat → List BuildOp} {n : Nat} {a : Assignment e}
+    (h : ProgramSatisfied
+      ((List.range n).bind (fun i => ((List.range n).drop (i + 1)).bind (g i))) a) :
+    ∀ i j, i < j → j < n → ProgramSatisfied (g i j) a := by
+  intro i j hij hj op hop
+  refine h op (List.mem_bind.mpr ⟨i, (mem_range_iff_lt _ _).mpr (Nat.lt_trans hij hj), ?_⟩)
+  exact List.mem_bind.mpr ⟨j, (mem_drop_range_iff n (i + 1) j).mpr ⟨hij, hj⟩, hop⟩
+
+theorem satisfied_ordered_pairs_of {Proof Path : Type} {e : Environment Proof Path}
+    {g : Nat → Nat → List BuildOp} {n : Nat} {a : Assignment e}
+    (h : ∀ i j, i < j → j < n → ProgramSatisfied (g i j) a) :
+    ProgramSatisfied ((List.range n).bind (fun i => ((List.range n).drop (i + 1)).bind (g i))) a := by
+  intro op hop
+  obtain ⟨i, _, hop⟩ := List.mem_bind.mp hop
+  obtain ⟨j, hj, hop⟩ := List.mem_bind.mp hop
+  obtain ⟨hij, hjn⟩ := (mem_drop_range_iff _ _ _).mp hj
+  exact h i j (by omega) hjn op hop
+
+theorem activity_assigned_rows {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) :
+    activity (assignedRows a) = indexedWires (fun i => a.activityWire i == 1) 0 maxTokens := by
+  show (indexedWires (rowWire a) 0 maxTokens).map Row.active = _
+  rw [map_indexed_wires]
+  rfl
+
+theorem indexed_range_gates {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) (n : Nat) : ∀ s,
+    (∀ i, i < n → a.registryWire (s + i) < wordBase) →
+    (∀ i, i < n → (a.amountWire (s + i)).Checked) →
+    RangeGates (indexedWires (rowWire a) s n) := by
+  intro s hr ha r hmem
+  obtain ⟨i, hi, rfl⟩ := mem_indexed_wires (rowWire a) n s r hmem
+  exact ⟨hr i hi, ha i hi⟩
+
+theorem indexed_no_rise (w : Nat → Nat) (n : Nat) : ∀ (s : Nat) (previous : Bool),
+    (∀ i, i < n → w (s + i) = 0 ∨ w (s + i) = 1) →
+    (∀ i, i + 1 < n → w (s + i + 1) * (1 - w (s + i)) = 0) →
+    (0 < n → bit (w s == 1) * (1 - bit previous) = 0) →
+    NoRise previous (indexedWires (fun i => w i == 1) s n) := by
+  induction n with
+  | zero => intro s previous _ _ _; trivial
+  | succ n ih =>
+      intro s previous hbool hmono hhead
+      refine ⟨hhead (Nat.succ_pos n), ?_⟩
+      refine ih (s + 1) (w s == 1) ?_ ?_ ?_
+      · intro i hi
+        have hb := hbool (i + 1) (by omega)
+        rwa [show s + (i + 1) = s + 1 + i from by omega] at hb
+      · intro i hi
+        have hm := hmono (i + 1) (by omega)
+        rwa [show s + (i + 1) + 1 = s + 1 + i + 1 from by omega,
+          show s + (i + 1) = s + 1 + i from by omega] at hm
+      · intro hn
+        have hb0 : w s = 0 ∨ w s = 1 := by simpa using hbool 0 (by omega)
+        have hb1 : w (s + 1) = 0 ∨ w (s + 1) = 1 := by simpa using hbool 1 (by omega)
+        have hm := hmono 0 (by omega)
+        rw [bit_of_boolean_wire (w (s + 1)) hb1, bit_of_boolean_wire (w s) hb0]
+        simpa using hm
+
+theorem indexed_active_count (w : Nat → Nat) (n : Nat) : ∀ s,
+    (∀ i, i < n → w (s + i) = 0 ∨ w (s + i) = 1) →
+    activeCount (indexedWires (fun i => w i == 1) s n) = sumWires w s n := by
+  induction n with
+  | zero => intro s _; rfl
+  | succ n ih =>
+      intro s hbool
+      have hb0 : w s = 0 ∨ w s = 1 := by simpa using hbool 0 (by omega)
+      have htail : ∀ i, i < n → w (s + 1 + i) = 0 ∨ w (s + 1 + i) = 1 := by
+        intro i hi
+        have hb := hbool (i + 1) (by omega)
+        rwa [show s + (i + 1) = s + 1 + i from by omega] at hb
+      show bit (w s == 1) + activeCount (indexedWires (fun i => w i == 1) (s + 1) n) = _
+      rw [bit_of_boolean_wire (w s) hb0, ih (s + 1) htail]
+      rfl
+
+theorem accumulator_is_prefix_sum {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) (n : Nat)
+    (hstep : ∀ i, i < n → a.activitySumWire (i + 1) = a.activitySumWire i + a.activityWire i) :
+    a.activitySumWire n = a.activitySumWire 0 + sumWires a.activityWire 0 n := by
+  induction n with
+  | zero => simp [sumWires]
+  | succ n ih =>
+      have hprev : a.activitySumWire n = a.activitySumWire 0 + sumWires a.activityWire 0 n :=
+        ih (fun i hi => hstep i (by omega))
+      rw [hstep n (by omega), hprev, sum_wires_snoc a.activityWire n 0, Nat.zero_add,
+        Nat.add_assoc]
+
+theorem indexed_padding_gates {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) (n : Nat) : ∀ s,
+    (∀ i, i < n → a.activityWire (s + i) = 0 ∨ a.activityWire (s + i) = 1) →
+    (∀ i, i < n → a.inactiveWire (s + i) = 1 - a.activityWire (s + i)) →
+    (∀ i, i < n → a.inactiveWire (s + i) * a.registryWire (s + i) = 0) →
+    (∀ i j, i < n → j < 8 →
+      a.inactiveWire (s + i) * (a.amountWire (s + i)).words.getD j 0 = 0) →
+    ∀ r ∈ indexedWires (rowWire a) s n, PaddingGates r := by
+  intro s hbool hnot hreg hamt r hmem
+  obtain ⟨i, hi, rfl⟩ := mem_indexed_wires (rowWire a) n s r hmem
+  have hb : bit (!(a.activityWire (s + i) == 1)) = a.inactiveWire (s + i) := by
+    rw [not_bit_of_boolean_wire _ (hbool i hi), hnot i hi]
+  refine ⟨?_, ?_⟩
+  · show bit (!(a.activityWire (s + i) == 1)) * a.registryWire (s + i) = 0
+    rw [hb]
+    exact hreg i hi
+  · intro limb hlimb
+    show bit (!(a.activityWire (s + i) == 1)) * limb = 0
+    rw [hb]
+    obtain ⟨j, hj, rfl⟩ := words8_mem_is_a_limb (a.amountWire (s + i)) limb hlimb
+    exact hamt i j hi hj
+
+theorem indexed_unique_gates {Proof Path : Type} {e : Environment Proof Path}
+    (a : Assignment e) (n : Nat) : ∀ s,
+    (∀ i j, i < j → j < n →
+      (if a.registryWire (s + i) = a.registryWire (s + j) then 1 else 0) *
+        a.activityWire (s + j) = 0) →
+    UniqueGates (indexedWires (rowWire a) s n) := by
+  induction n with
+  | zero => intro s _; trivial
+  | succ n ih =>
+      intro s hpair
+      refine ⟨?_, ?_⟩
+      · intro t hmem hact
+        obtain ⟨k, hk, rfl⟩ := mem_indexed_wires (rowWire a) n (s + 1) t hmem
+        have hact1 : a.activityWire (s + 1 + k) = 1 := by simpa [rowWire] using hact
+        have hp := hpair 0 (k + 1) (by omega) (by omega)
+        rw [show s + (k + 1) = s + 1 + k from by omega, Nat.add_zero, hact1, Nat.mul_one] at hp
+        intro heq
+        have heq' : a.registryWire s = a.registryWire (s + 1 + k) := heq
+        rw [if_pos heq'] at hp
+        exact absurd hp (by omega)
+      · refine ih (s + 1) ?_
+        intro i j hij hj
+        have hp := hpair (i + 1) (j + 1) (by omega) (by omega)
+        rwa [show s + (i + 1) = s + 1 + i from by omega,
+          show s + (j + 1) = s + 1 + j from by omega] at hp
+
+theorem indexed_path_gates {Proof Path : Type} (e : Environment Proof Path)
+    (a : Assignment e) (n : Nat) : ∀ s,
+    (∀ i, i < n → a.activityWire (s + i) = 1 →
+      e.merkle.pathRoot (a.pathWire (s + i)) Words8.zero (a.registryWire (s + i)) =
+        a.rootWire (s + i)) →
+    (∀ i, i < n → a.rootWire (s + i + 1) =
+      (if a.activityWire (s + i) = 1
+        then e.merkle.pathRoot (a.pathWire (s + i)) (a.amountWire (s + i))
+          (a.registryWire (s + i))
+        else a.rootWire (s + i))) →
+    PathGates e.merkle (indexedWires (rowWire a) s n) (a.rootWire s) := by
+  induction n with
+  | zero => intro s _ _; trivial
+  | succ n ih =>
+      intro s hcond hstep
+      have hnext : (if a.activityWire s = 1
+          then e.merkle.pathRoot (a.pathWire s) (a.amountWire s) (a.registryWire s)
+          else a.rootWire s) = a.rootWire (s + 1) := by
+        have hs := hstep 0 (by omega)
+        rw [Nat.add_zero] at hs
+        exact hs.symm
+      refine ⟨?_, ?_⟩
+      · intro hact
+        have h1 : a.activityWire s = 1 := (row_wire_active_iff a s).mp hact
+        have hc := hcond 0 (by omega)
+        rw [Nat.add_zero] at hc
+        exact hc h1
+      · show PathGates e.merkle (indexedWires (rowWire a) (s + 1) n)
+          (if (rowWire a s).active = true
+            then e.merkle.pathRoot (a.pathWire s) (a.amountWire s) (a.registryWire s)
+            else a.rootWire s)
+        rw [row_wire_if_active a s, hnext]
+        refine ih (s + 1) ?_ ?_
+        · intro i hi
+          have hc := hcond (i + 1) (by omega)
+          rwa [show s + (i + 1) = s + 1 + i from by omega] at hc
+        · intro i hi
+          have hs := hstep (i + 1) (by omega)
+          rwa [show s + (i + 1) = s + 1 + i from by omega] at hs
+
+theorem indexed_path_fold {Proof Path : Type} (e : Environment Proof Path)
+    (a : Assignment e) (n : Nat) : ∀ s,
+    (∀ i, i < n → a.rootWire (s + i + 1) =
+      (if a.activityWire (s + i) = 1
+        then e.merkle.pathRoot (a.pathWire (s + i)) (a.amountWire (s + i))
+          (a.registryWire (s + i))
+        else a.rootWire (s + i))) →
+    pathFold e.merkle (indexedWires (rowWire a) s n) (a.rootWire s) = a.rootWire (s + n) := by
+  induction n with
+  | zero => intro s _; rfl
+  | succ n ih =>
+      intro s hstep
+      have hnext : (if a.activityWire s = 1
+          then e.merkle.pathRoot (a.pathWire s) (a.amountWire s) (a.registryWire s)
+          else a.rootWire s) = a.rootWire (s + 1) := by
+        have hs := hstep 0 (by omega)
+        rw [Nat.add_zero] at hs
+        exact hs.symm
+      show pathFold e.merkle (indexedWires (rowWire a) (s + 1) n)
+          (if (rowWire a s).active = true
+            then e.merkle.pathRoot (a.pathWire s) (a.amountWire s) (a.registryWire s)
+            else a.rootWire s) = a.rootWire (s + (n + 1))
+      rw [row_wire_if_active a s, hnext]
+      have htail : ∀ i, i < n → a.rootWire (s + 1 + i + 1) =
+          (if a.activityWire (s + 1 + i) = 1
+            then e.merkle.pathRoot (a.pathWire (s + 1 + i)) (a.amountWire (s + 1 + i))
+              (a.registryWire (s + 1 + i))
+            else a.rootWire (s + 1 + i)) := by
+        intro i hi
+        have hs := hstep (i + 1) (by omega)
+        rwa [show s + (i + 1) = s + 1 + i from by omega] at hs
+      rw [ih (s + 1) htail, show s + 1 + n = s + (n + 1) from by omega]
+
+/-- THE GATE-LOWERING THEOREM. Every field of `CircuitConstraints` follows from
+    the ordered builder program alone: no extra environment hypothesis, no extra
+    admission premise, no residual side condition. `Environment` still supplies
+    the opaque dependency callbacks, but only as the SAME callbacks the
+    corresponding `holds` cases already apply to the wire values. This is a
+    statement about the MODEL of the builder program, not about plonky2's
+    compiled gate set. -/
+theorem program_satisfied_implies_constraints {Proof Path : Type}
+    (e : Environment Proof Path) (a : Assignment e)
+    (h : ProgramSatisfied constructorProgram a) :
+    CircuitConstraints e.merkle e.hash e.recursive (readWitness a) := by
+  unfold constructorProgram at h
+  obtain ⟨h, hTail⟩ := satisfied_append h
+  obtain ⟨h, hPathLoop⟩ := satisfied_append h
+  obtain ⟨h, hLeafConst⟩ := satisfied_append h
+  obtain ⟨h, hPairs⟩ := satisfied_append h
+  obtain ⟨h, hPadding⟩ := satisfied_append h
+  obtain ⟨h, hSumTail⟩ := satisfied_append h
+  obtain ⟨h, hSumChunk⟩ := satisfied_append h
+  obtain ⟨h, hRiseChunk⟩ := satisfied_append h
+  obtain ⟨h, hConstChunk⟩ := satisfied_append h
+  obtain ⟨h, _hPathAlloc⟩ := satisfied_append h
+  obtain ⟨h, hBoolChunk⟩ := satisfied_append h
+  obtain ⟨h, hAmountChunk⟩ := satisfied_append h
+  obtain ⟨hHead, hRegistryChunk⟩ := satisfied_append h
+  -- literal head chunk
+  have hVerified : e.recursive.circuitAccepts a.balanceProofWire :=
+    hHead .allocateProofAndVerifyPinnedCyclic (by simp)
+  have hPoseidon : e.hash.privateCommitment a.privateStateWire.words =
+      a.openedPrivateCommitmentWire := hHead .computePrivatePoseidon (by simp)
+  have hOpening : a.openedPrivateCommitmentWire =
+      a.balanceProofWire.statement.privateCommitment := hHead .connectPrivateCommitment (by simp)
+  have hExtended : a.extendedStateWire.Checked := hHead .allocateExtendedChecked (by simp)
+  have hInner : a.balanceProofWire.statement.publicState = a.extendedStateWire.inner :=
+    hHead .connectInnerPublicState (by simp)
+  have hCountRange : a.tokenCountWire < wordBase := hHead .rangeCount32 (by simp)
+  -- constants
+  have hZero : a.zeroWire = 0 ∧ a.activitySumWire 0 = a.zeroWire :=
+    hConstChunk .constantZero (by simp)
+  have hOne : a.oneWire = 1 := hConstChunk .constantOne (by simp)
+  have hZeroLeaf : a.zeroLeafWire = Words8.zero := hLeafConst .constantZeroLeaf (by simp)
+  have hEmptyRoot : a.rootWire 0 = e.merkle.emptyRoot := hLeafConst .constantEmptyRoot (by simp)
+  have hSumCount : a.activitySumWire maxTokens = a.tokenCountWire :=
+    hSumTail .connectSumToCount (by simp)
+  have hFirst : a.activityWire 0 = 1 := hSumTail .assertFirstActive (by simp)
+  have hFinalRoot : a.rootWire maxTokens = a.privateStateWire.assetTreeRoot :=
+    hTail .connectFinalAssetRoot (by simp)
+  -- indexed families
+  have hRegistry : ∀ i, i < maxTokens → a.registryWire i < wordBase := by
+    intro i hi
+    exact (satisfied_bind_range hRegistryChunk i hi) (.rangeRegistry32 i) (by simp)
+  have hAmount : ∀ i, i < maxTokens → (a.amountWire i).Checked :=
+    satisfied_map_range hAmountChunk
+  have hBool : ∀ i, i < maxTokens → a.activityWire i = 0 ∨ a.activityWire i = 1 :=
+    satisfied_map_range hBoolChunk
+  have hSumStep : ∀ i, i < maxTokens →
+      a.activitySumWire (i + 1) = a.activitySumWire i + a.activityWire i :=
+    satisfied_map_range hSumChunk
+  have hRise : ∀ i, i + 1 < maxTokens →
+      a.activityWire (i + 1) * (1 - a.activityWire i) = 0 := by
+    intro i hi
+    have hc := satisfied_bind_range hRiseChunk i (by simp only [maxTokens] at hi ⊢; omega)
+    have h1 : a.oneMinusActivityWire i = a.oneWire - a.activityWire i :=
+      hc (.subtractActivityFromOne i) (by simp)
+    have h2 : a.riseProductWire i = a.activityWire (i + 1) * a.oneMinusActivityWire i :=
+      hc (.multiplyNextActivity i) (by simp)
+    have h3 : a.riseProductWire i = a.zeroWire := hc (.connectNoRiseZero i) (by simp)
+    have h4 : a.activityWire (i + 1) * a.oneMinusActivityWire i = 0 := by
+      rw [← h2, h3, hZero.1]
+    rwa [h1, hOne] at h4
+  have hNot : ∀ i, i < maxTokens → a.inactiveWire i = 1 - a.activityWire i := by
+    intro i hi
+    exact (satisfied_append (satisfied_bind_range hPadding i hi)).1 (.notActivity i) (by simp)
+  have hDirtyReg : ∀ i, i < maxTokens → a.inactiveWire i * a.registryWire i = 0 := by
+    intro i hi
+    have hc := (satisfied_append (satisfied_bind_range hPadding i hi)).1
+    have h1 : a.dirtyRegistryWire i = a.inactiveWire i * a.registryWire i :=
+      hc (.multiplyInactiveRegistry i) (by simp)
+    have h2 : a.dirtyRegistryWire i = a.zeroWire := hc (.connectInactiveRegistryZero i) (by simp)
+    rw [← h1, h2, hZero.1]
+  have hDirtyAmount : ∀ i j, i < maxTokens → j < 8 →
+      a.inactiveWire i * (a.amountWire i).words.getD j 0 = 0 := by
+    intro i j hi hj
+    have hc :=
+      satisfied_bind_range (satisfied_append (satisfied_bind_range hPadding i hi)).2 j hj
+    have h1 : a.dirtyAmountWire i j = a.inactiveWire i * (a.amountWire i).words.getD j 0 :=
+      hc (.multiplyInactiveAmount i j) (by simp)
+    have h2 : a.dirtyAmountWire i j = a.zeroWire := hc (.connectInactiveAmountZero i j) (by simp)
+    rw [← h1, h2, hZero.1]
+  have hPair : ∀ i j, i < j → j < maxTokens →
+      (if a.registryWire i = a.registryWire j then 1 else 0) * a.activityWire j = 0 := by
+    intro i j hij hj
+    have hc := satisfied_ordered_pairs hPairs i j hij hj
+    have h1 : a.registryEqualWire i j =
+        (if a.registryWire i = a.registryWire j then 1 else 0) :=
+      hc (.equalRegistry i j) (by simp)
+    have h2 : a.duplicateActiveWire i j = a.registryEqualWire i j * a.activityWire j :=
+      hc (.andEqualWithLaterActive i j) (by simp)
+    have h3 : a.duplicateActiveWire i j = a.zeroWire := hc (.connectDuplicateZero i j) (by simp)
+    rw [← h1, ← h2, h3, hZero.1]
+  have hCond : ∀ i, i < maxTokens → a.activityWire i = 1 →
+      e.merkle.pathRoot (a.pathWire i) Words8.zero (a.registryWire i) = a.rootWire i := by
+    intro i hi
+    have hc : a.activityWire i = 1 →
+        e.merkle.pathRoot (a.pathWire i) a.zeroLeafWire (a.registryWire i) = a.rootWire i :=
+      (satisfied_bind_range hPathLoop i hi) (.conditionalVerifyZeroPath i) (by simp)
+    rwa [hZeroLeaf] at hc
+  have hStep : ∀ i, i < maxTokens → a.rootWire (i + 1) =
+      (if a.activityWire i = 1
+        then e.merkle.pathRoot (a.pathWire i) (a.amountWire i) (a.registryWire i)
+        else a.rootWire i) := by
+    intro i hi
+    have hc := satisfied_bind_range hPathLoop i hi
+    have hins : a.insertedRootWire i =
+        e.merkle.pathRoot (a.pathWire i) (a.amountWire i) (a.registryWire i) :=
+      hc (.computeInsertedRoot i) (by simp)
+    have hsel : a.rootWire (i + 1) =
+        (if a.activityWire i = 1 then a.insertedRootWire i else a.rootWire i) :=
+      hc (.selectUpdatedRoot i) (by simp)
+    rwa [hins] at hsel
+  -- zero-shifted forms
+  have hBool0 : ∀ i, i < maxTokens → a.activityWire (0 + i) = 0 ∨ a.activityWire (0 + i) = 1 := by
+    intro i hi
+    rw [Nat.zero_add]
+    exact hBool i hi
+  refine
+    { verifiedBalance := hVerified
+      privateOpening := hPoseidon.trans hOpening
+      publicConnection := hInner
+      extendedRanges := hExtended
+      vector := ?_
+      paths := ?_
+      rootConnection := ?_ }
+  · refine
+      { width := indexed_wires_length _ _ _
+        countRange := hCountRange
+        ranges := ?_
+        prefixGates := ?_
+        sum := ?_
+        first := ?_
+        padding := ?_
+        distinct := ?_ }
+    · refine indexed_range_gates a maxTokens 0 ?_ ?_
+      · intro i hi; rw [Nat.zero_add]; exact hRegistry i hi
+      · intro i hi; rw [Nat.zero_add]; exact hAmount i hi
+    · show NoRise true (activity (assignedRows a))
+      rw [activity_assigned_rows]
+      refine indexed_no_rise a.activityWire maxTokens 0 true hBool0 ?_ ?_
+      · intro i hi
+        simp only [Nat.zero_add]
+        exact hRise i hi
+      · intro _
+        simp [bit]
+    · show activeCount (activity (assignedRows a)) = a.tokenCountWire
+      rw [activity_assigned_rows, indexed_active_count a.activityWire maxTokens 0 hBool0]
+      have hacc := accumulator_is_prefix_sum a maxTokens hSumStep
+      rw [hSumCount, hZero.2, hZero.1, Nat.zero_add] at hacc
+      exact hacc.symm
+    · show (activity (assignedRows a)).head? = some true
+      rw [activity_assigned_rows, show maxTokens = 9 + 1 from rfl,
+        indexed_wires_head (fun i => a.activityWire i == 1) 9 0, hFirst]
+      rfl
+    · refine indexed_padding_gates a maxTokens 0 hBool0 ?_ ?_ ?_
+      · intro i hi; simp only [Nat.zero_add]; exact hNot i hi
+      · intro i hi; simp only [Nat.zero_add]; exact hDirtyReg i hi
+      · intro i j hi hj; simp only [Nat.zero_add]; exact hDirtyAmount i j hi hj
+    · refine indexed_unique_gates a maxTokens 0 ?_
+      intro i j hij hj
+      simp only [Nat.zero_add]
+      exact hPair i j hij hj
+  · show PathGates e.merkle (assignedRows a) e.merkle.emptyRoot
+    rw [← hEmptyRoot]
+    refine indexed_path_gates e a maxTokens 0 ?_ ?_
+    · intro i hi; simp only [Nat.zero_add]; exact hCond i hi
+    · intro i hi; simp only [Nat.zero_add]; exact hStep i hi
+  · show pathFold e.merkle (assignedRows a) e.merkle.emptyRoot =
+      a.privateStateWire.assetTreeRoot
+    rw [← hEmptyRoot, ← hFinalRoot]
+    have hfold : pathFold e.merkle (indexedWires (rowWire a) 0 maxTokens) (a.rootWire 0) =
+        a.rootWire (0 + maxTokens) := by
+      refine indexed_path_fold e a maxTokens 0 ?_
+      intro i hi
+      simp only [Nat.zero_add]
+      exact hStep i hi
+    rw [Nat.zero_add] at hfold
+    exact hfold
+
+/-- The 26 registered wires are exactly the model's `computedPublicInputs` of the
+    witness the same assignment reads back — again from the program alone. -/
+theorem program_satisfied_computes_public_inputs {Proof Path : Type}
+    (e : Environment Proof Path) (a : Assignment e)
+    (h : ProgramSatisfied constructorProgram a) :
+    readPublic a = computedPublicInputs e.hash (readWitness a) := by
+  unfold constructorProgram at h
+  obtain ⟨_, hTail⟩ := satisfied_append h
+  have hDomain : a.tokenFundsDomainWire = tokenFundsDomain :=
+    hTail .constantTokenFundsDomain (by simp)
+  have hLimbs : a.amountLimbsWire = amountWords (assignedRows a) :=
+    hTail .flattenAmountLimbs (by simp)
+  have hPre : a.digestPreimageWire =
+      [a.tokenFundsDomainWire] ++ registryWords (assignedRows a) ++ [a.tokenCountWire] ++
+        a.amountLimbsWire := hTail .concatenateDigestPreimage (by simp)
+  have hDigest : a.tokenFundsDigestWire = e.hash.tokenFundsHash a.digestPreimageWire :=
+    hTail .computeKeccakTokenFunds (by simp)
+  have hCommitment : a.extendedCommitmentWire =
+      e.hash.extendedCommitment a.extendedStateWire.words :=
+    hTail .computeExtendedPoseidonBytes (by simp)
+  have hAssemble := hTail .assembleComputedPublicInputs (by simp)
+  rw [hDomain, hLimbs] at hPre
+  rw [hPre] at hDigest
+  show a.publicWire = _
+  rw [hAssemble, hDigest, hCommitment]
+  rfl
+
 end Zkp.Implementation.CloseAssetBacking
