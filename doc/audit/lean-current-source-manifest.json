@@ -320,7 +320,7 @@
     },
     {
       "path": "src/circuits/channel/close_asset_backing_circuit.rs",
-      "sha256": "1f59ca8d5ef2073326909c2c9dc447e80f30968546ea4afd987da74eb7ee7317",
+      "sha256": "370f8ba34ba687a19b850472bf6720f8317791ecc6a2d1d2e82b41cbdd8c496e",
       "role": "implementation"
     },
     {
@@ -380,12 +380,12 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "2813d0a9ae86addc7e926105be9457e74d9a5b2fbc366804e4346ec07d8bf903",
+      "sha256": "966a461cac425ae2a74b376eae145c51e1a740823d48d5829f690e10c8eb7adc",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "baa7a1303d2b6ddb6a294aecbba2ea2de5f32f0ddbc34d362a484c48f3e9ef17",
+      "sha256": "dc531f27a354f73dc2bc0c214be36c91454970d55d4dc76f131711af04a765e2",
       "role": "spec"
     },
     {
@@ -400,7 +400,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/close-asset-backing.json",
-      "sha256": "0405358d816e8f8685089b7a6c3e88fb5855d5fcfed0fc28526fcee79b978fbc",
+      "sha256": "18a3d791b220aa2cd94968f0d02a2e113e2babb735ba85a71e0247b93a335208",
       "role": "spec"
     },
     {
@@ -1215,12 +1215,12 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/SystemSafety.lean",
-      "sha256": "2f20799008fbaa2b6c1d89c1fafdc22a7be0afec3de3f11f2857331596a8a7ec",
+      "sha256": "331210ee826937ec27ab440850fe7742d93627fb3a11a994c5a006d969c51b66",
       "role": "model"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "6bed037ebe80581a22485efa6d4de818e2f7d82ec9b7db56ac44fc24a0479c63",
+      "sha256": "be1fa8ded25ca2ab36696806819d537127301debec31e4a43d9f7685490e79a0",
       "role": "model"
     },
     {
@@ -2410,17 +2410,17 @@
     },
     {
       "path": "doc/audit/zkp/evidence/README.md",
-      "sha256": "226b59ac19f54d4ddfdc9b141dff9e20b7f17d14090d27a13829e51d2e367700",
+      "sha256": "7b10dda873d5ce2daff3494df719bf9ecd98259bc53aec4025d209cf993e8e53",
       "role": "tooling"
     },
     {
       "path": "doc/audit/zkp/evidence/faithfulness-CloseAssetBacking.ops",
-      "sha256": "045cdfa2609791273bbd62eaef03ab9690e0d50a920111a30ecd33fbc21e953a",
+      "sha256": "81bf6fd6b4b2721c069e1bd37d18eb1e6fb9a80dff50fc41e865c9ab278f2e9e",
       "role": "tooling"
     },
     {
       "path": "doc/audit/zkp/evidence/faithfulness-CloseAssetBacking.tsv",
-      "sha256": "6f4f0aeb83026b33a2db824361ca4e667a6ac8144c8e5de77f2c8996b26c557f",
+      "sha256": "914b4b45f78f2de52acd4bcc5b897695ce0fcaa8b3988bb3e2e980fd83a4bb5b",
       "role": "tooling"
     },
     {

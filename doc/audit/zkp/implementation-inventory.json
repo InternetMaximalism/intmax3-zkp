@@ -664,8 +664,8 @@
     },
     {
       "path": "src/circuits/channel/close_asset_backing_circuit.rs",
-      "sha256": "1f59ca8d5ef2073326909c2c9dc447e80f30968546ea4afd987da74eb7ee7317",
-      "lines": 1196,
+      "sha256": "370f8ba34ba687a19b850472bf6720f8317791ecc6a2d1d2e82b41cbdd8c496e",
+      "lines": 1398,
       "category": "core",
       "line_map": "doc/audit/zkp/line-map/close-asset-backing.json"
     },

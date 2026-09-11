@@ -2,12 +2,12 @@
 # op	kind	verdict
 addActivityToSum [0..10)	arith	not-static
 allocateCheckedU256 [0..10)	range	ok
-allocateCount / rangeCount32	range	ok
+allocateCount	no-gate	trivial
 allocateExtendedChecked	range	ok
 allocatePath [0..10)	width	ok
 allocatePrivateUnchecked	range	ok
 allocateProofAndVerifyPinnedCyclic	gadget	not-static
-allocateRegistry / rangeRegistry32 [0..10)	range	ok
+allocateRegistry [0..10)	no-gate	trivial
 allocateSafeBoolean [0..10)	arith	not-static
 andEqualWithLaterActive [45 pairs]	arith	not-static
 assembleComputedPublicInputs	aliasing	ok
@@ -18,26 +18,31 @@ computeExtendedPoseidonBytes	gadget	not-static
 computeInsertedRoot [0..10)	gadget	not-static
 computeKeccakTokenFunds	gadget	not-static
 computePrivatePoseidon	gadget	not-static
+concatenateDigestPreimage	preimage	ok
 conditionalVerifyZeroPath [0..10)	gadget	not-static
-connectDuplicateZero [45 pairs]	arith	not-static
+connectDuplicateZero [45 pairs]	connect	ok
 connectFinalAssetRoot	connect	ok
-connectInactiveAmountZero [0..10)x[0..8)	arith	not-static
-connectInactiveRegistryZero [0..10)	arith	not-static
+connectInactiveAmountZero [0..10)x[0..8)	connect	ok
+connectInactiveRegistryZero [0..10)	connect	ok
 connectInnerPublicState	connect	ok
-connectNoRiseZero [0..9)	arith	not-static
+connectNoRiseZero [0..9)	connect	ok
 connectPrivateCommitment	connect	ok
 connectSumToCount	connect	ok
 constantEmptyRoot	constant	ok
-constantTokenFundsDomain / flattenAmountLimbs / concatenateDigestPreimage	preimage	ok
-constantZero / constantOne	constant	ok
+constantOne	constant	ok
+constantTokenFundsDomain	constant	ok
+constantZero	constant	ok
 constantZeroLeaf	constant	ok
 decodeBalanceTargetPis	aliasing	ok
 equalRegistry [45 pairs]	arith	not-static
+flattenAmountLimbs	aliasing	ok
 multiplyInactiveAmount [0..10)x[0..8)	arith	not-static
 multiplyInactiveRegistry [0..10)	arith	not-static
 multiplyNextActivity [0..9)	arith	not-static
 notActivity [0..10)	arith	not-static
+rangeCount32	range	ok
+rangeRegistry32 [0..10)	range	ok
 registerPublicInputs 26	public-inputs	ok
-selectUpdatedRoot [0..10)	gadget	not-static
+selectUpdatedRoot [0..10)	arith	not-static
 startStandardRecursionZk	config	ok
 subtractActivityFromOne [0..9)	arith	not-static

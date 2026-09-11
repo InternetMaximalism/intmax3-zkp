@@ -56,6 +56,36 @@ An op may occupy several rows when its `holds` has both a structural and a non-s
 * `mutation` — covered by a proving test that violates exactly this claim; the `detail` names it.
 * `not-injectable` — the violation cannot be expressed through the circuit's public witness API.
 
+### `CloseAssetBacking`
+
+`faithfulness-CloseAssetBacking.tsv` used to carry a caveat: the Lean module had a `BuildOp`
+transcript but no per-op `holds`, so the table was diffed against what each op's *name and
+docstring* asserted, plus whichever `CircuitConstraints` fields happened to be copy constraints.
+**That caveat is gone.** `doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean` now defines
+`BuildOp.holds` for all 45 constructors (468 program entries) over an `Assignment` of every wire
+the constructor allocates, and `program_satisfied_implies_constraints` derives every
+`CircuitConstraints` field from `ProgramSatisfied constructorProgram` alone. The table is now
+diffed against those actual `holds` cases: there is exactly **one row per `BuildOp` constructor**
+(46 rows, counting `registerPublicInputs` and `buildCircuit`), each row's `detail` opens with the
+`holds` proposition it is diffing, and the verdict says whether the built circuit was checked
+against it (`ok`), whether the proposition is arithmetic/gadget semantics the partition cannot see
+(`not-static`), or whether `holds` is literally `True` (`trivial`).
+
+Four rows moved from `not-static` to `ok` in that re-diff, because the `holds` case is a plain
+`connect` to the zero constant rather than the arithmetic that produced the wire:
+`connectNoRiseZero`, `connectInactiveRegistryZero`, `connectInactiveAmountZero` and
+`connectDuplicateZero` (9 + 10 + 80 + 45 = 144 wires). The multiply/`is_equal`/`and`/`not` ops that
+*feed* them stay `not-static`. Rows previously merged (`allocateCount / rangeCount32`,
+`constantZero / constantOne`, the three digest-preimage ops) were split so that each constructor
+is diffed on its own, and several checks were widened to the full `holds` conjunction — notably
+`allocateExtendedChecked` (all eight conjuncts of `ExtendedPublicState.Checked`, including
+`blockNumber < 2^63` and `depositCount < 2^63`), `connectInnerPublicState` (all 15 inner wires),
+`decodeBalanceTargetPis` (all 29 re-sliced statement wires) and `constantZero` (the second
+conjunct, `activitySumWire 0 = zeroWire`). A constructor whose `holds` is `True` but whose
+docstring still makes a checkable structural claim carries that claim as its executed check and
+says so in the `detail`, so a docstring that stops describing the circuit surfaces as a `MISMATCH`
+too. No `MISMATCH` row was produced: 27 `ok`, 16 `not-static`, 3 `trivial`.
+
 ## How the static check works
 
 After `CircuitBuilder::build`, `CircuitData.prover_only.representative_map`
@@ -92,3 +122,7 @@ offset by hand.
 ran to completion on all six files is an independent mechanical confirmation of the property this
 layer depends on: the probes add lines and change none, so the runtime constraint system outside
 `#[cfg(test)]` is byte-identical.
+
+## Measured run cost (2026-09-11, audit machine)
+
+`cargo test --release --locked --lib -- --test-threads=1 faithfulness`: 18 tests, 209 s wall (221.9 s on the second run after the CloseAssetBacking re-diff), peak RSS 26.6 GB. Touched-module regressions re-run alongside: 76 tests / 1,237 s / 33.5 GB and `close_circuit::tests` 17 tests / 196 s / 8.8 GB. The lib suite is OOM-killed at any parallelism; a SIGKILL looks like a test failure.
