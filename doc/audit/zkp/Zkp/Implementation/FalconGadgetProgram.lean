@@ -156,13 +156,21 @@ theorem twiddle_table_spot_checks :
 /-- The tables are inverse at every spot-checked index. -/
 theorem twiddle_tables_are_inverse_at_one : psiRev 1 * psiInvRev 1 % falconQ = 1 := by decide
 
+/-- Why each transcribed loop's `holds` may be stated in solved form: ONE `reduce_mod_q`
+gate (:276-289, constraining through `constrain_mod_q_decomposition`, :243-275) pins BOTH
+of its witness wires, so a batch of such gates and the functional equation the batch
+computes carry exactly the same information. -/
+theorem reduction_gate_pins_both_wires (t k r kBits : Nat) (hg : modQGates t k r kBits) :
+    k = t / falconQ ∧ r = t % falconQ :=
+  mod_q_decomposition_unique t k r kBits hg
+
 /-! ## 2. The transcribed NTT (`ntt_forward` :434-472, `ntt_inverse` :473-514,
 `pointwise_mul` :515-539)
 
 The mutable `Vec<Target> a` of the source is modelled as a total function `Nat → Nat`
 (out-of-range indices read 0, exactly like the `wireOf` lift of a coefficient list). Each
 `reduce_mod_q` result is written as `% q`, which `FalconCore.mod_q_decomposition_unique`
-shows is the unique value the reduction's gates admit. The `while` loops carry an explicit
+shows is the unique value the reduction's gates allow. The `while` loops carry an explicit
 fuel of 10, one more than the 9 stages the source runs. -/
 
 /-- `0, 1, ..., n-1` in ascending order — the iteration order of every `for` loop below. -/
@@ -444,17 +452,21 @@ def packLimbs (limbs : List Nat) : Nat := limbs.foldl (fun acc x => acc * 429496
 
 /-- One builder call of `FalconSigVerifyTarget::build` (gadget.rs:651-736). -/
 inductive GadgetOp where
-  /-- `twiddle_tables()`, :655. -/
+  /-- `twiddle_tables()`, :655. Build-time assertions on the tables only; emits NO
+  constraint, so its `holds` is `True`. The assertions themselves are the `decide`d pins
+  `psi_half_order_is_minus_one`, `psi_order`, `psi_inverse_pinned` and `n_inv_pinned`. -/
   | twiddleTables
   /-- `Bytes32Target::new(builder, true)` for `pk_g`, :659. -/
   | allocPkG
   /-- `Bytes32Target::new(builder, true)` for `message_digest`, :660. -/
   | allocMessageDigest
-  /-- `core::array::from_fn(add_virtual_target)`, :663. -/
+  /-- `core::array::from_fn(add_virtual_target)`, :663. Allocation emits no gate; the
+  `[Target; 8]` TYPE fixes the vector's length, which is all `holds` states. -/
   | witnessSalt
-  /-- `(0..N).map(add_virtual_target)` for `h`, :664. -/
+  /-- `(0..N).map(add_virtual_target)` for `h`, :664. Allocation only; `holds` states the
+  length the `(0..N)` range fixes. -/
   | witnessH
-  /-- the same for `s2`, :665. -/
+  /-- the same for `s2`, :665. Allocation only. -/
   | witnessS2
   /-- the `h.iter().chain(s2.iter())` canonicity loop, :670-672. -/
   | canonicalCoeffs
@@ -480,7 +492,8 @@ inductive GadgetOp where
   | centeredSquaresS2
   /-- `add_many(&squares)`, :707. -/
   | normSum
-  /-- `builder.constant(FALCON_SIG_L2_BOUND)`, :716-718. -/
+  /-- `builder.constant(FALCON_SIG_L2_BOUND)`, :716-718. A constant wire constrains
+  nothing, so its `holds` is `True`; the literal is `FalconCore.falconSigL2Bound`. -/
   | betaConstant
   /-- `builder.sub(beta_sq, norm)`, :719. -/
   | slackSub
@@ -488,7 +501,8 @@ inductive GadgetOp where
   | selectVerify
   /-- `range_check(checked_slack, 26)`, :727. -/
   | slackRange
-  /-- the returned `Self { .. }`, :729-735. -/
+  /-- the returned `Self { .. }`, :729-735. A struct literal emits NO constraint, so its
+  `holds` is `True`. -/
   | buildTarget
   deriving DecidableEq, Repr
 
@@ -584,10 +598,13 @@ theorem constraint_free_ops_are_trivial (e : FalconCore.HashEnvironment)
     OpHolds e .twiddleTables a ∧ OpHolds e .betaConstant a ∧ OpHolds e .buildTarget a :=
   ⟨trivial, trivial, trivial⟩
 
-/-- `new` (:615-619) and `new_conditional` (:644-649) differ only in the `select` of
-:720-726; both run the identical `build`. -/
-theorem new_and_new_conditional_share_the_program :
-    gadgetProgram = gadgetProgram := rfl
+/-- `new` (:615-619) and `new_conditional` (:644-649) both run the identical `build`; they
+differ only in the `select` of :720-726, which is the `selectVerify` op. With `new` the
+wire is absent and `checked_slack = slack`, i.e. exactly the `verifyBit = 1` branch. -/
+theorem select_verify_with_active_wire_is_the_unconditional_slack
+    (e : FalconCore.HashEnvironment) (a : GadgetAssignment e)
+    (hop : OpHolds e .selectVerify a) (hact : a.verifyBit = 1) : a.checkedSlack = a.slack := by
+  rw [hop.2, if_pos hact]
 
 /-! ## 6. The lowering theorem -/
 
@@ -686,7 +703,7 @@ theorem gadget_program_satisfied_implies_circuit_satisfied (e : FalconCore.HashE
     exact hRange
 
 /-- The obligation that remains after the reduction: the actual plonky2 constraint system
-admits only assignments satisfying every primitive of `gadgetProgram`. Strictly
+accepts only assignments satisfying every primitive of `gadgetProgram`. Strictly
 per-primitive; never instantiated here. -/
 def PrimitiveLowering (e : FalconCore.HashEnvironment)
     (actual : GadgetAssignment e → Prop) : Prop :=
@@ -721,7 +738,7 @@ theorem foldl_invariant {α β : Type} (P : β → Prop) (f : β → α → β)
   intro l
   induction l with
   | nil => intro b hb; exact hb
-  | cons x xs ih => intro b hb; exact ih (f b x) (hf b x hb)
+  | cons x _xs ih => intro b hb; exact ih (f b x) (hf b x hb)
 
 theorem upd_all_zero {a : Nat → Nat} (ha : AllZero a) (j : Nat) : AllZero (upd a j 0) := by
   intro i
