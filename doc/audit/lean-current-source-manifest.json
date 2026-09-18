@@ -1220,7 +1220,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "4db24288c2ba439b16e544dfa710c7aa35e426ffca5389a25d08e09feac779c0",
+      "sha256": "c99f1856ff76d04fa06360ec8729e0d4643958e079d63df7574fbd962e149356",
       "role": "model"
     },
     {
