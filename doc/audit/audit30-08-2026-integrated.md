@@ -1,5 +1,11 @@
 # INTMAX3 integrated pre-release security audit (2026-08-30)
 
+> **⚠ RELEASE CONCLUSIONS SUPERSEDED (pointer added 2026-09-18).** This is a dated, frozen
+> record. Its NO-GO verdict and open/closed statuses describe the codebase at its own base
+> commit; **the NO-GO determination has since been lifted**. The record of release
+> disposition is `release-status-2026-09-18.md`. The technical body below stands as history.
+
+
 > **INTEGRATION EVIDENCE, NOT RELEASE APPROVAL.** The runtime source was frozen after the final
 > no-skip Forge runs and bytecode measurements below. The parent SHA is the commit containing this
 > report (reported at handoff rather than embedded self-referentially). Full clean-clone Rust/Lean,

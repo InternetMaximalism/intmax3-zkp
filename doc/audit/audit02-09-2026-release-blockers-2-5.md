@@ -1,5 +1,11 @@
 # Release blockers 2–5 security closure audit (2026-09-02)
 
+> **⚠ RELEASE CONCLUSIONS SUPERSEDED (pointer added 2026-09-18).** This is a dated, frozen
+> record. Its NO-GO verdict and open/closed statuses describe the codebase at its own base
+> commit; **the NO-GO determination has since been lifted**. The record of release
+> disposition is `release-status-2026-09-18.md`. The technical body below stands as history.
+
+
 > **Release verdict: NO-GO.** This branch implements and hardens the requested blocker 2–5
 > plumbing, but it does not repair the separately owned MLE/WHIR PCS soundness defect, does not yet
 > provide a signer-independent terminal exit kit for the latest accepted head, and has not been

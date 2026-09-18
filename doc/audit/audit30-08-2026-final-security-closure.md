@@ -1,5 +1,11 @@
 # INTMAX3 final security-closure audit (2026-08-30)
 
+> **⚠ RELEASE CONCLUSIONS SUPERSEDED (pointer added 2026-09-18).** This is a dated, frozen
+> record. Its NO-GO verdict and open/closed statuses describe the codebase at its own base
+> commit; **the NO-GO determination has since been lifted**. The record of release
+> disposition is `release-status-2026-09-18.md`. The technical body below stands as history.
+
+
 > **Release verdict: NO-GO.** This report supersedes the release conclusions in
 > `audit30-08-2026-integrated.md`. It records the exact state reached after merging the independent
 > Opus audit, three attacker/defender rounds, and a final independent review. It is not a claim that
