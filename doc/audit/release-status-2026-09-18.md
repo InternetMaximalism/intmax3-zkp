@@ -30,40 +30,55 @@ under `mle/audit` (Lean 4, its own guard `check-wire3.py`). Status reported 2026
 
 | | |
 |---|---|
-| Audit head | `4ae524dc` — `audit(wire3): record the 43a454fb fresh-source receipt` (2026-09-18) |
+| Audit head | `4ae524dc` — `audit(wire3): record the 43a454fb fresh-source receipt` (2026-09-18); carried into `3a20a05f`, which this repository now pins |
 | Merged to | the submodule's own `main`, fast-forwarded `becfe98e` → `4ae524dc`, pushed |
 | Guard | PASS — **157 models / 516 files / 6,542 theorems** |
 | Fresh-source rebuild | run twice from clean output; the first run caught a mid-run file-change conflict, re-run after edits settled |
 | Documentation | `README.md`, `SCOPE.md`, `REPORT.md` (2,244 lines, all 55 continuation-update sections) and the three `HISTORICAL-*` files translated to English with every proved/not-proved distinction, hedge, citation, hash and identifier preserved; zero CJK characters verified independently in all six. The guard scripts contained no Japanese. |
 | Adversarial work carried | the 2026-09-18 re-audit of the deployed verifier, with PoC suites (`PocWhirFiatShamir`, `PocGateExt3Production`, `PocOuterCanonicality`, `PocOuterFraudVerdict`, `PocWhirDotEqBounds`) |
 
-### The audited tree is not the tree this repository pins
+### The audited tree is now the tree this repository pins — RESOLVED
 
-This is the one qualification on the confirmation above, and it needs reconciling before the wire3
-audit can be cited as covering what this repository deploys.
+This was open earlier the same day and is now closed.
 
-- This repository pins `contracts/lib/polygon-plonky2` at **`6cefc6ac`** — on this branch, on
-  `origin/main`, and in `doc/audit/lean-current-source-manifest.json`.
-- The audit line's head is **`4ae524dc`**.
-- **The two have diverged.** Their merge base is `b569e0d7` (2026-09-04). The pinned commit adds two
-  merges the audit line does not have (`ca5c8fc6` "Merge wire-v3 PCS repair into main integration
-  branch and isolate legacy APIs", then `6cefc6ac` "Merge main PCS isolation while retaining
-  target-105 verifier optimizations"). The audit line adds 66 commits the pin does not have.
-- The PCS repair itself (`5b1c28ae`), `96b5836c` and `b569e0d7` are ancestors of **both**, so both
-  lines carry the repair.
-- The divergence is not confined to audit artifacts: `git diff 6cefc6ac 4ae524dc` touches verifier
-  source — `mle/src/commitment/whir_pcs.rs` (44 lines), `mle/src/prover.rs` (14),
-  `mle/src/lib.rs` (38 deletions), `mle/src/verifier.rs` (2), `mle/src/fixture.rs`,
-  `mle/src/generated/mle_whir_v2.rs`, plus the legacy-containment test harnesses.
+The two lines had diverged from merge base `b569e0d7`: the pin `6cefc6ac` carried the isolation
+merges (`ca5c8fc6`, then `6cefc6ac` itself), and the audit line `4ae524dc` carried 66 audit
+commits. Moving the pointer straight to `4ae524dc` would have broken this repository — the parent's
+`deprecated-msu = ["plonky2_mle/legacy-conformance"]` (`Cargo.toml:223`) names a feature that exists
+in `6cefc6ac`'s `mle/Cargo.toml` and not in `4ae524dc`'s — and would have un-gated the historical
+protocol-1 prover and verifier that `audit30-08-2026` recorded as isolated.
 
-Consequence: the Lean premise (a0) `mleVerifierSoundness` in `Zkp.Implementation.TrustBoundary` is
-scoped **by commit** to `6cefc6ac`, while the wire3 audit's evidence is about `4ae524dc`. The wire3
-result therefore does not transfer to the pinned artifact as-is.
+The submodule side therefore took the isolation line into its own `main`, producing **`3a20a05f`**
+(`merge(non-audit): take the mle-node-safety isolation line (ca5c8fc6, 6cefc6ac)`), pushed. This
+repository now pins that commit — gitlink, `doc/audit/lean-current-source-manifest.json`, and the
+(a0) scope statement in `Zkp.Implementation.TrustBoundary` all updated together.
 
-**Action:** reconcile the two lines — either merge the isolation work into the audit line and re-run
-its guard and fresh-source receipt, or merge the audit line into the pinned line and advance this
-repository's submodule pointer and manifest pin — then restate (a0)'s scope at the resulting commit.
-Until then, cite the wire3 audit as covering `4ae524dc`, not the deployed pin.
+Checks made before moving the pin:
+
+- `4ae524dc` and the PCS repair `5b1c28ae` are both ancestors of `3a20a05f`.
+- `legacy-conformance` is present in `3a20a05f`'s `mle/Cargo.toml`, so the parent's `deprecated-msu`
+  feature resolves and the protocol-1 entrypoints stay gated.
+- On source paths (`mle/src`, `mle/contracts/src`, `mle/Cargo.toml`, `plonky2`, `field`, `util`,
+  `starky`), `git diff 6cefc6ac 3a20a05f` is **one file**: `mle/src/verifier.rs`, +15/−2, and the
+  change is entirely comments recording the D3 history and why the retained fold is now only a
+  shape guard. No semantic change, and that file is behind `legacy-conformance` in any case.
+- Everything else `3a20a05f` adds over `6cefc6ac` is additive: the audit corpus, the PoC suites
+  (`PocWhirFiatShamir`, `PocGateExt3Production`, `PocOuterCanonicality`, `PocOuterFraudVerdict`,
+  `PocWhirDotEqBounds`, and the Rust `poc_*` tests), the re-audit task note and its test vectors.
+
+Submodule-side verification of `3a20a05f`, as reported: Lean guard PASS (157 models / 520 files /
+6,542 theorems), `cargo test` 141 passed on default features and 196 passed with
+`legacy-conformance`, `forge test` 385 passed. The fresh-source receipt was not re-run because no
+Lean file changed in that merge; the `43a454fb` receipt recorded in that repository's REPORT §56
+still covers the identical Lean tree.
+
+This also repairs a latent breakage: `6cefc6ac` had never been pushed to the submodule's remote, so
+a fresh clone followed by `git submodule update` could not fetch the commit the parent pinned.
+`3a20a05f` is on that remote's `main`.
+
+**(a0) is re-scoped, not discharged.** The premise now names `3a20a05f`. The submodule carrying its
+own Lean audit does not discharge it: that corpus is not built, hashed or replayed by this
+project's guard, and nothing here checks its scope or residues. (a0) remains an accepted premise.
 
 ## Release evidence still to be produced (not blockers)
 
@@ -72,7 +87,8 @@ Until then, cite the wire3 audit as covering `4ae524dc`, not the deployed pin.
    and verification of the deployed runtime bytecode. The `mle/audit` wire3 corpus above is that
    review for the audit line: 157 models / 516 files / 6,542 theorems at `4ae524dc`, plus the
    2026-09-18 adversarial re-audit of the deployed verifier. What is outstanding is the
-   reconciliation of `4ae524dc` with the pinned `6cefc6ac`, and the deployed-bytecode verification.
+   deployed-bytecode verification; the tree reconciliation is done (see above, now pinned at
+   `3a20a05f`).
 2. Public-chain browser-to-payout E2E with production key custody, including restart and reorg
    recovery. Local fixtures and development secrets are not release evidence.
 3. Repeat the clean-clone matrix: regenerate and hash every VK and fixture, verify deployed runtime

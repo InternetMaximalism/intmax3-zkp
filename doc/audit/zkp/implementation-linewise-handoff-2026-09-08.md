@@ -14,7 +14,7 @@ worktree : /Users/andropov/repos/intmax3-zkp/.claude/worktrees/mle-plonky2-proof
 branch   : codex/implementation-linewise-lean-20260906
 HEAD     : b3e19c2  feat(lean): accept the pinned MLE submodule as a named trust assumption
 base     : 680146f からこの HEAD まで 59 commit
-submodule: contracts/lib/polygon-plonky2 = 6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78 (clean)
+submodule: contracts/lib/polygon-plonky2 = 3a20a05fb99d2653c4d37debb4f1ead2f422dfb2 (clean)
 push     : **未実施**。ローカル commit のみ。指示があるまで push しません。
 ```
 
@@ -130,7 +130,7 @@ submitClaim、claimCredit payout、close の request / cancel / finalize、rollb
 （`TrustBoundary.*_gap_is_now_per_primitive`、`*PinnedDigestIsProgramDigest`）。
 
 **`mleVerifierSoundness`（前提 a0）は運用者判断で受容した信頼仮定です。** KZG ceremony と同格。
-pinned MLE/WHIR サブモジュール（commit `6cefc6ac` に限定）を翻訳せず信頼します。
+pinned MLE/WHIR サブモジュール（commit `3a20a05f` に限定）を翻訳せず信頼します。
 これが買うのは `mle_assumption_reduces_close_soundness_to_gate_lowering`（close 経路の隙間が
 `CloseStatementLowering` の 1 段だけになる）で、買わないことは
 `SystemSafety.mle_assumption_does_not_imply_fund_safety` と
@@ -215,7 +215,7 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
 - callback の成功を proof soundness / ownership / freshness とみなさない。
 - `root != oldRoot` を freshness とみなさない。`paid ≤ received` を他チャネル非越境の証明とみなさない。
 - cluster 署名を利用者資産の正当性とみなさない。
-- MLE の信頼仮定を他の未証明依存へ拡張しない。commit `6cefc6ac` にのみ及ぶ。
+- MLE の信頼仮定を他の未証明依存へ拡張しない。commit `3a20a05f` にのみ及ぶ。
 - benchmark 確認なしに runtime、proof parameter、proof format を変更しない
   （runtime 基準 `05ec7ae` に対する `src` / `contracts` / `Cargo.toml` / `Cargo.lock` の差分は現在ゼロ）。
 - main checkout や MLE submodule を reset / checkout / 削除しない。

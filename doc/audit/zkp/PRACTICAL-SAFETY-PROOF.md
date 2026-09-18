@@ -4,7 +4,7 @@ Status: **work in progress, not a release approval.** Revision of this document:
 as of the commit that lands the fourth audit loop on branch
 `codex/implementation-linewise-lean-20260906` (see `git log`).
 Runtime baseline `05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8`; MLE/WHIR submodule pinned at
-`6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78`.
+`3a20a05fb99d2653c4d37debb4f1ead2f422dfb2`.
 
 ---
 
@@ -504,7 +504,7 @@ more named, unproved field.
 `contracts/lib/polygon-plonky2` submodule — its Rust verifier (`mle/src/verifier_v2.rs` and the
 sumcheck/WHIR machinery beneath it) together with its Solidity counterpart
 (`PinnedMleVerifierV2.sol`, `CompactMleProofV2.sol` and the `Plonky2GateEvaluator` dispatch). The
-submodule is pinned **by commit** — `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` in
+submodule is pinned **by commit** — `3a20a05fb99d2653c4d37debb4f1ead2f422dfb2` in
 `doc/audit/lean-current-source-manifest.json`, the same gitlink the parent tree carries, with the
 Cargo `[patch]` block redirecting every transitive dependency to that checkout. **A different
 revision is a different, unaccepted artifact.** Accepting it means accepting, unexamined, that
@@ -1094,7 +1094,7 @@ may count in several columns).
 | Lean modules covered by the guard | 132 |
 | current modules with a theorem inventory | 79 |
 | reviewed-source SHA-256 hashes pinned | 497 |
-| pinned submodules | 1 (`contracts/lib/polygon-plonky2` @ `6cefc6ac`) |
+| pinned submodules | 1 (`contracts/lib/polygon-plonky2` @ `3a20a05f`) |
 | named theorems in the inventory | 5,311 |
 | …of which in `Zkp.Implementation.*` | 5,092, across 74 modules |
 | line maps | 169 |

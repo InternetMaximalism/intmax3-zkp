@@ -918,11 +918,21 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   and `CompactMleProofV2.sol` with the `Plonky2GateEvaluator` dispatch they call.
   The submodule is pinned BY COMMIT in the manifest: `submodules` of
   `doc/audit/lean-current-source-manifest.json` records
-  `contracts/lib/polygon-plonky2` at `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78`,
+  `contracts/lib/polygon-plonky2` at `3a20a05fb99d2653c4d37debb4f1ead2f422dfb2`,
   the same gitlink the parent tree carries, and the Cargo `[patch]` block
   redirects every transitive `polygon-plonky2` dependency to that one checkout.
   The acceptance is scoped to that commit and to nothing else: a different
-  submodule revision is a different, unaccepted artifact. Accepting it means
+  submodule revision is a different, unaccepted artifact. (The pin moved from
+  `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` on 2026-09-18; on the paths this
+  premise names, the two trees differ only by comments, and the new commit adds
+  the submodule's own audit corpus and proof-of-concept suites.)
+
+  That submodule now carries a Lean audit of its own, under `mle/audit` with its
+  own guard. It does NOT discharge this premise. That corpus is not built,
+  hashed or replayed by this project's guard, its scope and residues are stated
+  in its own documents, and nothing here checks either. The acceptance below is
+  unchanged in kind: it remains a named premise, believed for reasons outside
+  this development, and no theorem may treat it as established. Accepting it means
   accepting, unexamined by this audit, that submodule's WHIR/FRI and sumcheck
   soundness argument, its claimed security level, its Fiat-Shamir transcript, its
   compact-proof codec, and the agreement of its Rust and Solidity sides.

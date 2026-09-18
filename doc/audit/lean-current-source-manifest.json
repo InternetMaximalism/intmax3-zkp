@@ -4,7 +4,7 @@
   "submodules": [
     {
       "path": "contracts/lib/polygon-plonky2",
-      "commit": "6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78"
+      "commit": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2"
     }
   ],
   "files": [
@@ -75,7 +75,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Contracts/CurrentVerification.lean",
-      "sha256": "4e58adb968dd56269c6dd359d895ad959e2f10e2a380c7a68d9c081c9c3ae23c",
+      "sha256": "feb14fe8b267ddec3f959cf7df2b922dec0c8b465c6600f46433069b8ccbd9da",
       "role": "model"
     },
     {
@@ -1220,7 +1220,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "be1fa8ded25ca2ab36696806819d537127301debec31e4a43d9f7685490e79a0",
+      "sha256": "4db24288c2ba439b16e544dfa710c7aa35e426ffca5389a25d08e09feac779c0",
       "role": "model"
     },
     {

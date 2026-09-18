@@ -4,7 +4,7 @@ import Std
 # Current wire-v3 application verification boundary
 
 Source pin: parent 05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8,
-submodule 6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78.
+submodule 3a20a05fb99d2653c4d37debb4f1ead2f422dfb2.
 Updated 2026-09-06 from the c533e71 projection.
 The current manifest pins reviewed complete files. The production
 verifier bodies are unchanged by the MLE merge; Rollup runtime containment now
