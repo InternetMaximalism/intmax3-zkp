@@ -1,100 +1,100 @@
-# 実装全行 Lean 化 — 2026-09-08 時点の再開手引き
+# Line-by-line Lean formalization of the whole implementation — resumption guide as of 2026-09-08
 
-この文書だけで作業を再開できるように書いています。会話の記憶を前提としません。
+This is written so that the work can be resumed from this document alone. It does not presuppose any memory of the conversation.
 
-## 0. 現在地（一行で）
+## 0. Where we are (in one line)
 
-core 71 file と依存側の主要部の行対応が完了し、全 entrypoint の資金保存を一本の定理に合成し、
-未証明の前提を 13 個の名前付き field に集約した状態です。**全体完了でもリリース承認でもありません。**
+The line correspondence for the 71 core files and the main parts of the dependency side is complete, the fund conservation of every entrypoint has been composed into a single theorem, and
+the unproved premises have been collected into 13 named fields. **This is neither overall completion nor a release approval.**
 
-## 1. 場所と状態
+## 1. Location and state
 
 ```text
 worktree : /Users/andropov/repos/intmax3-zkp/.claude/worktrees/mle-plonky2-proof-completion-48398c
 branch   : codex/implementation-linewise-lean-20260906
 HEAD     : b3e19c2  feat(lean): accept the pinned MLE submodule as a named trust assumption
-base     : 680146f からこの HEAD まで 59 commit
+base     : 59 commits from 680146f to this HEAD
 submodule: contracts/lib/polygon-plonky2 = 3a20a05fb99d2653c4d37debb4f1ead2f422dfb2 (clean)
-push     : **未実施**。ローカル commit のみ。指示があるまで push しません。
+push     : **not done**. Local commits only. No push until instructed.
 ```
 
-作業ツリーは clean です。`git status` に何も出ないのが正常な再開時の状態です。
+The working tree is clean. Nothing appearing in `git status` is the normal state on resumption.
 
-**重要な事故の記録。** 以前この作業は `/private/tmp` 配下の worktree で行っており、macOS の再起動で
-その worktree ごと消えました（未 commit の 21 module と 30 以上の対応表が失われ、作り直しました）。
-現在の worktree は永続ボリューム上にあります。**`/private/tmp` に作業を置かないでください。**
-agent 出力は 10 分ごとに WIP commit する `doc/audit/zkp/agent-tools/autocommit.sh` を回すのが安全です。
+**Record of an important accident.** This work was previously done in a worktree under `/private/tmp`, and a macOS reboot
+took the whole worktree with it (21 uncommitted modules and more than 30 correspondence tables were lost and had to be rebuilt).
+The current worktree is on a persistent volume. **Do not put work in `/private/tmp`.**
+It is safer to run `doc/audit/zkp/agent-tools/autocommit.sh`, which makes a WIP commit of agent output every 10 minutes.
 
-## 2. 検証コマンド（再開後まず全部通ること）
+## 2. Verification commands (all should pass right after resuming)
 
 ```sh
 cd /Users/andropov/repos/intmax3-zkp/.claude/worktrees/mle-plonky2-proof-completion-48398c
-export PATH=/Users/andropov/.elan/bin:$PATH        # pinned Lean 4.10.0。他の lean を使わない
+export PATH=/Users/andropov/.elan/bin:$PATH        # pinned Lean 4.10.0. Do not use another lean
 bash .github/ci/lean-safety-guard.sh               # → PASS
 python3 -B .github/ci/lean-line-coverage.py        # → PASS
-python3 -B .github/ci/lean-line-coverage.py --require-complete   # → exit 1 が正しい
+python3 -B .github/ci/lean-line-coverage.py --require-complete   # → exit 1 is correct
 python3 -B .github/ci/test-lean-safety-guard.py    # 29 tests OK
 python3 -B .github/ci/test-lean-line-coverage.py   # 22 tests OK
 python3 -B .github/ci/test-lean-fixture-parity.py  # 40 tests OK
 python3 -B .github/ci/test-check-ledger-writers.py  # 6 tests OK
-python3 -B .github/ci/check-ledger-writers.py       # → PASS（Solidity 書込元 inventory）
+python3 -B .github/ci/check-ledger-writers.py       # → PASS (inventory of Solidity write sites)
 python3 -B .github/ci/lean-fixture-parity.py       # 18 fixtures / 177 fields / 0 FAIL
 git diff --check
 ```
 
-期待値：main guard は **132 Lean modules / 現行 79 modules / 497 reviewed-source hashes / 1 submodule pin**（2026-09-11 第 4 ループ後）、
-line guard は **169 source maps**、行分類は
-`translated 31,095 / dependency-boundary 10,850 / non-executable 9,828 / test-only 25,892 / untranslated 41,784`（第 4 ループの test-only probe 挿入後）。
+Expected values: the main guard reports **132 Lean modules / 79 current modules / 497 reviewed-source hashes / 1 submodule pin** (after the 4th loop of 2026-09-11),
+the line guard reports **169 source maps**, and the line classification is
+`translated 31,095 / dependency-boundary 10,850 / non-executable 9,828 / test-only 25,892 / untranslated 41,784` (after the 4th loop's test-only probe insertion).
 
-`lake build` を全体で回すと 10 分程度かかります。個別 module は
-`cd doc/audit/zkp && lake build Zkp.Implementation.<Name>` です。
+Running `lake build` over everything takes about 10 minutes. For an individual module use
+`cd doc/audit/zkp && lake build Zkp.Implementation.<Name>`.
 
-## 3. 作業用 tooling（リポジトリ内・版管理下）
+## 3. Working tooling (in the repository, under version control)
 
-`doc/audit/zkp/agent-tools/` にあります。絶対パス依存はなく、自身の位置から repo root を導きます。
+It lives in `doc/audit/zkp/agent-tools/`. It has no absolute-path dependencies and derives the repo root from its own location.
 
-| ファイル | 用途 |
+| File | Purpose |
 |---|---|
-| `module-README.md` | 新規 module を書く agent への指示書。CI 規則、証明の落とし穴（kernel timeout poisoning ほか）を含む |
-| `linemap-README.md` | line-map JSON の schema と正直さの規則 |
-| `validate-linemap.py` | 対応表 1 件を検証。`PROBE OK` が出るまで直す。`--no-probe` で Lean 起動を省略 |
-| `register2.py` | 未登録 module を一括登録（Zkp.lean import / guard CURRENT / manifest / inventory）。既登録 module の定理一覧も再生成するので、定理を足したあとの hash 更新にも使う。引数なしで冪等 |
-| `tmo.py` | macOS に `timeout` がないための代替。`python3 tmo.py 300 lake env lean <file>` |
-| `autocommit.sh` | 10 分ごとに agent 出力を WIP commit する保険。バックグラウンドで回す |
+| `module-README.md` | Instructions for an agent writing a new module. Includes the CI rules and the proof pitfalls (kernel timeout poisoning and others) |
+| `linemap-README.md` | The schema of the line-map JSON and the honesty rules |
+| `validate-linemap.py` | Validates one correspondence table. Fix until `PROBE OK` appears. `--no-probe` skips starting Lean |
+| `register2.py` | Registers unregistered modules in bulk (Zkp.lean import / guard CURRENT / manifest / inventory). It also regenerates the theorem list of already-registered modules, so use it for the hash update after adding theorems too. Idempotent with no arguments |
+| `tmo.py` | A substitute for the `timeout` that macOS lacks. `python3 tmo.py 300 lake env lean <file>` |
+| `autocommit.sh` | Insurance that WIP-commits agent output every 10 minutes. Run it in the background |
 
-agent に指示するときは README 内の `<root>` を実際の worktree 絶対パスに置換して渡してください。
+When instructing an agent, replace `<root>` in the README with the actual absolute worktree path before passing it on.
 
-## 4. 何が証明できていて、何が前提か
+## 4. What is proved and what is a premise
 
-### 4.1 前提なしで証明済み（`Zkp.Implementation.SystemSafety`）
+### 4.1 Proved with no premises (`Zkp.Implementation.SystemSafety`)
 
-任意の有限 trace（Rollup 入金、withdrawNative / withdrawERC20、materializer credit、Manager pull、
-submitClaim、claimCredit payout、close の request / cancel / finalize、rollback を覆う 12 の `Step`）について:
+For any finite trace (the 12 `Step`s covering Rollup deposit, withdrawNative / withdrawERC20, materializer credit, Manager pull,
+submitClaim, claimCredit payout, close request / cancel / finalize, and rollback):
 
-- `trace_conserves_per_token` — token ごとの保存則。
-- `trace_channel_attribution` — Manager の `received` が自チャネルの cap を超えない、cap は書き換わらない、
-  materialization は一度 latch されたら保持される。
-- `trace_nullifier_single_use` — 消費済み nullifier の永続と再提出の失敗。
-- `trace_paid_bounded` — `paid ≤ received` の保存と paid / unspent 分解。
+- `trace_conserves_per_token` — per-token conservation law.
+- `trace_channel_attribution` — the Manager's `received` does not exceed its own channel's cap, the cap is not rewritten,
+  and materialization is retained once latched.
+- `trace_nullifier_single_use` — persistence of a consumed nullifier and failure of resubmission.
+- `trace_paid_bounded` — conservation of `paid ≤ received` and the paid / unspent decomposition.
 
-### 4.2 実装から導出できた前提（もはや仮定ではない）
+### 4.2 Premises derived from the implementation (no longer assumptions)
 
-- **nullifier freshness**: `IndexedMerkleTree.accepted_insertion_implies_key_absent`。
-  受理された挿入証明は key の不在を含意します。前提は Poseidon の衝突耐性（葉の 18 語符号化の
-  単射性は証明済みなので残るのは hash 本体のみ）、順序集合不変条件（空木で成立・挿入で保存）、
-  key の範囲の 3 つだけ。hash 仮定なしでも `insert_fails_iff_key_present` が成立します。
-- **選択回路の意味論**: `UtilGadgets.select_vec_one_hot_selects_candidate`。
-  SwitchBoard が仮定していた 4 積和選択を実装から証明。ただし one-hot 性は強制されません。
+- **nullifier freshness**: `IndexedMerkleTree.accepted_insertion_implies_key_absent`.
+  An accepted insertion proof implies the absence of the key. The premises are only three: collision resistance of Poseidon
+  (injectivity of the leaf's 18-word encoding is proved, so only the hash itself remains), the ordered-set invariant
+  (holds for the empty tree, preserved by insertion), and the range of the key. `insert_fails_iff_key_present` holds even without the hash assumption.
+- **Semantics of the selection circuit**: `UtilGadgets.select_vec_one_hot_selects_candidate`.
+  The 4-term sum-of-products selection that SwitchBoard had assumed is now proved from the implementation. One-hotness, however, is not enforced.
 
-### 4.3 回路と Solidity の一致（4 本）
+### 4.3 Agreement between circuit and Solidity (4 of them)
 
-`DepositChain.chain_matches_rollup_fold`、`ChannelRegChain.chain_matches_rollup_fold`、
-`ValidityChain.circuit_pi_layout_matches_solidity_preimage`、
-`WithdrawalChain.circuit_layout_matches_rollup_verifier`。
-いずれも手書きモデル同士の照合ではなく、回路側の語列・byte 列が Solidity 実装モデルの計算と
-一致することを導出したものです。
+`DepositChain.chain_matches_rollup_fold`, `ChannelRegChain.chain_matches_rollup_fold`,
+`ValidityChain.circuit_pi_layout_matches_solidity_preimage`,
+`WithdrawalChain.circuit_layout_matches_rollup_verifier`.
+None of these is a comparison between two hand-written models; each derives that the circuit-side word / byte sequence
+agrees with the computation of the model of the Solidity implementation.
 
-### 4.4 名前付き前提 23 個（`Zkp.Implementation.TrustBoundary`）
+### 4.4 The 23 named premises (`Zkp.Implementation.TrustBoundary`)
 
 `mleVerifierSoundness` (a0) / `closePrimitiveLowering` (a) / `withdrawalPrimitiveLowering` (b1) /
 `postClosePrimitiveLowering` (b2) /
@@ -105,118 +105,118 @@ submitClaim、claimCredit payout、close の request / cancel / finalize、rollb
 `aggregatePrimitiveLowering` (d1') / `falconUnforgeability` (d3) /
 `solidityKeccakIsReference` (e1a) / `circuitKeccakIsReference` (e1b) / `tokenFundsHashBinding` (e2) /
 `finalizedRootObservation` (f1) / `finalizedHeightObservation` (f2) /
-`ledgerWritersAreInventoried` (g1') / `latchWritersAreInventoried` (g2') / `sourceRefinement` (h)。
+`ledgerWritersAreInventoried` (g1') / `latchWritersAreInventoried` (g2') / `sourceRefinement` (h).
 
-**2026-09-11 第 4 ループで (c) を 7 個に分解し、(d2') は定理になりました**（`NttCorrectness`）。
-残余は (c4) `finalizedBalanceIsBacked`（L2 ledger の不変量、validity chain の合成が次の project）。
-公開文書は `PRACTICAL-SAFETY-PROOF.md`、機械的な忠実性証拠は `evidence/` と `src/faithfulness.rs`。
+**In the 4th loop of 2026-09-11 (c) was decomposed into 7 and (d2') became a theorem** (`NttCorrectness`).
+What remains is (c4) `finalizedBalanceIsBacked` (an invariant of the L2 ledger; composing the validity chain is the next project).
+The public document is `PRACTICAL-SAFETY-PROOF.md`; the mechanical faithfulness evidence is in `evidence/` and `src/faithfulness.rs`.
 
-**2026-09-11 第 3 ループで (d1)(d2)(g1)(g2) を置換しました。** 集約スタック（agg.rs leaf/level、gadget.rs）は
-`FalconAggProgram`・`FalconGadgetProgram` の命令列になり、回路を丸ごと仮定する field は無くなりました。
-(g1)(g2) は `LedgerWriters` の書込元 inventory（CI `check-ledger-writers.py` が照合）への source refinement
-に還元。旧 (g1) の `cap t = cap s` 節は `finalizeCloseGuarded` に反証されていたため単調に訂正済み
-（`durable_nullifier_ledger_of_boundary`）。
+**In the 3rd loop of 2026-09-11 we replaced (d1)(d2)(g1)(g2).** The aggregation stack (agg.rs leaf/level, gadget.rs) has become
+the instruction sequences `FalconAggProgram` and `FalconGadgetProgram`, and there is no longer any field that assumes a whole circuit.
+(g1)(g2) are reduced to a source refinement over the write-site inventory of `LedgerWriters` (checked by CI's `check-ledger-writers.py`).
+The `cap t = cap s` clause of the old (g1) was refuted by `finalizeCloseGuarded`, so it has been corrected to the monotone form
+(`durable_nullifier_ledger_of_boundary`).
 
-**2026-09-11 第 2 ループで (d)(e1)(e2) を分解しました。** 旧 (d)(e1)(e2) の結論は
-`signature_validity_of_boundary`・`circuit_keccak_is_solidity_keccak_of_boundary`・
-`token_funds_hash_binding_of_boundary` として定理です。参照 Keccak-256 は `Keccak256`
-（ベクトル 4 本を kernel 証明）、署名側の橋は `CloseSignatureBridge`。放電不能なもの：
-(d3) 格子仮定、(e2) 衝突耐性、(e1a) EVM 意味論、(d2') NTT = negacyclic 積（証明可能だが未着手）。
+**In the 2nd loop of 2026-09-11 we decomposed (d)(e1)(e2).** The conclusions of the old (d)(e1)(e2) are now theorems, as
+`signature_validity_of_boundary`, `circuit_keccak_is_solidity_keccak_of_boundary` and
+`token_funds_hash_binding_of_boundary`. The reference Keccak-256 is `Keccak256`
+(4 vectors proved in the kernel); the bridge on the signature side is `CloseSignatureBridge`. What cannot be discharged:
+(d3) the lattice assumption, (e2) collision resistance, (e1a) EVM semantics, (d2') NTT = negacyclic product (provable but not yet started).
 
-**2026-09-11 以降、(a)(b1)(b2) は「回路全体の lowering」ではなく「命令単位の lowering」です。**
-各回路の `program_satisfied_implies_gates` が `ProgramSatisfied constructorProgram a ⇒ CircuitGates` を
-前提なしで証明済みなので、残るのは (i) `BuildOp.holds` の各ケースと plonky2 primitive の一致、
-(ii) pinned digest が `constructorProgram` の digest であること、の 2 点だけです
-（`TrustBoundary.*_gap_is_now_per_primitive`、`*PinnedDigestIsProgramDigest`）。
+**Since 2026-09-11, (a)(b1)(b2) are "per-instruction lowering" rather than "lowering of the whole circuit".**
+Each circuit's `program_satisfied_implies_gates` proves `ProgramSatisfied constructorProgram a ⇒ CircuitGates` with no premises,
+so what remains is only two points: (i) that each case of `BuildOp.holds` agrees with the plonky2 primitive, and
+(ii) that the pinned digest is the digest of `constructorProgram`
+(`TrustBoundary.*_gap_is_now_per_primitive`, `*PinnedDigestIsProgramDigest`).
 
-**`mleVerifierSoundness`（前提 a0）は運用者判断で受容した信頼仮定です。** KZG ceremony と同格。
-pinned MLE/WHIR サブモジュール（commit `3a20a05f` に限定）を翻訳せず信頼します。
-これが買うのは `mle_assumption_reduces_close_soundness_to_gate_lowering`（close 経路の隙間が
-`CloseStatementLowering` の 1 段だけになる）で、買わないことは
-`SystemSafety.mle_assumption_does_not_imply_fund_safety` と
-`mle_assumption_alone_does_not_yield_close_gate_soundness` が反例で示します。
-MLE の 68 file・33,974 行は inventory 上 **untranslated のまま**で、検証済みには算入していません。
+**`mleVerifierSoundness` (premise a0) is a trust assumption accepted by operator judgement.** It is on a par with the KZG ceremony.
+We trust, rather than translate, the pinned MLE/WHIR submodule (limited to commit `3a20a05f`).
+What this buys is `mle_assumption_reduces_close_soundness_to_gate_lowering` (the gap on the close path becomes a single step of
+`CloseStatementLowering`); what it does not buy is shown by counterexamples in
+`SystemSafety.mle_assumption_does_not_imply_fund_safety` and
+`mle_assumption_alone_does_not_yield_close_gate_soundness`.
+MLE's 68 files and 33,974 lines remain **untranslated** in the inventory and are not counted as verified.
 
-**残る隙間の位置**は `SystemSafety.close_vector_backing_is_exactly_premise_c` が明示します。
-Rollup escrow が pooled であるため、cap をチャネル自身の預入に結ぶ部分は前提 (c) のままです。
+**Where the remaining gap sits** is made explicit by `SystemSafety.close_vector_backing_is_exactly_premise_c`.
+Because the Rollup escrow is pooled, the part that ties the cap to the channel's own deposits remains premise (c).
 
-## 5. 次にやるべきこと（優先順）
+## 5. What to do next (in priority order)
 
-1. ~~`ChannelRegRecord::validate` の到達不能な canonicality 検査を直す~~ **完了（`150bb19`）。**
-2. ~~`balance_state` の古いテスト 2 件を更新する~~ **完了（`150bb19`）。** `wallet_core` の古いテスト
-   1 件も `31aaf6c` で更新。
-3. ~~CI に `cargo test --lib` を足す~~ **完了（`150bb19`、`regev::` を加えて 240 件）。**
-   lib 711 件の全数実行も 2026-09-10 に完了し全通過（進捗文書の同日節）。`wallet_core::` /
-   `circuits::` / `falcon_sig::` は 16 GB runner に載らないため routine step 外に留めています。
-4. **残る前提の削減。** ~~`CloseStatementLowering` と claim 側 (b1, b2) の lowering~~ は 2026-09-11 に
-   命令単位まで縮小済み。~~hash binding (e1, e2) と署名妥当性 (d)~~ も同日第 2 ループで分解済み
-   （進捗文書の同日節）。~~(d1) の命令単位化と (d2) の gadget.rs 逐 gate 照合、(g1)(g2) の inventory 化~~
-   も同日第 3 ループで完了。残る前提はすべて (i) 命令ごとの plonky2 忠実性と digest pinning、
-   (ii) 計算量仮定 (d3)(e2)、(iii) 環境意味論 (e1a)(f)(g')(h)、(iv) 設計上の隙間 (c) のいずれかで、
-   ~~(d2') NTT の正しさ~~ は第 4 ループで証明済み。第 4 ループで (c) も materialization に付け替えて
-   7 個に分解し、残余 (c4) は L2 ledger 不変量（BalanceCircuit → SwitchBoard → ValidityChain →
-   DepositChain/WithdrawalChain の合成）です。次の project はその合成と、`not-static` に残る
-   算術・gadget 意味論の忠実性の機械照合（`evidence/README.md`）。
-5. **未翻訳 41,783 行**は MLE 33,974 行（受容済み）＋残り約 7,800 行（falcon vendor の f64 FFT、
-   各 module が untranslated と明記した部分）。無理に translated へ付け替えないこと。
+1. ~~Fix the unreachable canonicality check in `ChannelRegRecord::validate`~~ **Done (`150bb19`).**
+2. ~~Update the 2 stale tests in `balance_state`~~ **Done (`150bb19`).** One stale test in `wallet_core`
+   was also updated in `31aaf6c`.
+3. ~~Add `cargo test --lib` to CI~~ **Done (`150bb19`, 240 tests with `regev::` added).**
+   The full run of all 711 lib tests was also completed on 2026-09-10 and all passed (see the same-day section of the progress document). `wallet_core::` /
+   `circuits::` / `falcon_sig::` are kept out of the routine step because they do not fit on a 16 GB runner.
+4. **Reducing the remaining premises.** ~~`CloseStatementLowering` and the claim-side (b1, b2) lowering~~ were
+   narrowed to per-instruction on 2026-09-11. ~~The hash bindings (e1, e2) and signature validity (d)~~ were also decomposed in the 2nd loop that day
+   (see the same-day section of the progress document). ~~Making (d1) per-instruction, the gate-by-gate check of gadget.rs for (d2), and inventorying (g1)(g2)~~
+   were likewise completed in the 3rd loop that day. Every remaining premise is one of (i) per-instruction plonky2 faithfulness and digest pinning,
+   (ii) the complexity assumptions (d3)(e2), (iii) the environment semantics (e1a)(f)(g')(h), or (iv) the design gap (c), and
+   ~~(d2') the correctness of NTT~~ was proved in the 4th loop. In the 4th loop (c) was also reattached to materialization and
+   decomposed into 7, with the remainder (c4) being an L2 ledger invariant (the composition of BalanceCircuit → SwitchBoard → ValidityChain →
+   DepositChain/WithdrawalChain). The next project is that composition together with the mechanical checking of the faithfulness of the
+   arithmetic and gadget semantics that remain in `not-static` (`evidence/README.md`).
+5. **The 41,783 untranslated lines** are MLE's 33,974 lines (accepted) plus about 7,800 more (the f64 FFT of the falcon vendor,
+   and the portions each module explicitly marks as untranslated). Do not force them over into translated.
 
-## 6. 人間の判断が要る発見
+## 6. Findings requiring human judgement
 
-いずれも定理として固定済み。脆弱性の実証ではありません。番号は進捗文書と対応します。
+All of them are fixed as theorems. They are not demonstrations of vulnerabilities. The numbers correspond to the progress document.
 
-**実在した不具合（1 件・2026-09-09 修正済み）**
-- `ChannelRegRecord::validate` の非 canonical identity 拒否が **到達不能** でした。
-  `PoseidonHashOut::try_from(Bytes32)` の round-trip 検査が、`reduce_to_hash_out` と逆変換が
-  厳密な逆であるため決して発火しなかったためです。リポジトリ自身のテスト
+**An actual defect (1 item, fixed 2026-09-09)**
+- The rejection of non-canonical identities in `ChannelRegRecord::validate` was **unreachable**.
+  This was because the round-trip check of `PoseidonHashOut::try_from(Bytes32)` never fired, since `reduce_to_hash_out` and the reverse conversion are
+  strict inverses. The repository's own test
   `common::channel_registration::tests::test_channel_reg_validate_rejects_noncanonical_identity_encodings`
-  が実際に失敗していました。
-  **修正**: `try_from` に Goldilocks 位数に対する明示的な canonical 性検査を前置し、
-  エラー variant `PoseidonHashOutError::NonCanonicalElement(usize)` を追加。`reduce_to_hash_out` と
-  `From<PoseidonHashOut> for Bytes32` は未変更なので、多対一の読み取りを使う呼び出し元には影響しません。
-  Lean 側も追随済み（`H1Gadget.native_try_from_requires_canonical_elements`、
-  `ChannelRegChain.non_goldilocks_record_rejected`、`BlockTypes.non_canonical_pk_g_rejection_is_reachable`）。
-  round-trip 半分が今も到達不能であることは
-  `ChannelRegChain.byte_round_trip_alone_cannot_reject` として残しています。
+  was actually failing.
+  **Fix**: prepend to `try_from` an explicit canonicality check against the Goldilocks order, and
+  add the error variant `PoseidonHashOutError::NonCanonicalElement(usize)`. `reduce_to_hash_out` and
+  `From<PoseidonHashOut> for Bytes32` are unchanged, so callers that use the many-to-one reading are unaffected.
+  The Lean side has followed suit (`H1Gadget.native_try_from_requires_canonical_elements`,
+  `ChannelRegChain.non_goldilocks_record_rejected`, `BlockTypes.non_canonical_pk_g_rejection_is_reachable`).
+  That half of the round trip is still unreachable is retained as
+  `ChannelRegChain.byte_round_trip_alone_cannot_reject`.
 
-**古いテスト（2 件・2026-09-09 更新済み）**
-- `common::balance_state::tests::balance_state_validate_multi_n` と
-  `balance_state_delegate_count_regions_and_h1` が member_count 16 の通過を主張していました。
-  `fd467ea`（sig-cluster を 8 に制限）以降 2..=8 が正。`MAX_SIG_CLUSTER` を使うよう更新し、
-  無効な基底 16 から作っていた否定テスト 3 件も有効な基底に直して、意図した検査を実際に通すようにしました。
+**Stale tests (2 items, updated 2026-09-09)**
+- `common::balance_state::tests::balance_state_validate_multi_n` and
+  `balance_state_delegate_count_regions_and_h1` asserted that member_count 16 passes.
+  Since `fd467ea` (restricting the sig-cluster to 8), 2..=8 is correct. They were updated to use `MAX_SIG_CLUSTER`, and
+  the 3 negative tests that were built from the invalid base 16 were fixed to use a valid base so that they actually exercise the intended check.
 
-**設計上の観察**
-- **チャネル木はブロックを通じた資金保存を強制しない。** `ChannelLeaf` に fund vector がなく、
-  公開 root は IMCH preimage を差し替えても不変（`UpdateChannelTree.native_account_root_ignores_channel_state_fields`）。
-- **`update_channel_tree.rs` では署名が一切検証されない。** `bp_sig_chain` への fold のみ。
-- **チャネル間送金の対応付けはブロック側で行われない。** `destination_channel_id` はどこからも読まれない。
-- **Falcon 検証器は vendor 木に存在しない。** 復号器の係数範囲はノルム境界を含意しない
-  （`FalconVendor.decode_range_does_not_imply_norm_bound`）。
-- **回路 gadget が署名を検証するかは、gadget 自身が制約しない 1 本の wire 次第。**
-  wire が 0 だとノルム境界検査が定数 0 の範囲検査に置き換わる（`FalconCore.padding_slot_norm_gate_is_trivial`）。
-- **受理された集約証明は署名者の相異性も member 集合への所属も示さない。**
-- **`agg_list.rs:329` の `range_check(count_minus_one, 4)` は署名者数 1〜16 を許す。** 上限 8 は構造由来。
-- **hash 署名は再生可能なトークン。** 公開値に nonce も期限もない。健全性は依拠側が
-  `pk_b` を登録済み leaf から解決し IMPA digest を高々一度受理することに依存。
-- **`channel.rs` の `validate()` は構造のみを制約。** 両 root を保ったまま鍵集合全体を差し替えても通る
-  （`ChannelTypes.validate_accepts_substituted_member_set`）。署名検証器は blob 内容に反応しない。
-- **葉と節点で domain 分離がなく**、高さ 32 の空 SendTree と空 TxV2Tree の root が hash 仮定なしで一致。
-- **`test_utils` は cfg(test) なしの公開 module**。harness の決定的 Falcon 鍵導出が production 到達可能。
-- **domain 非衝突検査は test 専用かつ release 無効。**
-- **`U32LimbTargetTrait::get_witness` は field wire を 2^32 で黙って切り捨てる。**
-- **`U63Target::enforce_ge` は上端の窓（正確に `2^32 - 2` 値）で順序検査にならない。** 32 bit 版は健全。
-- **sparse 木の範囲外 index 更新は葉を記録しつつ root を変えない。**
-- **文書と実装の不一致**: `channel_tree.rs` は member root を 1024 slot と書くが実際は高さ 3 の 8 slot。
-  `agg.rs` は `AGG_LEVELS = 4` / 公開入力 137 と書くがコードは 3 と 73（`batch.rs:695` の
-  assert メッセージも 137 のまま。assert 発火時に運用者が読む文言）。
+**Design observations**
+- **The channel tree does not enforce fund conservation across blocks.** `ChannelLeaf` has no fund vector, and
+  the public root is unchanged even if the IMCH preimage is substituted (`UpdateChannelTree.native_account_root_ignores_channel_state_fields`).
+- **No signature is verified at all in `update_channel_tree.rs`.** Only the fold into `bp_sig_chain`.
+- **Matching up inter-channel transfers is not done on the block side.** `destination_channel_id` is never read by anything.
+- **The Falcon verifier does not exist in the vendor tree.** The coefficient range of the decoder does not imply a norm bound
+  (`FalconVendor.decode_range_does_not_imply_norm_bound`).
+- **Whether the circuit gadget verifies a signature depends on a single wire that the gadget itself does not constrain.**
+  If the wire is 0, the norm-bound check is replaced by a range check on the constant 0 (`FalconCore.padding_slot_norm_gate_is_trivial`).
+- **An accepted aggregate proof shows neither distinctness of the signers nor membership in the member set.**
+- **`range_check(count_minus_one, 4)` at `agg_list.rs:329` allows a signer count of 1 to 16.** The upper bound of 8 comes from the structure.
+- **A hash signature is a replayable token.** There is neither a nonce nor an expiry in the public values. Soundness depends on the relying side
+  resolving `pk_b` from a registered leaf and accepting an IMPA digest at most once.
+- **`validate()` in `channel.rs` constrains structure only.** It passes even if the entire key set is substituted while keeping both roots
+  (`ChannelTypes.validate_accepts_substituted_member_set`). The signature verifier does not react to the blob contents.
+- **There is no domain separation between leaves and nodes**, and the roots of an empty SendTree and an empty TxV2Tree of height 32 agree without any hash assumption.
+- **`test_utils` is a public module without cfg(test)**. The harness's deterministic Falcon key derivation is reachable from production.
+- **The domain non-collision check is test-only and disabled in release.**
+- **`U32LimbTargetTrait::get_witness` silently truncates a field wire at 2^32.**
+- **`U63Target::enforce_ge` is not an ordering check in the window at the top end (exactly `2^32 - 2` values).** The 32-bit version is sound.
+- **An out-of-range index update on a sparse tree records the leaf while leaving the root unchanged.**
+- **Mismatch between documentation and implementation**: `channel_tree.rs` says the member root is 1024 slots, but it is actually 8 slots at height 3.
+  `agg.rs` says `AGG_LEVELS = 4` / 137 public inputs, but the code says 3 and 73 (the assert message at
+  `batch.rs:695` still says 137 as well — the wording an operator reads when the assert fires).
 
-## 7. 禁止事項（前任からの引き継ぎ、継続）
+## 7. Prohibitions (carried over from the predecessor, still in force)
 
-- `--require-complete` を通すために未翻訳区間を根拠なく translated にしない。
-- callback の成功を proof soundness / ownership / freshness とみなさない。
-- `root != oldRoot` を freshness とみなさない。`paid ≤ received` を他チャネル非越境の証明とみなさない。
-- cluster 署名を利用者資産の正当性とみなさない。
-- MLE の信頼仮定を他の未証明依存へ拡張しない。commit `3a20a05f` にのみ及ぶ。
-- benchmark 確認なしに runtime、proof parameter、proof format を変更しない
-  （runtime 基準 `05ec7ae` に対する `src` / `contracts` / `Cargo.toml` / `Cargo.lock` の差分は現在ゼロ）。
-- main checkout や MLE submodule を reset / checkout / 削除しない。
-- 20 並列を超えて agent を投入しない（ハード上限）。credit を使い切ると全 agent が同時に落ちます。
+- Do not reclassify untranslated spans as translated without grounds in order to make `--require-complete` pass.
+- Do not treat the success of a callback as proof soundness / ownership / freshness.
+- Do not treat `root != oldRoot` as freshness. Do not treat `paid ≤ received` as a proof of non-crossing between channels.
+- Do not treat a cluster signature as the legitimacy of user assets.
+- Do not extend the MLE trust assumption to other unproved dependencies. It extends only to commit `3a20a05f`.
+- Do not change the runtime, proof parameters or proof format without benchmark confirmation
+  (the diff in `src` / `contracts` / `Cargo.toml` / `Cargo.lock` against the runtime baseline `05ec7ae` is currently zero).
+- Do not reset / check out / delete the main checkout or the MLE submodule.
+- Do not launch more than 20 agents in parallel (a hard limit). If the credits run out, every agent dies at once.

@@ -55,46 +55,6 @@ left, so the residue cannot be lost. A kernel-checked counterexample,
 proof-system assumption holds and fund safety fails anyway; accepting an artifact is recorded here
 as a scoping decision, never as evidence.
 
-## 要旨
-
-本書は、INTMAX3 決済実装について**何が証明され、何が証明されていないか**を記述する。対象は
-Solidity 契約（`IntmaxRollup`、`ChannelSettlementManager`、`ChannelSettlementVerifier`、
-`CloseFundingMaterializer`）と、それらが消費する Rust/plonky2 回路である。証明は Lean 4 の
-kernel 検証済み定理であるが、その対象は原文の**手書き意味モデル**であり、コンパイル済み成果物の
-refinement ではなく、暗号プリミティブの証明でもなく、配備の安全性の主張でもない。
-
-暗号仮定・証明系仮定を一切用いずに証明されているのは 4 つである。モデル化された 12 の資金・認可
-遷移の任意の有限列について、token ごとの会計恒等式が厳密に成立すること
-（`trace_conserves_per_token`）、Manager の受領額が自チャネルの cap を超えず materialization の
-latch が保持されること（`trace_channel_attribution`）、消費済み nullifier が復活せず再請求が
-失敗すること（`trace_nullifier_single_use`）、支払額が受領額を超えないこと
-（`trace_paid_bounded`）。さらに close / claim の受理が返り値の公開入力記録を厳密に固定する点は
-無条件である（`close_acceptance_binds_statement`、`claim_acceptance_binds_statement`）。
-
-回路側の算術的性質も 1 件、環境も前提もなしに証明された。Falcon 署名 gadget の in-circuit NTT が
-`Z_q[X]/(X^512+1)` の negacyclic product を計算すること
-（`NttCorrectness.ntt_computes_negacyclic_product`）である。これは以前は仮定 (d2') であったが、
-いまや定理であり、監査対象の gate 集合を「Falcon の署名方程式そのもの」と読んでよい根拠となる
-（§2.5）。
-
-残りは Lean structure `Zkp.Implementation.TrustBoundary` の **23 個の名前付き未証明 field** として
-明示的に保持される。いずれも公理ではなく `Prop` であるため、どの定理がどの前提を借りているかが
-機械的に判別できる。内訳は、受容済み成果物 1 件（pinned MLE/WHIR 証明系。配備アダプタ 2 箇所で
-参照される）、plonky2 再帰検証器の 4 インスタンス、計算量仮定 3 件（Falcon/NTRU 偽造困難性と
-Keccak-256 の同一長衝突 2 件）、EVM・source refinement 系の環境仮定、そして唯一の設計上の隙間
-**(c4) `finalizedBalanceIsBacked`（L2 台帳不変量：Balance 回路が finalized root で証明する残高が
-escrow に裏付けられていること）** である。
-
-この隙間の周囲は、いまや仮定ではなく証明である。資金が動く事象は
-`CloseFundingMaterializer.materializeSignedHead` であり、
-`materialized_credits_are_finalized_l2_balances_of_boundary` は、受理された materialization から
-「支払われた各金額は、head が finalized と認める extended-state root において
-close-asset-backing 回路の gate 述語を満たす witness の active row であり、したがって当該
-チャネルの L2 entitlement 以下である」ことを導く。残余は
-`close_vector_backing_gap_is_now_l2_ledger` が明示的に名指しするため失われない。
-`mle_assumption_does_not_imply_fund_safety` は、受容済み仮定が成立しながら資金安全性が破れる環境を
-kernel 検証済みの反例として与える。**成果物の受容は監査の完了ではない。**
-
 ---
 
 ## 2. What is proved
