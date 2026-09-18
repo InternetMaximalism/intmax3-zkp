@@ -235,7 +235,7 @@
     },
     {
       "path": "src/bin/channel_member.rs",
-      "sha256": "996e85cfab19fdafdf5327d6c838d7d9c89446ddb8cd333689946d91277fa671",
+      "sha256": "5ae917545b92dedfabb29502a8fc100b9dd38505e439a987ace254a6271c7c3b",
       "role": "implementation"
     },
     {
@@ -385,7 +385,7 @@
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "dc531f27a354f73dc2bc0c214be36c91454970d55d4dc76f131711af04a765e2",
+      "sha256": "a01d702bb0dc90b91abcb71c0e0c308de6e5ce83be09757c2982bf28b95542af",
       "role": "spec"
     },
     {

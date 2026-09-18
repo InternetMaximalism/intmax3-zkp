@@ -1,64 +1,64 @@
-# A-3 P4 完成ハンドオフ: CLI `withdraw`(channel funds を rollup → manager へ)
+# A-3 P4 completion handoff: CLI `withdraw` (channel funds from rollup → manager)
 
-このファイルだけで次スレッドが `withdraw` を実装できるよう、文脈・設計・落とし穴・検証を自己完結で書く。
+This file is written to be self-contained — context, design, pitfalls, and verification — so that the next thread can implement `withdraw` from it alone.
 
-## 0. 前提(これまでの到達点)
-ブランチ `fix/audit-soundness-and-tests`。`doc/tasks/a3-impl-todo.md` と `doc/tasks/a3-close-lifecycle-spec.md` が母艦。
-- **P2 完了・検証済み**: `src/wallet_core.rs` に `CloseProver` / `WithdrawalClaimProver` / `CancelCloseProver` / `PostCloseClaimProver`(全て実証明テスト PASS + 独立セキュリティレビュー済み)。
-- **P3/P4 配線済み**: `src/bin/channel_member.rs` に `cmd_close`(P3)/ `cmd_settle` / `cmd_claim`(P4)。`contracts/script/RunClose.s.sol` に `submitCloseIntentStep` / `submitWithdrawalClaimStep`(新規追加済み)/ `withdrawNativeStep`(既存)。
-- **唯一の欠落 = `withdraw`**。これが無いと `claim` 時点で manager に資金が無い。
+## 0. Prerequisites (where we are so far)
+Branch `fix/audit-soundness-and-tests`. `doc/tasks/a3-impl-todo.md` and `doc/tasks/a3-close-lifecycle-spec.md` are the base documents.
+- **P2 complete and verified**: `CloseProver` / `WithdrawalClaimProver` / `CancelCloseProver` / `PostCloseClaimProver` in `src/wallet_core.rs` (all have real-proof tests PASSing + an independent security review).
+- **P3/P4 wired up**: `cmd_close` (P3) / `cmd_settle` / `cmd_claim` (P4) in `src/bin/channel_member.rs`. `submitCloseIntentStep` / `submitWithdrawalClaimStep` (newly added) / `withdrawNativeStep` (existing) in `contracts/script/RunClose.s.sol`.
+- **The only thing missing = `withdraw`**. Without it the manager has no funds at `claim` time.
 
-## 1. ゴール
+## 1. Goal
 `channel_member withdraw <manager_addr> [rpc_url]`:
-1. channel の実 deposit に対する **withdrawal 証明**(recipient = manager)を生成(wrap + MLE)。
-2. `IntmaxRollup.withdrawNative(ws, prover, mleProof)` で manager の `pendingWithdrawals` を満たす。
-3. `ChannelSettlementManager.pullChannelFunds()` で manager に資金を引き込む。
+1. Generate a **withdrawal proof** (recipient = manager) against the channel's real deposit (wrap + MLE).
+2. Fill the manager's `pendingWithdrawals` via `IntmaxRollup.withdrawNative(ws, prover, mleProof)`.
+3. Pull the funds into the manager with `ChannelSettlementManager.pullChannelFunds()`.
 
-→ その後 `claim` で member に分配。
+→ then distribute to members with `claim`.
 
-## 2. なぜ大仕事か(再スコープの根拠)
-withdrawal 証明は close 系回路ではなく **rollup の withdrawal サブシステム**。`src/bin/generate_withdrawal_fixture.rs`(~700行)が雛形で、必要なのは:
-- `BalanceProcessor` + `BalanceWitnessGenerator`(`src/circuits/test_utils/balance_witness_generator.rs`)
-- `BlockWitnessGenerator`(rollup の block 状態 = どの deposit/block か)
+## 2. Why this is a big job (rationale for re-scoping)
+The withdrawal proof is not part of the close circuits but of the **rollup's withdrawal subsystem**. `src/bin/generate_withdrawal_fixture.rs` (~700 lines) is the template; what is needed:
+- `BalanceProcessor` + `BalanceWitnessGenerator` (`src/circuits/test_utils/balance_witness_generator.rs`)
+- `BlockWitnessGenerator` (the rollup's block state = which deposit/block)
 - `balance_witness_generator.single_withdrawal_witness(&single_withdrawal_data)` → `single_withdrawal_circuit.prove(...)`
-- `WithdrawalProcessor`(`prove_step` → `prove_final(&chain_proof, prover, &ext_public_state)`)
-- `ext_public_state`(= `block_witness_generator.current_extended_public_state()` 系。`.commitment()` が withdrawNative の `ext_public_state_commitment` PI に一致せねばならない)
-- 出力: 最終 withdrawal 証明 → `WrapperCircuit` + MLE(`wallet_core::wrap_and_export_mle` を流用可)→ `withdrawal_mle.json` + payout(`Withdrawal` struct)
+- `WithdrawalProcessor` (`prove_step` → `prove_final(&chain_proof, prover, &ext_public_state)`)
+- `ext_public_state` (i.e. `block_witness_generator.current_extended_public_state()` and friends; its `.commitment()` must match withdrawNative's `ext_public_state_commitment` PI)
+- Output: the final withdrawal proof → `WrapperCircuit` + MLE (`wallet_core::wrap_and_export_mle` can be reused) → `withdrawal_mle.json` + payout (`Withdrawal` struct)
 
-**核心の制約(SECURITY)**: withdrawNative は `if (!finalizedStateRoots[extCommitment]) revert`(`IntmaxRollup.sol:1262`)。つまり withdrawal 証明の `ext_public_state_commitment` は **rollup が finalize 済みの state root** でなければならない。よって channel の deposit を含む block が finalize されている必要がある(P1 の anchor/liveness と同じ前提)。
+**The core constraint (SECURITY)**: withdrawNative does `if (!finalizedStateRoots[extCommitment]) revert` (`IntmaxRollup.sol:1262`). That is, the withdrawal proof's `ext_public_state_commitment` must be a **state root the rollup has already finalized**. Therefore the block containing the channel's deposit must be finalized (the same prerequisite as P1's anchor/liveness).
 
-## 3. 設計(2案、A 推奨)
+## 3. Design (two options, A recommended)
 
-### 案A(推奨): setup-backing の witness-generator 文脈を再構築して withdraw で使う
-`setup-backing`(`channel_member.rs:cmd_setup_backing`)は既に real deposit を行い、`BalanceWitnessGenerator` に deposit witness を入れて balance proof を作っている。同じ deposit パラメータ(channel_id, deposit_salt, recipient, amount)を `ChannelBacking` 等に**永続化**し、`withdraw` で同じ block/witness 文脈を**決定的に再構築**して single_withdrawal_witness を作る。
-- 必要な追加永続化: deposit_salt(現状未保存), deposit の block 文脈。`ChannelBacking` に `deposit_salt` 等を追加。
-- 利点: 実 deposit に正しく束縛。欠点: block witness の再構築ロジックを generate_withdrawal_fixture から移植。
+### Option A (recommended): rebuild the witness-generator context from setup-backing and use it in withdraw
+`setup-backing` (`channel_member.rs:cmd_setup_backing`) already performs a real deposit and builds a balance proof by feeding the deposit witness into `BalanceWitnessGenerator`. **Persist** the same deposit parameters (channel_id, deposit_salt, recipient, amount) in something like `ChannelBacking`, and **deterministically rebuild** the same block/witness context in `withdraw` to build single_withdrawal_witness.
+- Additional persistence needed: deposit_salt (currently not stored), and the deposit's block context. Add `deposit_salt` etc. to `ChannelBacking`.
+- Upside: correctly bound to the real deposit. Downside: the block-witness rebuild logic has to be ported over from generate_withdrawal_fixture.
 
-### 案B: `build_channel_withdrawal` を wallet_core に新設
-`generate_withdrawal_fixture` の Step(single_withdrawal → chain → final → wrap+MLE)を `wallet_core` の builder 関数に括り出し、`withdraw` から呼ぶ。入力は (deposit 文脈, recipient=manager, finalized_root)。P2 builder と同じ流儀(fail-closed 前提 + 検証済みテスト)。
-- 利点: 再利用可能・テストしやすい。欠点: deposit/block 文脈の引き回しが重い。
+### Option B: add a new `build_channel_withdrawal` to wallet_core
+Factor the steps of `generate_withdrawal_fixture` (single_withdrawal → chain → final → wrap+MLE) out into a builder function in `wallet_core` and call it from `withdraw`. The inputs are (deposit context, recipient=manager, finalized_root). Same style as the P2 builders (fail-closed by default + verified tests).
+- Upside: reusable and easy to test. Downside: threading the deposit/block context through is heavy.
 
-**どちらでも generate_withdrawal_fixture が唯一の正解実装**。まずそれを `cargo run --release --bin generate_withdrawal_fixture` で動かし、Step ごとに理解 → 移植。
+**Either way, generate_withdrawal_fixture is the one correct reference implementation.** First run it with `cargo run --release --bin generate_withdrawal_fixture`, understand it step by step, then port.
 
-## 4. 実装手順(具体)
-1. `generate_withdrawal_fixture.rs` を読み、withdrawal 証明生成の最小経路を抽出(`fn main` 209行〜、single_withdrawal_witness 452行、prove_step/prove_final 466-487行、ext_public_state 480行、wrap+MLE 出力)。
-2. wallet_core に `WithdrawalProver`(または `build_channel_withdrawal`)を追加。`wrap_and_export_mle` を MLE に流用。WD_RECIPIENT に相当する recipient=manager を引数化。
-3. `channel_member.rs` に `cmd_withdraw`:
-   - args: `<manager> [rpc]`。manager の 20byte → `calculate_recipient_from_address`。
-   - deposit 文脈を案A/Bで取得 → withdrawal 証明 + MLE 生成 → `withdrawal_mle.json` + `withdrawal_payout.json` を書く(`cmd_claim` の staging パターンに倣い `contracts/test/data/sepolia_withdrawal_mle.json` / `sepolia_withdrawal_payout.json` へ copy)。
-   - `forge script RunClose --sig withdrawNativeStep()`(既存、ROLLUP/MANAGER env)→ 続けて `cast send <manager> pullChannelFunds()`。
-   - dispatcher の `"withdraw" => cmd_close_lifecycle_unimplemented` を `cmd_withdraw` に置換。
-4. payout 形式: `RunClose._payout()` が読む `sepolia_withdrawal_payout.json` の `Withdrawal` 構造(recipient, amount, …)に合わせる。`generate_withdrawal_fixture` の payout 出力(700行付近)を参照。
+## 4. Implementation steps (concrete)
+1. Read `generate_withdrawal_fixture.rs` and extract the minimal path for generating a withdrawal proof (`fn main` from line 209, single_withdrawal_witness at line 452, prove_step/prove_final at lines 466-487, ext_public_state at line 480, wrap+MLE output).
+2. Add a `WithdrawalProver` (or `build_channel_withdrawal`) to wallet_core. Reuse `wrap_and_export_mle` for the MLE. Make the recipient=manager, which corresponds to WD_RECIPIENT, a parameter.
+3. Add `cmd_withdraw` to `channel_member.rs`:
+   - args: `<manager> [rpc]`. The manager's 20 bytes → `calculate_recipient_from_address`.
+   - Obtain the deposit context per option A/B → generate the withdrawal proof + MLE → write `withdrawal_mle.json` + `withdrawal_payout.json` (following the staging pattern of `cmd_claim`, copy them to `contracts/test/data/sepolia_withdrawal_mle.json` / `sepolia_withdrawal_payout.json`).
+   - `forge script RunClose --sig withdrawNativeStep()` (existing, ROLLUP/MANAGER env) → then `cast send <manager> pullChannelFunds()`.
+   - Replace the dispatcher's `"withdraw" => cmd_close_lifecycle_unimplemented` with `cmd_withdraw`.
+4. Payout format: match the `Withdrawal` structure (recipient, amount, …) of `sepolia_withdrawal_payout.json` that `RunClose._payout()` reads. See the payout output of `generate_withdrawal_fixture` (around line 700).
 
-## 5. 検証
-- **単体(release, heavy)**: `wallet_core` に `a3_withdrawal_prover_builds_and_verifies` 相当を追加し、deposit→withdrawal 証明→`single_withdrawal_circuit.data.verify` で self-verify(P2 の各テストと同型、`#[cfg_attr(debug_assertions, ignore)]`)。
-- **live は P5 E2E**(下記計画書): anvil で deposit→finalize→withdrawNative→pullChannelFunds→`pendingWithdrawals[manager]` と manager 残高を assert。
+## 5. Verification
+- **Unit (release, heavy)**: add the equivalent of `a3_withdrawal_prover_builds_and_verifies` to `wallet_core` and self-verify deposit→withdrawal proof→`single_withdrawal_circuit.data.verify` (same shape as the P2 tests, `#[cfg_attr(debug_assertions, ignore)]`).
+- **Live is the P5 E2E** (see the plan below): on anvil, deposit→finalize→withdrawNative→pullChannelFunds→assert `pendingWithdrawals[manager]` and the manager balance.
 
-## 6. 落とし穴
-- **ext_commitment は finalize 済み root 必須**。E2E は deposit を含む block を必ず finalize してから withdraw。
-- **fixture 競合**: `withdraw`/`claim`/`close` が `contracts/test/data/sepolia_*` に staging する。E2E で順序・上書きに注意(各 step の直前に書く)。
-- **IntmaxRollup を一切変更しない**: bytecode 変更 = manager CREATE2 アドレス drift = close fixture 再生成(A-2 で経験済み、metadata-hash 由来)。`withdraw` は IntmaxRollup を触らないので不要。
-- 重い proving(分単位)。テストは `#[ignore]` + release、live は anvil で都度許可を取る。
+## 6. Pitfalls
+- **ext_commitment must be an already-finalized root**. The E2E must always finalize the block containing the deposit before withdraw.
+- **fixture contention**: `withdraw`/`claim`/`close` all stage into `contracts/test/data/sepolia_*`. Watch the ordering and overwrites in the E2E (write them immediately before each step).
+- **Do not change IntmaxRollup at all**: a bytecode change = manager CREATE2 address drift = close fixture regeneration (experienced in A-2, stemming from the metadata hash). `withdraw` does not touch IntmaxRollup, so this is not needed.
+- Heavy proving (on the order of minutes). Tests are `#[ignore]` + release; for live runs on anvil, get permission each time.
 
-## 7. 完了条件
-`channel_member withdraw` が実 channel の withdrawal 証明を生成し withdrawNative + pullChannelFunds が通る。→ P4 完成(close→settle→withdraw→claim が CLI で一気通貫)。
+## 7. Completion criteria
+`channel_member withdraw` generates a withdrawal proof for a real channel and withdrawNative + pullChannelFunds succeed. → P4 complete (close→settle→withdraw→claim works end to end from the CLI).

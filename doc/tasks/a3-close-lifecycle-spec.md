@@ -1,126 +1,126 @@
-# A-3 本実装 仕様書: channel close / withdraw-to-L1 / settle ライフサイクル
+# A-3 main implementation spec: channel close / withdraw-to-L1 / settle lifecycle
 
-ステータス: **承認済み(2026-06-20)**。実装はフェーズごとに、着手前に専用の attacker subagent レビューを通す(CLAUDE.md §Adversarial)。
+Status: **APPROVED (2026-06-20)**. Each implementation phase must pass a dedicated attacker subagent review before work starts (CLAUDE.md §Adversarial).
 
-**承認された決定(§7):**
-1. **anchor の on-chain チェックを入れる**(`finalizeClose` で `finalizedStateRoots(root)` 要求)。Manager bytecode 変更 → close fixture 再生成を伴う。
-2. **今すべて実装する**(P1–P6 全部。post-close-claim、specialClose/lateOutgoingDebit の **revert 化**=forgeable stub を塞ぐ、も含む)。
-3. **liveness grief は明記に留める**(健全な救済は cross-layer 証明待ちで別途)。
+**Approved decisions (§7):**
+1. **Include the on-chain anchor check** (`finalizeClose` requires `finalizedStateRoots(root)`). This changes the Manager bytecode → entails regenerating the close fixtures.
+2. **Implement everything now** (all of P1–P6, including post-close-claim and **turning specialClose/lateOutgoingDebit into reverts** = closing off the forgeable stubs).
+3. **Liveness grief is only documented** (a sound remedy waits on cross-layer proofs and is handled separately).
 
-## 0. ゴールと前提
+## 0. Goal and premises
 
-CLI(`channel_member`)から、実 L1 を相手に **deposit → 運用 → close → challenge → withdraw → claim** の完全な channel ライフサイクルを駆動できるようにする。現状 `close`/`withdraw`/`settle` は fail-closed スタブ(A-3 安全化済み)。
+Make it possible to drive the complete channel lifecycle — **deposit → operation → close → challenge → withdraw → claim** — against a real L1 from the CLI (`channel_member`). Today, `close`/`withdraw`/`settle` are fail-closed stubs (already made safe in A-3).
 
-**決定的事実(調査・攻撃者レビュー済み):**
-- on-chain の settlement 機構(`ChannelSettlementManager.sol` / `ChannelSettlementVerifier.sol`)と close 系回路(close / withdrawal-claim / post-close-claim / cancel-close)は **既に REAL でほぼ完成**。`CloseLifecycleE2E` が fixture でこの全経路を緑にしている。
-- 欠けているのは **接続層**:(1) 実 L1-anchor のソーシング、(2) wallet_core の close ビルダ、(3) CLI コマンド、(4) on-chain 提出、(5) relay/E2E。
-- 新しい暗号プリミティブは不要。member の N-of-N 共署名・balance proof・withdrawal proof はすべて既存。
+**Established facts (investigated and attacker-reviewed):**
+- The on-chain settlement machinery (`ChannelSettlementManager.sol` / `ChannelSettlementVerifier.sol`) and the close-family circuits (close / withdrawal-claim / post-close-claim / cancel-close) are **already REAL and nearly complete**. `CloseLifecycleE2E` keeps all of these paths green on fixtures.
+- What is missing is the **connection layer**: (1) sourcing the real L1 anchor, (2) the wallet_core close builders, (3) the CLI commands, (4) on-chain submission, (5) relay/E2E.
+- No new cryptographic primitives are needed. The members' N-of-N co-signatures, the balance proof, and the withdrawal proof all already exist.
 
-## 1. 現状(既に REAL なもの)
+## 1. Current state (what is already REAL)
 
-| 層 | 状態 |
+| Layer | State |
 |---|---|
 | `ChannelSettlementManager`: requestClose / submitCloseIntent / cancelClose / finalizeClose / submitWithdrawalClaim / submitPostCloseClaim / pullChannelFunds / claimWithdrawalCredit | **REAL** |
-| state machine: Active → ClosePending → Closed、GRACE=600s / CHALLENGE=86400s | **REAL** |
-| 払い出し: `pullChannelFunds`(rollup→manager)→ `claimWithdrawalCredit`(member へ)、`totalCreditedOut ≤ receivedChannelFunds` 大域ソルベンシー上限 | **REAL** |
-| `ChannelSettlementVerifier`: verifyCloseIntent(95 limbs)/ verifyWithdrawalClaim(48)/ verifyPostCloseClaim(56)/ verifyCancelClose(27)、VK set-once | **REAL MLE/WHIR** |
-| close 系回路 + `test_fixture` witness builders | **REAL** |
-| 資金カストディ: `IntmaxRollup.withdrawNative` が finalized state root に束縛し manager の `pendingWithdrawals` を満たす | **REAL** |
-| `verifySpecialClose`(C2)/ `verifyLateOutgoingDebit`(C3) | **DISABLED stub**(detail2 §H-3、本仕様の対象外。下記 §3.5) |
+| state machine: Active → ClosePending → Closed, GRACE=600s / CHALLENGE=86400s | **REAL** |
+| payout: `pullChannelFunds` (rollup→manager) → `claimWithdrawalCredit` (to the member), with the global solvency cap `totalCreditedOut ≤ receivedChannelFunds` | **REAL** |
+| `ChannelSettlementVerifier`: verifyCloseIntent (95 limbs) / verifyWithdrawalClaim (48) / verifyPostCloseClaim (56) / verifyCancelClose (27), VK set-once | **REAL MLE/WHIR** |
+| the close-family circuits + the `test_fixture` witness builders | **REAL** |
+| fund custody: `IntmaxRollup.withdrawNative` binds to the finalized state root and satisfies the manager's `pendingWithdrawals` | **REAL** |
+| `verifySpecialClose` (C2) / `verifyLateOutgoingDebit` (C3) | **DISABLED stub** (detail2 §H-3; out of scope for this spec. See §3.5 below) |
 
-## 2. ギャップ(本実装で作るもの)
+## 2. Gaps (what this implementation builds)
 
-1. **実 L1-close anchor**(`channel_fund_intmax_state_root`)— 現状ゼロ placeholder。
-2. **wallet_core の close ビルダ** — `build_close_full_witness` / close 証明生成 / `build_withdrawal_claim` / channel withdrawal proof(recipient=manager)。
-3. **CLI コマンド** — `close` / `settle`(=finalize)/ `withdraw` / `claim`(+ challenge 用 `cancel-close`)。
-4. **on-chain 提出** — `cast send` で Manager / IntmaxRollup を叩く。
-5. **relay エンドポイント + 実 E2E**(anvil、fixture ではなく CLI 駆動)。
+1. **The real L1-close anchor** (`channel_fund_intmax_state_root`) — currently a zero placeholder.
+2. **The wallet_core close builders** — `build_close_full_witness` / close proof generation / `build_withdrawal_claim` / the channel withdrawal proof (recipient=manager).
+3. **CLI commands** — `close` / `settle` (=finalize) / `withdraw` / `claim` (plus `cancel-close` for the challenge).
+4. **On-chain submission** — calling the Manager / IntmaxRollup via `cast send`.
+5. **Relay endpoints + a real E2E** (anvil, CLI-driven rather than fixture-driven).
 
-## 3. 設計
+## 3. Design
 
-### 3.1 L1-close anchor(`channel_fund_intmax_state_root`)— 攻撃者レビュー結論
+### 3.1 The L1-close anchor (`channel_fund_intmax_state_root`) — attacker review conclusions
 
-**結論(Option B、攻撃者 subagent 検証済み):** この値は **channel 内部の member 署名値**で、IMCH/IMCL/IMCI に keccak 折り込みされるのみ。回路は外部 rollup root と一切照合しない。資金安全性は **別経路の withdrawal proof**(`ext_public_state_commitment` を `IntmaxRollup.finalizedStateRoots[]` で検証 + nullifier)が**完全に**担保。
-- ゼロ anchor:**SAFE**(over/double-withdraw 不可、払い出しは withdrawal proof が gate)。
-- 偽造 anchor:**SAFE**(IMCH が変わり member の list-proof が通らない=第三者偽造不可。member 自身が署名しても払い出しは別 gate)。
-- double-backing:**SAFE**(deposit nullifier + settled_tx_chain 分離 + manager ソルベンシー上限)。
+**Conclusion (Option B, verified by an attacker subagent):** this value is a **member-signed value internal to the channel**; it is only keccak-folded into IMCH/IMCL/IMCI. The circuits never cross-check it against an external rollup root. Fund safety is **fully** guaranteed by the **separate withdrawal proof** path (which verifies `ext_public_state_commitment` against `IntmaxRollup.finalizedStateRoots[]` + a nullifier).
+- Zero anchor: **SAFE** (over/double-withdraw is impossible; the payout is gated by the withdrawal proof).
+- Forged anchor: **SAFE** (IMCH changes, so the members' list proof does not pass = a third party cannot forge it. Even if a member signs it themselves, the payout is gated separately).
+- double-backing: **SAFE** (deposit nullifier + settled_tx_chain separation + the manager's solvency cap).
 
-**採用方針:**
-- **(必須)実値のソーシング**:`setup-backing` 時に `IntmaxRollup.latestFinalizedStateRoot()` を RPC 取得し、`ChannelBacking.intmax_state_root` に格納(placeholder 廃止)。genesis 組み立てで `ChannelFund.intmax_state_root` に流す。→ 意味論を正す+将来の post-close 機能の前提を満たす。
-- **(推奨・低コスト)on-chain 整合チェック**:`finalizeClose()` で `finalizedChannelFundIntmaxStateRoot != 0` なら `IntmaxRollup.finalizedStateRoots(root)` を要求(`CloseFundAnchorNotFinalized`)。将来の誤用を防ぐ防御的措置。**※これは IntmaxRollup bytecode を変えないが Manager bytecode は変わる → close fixture 再生成が必要**(A-2 と同じ metadata-hash 性質)。採否は §7 で要決定。
+**Adopted approach:**
+- **(required) source the real value**: at `setup-backing` time, fetch `IntmaxRollup.latestFinalizedStateRoot()` over RPC and store it in `ChannelBacking.intmax_state_root` (removing the placeholder). Flow it into `ChannelFund.intmax_state_root` during genesis assembly. → This corrects the semantics and satisfies a precondition for future post-close functionality.
+- **(recommended, low cost) on-chain consistency check**: in `finalizeClose()`, if `finalizedChannelFundIntmaxStateRoot != 0`, require `IntmaxRollup.finalizedStateRoots(root)` (`CloseFundAnchorNotFinalized`). A defensive measure against future misuse. **Note that this does not change the IntmaxRollup bytecode, but it does change the Manager bytecode → the close fixtures must be regenerated** (the same metadata-hash property as in A-2). Whether to adopt it is to be decided in §7.
 
-### 3.2 wallet_core の close ビルダ(新規 pub fn)
+### 3.2 The wallet_core close builders (new pub fns)
 
-すべて既存機構の配線。新暗号なし。
+All of this is wiring of existing machinery. No new cryptography.
 
-| 関数 | 入力(wallet が既に持つ) | 出力 | 補助(既存) |
+| Function | Input (already held by the wallet) | Output | Helpers (existing) |
 |---|---|---|---|
-| `build_close_intent(state, close_nonce, burn_tx_hash, snapshot_medium_block_number)` | 署名済み `ChannelState` | `ChannelCloseWitness`(intent+close_tx) | `CloseIntent::new` |
-| `build_close_full_witness(close_witness, member_auth, balance_proof, member_sigs)` | record.member_pk_gs、`channel_attestation.bin`(=balance proof)、member の IMCH 共署名 | `ChannelCloseFullWitness` | `ListCircuit::prove_append` で N sig を fold |
-| `prove_close(full_witness) → MleProof JSON + CloseProofFields` | 上記 | close MLE 証明 + descriptor | `generate_close_fixture.rs` と同じ wrap+MLE |
-| `build_channel_withdrawal(state, manager_addr, finalized_root)` | 署名済み state、manager アドレス、finalized root | withdrawal proof(recipient=manager) | 既存 withdraw 回路(withdrawNative 経路) |
-| `build_withdrawal_claim(final_balance_state, member_index, regev_sk, recipient)` | finalized balance、member の regev_sk | `WithdrawalClaim` + E-3 proof + MLE | 既存 withdrawal_claim 回路 |
-| (任意/後) `build_post_close_claim(...)` / `build_cancel_close(revived_state, close_intent)` | — | post-close / cancel MLE | 既存回路 |
+| `build_close_intent(state, close_nonce, burn_tx_hash, snapshot_medium_block_number)` | a signed `ChannelState` | `ChannelCloseWitness` (intent+close_tx) | `CloseIntent::new` |
+| `build_close_full_witness(close_witness, member_auth, balance_proof, member_sigs)` | record.member_pk_gs, `channel_attestation.bin` (= the balance proof), the members' IMCH co-signatures | `ChannelCloseFullWitness` | fold the N signatures with `ListCircuit::prove_append` |
+| `prove_close(full_witness) → MleProof JSON + CloseProofFields` | the above | close MLE proof + descriptor | the same wrap+MLE as `generate_close_fixture.rs` |
+| `build_channel_withdrawal(state, manager_addr, finalized_root)` | a signed state, the manager address, the finalized root | a withdrawal proof (recipient=manager) | the existing withdraw circuit (the withdrawNative path) |
+| `build_withdrawal_claim(final_balance_state, member_index, regev_sk, recipient)` | the finalized balance, the member's regev_sk | `WithdrawalClaim` + E-3 proof + MLE | the existing withdrawal_claim circuit |
+| (optional/later) `build_post_close_claim(...)` / `build_cancel_close(revived_state, close_intent)` | — | post-close / cancel MLE | existing circuits |
 
-**鍵となる現実的論点**:close 証明は **N-of-N member が IMCH digest に共署名**する必要がある(threshold なし)。これは `cosign` と同じ機構で、relay が全 member を所有する構成(現状の delegate demo)なら 1 コマンドで集められる。**1 人でも拒否すると close は作れない**(liveness は cancel/special-close 側の話 → §3.5)。
+**The key practical issue**: the close proof requires that **the N-of-N members co-sign the IMCH digest** (there is no threshold). This is the same machinery as `cosign`, and in a configuration where the relay owns all members (the current delegate demo) they can be collected in a single command. **If even one member refuses, the close cannot be built** (liveness is a matter for the cancel/special-close side → §3.5).
 
-### 3.3 CLI コマンド仕様
+### 3.3 CLI command spec
 
-| サブコマンド | 役割 | 主な処理 | on-chain |
+| Subcommand | Role | Main processing | On-chain |
 |---|---|---|---|
-| `close <manager_addr>` | close 意図の生成 | 最終 state を読み、N-of-N IMCH 共署名を集め、`prove_close` で close MLE 生成 → `close_intent.json` + `close_intent_mle.json`。durable checkpoint で freeze nonce / cancel floor を固定して `requestClose` | `cast send Manager.requestClose(uint64,uint64)` → `submitCloseIntent(intent, mleProof)` |
-| `cancel-close <manager_addr> <revived_state.json>` | challenge: 新しい署名済み state で close を撤回 | `build_cancel_close` → MLE | `cast send Manager.cancelClose(req, mleProof)` |
-| `settle <manager_addr>` | challenge 期間後に finalize | durable checkpoint で pending digest / request generation を固定・再検証 | `cast send Manager.finalizeCloseGuarded(bytes32,uint64)` |
-| `withdraw <rollup_addr> <manager_addr>` | rollup から manager へ資金移動 | `build_channel_withdrawal`(recipient=manager、finalized root)→ withdrawal proof | `cast send IntmaxRollup.withdrawNative(...)` → `Manager.pullChannelFunds()` |
-| `claim <manager_addr> <member_slot>` | member ごとの取り分主張+引き出し | `build_withdrawal_claim`(member の regev_sk)→ MLE | `cast send Manager.submitWithdrawalClaim(claim, mleProof)` → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` |
+| `close <manager_addr>` | generate the close intent | read the final state, collect the N-of-N IMCH co-signatures, generate the close MLE with `prove_close` → `close_intent.json` + `close_intent_mle.json`. Pin the freeze nonce / cancel floor in a durable checkpoint and call `requestClose` | `cast send Manager.requestClose(uint64,uint64)` → `submitCloseIntent(intent, mleProof)` |
+| `cancel-close <manager_addr> <revived_state.json>` | challenge: withdraw the close with a newer signed state | `build_cancel_close` → MLE | `cast send Manager.cancelClose(req, mleProof)` |
+| `settle <manager_addr>` | finalize after the challenge period | pin and re-validate the pending digest / request generation via the durable checkpoint | `cast send Manager.finalizeCloseGuarded(bytes32,uint64)` |
+| `withdraw <rollup_addr> <manager_addr>` | move funds from the rollup to the manager | `build_channel_withdrawal` (recipient=manager, finalized root) → withdrawal proof | `cast send IntmaxRollup.withdrawNative(...)` → `Manager.pullChannelFunds()` |
+| `claim <manager_addr> <member_slot>` | a member claims and withdraws their share | `build_withdrawal_claim` (the member's regev_sk) → MLE | `cast send Manager.submitWithdrawalClaim(claim, mleProof)` → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` |
 
-- 状態ファイル:`close_intent.json` / `close_intent_mle.json` / `withdrawal_claim_*.json` を channel dir に出力(既存 fixture と同スキーマ)。
-- 秘密鍵の扱いは CLAUDE.md 準拠(`.claude/priv` を shell 展開、assistant に載せない)。
+- State files: `close_intent.json` / `close_intent_mle.json` / `withdrawal_claim_*.json` are written to the channel directory (same schema as the existing fixtures).
+- Secret-key handling follows CLAUDE.md (expand `.claude/priv` in the shell; never put it in front of the assistant).
 
-### 3.4 relay エンドポイント(任意・E2E 用)
+### 3.4 Relay endpoints (optional, for E2E)
 
-`/api/close`(N-of-N 共署名を集め close MLE 生成)、`/api/settle`、`/api/withdraw`、`/api/claim`。relay が全 channel を所有する前提で、各々 CLI を cwd 切替で起動(既存 `/api/inter/send` と同型)。
+`/api/close` (collect the N-of-N co-signatures and generate the close MLE), `/api/settle`, `/api/withdraw`, `/api/claim`. On the premise that the relay owns every channel, each one launches the CLI with a cwd switch (the same shape as the existing `/api/inter/send`).
 
-### 3.5 対象外(明示)
+### 3.5 Out of scope (explicitly)
 
-- **specialClose(C2)/ lateOutgoingDebit(C3)**:detail2 §H-3 で「forgeable stub → DISABLE」。本実装では**実装しない**。むしろ別 PR で **entry point を revert 化**して forgeable stub を塞ぐのが正(安全側)。本仕様では「呼ばない/触らない」。
-- **post-close-claim**:回路は REAL だが happy-path close には不要。フェーズ後半 or 別 PR。
+- **specialClose (C2) / lateOutgoingDebit (C3)**: detail2 §H-3 says "forgeable stub → DISABLE". This implementation **does not implement them**. The right (safe-side) move is instead to **turn the entry points into reverts** in a separate PR, closing off the forgeable stubs. This spec says: do not call them, do not touch them.
+- **post-close-claim**: the circuit is REAL but it is not needed for the happy-path close. Later in the phase sequence, or in a separate PR.
 
-## 4. 脅威モデル(CLAUDE.md チェックリスト)
+## 4. Threat model (CLAUDE.md checklist)
 
-| 脅威 | 緩和 | 状態 |
+| Threat | Mitigation | State |
 |---|---|---|
-| 第三者が close を偽造 | close 回路が N-of-N member IMCH 署名を ListCircuit で検証。非 member 鍵は member_set_commitment 不一致で拒否(Finding E/D) | 既存 REAL |
-| stale state で close(古い残高を凍結) | challenge 期間(86400s)+ `cancelClose`(REAL):より新しい N-of-N 署名 state を提示で撤回。`revived_version > close_version` を回路強制(Finding B) | 既存 REAL |
-| over-withdraw / double-withdraw | nullifier 使用済みマップ + `totalWithdrawn ≤ fund` + `totalCreditedOut ≤ receivedChannelFunds`(実受領額上限) | 既存 REAL |
-| ゼロ/偽造 anchor | §3.1 攻撃者結論=資金安全(別 withdrawal proof が gate)。実値化は意味論+将来防御 | 本実装で実値化 |
-| 払い出し先すり替え | `registeredRecipientOf[pkG]` が registration 時固定、member pk→recipient 1:1 束縛 | 既存 REAL |
-| close の liveness grief(1 member 拒否で close 不能) | **残存リスク**:N-of-N 必須のため悪意 member は close を妨害可。special-close(本来の救済)は DISABLED。→ 既知の制約として明記、別途設計 | 設計課題(明記) |
-| challenge 期間の anvil 時間操作(テスト) | `vm.warp` / anvil `evm_increaseTime` で制御 | テスト手段 |
-| manager アドレスの fixture 焼き込み(CREATE2 metadata-hash 脆さ) | 本番は通常デプロイ済み manager の実アドレスを使う(CREATE2 はテスト専用)。Manager bytecode を変える変更(§3.1 推奨チェック等)は close fixture 再生成が必要 | 留意点 |
+| a third party forges a close | the close circuit verifies the N-of-N members' IMCH signatures with ListCircuit. A non-member key is rejected by the member_set_commitment mismatch (Findings E/D) | existing REAL |
+| closing with a stale state (freezing an old balance) | the challenge period (86400s) + `cancelClose` (REAL): presenting a more recent N-of-N-signed state withdraws it. `revived_version > close_version` is enforced by the circuit (Finding B) | existing REAL |
+| over-withdraw / double-withdraw | the used-nullifier map + `totalWithdrawn ≤ fund` + `totalCreditedOut ≤ receivedChannelFunds` (capped by the amount actually received) | existing REAL |
+| zero/forged anchor | the §3.1 attacker conclusion = funds are safe (a separate withdrawal proof is the gate). Using the real value is about semantics + future defense | made real in this implementation |
+| substituting the payout destination | `registeredRecipientOf[pkG]` is fixed at registration time, binding member pk→recipient 1:1 | existing REAL |
+| close liveness grief (one member refuses and close becomes impossible) | **residual risk**: because N-of-N is mandatory, a malicious member can obstruct the close. special-close (the intended remedy) is DISABLED. → documented as a known limitation; to be designed separately | design issue (documented) |
+| manipulating the challenge-period time on anvil (tests) | controlled with `vm.warp` / anvil `evm_increaseTime` | a testing facility |
+| baking the manager address into fixtures (the CREATE2 metadata-hash fragility) | in production, use the real address of a normally deployed manager (CREATE2 is test-only). Any change to the Manager bytecode (such as the §3.1 recommended check) requires regenerating the close fixtures | caveat |
 
-**着手前**:各フェーズ実装の直前に専用 attacker subagent を回し、上記 + 新規発見を確認する(CLAUDE.md 必須)。
+**Before starting**: immediately before implementing each phase, run a dedicated attacker subagent and confirm the above plus any new findings (mandatory per CLAUDE.md).
 
-## 5. フェーズ分割(falsifiable な成果物)
+## 5. Phase breakdown (falsifiable deliverables)
 
-- **P1 — 実 anchor**:`setup-backing` で `latestFinalizedStateRoot()` 取得→`ChannelBacking.intmax_state_root` に格納、genesis に伝播。placeholder 廃止。(任意)`finalizeClose` の on-chain チェック追加 → 採否は §7。**検証**:backing JSON に実 root、既存テスト緑。
-- **P2 — wallet_core close ビルダ**:`build_close_intent` / `build_close_full_witness` / `prove_close`。**検証**:新規 Rust 単体テストで close MLE を生成・self-verify、negative(改竄署名/非 member)で拒否。
-- **P3 — CLI `close` + `cancel-close`**:意図生成 + 共署名集約 + on-chain 提出。**検証**:anvil で requestClose→submitCloseIntent が通る。
-- **P4 — `settle` + `withdraw` + `claim`**:finalize → withdrawNative → pull → submitWithdrawalClaim → claimWithdrawalCredit。**検証**:anvil で member が実 ETH を受領。
-- **P5 — relay + 完全 E2E**:`/api/close|settle|withdraw|claim`、CLI 駆動の anvil E2E(deposit→運用→close→challenge→withdraw→claim)。**検証**:新 `tests/close_lifecycle_cli_e2e.rs`(real proof、強 negative、エラー文字列固定)。
-- **P6 — 後始末**:`doc/tasks/a3-close-lifecycle-followup.md` を closed に、fail-closed スタブを実装に置換。specialClose/lateDebit の revert 化は別 PR 提案。
+- **P1 — the real anchor**: `setup-backing` fetches `latestFinalizedStateRoot()` → stores it in `ChannelBacking.intmax_state_root` and propagates it into genesis. Placeholder removed. (Optional) add the on-chain check in `finalizeClose` → adoption decided in §7. **Verification**: the backing JSON contains the real root and the existing tests are green.
+- **P2 — the wallet_core close builders**: `build_close_intent` / `build_close_full_witness` / `prove_close`. **Verification**: a new Rust unit test generates and self-verifies a close MLE, and negatives (tampered signature / non-member) are rejected.
+- **P3 — CLI `close` + `cancel-close`**: intent generation + co-signature aggregation + on-chain submission. **Verification**: requestClose→submitCloseIntent passes on anvil.
+- **P4 — `settle` + `withdraw` + `claim`**: finalize → withdrawNative → pull → submitWithdrawalClaim → claimWithdrawalCredit. **Verification**: a member receives real ETH on anvil.
+- **P5 — relay + full E2E**: `/api/close|settle|withdraw|claim`, and a CLI-driven anvil E2E (deposit→operation→close→challenge→withdraw→claim). **Verification**: a new `tests/close_lifecycle_cli_e2e.rs` (real proofs, strong negatives, pinned error strings).
+- **P6 — cleanup**: mark `doc/tasks/a3-close-lifecycle-followup.md` as closed and replace the fail-closed stubs with implementations. Turning specialClose/lateDebit into reverts is proposed as a separate PR.
 
-各フェーズ末で `doc/tasks/audit-fixes-todo.md` 系に成果を記録。
+At the end of each phase, record the results in the `doc/tasks/audit-fixes-todo.md` family.
 
-## 6. テスト計画
+## 6. Test plan
 
-- **単体(Rust, release)**:close/withdrawal-claim/cancel の witness ビルダ correctness + negative(改竄 IMCH、非 member 署名、stale version、amount 改竄)。`tests/inter_channel_live.rs` のエラー文字列固定パターンに倣う。
-- **on-chain(forge)**:`CloseLifecycleE2E` を CLI 駆動版に拡張、または新 `ChannelSettlementManager` negative(verdict・期間境界)。
-- **E2E(anvil, Rust 駆動)**:`tests/close_lifecycle_cli_e2e.rs` — deposit→close→challenge(cancel で撤回も)→settle→withdraw→claim、member の L1 残高増を assert。重い(実証明)ので明示的にユーザー許可を取る。
-- **回帰**:`generate_*` fixture と `CloseLifecycleE2E` が緑のまま。Manager bytecode を変えたら close fixture 再生成(§3.1 留意点)。
+- **Unit (Rust, release)**: correctness of the close/withdrawal-claim/cancel witness builders + negatives (tampered IMCH, non-member signature, stale version, tampered amount). Follow the pinned-error-string pattern of `tests/inter_channel_live.rs`.
+- **On-chain (forge)**: extend `CloseLifecycleE2E` into a CLI-driven version, or add new `ChannelSettlementManager` negatives (verdicts, period boundaries).
+- **E2E (anvil, Rust-driven)**: `tests/close_lifecycle_cli_e2e.rs` — deposit→close→challenge (including withdrawal via cancel)→settle→withdraw→claim, asserting the increase in the member's L1 balance. It is heavy (real proofs), so obtain explicit user permission.
+- **Regression**: the `generate_*` fixtures and `CloseLifecycleE2E` stay green. If the Manager bytecode changes, regenerate the close fixtures (the §3.1 caveat).
 
-## 7. ユーザー決定が必要な点
+## 7. Points requiring a user decision
 
-1. **anchor の on-chain チェック(§3.1 推奨)を入れるか**:入れる=意味論強化+将来防御だが Manager bytecode 変更→close fixture 再生成が必要。入れない=実値化のみ(資金安全は変わらず)。**推奨:入れる**(防御的、低コスト、A-2 と同じ再生成を 1 回行う)。
-2. **スコープ**:happy-path(P1–P5)までか、post-close-claim / specialClose revert 化まで含めるか。**推奨:まず happy-path + cancel-close を完成(P1–P5)、post-close と stub revert 化は別 PR**。
-3. **liveness grief(1 member 拒否で close 不能)**の扱い:本実装では「既知の制約」として明記に留めるか、救済(special-close の健全版=cross-layer non-inclusion 証明)まで設計するか。**推奨:今回は明記に留め、救済は別途**(detail2 §H-3 が cross-layer commitment 待ちとしている)。
+1. **Whether to include the on-chain anchor check (recommended in §3.1)**: including it strengthens the semantics and adds future defense, but changes the Manager bytecode → the close fixtures must be regenerated. Excluding it means only using the real value (fund safety is unchanged either way). **Recommendation: include it** (defensive, low cost, and it means doing the same regeneration as A-2 once).
+2. **Scope**: up to the happy path (P1–P5), or also including post-close-claim / turning specialClose into a revert. **Recommendation: first complete the happy path + cancel-close (P1–P5), and do post-close and the stub reverts in a separate PR**.
+3. **How to handle liveness grief (one member refuses and close becomes impossible)**: either document it as a "known limitation" in this implementation, or design a remedy as well (a sound version of special-close = a cross-layer non-inclusion proof). **Recommendation: document it for now and handle the remedy separately** (detail2 §H-3 states it is waiting on cross-layer commitments).

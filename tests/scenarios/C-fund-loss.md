@@ -47,7 +47,7 @@ real findings — if a test shows a payout where it shouldn't, STOP and escalate
 - **Assert**: characterize the outcome — the pre-existing pending deposit folds into the FIRST posted
   block, so the withdrawal proof's deposit-in-block-2 model mismatches → `finalize returned false`.
   The test should PIN that this combination fails fail-closed (no fund movement), and document that the
-  supported integrated path requires the deferred-deposit (案B) mode. This guards against silently
+  supported integrated path requires the deferred-deposit (Option B) mode. This guards against silently
   shipping a demo path that bricks withdraw.
 
 ### C17 — `claimWithdrawalCredit` before `pullChannelFunds`

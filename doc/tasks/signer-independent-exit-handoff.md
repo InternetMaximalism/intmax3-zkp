@@ -1,79 +1,79 @@
 # Signer-independent exact-vector exit: handoff
 
-## 作業対象
+## Scope of work
 
-- 作業ブランチ: `codex/signerless-latest-head-exit-20260903`
-- 開始コミット: `9f5d820` (`fix: close release blockers and retire direct MSU`)
-- 作業ツリー: `/private/tmp/intmax3-signerless-exit.2qrfge`
-- `contracts/lib/polygon-plonky2` はサブモジュールであり、この作業では変更していない。
-- KZG trusted setup は、依頼どおり信頼仮定として扱い、blocker にしていない。
+- Working branch: `codex/signerless-latest-head-exit-20260903`
+- Starting commit: `9f5d820` (`fix: close release blockers and retire direct MSU`)
+- Working tree: `/private/tmp/intmax3-signerless-exit.2qrfge`
+- `contracts/lib/polygon-plonky2` is a submodule and was not modified in this work.
+- The KZG trusted setup is treated as a trust assumption, as requested, and is not treated as a blocker.
 
-## ここまでに実施したこと
+## What has been done so far
 
-### 1. 最新署名済み state を単一の close 対象に固定
+### 1. Pinning the latest signed state as the single close target
 
-`V` と `B` を token ごとに混ぜる経路を廃止し、close は一つの認証済み whole-state vector を対象にした。`ChannelSettlementManager` と `CloseFundingMaterializer` は、channel、settled chain、TFD、拡張 state root、anchor を同一 proof から読み、exact vector を原子的に materialize する。古い close、異なる identity、stale-burn、異なる generation は fail-closed になる。
+The path that mixes `V` and `B` per token was removed; close now targets a single authenticated whole-state vector. `ChannelSettlementManager` and `CloseFundingMaterializer` read the channel, the settled chain, the TFD, the extended state root, and the anchor from the same proof, and materialize the exact vector atomically. Old closes, a different identity, stale burns, and a different generation all fail closed.
 
-### 2. 署名者不在の退出材料
+### 2. Exit material that does not require a signer
 
-`src/live_balance_service.rs` に signed-head exit kit を追加し、完全な N-of-N state `H` が durable になる時点で、その state に対応する Balance proof、whole-vector backing proof、固定 public inputs、root、anchor を保存・検証する設計にした。L1 側は channel の追加署名を要求せず、保存済み kit と permissionless backing attestation を使って close/finalize/materialize を進める。
+A signed-head exit kit was added to `src/live_balance_service.rs`, designed so that at the point where the complete N-of-N state `H` becomes durable, the Balance proof corresponding to that state, the whole-vector backing proof, the fixed public inputs, the root, and the anchor are stored and verified. The L1 side does not require an additional channel signature; it drives close/finalize/materialize using the stored kit and a permissionless backing attestation.
 
 ### 3. Close backing circuit
 
-`src/circuits/channel/close_asset_backing_circuit.rs` を追加した。Balance proof/VK、PrivateState、ExtendedPublicState、asset registry、canonical zero limbs を再構成し、全 token の asset tree と TFD を exact に拘束する。public inputs は固定 26 limbs で、proof size/既存 close circuit ABI を変更しない additive な回路である。
+`src/circuits/channel/close_asset_backing_circuit.rs` was added. It reconstructs the Balance proof/VK, PrivateState, ExtendedPublicState, asset registry, and canonical zero limbs, and constrains the asset tree and the TFD exactly for all tokens. Its public inputs are a fixed 26 limbs; it is an additive circuit that changes neither the proof size nor the existing close circuit ABI.
 
-### 4. Solidity の安全境界
+### 4. Solidity safety boundaries
 
-- `ChannelSettlementManager.sol`: whole-state close、finalized/pending high-water mark、reorg rollback、exact TFD、historical authenticated partial withdrawal を実装。
-- `CloseFundingMaterializer.sol`: permissionless backing attestation、attestation receipt、exact vector credit、channel/generation/freeze guard、二重 materialization 防止を実装。
-- `IntmaxRollup.sol`: materializer の set-once、post/rollback journal、release runtime guard を実装。
-- 旧 MSU の安全でない経路は production から停止・隔離した。
+- `ChannelSettlementManager.sol`: implements whole-state close, the finalized/pending high-water mark, reorg rollback, exact TFD, and historical authenticated partial withdrawal.
+- `CloseFundingMaterializer.sol`: implements permissionless backing attestation, attestation receipts, exact-vector credit, channel/generation/freeze guards, and prevention of double materialization.
+- `IntmaxRollup.sol`: implements set-once for the materializer, the post/rollback journal, and the release runtime guard.
+- The unsafe paths of the old MSU have been stopped and isolated from production.
 
-### 5. 公開 prover/publisher/deployment
+### 5. Public prover/publisher/deployment
 
-- `public_close_prover` の bundle schema を更新し、backing proof、MLE proof、26 PI、root/anchor、protocol metadata を bundle に含めた。
-- `public_close_publisher` は attestation → submit → finalize authorization → finalize → materialize の順序を WAL に記録する。raw signed transaction は broadcast 前に fsync する。
-- attestation は permissionless で、他 watchtower の勝者を exact event/receipt/getter で採用できる。
-- `DeployCloseCli.s.sol` と `channel_member` は既存 Rollup への materializer 接続、distinct backing VK、bundle hash/PI/root/metadata pin、nonce/target/calldata の再検証を行う。
+- The `public_close_prover` bundle schema was updated so that the bundle contains the backing proof, the MLE proof, the 26 PI, the root/anchor, and the protocol metadata.
+- `public_close_publisher` records the order attestation → submit → finalize authorization → finalize → materialize in the WAL. Raw signed transactions are fsynced before broadcast.
+- Attestation is permissionless, and the winner among other watchtowers can be adopted via exact events/receipts/getters.
+- `DeployCloseCli.s.sol` and `channel_member` attach the materializer to an existing Rollup, use a distinct backing VK, pin the bundle hash/PI/root/metadata, and re-verify the nonce/target/calldata.
 
-### 6. 検証済みテスト・サイズ
+### 6. Verified tests and sizes
 
 - SignerIndependentExit: 11/11
 - ChannelSettlementManager: 79/79
 - PartialWithdrawal: 42/42
 - DeployGuards: 30/30
 - Node focused tests: 14/14
-- EIP-170 サイズ: IntmaxRollup 24,533 B、Manager 23,988 B、Materializer 15,339 B（いずれも上限内）。
-- Rust の backing circuit fixed-width PI test、`cargo check`、publisher の既存テストを実行済み。ただし publisher の最終 attestation 順序テストと全体再実行は引き継ぎ後に必ず再確認する。
+- EIP-170 sizes: IntmaxRollup 24,533 B, Manager 23,988 B, Materializer 15,339 B (all within the limit).
+- The Rust backing circuit fixed-width PI test, `cargo check`, and the publisher's existing tests have been run. However, the publisher's final attestation-ordering test and a full re-run must be re-confirmed after handoff.
 
-## 引き継ぎ後に必ず行うこと
+## What must be done after handoff
 
-1. **作業ツリーと差分を確認**
+1. **Check the working tree and the diff**
    ```sh
    cd /private/tmp/intmax3-signerless-exit.2qrfge
    git status --short
    git diff --check
    ```
 
-2. **publisher の最終整合性を完成**
-   - completed journal の schema を `PUBLICATION_VERSION`（現在 3）に合わせる。
-   - completed publication の `attest_transaction_hash` を journal の exact attestation observation と比較する。
-   - 全ての `submit_observation` 採用箇所で、`CloseSubmitted` の semantic position が attestation より厳密に後であることを要求する。
-   - 再起動、同一 block 内 tx 順序、attestation の race、reorg/rollback、stale event 混入をテストする。
+2. **Complete the publisher's final consistency work**
+   - Align the completed journal's schema with `PUBLICATION_VERSION` (currently 3).
+   - Compare the completed publication's `attest_transaction_hash` against the journal's exact attestation observation.
+   - At every site that adopts a `submit_observation`, require that the semantic position of `CloseSubmitted` be strictly after the attestation.
+   - Test restarts, transaction ordering within the same block, attestation races, reorg/rollback, and contamination by stale events.
 
-3. **channel_member の signer-independent 運用を再確認**
-   - kit は完全な N-of-N state `H` の受理時に durable であること。
-   - `H` の後に cosigner signature を要求する経路がないこと。
-   - 内部中間遷移を外部の canonical head と誤認しないこと。
-   - browser/wasm の raw signing 経路が公開環境で kit なしに canonical head を公開できないか再監査する。
+3. **Re-confirm the signer-independent operation of channel_member**
+   - The kit must be durable at the moment the complete N-of-N state `H` is accepted.
+   - There must be no path that requires a cosigner signature after `H`.
+   - Internal intermediate transitions must not be mistaken for the external canonical head.
+   - Re-audit whether the browser/wasm raw signing path can publish a canonical head without a kit in a public environment.
 
-4. **3 ラウンドの攻撃・防御レビューを完了**
-   - Round 1: whole-vector mixing、stale burn、double materialization、cross-channel backing を攻撃。
-   - Round 2: attestation race、reorg、cancel/replay、delegate/partial-withdrawal の exact-vector 不整合を攻撃。
-   - Round 3: signer 不在、WAL crash、同一 block の ordering、RPC 差し替え、browser/public claim を攻撃。
-   各ラウンドで再現テスト、修正、同じ攻撃の再実行を記録する。
+4. **Complete three rounds of attack/defense review**
+   - Round 1: attack whole-vector mixing, stale burn, double materialization, and cross-channel backing.
+   - Round 2: attack attestation races, reorgs, cancel/replay, and exact-vector inconsistencies in delegate/partial-withdrawal.
+   - Round 3: attack signer absence, WAL crash, ordering within the same block, RPC substitution, and browser/public claims.
+   For each round, record the reproduction test, the fix, and a re-run of the same attack.
 
-5. **全テストとベンチマーク**
+5. **All tests and benchmarks**
    ```sh
    /Users/andropov/.cargo/bin/cargo check --bin public_close_publisher
    /Users/andropov/.cargo/bin/cargo test --lib close_asset_backing_circuit
@@ -83,13 +83,13 @@
    forge test --match-contract PartialWithdrawal -vvv
    forge test --match-contract DeployGuards -vvv
    ```
-   既存 close proof の proof size/time と backing proof の size/time を比較し、既存 ABI・本番ベンチマークを悪化させていないことを記録する。
+   Compare the proof size/time of the existing close proof against the size/time of the backing proof, and record that the existing ABI and the production benchmarks have not been degraded.
 
-6. **公開環境の境界を確認**
+6. **Confirm the public-environment boundary**
 
-   MLE/WHIR PCS の constituent-evaluation 問題は別サブモジュール監査の範囲であり、本ブランチで暗号学的に修復しない。公式 deploy、Rollup/Manager の value boundary、chain ID、MLE VK、bundle hash が本番では fail-closed であることを再確認する。
+   The constituent-evaluation problem in the MLE/WHIR PCS is within the scope of a separate submodule audit and is not cryptographically repaired on this branch. Re-confirm that the official deploy, the Rollup/Manager value boundary, the chain ID, the MLE VK, and the bundle hash are fail-closed in production.
 
-7. **レビュー後に commit/push**
+7. **Commit/push after review**
 
    ```sh
    git diff --check
@@ -98,251 +98,257 @@
    git push -u origin codex/signerless-latest-head-exit-20260903
    ```
 
-## 既知の注意点
+## Known caveats
 
-- 実チェーンへの broadcast は未実施。deployment bundle、nonce、manager/materializer address、MLE verifier code、backing VK、finalized readback を実チェーンで確認してから行う。
-- MLE/WHIR PCS の Critical は別スレッドで扱う。これを解決済みと記載してはいけない。
-- Foundry は sandbox 内で macOS SystemConfiguration により落ちる場合があるため、その場合は承認済みの `forge test` 実行環境で再実行する。
-- 最終的な release 判定は、上記の publisher 順序検証、3 ラウンド攻撃レビュー、全テスト、ベンチマーク、実デプロイ readback が揃ってから行う。
+- Broadcast to a real chain has not been performed. Do it only after confirming the deployment bundle, the nonce, the manager/materializer addresses, the MLE verifier code, the backing VK, and the finalized readback on a real chain.
+- The MLE/WHIR PCS Critical is handled in a separate thread. It must not be recorded as resolved.
+- Foundry can crash inside the sandbox due to macOS SystemConfiguration; in that case, re-run it in an approved `forge test` execution environment.
+- The final release decision is to be made only once the publisher ordering verification, the three rounds of attack review, the full test run, the benchmarks, and the real-deploy readback are all in place.
 
 ---
 
-# 引き継ぎ後の実施記録（2026-09-03、`codex/signerless-latest-head-exit-20260903` 8f70b73 以降）
+# Record of work done after handoff (2026-09-03, `codex/signerless-latest-head-exit-20260903` from 8f70b73 onward)
 
-上記「引き継ぎ後に必ず行うこと」1〜7 を実施した結果。行番号は本記録時点のもの。
+The results of carrying out items 1 through 7 of "What must be done after handoff" above. Line numbers are as of the time of this record.
 
-## 1. 作業ツリー
+## 1. Working tree
 
-`8f70b73` を fast-forward で取り込み、submodule を初期化。`git diff --check` はクリーン。
-この handoff 文書はコミット `8f70b73` に含まれていなかったため `doc/tasks/` に取り込んだ。
+`8f70b73` was taken in by fast-forward and the submodules were initialized. `git diff --check` is clean.
+This handoff document was not included in commit `8f70b73`, so it was brought into `doc/tasks/`.
 
-## 2. publisher の最終整合性（`src/public_close_publisher.rs`）
+## 2. Publisher final consistency (`src/public_close_publisher.rs`)
 
-見つかったギャップと修正:
+Gaps found and fixes made:
 
-- **完了 journal の schema 検証がハードコード `!= 2`** だった（`PUBLICATION_VERSION` は 3）。publisher が自分で書いた完了 journal を次回起動で常に拒否する liveness バグ。`PUBLICATION_VERSION` と比較するよう修正し、`load_or_create_journal` でも検証する。
-- **`attest_transaction_hash` が再検証パスで一切参照されていなかった。** 完了 journal の再検証と journal ロード時に、`attest_observation`（`advance_attestation` が毎回オンチェーン再検証する）の tx hash と照合する。
-- **`CloseSubmitted` の semantic position が attestation より厳密に後である要求が存在しなかった。** `discover_semantic_confirmation` に `strictly_after` を追加し 9 箇所すべての呼び出しで attestation observation を下限として渡す。ローカル receipt 採用箇所（`ReceiptState::Finalized`）、完了 journal 再検証、journal ロード時にも `require_after_attestation` を適用。順序は `(block_number, transaction_index)` の辞書順で、同一 block 内は transaction index で決まる。
-- **テストハーネスが attestation ステージ未対応**で 30 中 16 件が失敗していた（`SignedHeadBackingAttested provenance count 0 != 1`）。`FakeBackend::new` が外部 watchtower の attestation receipt（block 10, index 1）を持つようにし、`attested_backend()` で採用済み状態から close 状態機械へ入る。
+- **The completed journal's schema check was hardcoded as `!= 2`** (`PUBLICATION_VERSION` is 3). This is a liveness bug in which the publisher always rejects, on the next startup, a completed journal it wrote itself. Fixed to compare against `PUBLICATION_VERSION`, and validated in `load_or_create_journal` as well.
+- **`attest_transaction_hash` was not referenced at all on the re-validation path.** When re-validating the completed journal and when loading the journal, it is now checked against the tx hash of `attest_observation` (which `advance_attestation` re-validates on-chain every time).
+- **There was no requirement that the semantic position of `CloseSubmitted` be strictly after the attestation.** `strictly_after` was added to `discover_semantic_confirmation` and the attestation observation is passed as the lower bound at all 9 call sites. `require_after_attestation` is also applied at the local receipt adoption site (`ReceiptState::Finalized`), at completed-journal re-validation, and at journal load. The ordering is the lexicographic order of `(block_number, transaction_index)`; within the same block it is decided by the transaction index.
+- **The test harness did not support the attestation stage**, so 16 of 30 were failing (`SignedHeadBackingAttested provenance count 0 != 1`). `FakeBackend::new` now carries an external watchtower's attestation receipt (block 10, index 1), and `attested_backend()` enters the close state machine from the already-adopted state.
 
-追加テスト（すべて通過、計 37 件）:
+Additional tests (all passing, 37 in total):
 
-| テスト | 対象 |
+| Test | Target |
 |---|---|
-| `permissionless_attestation_winner_is_adopted_and_local_raw_is_superseded` | attestation race: ローカル raw 送信後に他者の attestation が先に finalize → 採用、ローカル loser の revert 確定まで nonce lane を解放しない |
-| `close_submitted_in_the_attestation_block_must_follow_the_attestation_index` | 同一 block 内順序: index が attestation より小さい submit は拒否、大きい submit は採用 |
-| `local_submit_receipt_ordered_before_the_attestation_is_rejected` | RPC 差し替えで自分の submit が attestation 前に見える場合の拒否 |
-| `adopted_attestation_is_revalidated_and_fails_closed_after_reorg` | attestation block の reorg |
-| `foreign_attestation_events_are_filtered_and_duplicate_exact_attestations_fail_closed` | stale/foreign event 混入、重複 exact attestation |
-| `completed_publication_attestation_provenance_and_schema_are_revalidated` | 完了 journal の attest hash / schema 改竄 |
-| `journal_load_rejects_close_provenance_at_or_before_the_attestation` | journal ロード時の順序不変条件 |
+| `permissionless_attestation_winner_is_adopted_and_local_raw_is_superseded` | attestation race: after a local raw submission, another party's attestation finalizes first → it is adopted, and the nonce lane is not released until the local loser's revert is confirmed |
+| `close_submitted_in_the_attestation_block_must_follow_the_attestation_index` | ordering within the same block: a submit whose index is lower than the attestation's is rejected, a higher one is adopted |
+| `local_submit_receipt_ordered_before_the_attestation_is_rejected` | rejection when RPC substitution makes our own submit appear before the attestation |
+| `adopted_attestation_is_revalidated_and_fails_closed_after_reorg` | reorg of the attestation block |
+| `foreign_attestation_events_are_filtered_and_duplicate_exact_attestations_fail_closed` | contamination by stale/foreign events, duplicate exact attestations |
+| `completed_publication_attestation_provenance_and_schema_are_revalidated` | tampering with the completed journal's attest hash / schema |
+| `journal_load_rejects_close_provenance_at_or_before_the_attestation` | the ordering invariant at journal load |
 
-契約側は同一 `proofId` の `SignedHeadBackingAttested` を一度しか emit しない（`CloseFundingMaterializer.sol` `attestSignedHeadBacking`）ため、重複 exact attestation は RPC 側の異常であり fail-closed が正しい。
+The contract side emits `SignedHeadBackingAttested` only once for the same `proofId` (`CloseFundingMaterializer.sol` `attestSignedHeadBacking`), so a duplicate exact attestation is an RPC-side anomaly and failing closed is correct.
 
-## 3. channel_member / kit の再監査
+## 3. Re-audit of channel_member / the kit
 
-- kit は N-of-N head と同一スナップショット（`persist_snapshot`: create_new 0600 → fsync → rename → dir fsync）で原子的に永続化され、`verify_snapshot_semantics(require_exit_kit=true)` が commit/load ごとに proof を再検証する。head だけ durable で kit が無い窓は無い。
-- H 以後に cosigner 署名を要求する退出経路は無い。`cmd_close` は cosigner 鍵を導出しない。資産/構成を動かす 8 つの署名 purpose は `requires_prepared_exit_kit` で署名プリミティブ前に一律拒否されている（pre-sign prepare+fsync receipt の API 化まで）。
-- 内部中間遷移は canonical head にならない（`live_balance_service.rs` の線形進行チェック: epoch+1 / state_version+1 / small block・fund・settled chain・accumulator・nullifier root・import cursor 不変）。
-- **wasm/browser のギャップを修正**: `wallet_cosign` に kit ゲートが無かった。`wallet_core::verify_exit_kit_preserving_successor` を追加し、`wasm_wallet::wallet_cosign` が署名解放前に「H2=0 かつ backing statement 完全不変の後続」だけを許可する（CLI の拒否と同じ境界）。テスト `cosign_gate_refuses_every_asset_or_composition_moving_successor`（release）。
-- 未修正の注意点: `receive_deposit_unbound` は bound 済み channel への追加 deposit を stale kit 検出で fail-closed にする（機能制限）。`settle_close_funding` は deprecated で kit を install しない dead path。kit 再利用判定は anchor を比較しない（意図的、文書化のみ）。
+- The kit is persisted atomically in the same snapshot as the N-of-N head (`persist_snapshot`: create_new 0600 → fsync → rename → dir fsync), and `verify_snapshot_semantics(require_exit_kit=true)` re-verifies the proof on every commit/load. There is no window in which only the head is durable and the kit is missing.
+- There is no exit path that requires a cosigner signature after H. `cmd_close` does not derive cosigner keys. The 8 signing purposes that move assets/composition are uniformly rejected by `requires_prepared_exit_kit` before the signing primitive (until the pre-sign prepare+fsync receipt is exposed as an API).
+- Internal intermediate transitions do not become the canonical head (the linear-progress check in `live_balance_service.rs`: epoch+1 / state_version+1 / small block, fund, settled chain, accumulator, nullifier root, and import cursor unchanged).
+- **A wasm/browser gap was fixed**: `wallet_cosign` had no kit gate. `wallet_core::verify_exit_kit_preserving_successor` was added so that `wasm_wallet::wallet_cosign` permits, before releasing a signature, only successors that are "H2=0 and leave the backing statement entirely unchanged" (the same boundary as the CLI's rejection). Test `cosign_gate_refuses_every_asset_or_composition_moving_successor` (release).
+- Unfixed caveats: `receive_deposit_unbound` makes an additional deposit into an already-bound channel fail closed via stale-kit detection (a functional limitation). `settle_close_funding` is deprecated and is a dead path that does not install a kit. The kit-reuse decision does not compare the anchor (intentional; documented only).
 
-## 4. 3 ラウンドの攻撃・防御レビュー
+## 4. Three rounds of attack/defense review
 
-### Round 1（Solidity: mixing / stale burn / double materialization / cross-channel）
+### Round 1 (Solidity: mixing / stale burn / double materialization / cross-channel)
 
-既存ガードはすべて有効（`BackingPublicInputsMismatch` は TFD かつ settledTxChain の一致、`proofId` が proof 全体を束縛、`ChannelAlreadyExited` latch は credit 前に書かれ rollback でも消えない）。未カバーだった攻撃に `contracts/test/SignerIndependentExit.t.sol` へ 10 件追加（21/21）: settledTxChain 交差、anchor 改竄、cross-channel、未 bind manager、未 freeze materialize、未 finalize root、複数 channel 交錯 rollback（順序違反含む）、rollback 後の再 materialize、escrow 不足時の原子的 revert。
+All existing guards are effective (`BackingPublicInputsMismatch` requires both the TFD and settledTxChain to match, `proofId` binds the entire proof, and the `ChannelAlreadyExited` latch is written before the credit and is not cleared even by a rollback). For attacks that were not covered, 10 tests were added to `contracts/test/SignerIndependentExit.t.sol` (21/21): settledTxChain crossing, anchor tampering, cross-channel, unbound manager, materialize without freeze, unfinalized root, interleaved rollback across multiple channels (including ordering violations), re-materialization after a rollback, and atomic revert when escrow is insufficient.
 
-**重大バグ（修正済み）: `IntmaxRollup.registerSettlementManager` が materializer を一度も install しない。** Yul は引数を右から左に評価するため `and(staticcall(...), eq(returndatasize(), 32))` は call 前の `returndatasize()==0` を読んで常に偽だった。実デプロイでは `requestClose` が `NotBoundManager` で常時 revert し、`creditChannelExit` が永久に閉じる。既存 suite は stub materializer しか使っていなかったため緑だった。`let ok := staticcall(...)` に直し、`DeployGuards.t.sol` に `MaterializerSetOnceTest`（set-once、credit gate、registration が bind を呼ぶ）を追加。EIP-170 サイズは不変（24,533 B）。**Rollup バイトコードが変わったため close fixture 一式を再生成**（§5）。
+**Serious bug (fixed): `IntmaxRollup.registerSettlementManager` never installs the materializer.** Because Yul evaluates arguments right to left, `and(staticcall(...), eq(returndatasize(), 32))` read the pre-call `returndatasize()==0` and was therefore always false. On a real deploy, `requestClose` would always revert with `NotBoundManager` and `creditChannelExit` would be closed forever. The existing suite was green only because it used a stub materializer. This was fixed to `let ok := staticcall(...)`, and `MaterializerSetOnceTest` (set-once, credit gate, registration calls bind) was added to `DeployGuards.t.sol`. The EIP-170 size is unchanged (24,533 B). **Because the Rollup bytecode changed, the entire close fixture set was regenerated** (§5).
 
-### Round 2（attestation race / reorg / cancel-replay / delegate・PW の exact-vector）
+### Round 2 (attestation race / reorg / cancel-replay / exact-vector for delegate and PW)
 
-Rust 側は §2 のテストで再現。node delegate 側の監査で実害のある 3 点を修正:
+The Rust side is reproduced by the tests in §2. Auditing the node delegate side led to fixing 3 issues with real impact:
 
-- `node/delegate/branches/owntx.js` `doBurn`: cosigner 応答の state が top-level だと `verifyCosignedStructural` は通るのに import がスキップされ、`acceptedHead` が burn 前のまま `BURN_FINALIZED` になっていた。以後の close は `CloseOlderThanAuthorizedBurn` で永久拒否。nested `state` を必須化し import を無条件化、import 後に head が進んだことを確認、PW ticket に `burnHead {digest, epoch, stateVersion}` を記録。
-- `node/delegate/branches/exit.js`: close 進行中に chain 由来の deposit import で `acceptedHead` が進むと publisher が別 digest の journal を開き、元の journal が二度と進まない liveness wedge。`publicClosePublication.acceptedHeadDigest` に head をピン留めし、`CloseCancelled`/reconcile の CANCELLED 変換でのみ解除。
-- `exit.js`: ローカル burn 高水位マーク（`burnHead`）より古い head での close request / publication を `CLOSE_BELOW_AUTHORIZED_BURN` で拒否（`Store.listTickets` を追加）。
-- `api/routes/close.js`: caller 指定 `manager` を無検証で CLI argv に渡し devnet ゲートも無かった。`full-withdrawal.js` と同様に chain 31337 限定にし、アドレス形式を検証。
+- `node/delegate/branches/owntx.js` `doBurn`: when the state in the cosigner's response was top-level, `verifyCosignedStructural` would pass but the import was skipped, so `acceptedHead` reached `BURN_FINALIZED` while still at its pre-burn value. Subsequent closes would then be rejected forever with `CloseOlderThanAuthorizedBurn`. The nested `state` was made mandatory and the import unconditional, the head is confirmed to have advanced after the import, and `burnHead {digest, epoch, stateVersion}` is recorded on the PW ticket.
+- `node/delegate/branches/exit.js`: if `acceptedHead` advanced due to a chain-originated deposit import while a close was in progress, the publisher would open a journal for a different digest and the original journal would never progress again — a liveness wedge. The head is now pinned into `publicClosePublication.acceptedHeadDigest` and released only by `CloseCancelled` / the CANCELLED conversion in reconcile.
+- `exit.js`: close requests / publications on a head older than the local burn high-water mark (`burnHead`) are rejected with `CLOSE_BELOW_AUTHORIZED_BURN` (`Store.listTickets` was added).
+- `api/routes/close.js`: the caller-supplied `manager` was passed to the CLI argv without validation, and there was no devnet gate either. It is now restricted to chain 31337 like `full-withdrawal.js`, and the address format is validated.
 
-テスト: `node/test/delegate-burn-head.test.js`（5 件）、`node/test/api-close-route-devnet.test.js`（2 件）、`delegate-close-lifecycle.test.js` に 2 件追加。
+Tests: `node/test/delegate-burn-head.test.js` (5), `node/test/api-close-route-devnet.test.js` (2), and 2 added to `delegate-close-lifecycle.test.js`.
 
-### Round 3（signer 不在 / WAL crash / 同一 block / RPC 差し替え / browser）
+### Round 3 (signer absence / WAL crash / same block / RPC substitution / browser)
 
-- WAL: 4 ステージすべて reservation → sign → offline decode 検証 → journal fsync → broadcast の順。復旧は保存 raw bytes のみ再送し、nonce が動いていれば停止。
-- RPC 差し替え: 5 つの runtime code hash、pinned block での二重読み、same-height replacement 拒否、receipt の二重読み、event+getter の完全一致が必要。calldata/target は bundle と manifest の sha256 から局所生成され RPC に依存しない。
-- 同一 block: §2 で `(block, tx index)` 厳密順序を導入・テスト。
-- browser: §3 の wasm ゲート。`/api/backing` は kit 材料を配らず、claim ルートは 50 PI の withdrawal claim であり canonical head を公開できない。
+- WAL: all 4 stages follow the order reservation → sign → offline decode verification → journal fsync → broadcast. Recovery only re-sends the stored raw bytes, and stops if the nonce has moved.
+- RPC substitution: this requires 5 runtime code hashes, double reads at a pinned block, rejection of same-height replacement, double reads of the receipt, and an exact match between the event and the getter. The calldata/target are generated locally from the sha256 of the bundle and the manifest and do not depend on the RPC.
+- Same block: §2 introduced and tested the strict `(block, tx index)` ordering.
+- Browser: the wasm gate from §3. `/api/backing` does not hand out kit material, and the claim route is a 50-PI withdrawal claim, which cannot publish a canonical head.
 
-## 5. テストとサイズ
+## 5. Tests and sizes
 
-| suite | 結果 |
+| suite | result |
 |---|---|
 | `cargo check --bin public_close_publisher` | OK |
 | `cargo test --release --lib close_asset_backing_circuit` | 4/4 |
-| `cargo test --release --lib public_close_publisher` | 37/37（引き継ぎ時点は 16 失敗） |
+| `cargo test --release --lib public_close_publisher` | 37/37 (16 were failing at handoff) |
 | `cargo test --release --lib cosign_gate_refuses_every_asset_or_composition_moving_successor` | 1/1 |
-| forge `SignerIndependentExit` | 21/21（+10） |
+| forge `SignerIndependentExit` | 21/21 (+10) |
 | forge `ChannelSettlementManager` | 79/79 |
-| forge `PartialWithdrawal` | 4 suite 59/59 |
+| forge `PartialWithdrawal` | 4 suites 59/59 |
 | forge `DeployGuards` + `MaterializerSetOnceTest` | 33/33 |
-| forge 全体（fixture 再生成後） | 551 件中 550 通過、1 失敗（CloseLifecycleE2E、下記）、skip 0 |
-| node 全体 | 441 件、失敗 0 |
-| EIP-170 | IntmaxRollup 24,533 B / Manager 23,988 B / Materializer 15,339 B（不変） |
+| forge overall (after fixture regeneration) | 550 of 551 passing, 1 failing (CloseLifecycleE2E, see below), 0 skipped |
+| node overall | 441 tests, 0 failures |
+| EIP-170 | IntmaxRollup 24,533 B / Manager 23,988 B / Materializer 15,339 B (unchanged) |
 
-**forge 全体で引き継ぎ時点に失敗していた 32 件**の内訳と処置:
+**Breakdown and handling of the 32 tests that were failing in the whole forge suite at handoff**:
 
-- `CloseFundingAuthorization.t.sol`（15）: 退役した cooperative close funding API を叩いていた。tombstone テスト 3 件に置換し、生きている pull/claim nullifier のテストは維持（10/10）。
-- stale close を許容していた旧仕様のテスト（14: `AuthorizedBurnFenwick`、`CloseExitLivenessInvariant`、`CloseLifecycleHardening`、`CloseLifecycleRedTeam`、`RedTeamRound3`）: `CloseOlderThanAuthorizedBurn` / `CloseForksAuthorizedBurn` を主張する fail-closed テストに書き換え。invariant handler は admissible な close を生成するよう修正（256 runs / 128,000 calls）。
-- `CloseLifecycleE2E`（2）: Manager/Rollup 初期コードが変わったため close fixture が stale。再生成で解消。
+- `CloseFundingAuthorization.t.sol` (15): these exercised the retired cooperative close funding API. They were replaced with 3 tombstone tests, keeping the tests for the live pull/claim nullifier (10/10).
+- Tests from the old spec that tolerated stale closes (14: `AuthorizedBurnFenwick`, `CloseExitLivenessInvariant`, `CloseLifecycleHardening`, `CloseLifecycleRedTeam`, `RedTeamRound3`): rewritten as fail-closed tests asserting `CloseOlderThanAuthorizedBurn` / `CloseForksAuthorizedBurn`. The invariant handler was fixed to generate admissible closes (256 runs / 128,000 calls).
+- `CloseLifecycleE2E` (2): the close fixtures were stale because the Manager/Rollup init code had changed. Resolved by regeneration.
 
-**fixture 再生成**: runbook Step 1 に従い plain set → printer → close family（`close_` withdrawal / close / withdrawal_claim / post_close_claim / cancel_close / c2c / wasm）を一括生成。printer（`test_printCloseManagerAddress`）は `setUp` が `close_lifecycle*.json` を無条件に読むため、旧 close set を退避するのではなく plain set を `close_` 名にコピーして両予測を一致させる必要がある（runbook 未記載）。さらに予測アドレスはテスト contract のライブラリリンク先に依存し、**任意の Solidity テストファイルを編集するだけで動く**（本作業中に `0x894a…`→`0xb1f6…`→`0x894a…` と変化した）。したがって close family の焼き込みは Solidity 側の編集がすべて確定した後に行うこと。最終的に焼き込んだ Manager アドレスは `0x894a113DB75C344CCC287A7C1ECC5CfDC2B06d1B`。
+**Fixture regeneration**: following Step 1 of the runbook, the plain set → printer → close family (`close_` withdrawal / close / withdrawal_claim / post_close_claim / cancel_close / c2c / wasm) were generated in one batch. Because the printer (`test_printCloseManagerAddress`) has a `setUp` that unconditionally reads `close_lifecycle*.json`, rather than setting the old close set aside, the plain set must be copied under `close_` names so that both predictions agree (this is not documented in the runbook). Furthermore, the predicted address depends on the library link targets of the test contract, so **it moves merely by editing any Solidity test file at all** (during this work it changed `0x894a…`→`0xb1f6…`→`0x894a…`). Therefore the close family must be baked in only after all Solidity-side edits are final. The Manager address ultimately baked in was `0x894a113DB75C344CCC287A7C1ECC5CfDC2B06d1B`.
 
-`ClaimMleVerify.test_realMleVerifier_rejectsMismatchedFinalDuplicateRow` は特定 fixture のバイトオフセットを固定していた。WHIR の final round は 2^11 の domain から 16 query を引くため、再生成した proof に重複 query が含まれる確率は fixture あたり約 6% しかない。テストは現在の WHIR 形状から重複 row を動的に探索し、どの fixture にも無い場合は理由付きで skip する。今回は cancel_close を繰り返し再生成し（1 回目の batch では 30 回不発）、重複 query を含む proof が得られた時点の `cancel_close_mle.json` を採用したので skip は発生していない。
+`ClaimMleVerify.test_realMleVerifier_rejectsMismatchedFinalDuplicateRow` had pinned the byte offsets of a specific fixture. Because WHIR's final round draws 16 queries from a domain of 2^11, the probability that a regenerated proof contains a duplicate query is only about 6% per fixture. The test now searches dynamically for a duplicate row given the current WHIR shape, and if no fixture has one it skips with a stated reason. This time cancel_close was regenerated repeatedly (30 misses in the first batch) and the `cancel_close_mle.json` from the point at which a proof containing a duplicate query was obtained was adopted, so no skip occurs.
 
-**CloseLifecycleE2E（残る唯一の赤）**: アドレス一致後、E2E は `submitCloseIntent` で `ChannelFundStateRootNotFinalized(0x00000001…04…)` で止まる。原因は fixture 設計が新設計に追随していないこと:
-1. `close_circuit::test_fixture::build_close_full_witness_two_token` が `channel_fund.intmax_state_root` にプレースホルダ `[1,2,3,4]` を入れており、Manager は `registry.isFinalizedStateRoot` を要求する（E2E で finalized なのは lifecycle の genesis root と `final_state_root` のみ）。
-2. 新設計では `_checkCloseProof` が `requireSignedHeadBacking` を要求するため、同じ署名済み state に対する whole-vector backing proof（26 PI、MLE ラップ）を E2E 内で `attestSignedHeadBacking` する必要がある。backing proof の `finalized_extended_state_commitment` は lifecycle chain が finalize する拡張状態のコミットメントそのもの（channel の asset leaf が close vector `[77, 55]` と一致する状態）でなければならず、backing fixture の生成器は存在しない（`close_asset_backing_circuit` を使うのは `channel_member` のみ）。
-つまり close fixture と lifecycle chain の拡張状態を共生成する新しい生成器（`DeployCloseCli.s.sol` が期待する `close_asset_backing_{manifest,mle,public_inputs}.json` を出力）と E2E の backing VK 初期化・attestation 手順の追加が必要で、本セッションでは着手していない。E2E は明示的な revert で失敗し続ける（skip にはしていない）。
+**CloseLifecycleE2E (the one remaining red)**: once the addresses matched, the E2E stops at `submitCloseIntent` with `ChannelFundStateRootNotFinalized(0x00000001…04…)`. The cause is that the fixture design has not kept up with the new design:
+1. `close_circuit::test_fixture::build_close_full_witness_two_token` puts the placeholder `[1,2,3,4]` into `channel_fund.intmax_state_root`, whereas the Manager requires `registry.isFinalizedStateRoot` (the only roots finalized in the E2E are the lifecycle genesis root and `final_state_root`).
+2. In the new design, `_checkCloseProof` requires `requireSignedHeadBacking`, so the whole-vector backing proof (26 PI, MLE-wrapped) for the same signed state must be passed to `attestSignedHeadBacking` within the E2E. The backing proof's `finalized_extended_state_commitment` must be the commitment of the extended state that the lifecycle chain finalizes (the state in which the channel's asset leaf matches the close vector `[77, 55]`), and no generator for a backing fixture exists (only `channel_member` uses `close_asset_backing_circuit`).
+In other words, a new generator that co-generates the close fixture and the lifecycle chain's extended state (emitting the `close_asset_backing_{manifest,mle,public_inputs}.json` that `DeployCloseCli.s.sol` expects), plus the addition of the backing VK initialization and attestation steps to the E2E, are required, and this was not started in this session. The E2E keeps failing with an explicit revert (it has not been turned into a skip).
 
-ベンチマーク: backing circuit は既存 close circuit と独立な追加回路で、close proof の size/time と Manager/Verifier ABI は変更していない（`public_inputs_roundtrip_is_fixed_width` で 26 limbs 固定を確認）。
+Benchmarks: the backing circuit is an additional circuit independent of the existing close circuit, and the close proof's size/time and the Manager/Verifier ABI are unchanged (`public_inputs_roundtrip_is_fixed_width` confirms the fixed 26 limbs).
 
-## 6. 公開環境の境界（未解決事項、release 判定の前提）
+## 6. The public-environment boundary (open items, preconditions for the release decision)
 
-- **MLE/WHIR PCS の constituent-evaluation 問題は未解決**（別サブモジュール監査）。本ブランチでは扱っていない。
-- `IntmaxRollup.releaseRuntime` は `creditChannelExit` を含む価値移動を chain 31337 に固定している。signer-independent exit は現時点で公開チェーンでは実行できない設計（MLE エンジン未リリースのため）。Manager 側の `releaseRuntime` は challenge-period floor のみで、両者の「production」の定義がずれている。
-- `DeployCloseCli.s.sol` の既存 Rollup 接続ブランチ（`EXISTING_ROLLUP`）は fixture/driver/テストが無く、一度も実行されていない。読み込むファイル名（`close_asset_backing_{manifest,mle,public_inputs}.json`）は prover の出力名（`public_close_manifest.json` / `backing_mle.json` / `backing_public_inputs.json`）と一致せず、rename 手順が未定義。backing VK ≠ close VK の明示的比較も無い（provenance のみ）。
-- publisher は `cast mktx` の nonce を RPC から取るため、悪意ある RPC が nonce を膨らませると journal 済み raw が永久に broadcast 不能になる（資金は動かない liveness 問題）。`finalized` タグは単一 RPC 依存。
-- Rollup の value boundary は global `totalEscrowed` / per-token のみで per-channel 台帳は無い（健全性は proof に依存）。
-- JS publisher は `bundles/<digest>/` の存在だけで再 prove を省略する（内容の sha256 束縛無し、局所的）。
+- **The MLE/WHIR PCS constituent-evaluation problem is unresolved** (a separate submodule audit). It is not addressed on this branch.
+- `IntmaxRollup.releaseRuntime` pins value movement, including `creditChannelExit`, to chain 31337. By design, signer-independent exit cannot currently be executed on a public chain (because the MLE engine has not been released). The Manager's `releaseRuntime` has only a challenge-period floor, so the two have divergent definitions of "production".
+- The existing-Rollup attach branch of `DeployCloseCli.s.sol` (`EXISTING_ROLLUP`) has no fixture/driver/tests and has never been run. The file names it reads (`close_asset_backing_{manifest,mle,public_inputs}.json`) do not match the prover's output names (`public_close_manifest.json` / `backing_mle.json` / `backing_public_inputs.json`), and the rename procedure is undefined. There is also no explicit comparison that the backing VK ≠ the close VK (provenance only).
+- The publisher takes the `cast mktx` nonce from the RPC, so a malicious RPC that inflates the nonce can make an already-journaled raw transaction permanently un-broadcastable (a liveness problem; funds do not move). The `finalized` tag depends on a single RPC.
+- The Rollup's value boundary is only the global `totalEscrowed` / per-token amounts; there is no per-channel ledger (soundness depends on the proof).
+- The JS publisher skips re-proving based only on the existence of `bundles/<digest>/` (no sha256 binding of the contents; local in scope).
 
 ## 7. commit/push
 
-本記録の変更は同一ブランチ上に論理単位でコミットする。実チェーンへの broadcast は未実施。
+The changes in this record are committed as logical units on the same branch. Broadcast to a real chain has not been performed.
 
 ---
 
-# 追記（2026-09-04）: 資産移動 8 purpose の解放と close 経路の残件
+# Addendum (2026-09-04): releasing the 8 asset-moving purposes, and the remaining close-path work
 
-前節「テストネットを止めているもの」のうち、このリポジトリ内で完結する 2 項目を実装した。
+Of the items in the previous section "What is blocking the testnet", the 2 that are self-contained within this repository have been implemented.
 
-## 1. pre-sign exit kit（`doc/docs/pre-sign-exit-kit.md`）
+## 1. pre-sign exit kit (`doc/docs/pre-sign-exit-kit.md`)
 
-`requires_prepared_exit_kit` の一律拒否を、「署名対象の後続状態 H' の kit が検証・fsync 済みで
-durable であること」を要求する本来のゲートに置き換えた。
+The blanket rejection in `requires_prepared_exit_kit` was replaced with the gate it was originally meant to be:
+requiring that the kit for the successor state H' being signed has been verified, fsynced, and is durable.
 
-- **live balance service** `prepare_exit_kit`: 提案（未署名）の後続状態に対し、commit せずに
-  kit を証明し、署名検証を構造検証（`verify_snapshot_structure`）に置き換えた意味検証を通した
-  artifact を返す。TokenRegister / L1DepositImport / InterChannelDebit の 3 proposal。
-- **producer staging**: debit 系は後続の settle chain が「N-of-N 済みブロックの投稿」に依存する
-  ため、未署名の提案状態でブロックを journal の `prepared` entry として staging する
-  （`StagedInterChannelExitKit`、`BlockWitnessGenerator::unsigned_staging`）。ブロックハッシュ・
-  各 root・`bp_sig_chain` の statement `(IMSB digest, 登録 signer pk 列)` は署名バイトに依存
-  しないため、staging 時の head snapshot は実 N-of-N ブロックと byte 一致し、`post_inter_channel`
-  はそれを検証したうえで in-place で promote する（不一致は fail-closed）。staging 中は close
-  funding の prepared と同様に他の producer 変更を凍結し、`abandon` で解除できる。
-- **CLI**: `cli_state.json` schema 5（`prepared_exit_kit_receipt` 必須キー）、
-  `--propose-exit-kit`、`INTMAX_PREPARED_EXIT_KIT`、`verify_public_backing_proposed` による
-  検証・content-addressed アーカイブ・署名前 save、採用時の receipt promote。宛先側 credit
-  （InterChannelFundImport/BundleApply）は「純増のみ ＋ 現 head の receipt 検証済み」で署名し、
-  受領後に `install-exit-kit` で kit を入れる（kit-pending 状態）。CloseFunding は on-chain で
-  退役済みのため拒否のまま。
-- **API**: `api/lib/exit-kit.js`（propose → `livePrepareExitKit` → 署名、失敗時 abandon）、
-  register-token / deposit import / burn / inter-channel の各ルートを二相化。
-- **wasm**: 変更なし（ブラウザは資産移動 purpose の署名者ではない。前節の cosign ゲートは維持）。
+- **live balance service** `prepare_exit_kit`: for a proposed (unsigned) successor state, it proves the
+  kit without committing and returns an artifact that has passed semantic verification in which signature
+  verification is replaced by structural verification (`verify_snapshot_structure`). The 3 proposals are
+  TokenRegister / L1DepositImport / InterChannelDebit.
+- **producer staging**: because for debit-type operations the subsequent settle chain depends on "posting an
+  N-of-N-completed block", the block for the unsigned proposed state is staged as a `prepared` entry in the
+  journal (`StagedInterChannelExitKit`, `BlockWitnessGenerator::unsigned_staging`). The block hash, each
+  root, and the `bp_sig_chain` statement `(IMSB digest, the registered signer pk sequence)` do not depend
+  on the signature bytes, so the head snapshot at staging time is byte-identical to the real N-of-N block,
+  and `post_inter_channel` verifies that and then promotes it in place (a mismatch fails closed). During
+  staging, other producer changes are frozen just as with close funding's prepared state, and they can be
+  released with `abandon`.
+- **CLI**: `cli_state.json` schema 5 (`prepared_exit_kit_receipt` as a required key),
+  `--propose-exit-kit`, `INTMAX_PREPARED_EXIT_KIT`, verification via `verify_public_backing_proposed`,
+  content-addressed archiving, saving before signing, and promotion of the receipt on adoption. The
+  recipient-side credits (InterChannelFundImport/BundleApply) are signed under "net increase only, plus the
+  current head's receipt verified", and after receipt the kit is installed with `install-exit-kit` (a
+  kit-pending state). CloseFunding remains rejected because it is retired on-chain.
+- **API**: `api/lib/exit-kit.js` (propose → `livePrepareExitKit` → sign, abandon on failure); the
+  register-token / deposit import / burn / inter-channel routes were each made two-phase.
+- **wasm**: unchanged (the browser is not a signer for asset-moving purposes. The cosign gate from the previous section is retained).
 
-副作用の修正: `receive_deposit_unbound` が awaiting 遷移時に旧 kit を落とすようにし、bound 済み
-channel への追加 deposit が fail-closed で止まる問題を解消。
+A side-effect fix: `receive_deposit_unbound` now drops the old kit on the transition to awaiting, resolving
+the problem where an additional deposit into an already-bound channel would stop fail-closed.
 
-テスト: `signing_ledger_tests` 10/10（新規 4 件: exact successor 解放と promote、二段 import の
-kit 共有、宛先 credit の kit-pending、CloseFunding 退役）、`tests/live_balance_service.rs` に
-staging → prepare → 検証（提案 digest のみ受理、N-of-N 検証は拒否）→ 署名 → promote → settle の
-実 proof 統合テスト、node `api-exit-kit.test.js` 3 件と既存ルートテストの更新。
+Tests: `signing_ledger_tests` 10/10 (4 new: exact-successor release and promotion, kit sharing across a
+two-stage import, kit-pending for the recipient-side credit, CloseFunding retirement); a real-proof
+integration test in `tests/live_balance_service.rs` covering staging → prepare → verification (only the
+proposed digest is accepted; N-of-N verification is rejected) → sign → promote → settle; node
+`api-exit-kit.test.js` 3 tests, plus updates to existing route tests.
 
-## 2. close 経路の残件
+## 2. Remaining close-path work
 
-- **backing fixture 共生成器**（`generate_close_fixture`）: lifecycle chain（deposit 6 / withdraw 3）
-  の最終 `ExtendedPublicState`・balance proof・asset vector から close witness と whole-vector
-  backing proof を共生成し、`close_asset_backing_{manifest,mle,public_inputs}.json` を出力。
-  `intmax_state_root` は finalized な `final_state_root`、anchor は 3。
-- **CloseLifecycleE2E**: `initializeBackingVk` と `attestSignedHeadBacking` を追加し、実 contract
-  で request → attest → submit → finalize → payout が通る。
-- **DeployCloseCli 接続ブランチ**: `DeployGuards.t.sol` に `EXISTING_ROLLUP` ブランチのテストを
-  追加（`Deploy.s.sol` で作った Rollup に接続し、backing VK 初期化と readback を検証）。
-- **deploy readback**: `channel_member export-close-deployment-manifest <out> <rpc>` を追加。
-  ACTIVE settlement binding から publisher の deployment manifest v3 を生成し、activation
-  checkpoint で runtime code hash と MLE verifier（`allowedChainId`）を再読込・照合する。
-  `doc/docs/public-close-publisher.md` の例を v3 に更新。Sepolia 等の実チェーンでの実行は
-  鍵と資金が必要なため未実施。
+- **backing fixture co-generator** (`generate_close_fixture`): co-generates the close witness and the
+  whole-vector backing proof from the final `ExtendedPublicState`, balance proof, and asset vector of the
+  lifecycle chain (deposit 6 / withdraw 3), and emits
+  `close_asset_backing_{manifest,mle,public_inputs}.json`.
+  `intmax_state_root` is the finalized `final_state_root`, and the anchor is 3.
+- **CloseLifecycleE2E**: `initializeBackingVk` and `attestSignedHeadBacking` were added, so that request →
+  attest → submit → finalize → payout passes against the real contracts.
+- **DeployCloseCli attach branch**: a test for the `EXISTING_ROLLUP` branch was added to
+  `DeployGuards.t.sol` (it attaches to a Rollup created by `Deploy.s.sol` and verifies the backing VK
+  initialization and the readback).
+- **deploy readback**: `channel_member export-close-deployment-manifest <out> <rpc>` was added.
+  It generates the publisher's deployment manifest v3 from the ACTIVE settlement binding, and at the
+  activation checkpoint it re-reads and cross-checks the runtime code hash and the MLE verifier
+  (`allowedChainId`). The example in `doc/docs/public-close-publisher.md` was updated to v3. Running it
+  against a real chain such as Sepolia has not been done, because that requires keys and funds.
 
-## 3. MLE/WHIR PCS 修復ブランチのマージ（2026-09-05）
+## 3. Merging the MLE/WHIR PCS repair branch (2026-09-05)
 
-`origin/codex/mle-whir-pcs-repair-20260904`（c533e71、wire-v3 / WHIR profile 105 / 20M gas
-envelope、constructor-pinned `PinnedMleVerifierV2`、on-chain VK 初期化の廃止）をこのブランチに
-マージし、signer-independent exit を新モデルへ移植した。
+`origin/codex/mle-whir-pcs-repair-20260904` (c533e71; wire-v3 / WHIR profile 105 / 20M gas
+envelope, constructor-pinned `PinnedMleVerifierV2`, removal of on-chain VK initialization) was merged into
+this branch, and signer-independent exit was ported onto the new model.
 
-- **Solidity**: `CloseFundingMaterializer(rollup, IPinnedMleVerifierV2 backingMleVerifier)`。
+- **Solidity**: `CloseFundingMaterializer(rollup, IPinnedMleVerifierV2 backingMleVerifier)`.
   `attestSignedHeadBacking(manager, bytes compactProof)` / `materializeSignedHead(manager, bytes)`
-  は pinned adapter の `verifyCompactPublicInputs` で 26 limb を再導出し（calldata の PI は信用しない）、
-  receipt は `keccak(domain, chainid, materializer, rollup, manager, keccak256(proof))`。
-  `initializeBackingVk` / `backingVkInitialized` / `MleVk` は削除。Manager の `_checkCloseProof`
-  は `closeMleVerifier.verifyCompactPublicInputs` の PI から funds digest（limb 95..102）を取り
-  `requireSignedHeadBacking` を呼ぶ。`registerSettlementManager` の Yul 修正は維持。
-  `DeployCloseCli` の attach ブランチは `close_asset_backing_mle_config.json` から backing adapter
-  を deploy して materializer に渡す（authenticated backing proof と
-  `pinnedVerifier.verificationConfigDigest` が一致することを要求）。ブロードキャスト core は
-  15 tx（backing core+adapter → materializer → 4×(core, adapter) → verifier → registerChannel →
-  manager → registerSettlementManager）。
-- **Rust**: `public_close_prover::wrap_and_export_backing_mle` は v2 API
-  （`setup_mle_vk_v2` / `prove_with_mle_v2` / `export_mle_v2_json` + config 検証）で
-  `{mle_json, mle_config_json, compact_proof}` を返す。bundle manifest は schema 3
-  （`backingMleConfigFile/Bytes/Sha256` 追加）。publisher の attest / materialize calldata は
-  `(address, bytes)`、deployment manifest は schema 4（4 adapter の pin に加えて
-  `backingMle{Verifier,VerifierCore,…WhirSessionId}` の 9 pin、`closeFundingMaterializer`、
-  attest / materialize selector と 2 topic）。`channel_member` は backing bundle 4 ファイル
-  （manifest / mle / mle_config / public_inputs）を stage し、`settlement.json` は
-  `backing_mle_core` / `backing_mle_adapter` を持つ。
-- **Fixture**: `generate_close_fixture` が close family（`close_` lifecycle、close intent、
-  backing proof）の単一共生成器。`WD_OUT_PREFIX=close_ generate_withdrawal_fixture` は拒否。
-  `--mle-config-only` で close family 4 config を書く。`pullChannelFunds` の aux binding
-  （`CloseFundingAuxMismatch`）は signer-independent exit で退役済みなので
-  `WD_CLOSE_FUNDING_ROLLUP` は不要。`tests/mle_v2_fixture_release.rs` の cohort は 53 ファイル
-  （16 config / 17 full proof / 20 companion）。backing statement は 7 番目の production
-  profile（26 PI）として pin され、close intent / `close_` lifecycle との cross-binding
-  （settled_tx_chain、token_funds_digest、finalized root、anchor）を gate で検証する。
-- **Runbook**: `doc/tasks/regen-and-redeploy-runbook.md` Step 1（config cohort、退役した
-  target-133 switch の削除）/ Step 2（15 tx、14 address）/ Step 3（共生成器）を更新。
+  re-derive the 26 limbs via the pinned adapter's `verifyCompactPublicInputs` (the PI in the calldata is not trusted),
+  and the receipt is `keccak(domain, chainid, materializer, rollup, manager, keccak256(proof))`.
+  `initializeBackingVk` / `backingVkInitialized` / `MleVk` were deleted. The Manager's `_checkCloseProof`
+  takes the funds digest (limbs 95..102) from the PI of `closeMleVerifier.verifyCompactPublicInputs`
+  and calls `requireSignedHeadBacking`. The Yul fix in `registerSettlementManager` is retained.
+  The attach branch of `DeployCloseCli` deploys the backing adapter from `close_asset_backing_mle_config.json`
+  and passes it to the materializer (requiring that the authenticated backing proof and
+  `pinnedVerifier.verificationConfigDigest` match). The broadcast core is
+  15 txs (backing core+adapter → materializer → 4×(core, adapter) → verifier → registerChannel →
+  manager → registerSettlementManager).
+- **Rust**: `public_close_prover::wrap_and_export_backing_mle` returns `{mle_json, mle_config_json, compact_proof}`
+  using the v2 API (`setup_mle_vk_v2` / `prove_with_mle_v2` / `export_mle_v2_json` + config validation).
+  The bundle manifest is schema 3 (adding `backingMleConfigFile/Bytes/Sha256`). The publisher's attest /
+  materialize calldata is `(address, bytes)`, and the deployment manifest is schema 4 (in addition to the
+  pins for the 4 adapters, the 9 pins `backingMle{Verifier,VerifierCore,…WhirSessionId}`,
+  `closeFundingMaterializer`, and the attest / materialize selectors and 2 topics). `channel_member` stages
+  the 4 backing bundle files (manifest / mle / mle_config / public_inputs), and `settlement.json` carries
+  `backing_mle_core` / `backing_mle_adapter`.
+- **Fixture**: `generate_close_fixture` is the single co-generator for the close family (`close_` lifecycle,
+  close intent, backing proof). `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` is rejected.
+  `--mle-config-only` writes the 4 close-family configs. The aux binding of `pullChannelFunds`
+  (`CloseFundingAuxMismatch`) is retired under signer-independent exit, so
+  `WD_CLOSE_FUNDING_ROLLUP` is unnecessary. The cohort in `tests/mle_v2_fixture_release.rs` is 53 files
+  (16 config / 17 full proof / 20 companion). The backing statement is pinned as the 7th production
+  profile (26 PI), and its cross-binding with the close intent / `close_` lifecycle
+  (settled_tx_chain, token_funds_digest, finalized root, anchor) is verified by a gate.
+- **Runbook**: `doc/tasks/regen-and-redeploy-runbook.md` Step 1 (config cohort; removal of the retired
+  target-133 switch) / Step 2 (15 txs, 14 addresses) / Step 3 (the co-generator) were updated.
 
-### `partial_withdrawal_e2e_anvil`（2026-09-05 修正済み）
+### `partial_withdrawal_e2e_anvil` (fixed 2026-09-05)
 
-`submitPartialWithdrawalIntent` は `requireSignedHeadBacking` により post-burn head の attested
-backing（finalized root に anchor）を要求するが、旧 E2E は Rust 側の `BlockWitnessGenerator` だけを
-進め anvil の Rollup は genesis のままだったため、submit で `BackingProofNotAttested()` になっていた
-（8f70b73 以降の既存不整合）。現在は本番 CLI と同じ手順を E2E が実行する:
+`submitPartialWithdrawalIntent` requires, via `requireSignedHeadBacking`, an attested backing for the
+post-burn head (anchored to a finalized root), but the old E2E only advanced the Rust-side
+`BlockWitnessGenerator` and left anvil's Rollup at genesis, so the submit produced `BackingProofNotAttested()`
+(an existing inconsistency since 8f70b73). The E2E now performs the same steps as the production CLI:
 
-1. deploy script の `registerChannel` を Rust 側で `add_channel_registration_with_record`
-   （新規 API: 実 recipient を持つ record + Falcon signer）でミラーし registration block を作る。
-2. deposit / bootstrap / burn block（`add_block_with_tx_v2`）→ 4-block validity 証明 → wrap + MLE
-   （deploy 済み `mle_fixture_config.json` と照合、compact 129,484 B）。
-3. 4 block を `cast mktx --blob`（EIP-4844）で投稿し、署名済み tx を
-   `proof_da::validate_decoded_blob_transaction` で検証（本番 CLI と同一）、
-   `attestProofData`（KZG sidecar）→ `finalize`（`script/PartialWithdrawalE2ELifecycle.s.sol`）。
-   実 deposit は registration block の投稿後に送る（pending deposit chain の fold 順序）。
-4. burn-send balance proof 上の `CloseAssetBacking` proof（anchor = block 4、deploy 済み
-   `close_asset_backing_mle_config.json` と照合）を `attestSignedHeadBacking` で attest。
-5. submit（gas 19,028,810 / 20M）→ finalize → authorize → fail-closed claim → replay 拒否。
+1. The deploy script's `registerChannel` is mirrored on the Rust side with `add_channel_registration_with_record`
+   (a new API: a record with a real recipient + a Falcon signer) to build the registration block.
+2. deposit / bootstrap / burn blocks (`add_block_with_tx_v2`) → 4-block validity proof → wrap + MLE
+   (cross-checked against the deployed `mle_fixture_config.json`; compact 129,484 B).
+3. The 4 blocks are posted with `cast mktx --blob` (EIP-4844), the signed txs are verified with
+   `proof_da::validate_decoded_blob_transaction` (identical to the production CLI), then
+   `attestProofData` (KZG sidecar) → `finalize` (`script/PartialWithdrawalE2ELifecycle.s.sol`).
+   The real deposit is sent after the registration block has been posted (the fold order of the pending deposit chain).
+4. The `CloseAssetBacking` proof over the burn-send balance proof (anchor = block 4, cross-checked against
+   the deployed `close_asset_backing_mle_config.json`) is attested with `attestSignedHeadBacking`.
+5. submit (gas 19,028,810 / 20M) → finalize → authorize → fail-closed claim → replay rejection.
 
-成果物は gitignore 済みの `proof-da-output/pw-e2e/` に書き、`test/data` には
-`pw_reg.json` / `pw_submit.json` / `pw_close_intent_mle.json` のみ残す（cohort 不変）。
-anvil の block gas limit は 30M（attest / finalize は 20M envelope の対象外）、submit tx の
-固定 gas limit 20M の検証は従来どおり。
+The artifacts are written to the gitignored `proof-da-output/pw-e2e/`, and only
+`pw_reg.json` / `pw_submit.json` / `pw_close_intent_mle.json` remain in `test/data` (the cohort is unchanged).
+anvil's block gas limit is 30M (attest / finalize are not subject to the 20M envelope), and the verification
+of the submit tx's fixed 20M gas limit is as before.
 
-## 残る前提
+## Remaining assumptions
 
-`IntmaxRollup.releaseRuntime` は 2026-09-05 に chain 31337 のハードコードから
-`deploymentChainId`（constructor で両 pinned adapter の `allowedChainId()` == `block.chainid` を
-要求した上で固定される immutable）への pin に変更した。deploy 時に
-`MLE_VERIFIER_CHAIN_ID=<chain id>` を指定すれば任意のチェーンで価値移動が有効になり、
-コード/状態を別チェーンへ移すと fail-closed になる（`test_releaseValueBoundaries_followTheDeploymentChain`）。
-未 pin の旧 `postBlockAndSubmit` は引き続き 31337 限定で、公開チェーンは
-`postBlockAndSubmitGuarded` のみ。MLE/WHIR PCS 側の修復はマージ済みだが、protocol 固有の
-Fiat-Shamir / grinding 解析と外部レビューが完了するまで公開チェーンでの価値移動は運用上 NO-GO。
+On 2026-09-05, `IntmaxRollup.releaseRuntime` was changed from a hardcoded chain 31337 to a pin on
+`deploymentChainId` (an immutable that is fixed in the constructor after requiring that
+`allowedChainId()` of both pinned adapters == `block.chainid`). If
+`MLE_VERIFIER_CHAIN_ID=<chain id>` is specified at deploy time, value movement becomes valid on any chain,
+and moving the code/state to a different chain fails closed
+(`test_releaseValueBoundaries_followTheDeploymentChain`).
+The old, unpinned `postBlockAndSubmit` remains restricted to 31337, and for public chains only
+`postBlockAndSubmitGuarded` is available. The MLE/WHIR PCS repair has been merged, but until the
+protocol-specific Fiat-Shamir / grinding analysis and external review are complete, value movement on a
+public chain remains operationally NO-GO.

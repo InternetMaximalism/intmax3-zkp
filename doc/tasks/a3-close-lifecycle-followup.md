@@ -1,40 +1,40 @@
-# A-3 フォローアップ: channel close / withdraw-to-L1 / settle ライフサイクル(本体実装)
+# A-3 follow-up: channel close / withdraw-to-L1 / settle lifecycle (the real implementation)
 
-状態: **本体実装ほぼ完了**(2026-06, A-3 P1–P6)。下記「監査パスの安全化」は本実装で**置換済み**(歴史記録)。
-完了詳細は `doc/tasks/a3-impl-todo.md`。残るは **P5-B 完全 CLI E2E**(close 経路の CLI-members ↔
-on-chain-registration 整合 = withdraw パイプラインをチャネルの実 member/deposit に束縛する拡張が必要。
-withdraw 単体は anvil live 検証済。close-intent は CloseLifecycleE2E が member-set 不一致で skip する既存ギャップと同根)。
+Status: **the real implementation is essentially complete** (2026-06, A-3 P1–P6). The "hardening done in the audit pass" below has been **superseded** by this implementation (kept as a historical record).
+Full details of what is done are in `doc/tasks/a3-impl-todo.md`. What remains is the **P5-B full CLI E2E** (consistency between the CLI members and the
+on-chain registration on the close path = it needs an extension binding the withdraw pipeline to the channel's real members/deposit.
+`withdraw` on its own has been verified live on anvil. close-intent shares a root cause with the existing gap where CloseLifecycleE2E skips because of a member-set mismatch).
 
-## 完了(本実装、旧スタブを置換)
-- ✅ anchor 実値化(P1)。✅ close/settle/withdraw/claim CLI(P3/P4、withdraw は anvil live 検証済)。
-- ✅ C2/C3 stub revert 化(P6-A、攻撃者レビュー GO)。✅ relay /api/close|settle|withdraw|claim(P5-A)。
+## Done (the real implementation, replacing the old stubs)
+- ✅ anchor uses real values (P1). ✅ close/settle/withdraw/claim CLI (P3/P4; withdraw verified live on anvil).
+- ✅ C2/C3 stub revert (P6-A, attacker review GO). ✅ relay /api/close|settle|withdraw|claim (P5-A).
 
-## 旧:背景 / 現状(★本実装で解消済み・歴史記録)
-- 入金は実オンチェーン(`setup-backing` が IntmaxRollup へ実 deposit)。
-- しかし **L1 出金経路(close/withdraw/settle)が存在しない**。
-- L1-close anchor(`ChannelFund.intmax_state_root`)は `setup-backing` で全ゼロの
-  **PLACEHOLDER**(`PLACEHOLDER_L1_CLOSE_ANCHOR_HEX`, `src/bin/channel_member.rs`)。
-  実 anchor を導出する registration-time 手続き(detail2 §K-4)が未実装のため。
-- メモリ `project_channel_close_unification.md`「settlement is currently a stub」と一致。
+## Old: background / status (★ resolved by the real implementation; historical record)
+- Deposits are really on-chain (`setup-backing` makes a real deposit into IntmaxRollup).
+- However, **there is no L1 withdrawal path (close/withdraw/settle)**.
+- The L1-close anchor (`ChannelFund.intmax_state_root`) is an all-zero
+  **PLACEHOLDER** in `setup-backing` (`PLACEHOLDER_L1_CLOSE_ANCHOR_HEX`, `src/bin/channel_member.rs`),
+  because the registration-time procedure that derives the real anchor (detail2 §K-4) is not implemented.
+- Consistent with the memory `project_channel_close_unification.md`: "settlement is currently a stub".
 
-## 監査パスで実施した安全化(このPRに含む)
-- 全ゼロ anchor を named 定数化し「未実装プレースホルダ」であることを明示(greppable)。
-- `channel_member` に `close`/`withdraw`/`settle` サブコマンドを **fail-closed スタブ**として追加。
-  実装が無いまま誤って呼ばれても、明確なエラーで停止し placeholder anchor を消費させない。
+## Hardening carried out in the audit pass (included in this PR)
+- Turned the all-zero anchor into a named constant, making it explicit (and greppable) that it is an unimplemented placeholder.
+- Added `close`/`withdraw`/`settle` subcommands to `channel_member` as **fail-closed stubs**.
+  If they are called by mistake while unimplemented, they stop with a clear error and do not consume the placeholder anchor.
 
-## 本体実装で必要なこと(別PR、フル脅威モデル必須)
-- [ ] detail2 §K-4 の registration-time 手続きで **実 L1-close anchor** を導出し、placeholder を置換。
-- [ ] close 回路(`src/circuits/channel/close_circuit.rs`)が anchor を本物の rollup state root に
-      束縛していることを検証(zero/placeholder anchor を拒否)。
-- [ ] `channel_member` の `close`/`withdraw`/`settle` を実際の close-intent 生成 → on-chain
-      `ChannelSettlementManager` 提出 → challenge 期間 → payout までドライブできるよう実装。
-- [ ] オンチェーン settlement(`ChannelSettlementManager` / `ChannelSettlementVerifier`)との
-      E2E を実証明で接続(現状 `CloseLifecycleE2E` は fixture ベース)。
-- [ ] 脅威モデル: stale-state close、post-close over-claim、placeholder anchor 混入、
-      member-binding 回避、二重出金 を網羅。
+## What the real implementation needs (separate PR, a full threat model is mandatory)
+- [ ] Derive the **real L1-close anchor** via the registration-time procedure in detail2 §K-4 and replace the placeholder.
+- [ ] Verify that the close circuit (`src/circuits/channel/close_circuit.rs`) binds the anchor to a genuine rollup state root
+      (rejecting zero/placeholder anchors).
+- [ ] Implement `close`/`withdraw`/`settle` in `channel_member` so that they can actually drive real close-intent generation → on-chain
+      submission to `ChannelSettlementManager` → the challenge period → payout.
+- [ ] Connect the E2E with on-chain settlement (`ChannelSettlementManager` / `ChannelSettlementVerifier`) using real proofs
+      (today `CloseLifecycleE2E` is fixture-based).
+- [ ] Threat model: cover stale-state close, post-close over-claim, placeholder-anchor contamination,
+      member-binding bypass, and double withdrawal.
 
-## 関連ファイル
-- `src/bin/channel_member.rs`(anchor placeholder + fail-closed スタブ)
+## Related files
+- `src/bin/channel_member.rs` (anchor placeholder + fail-closed stubs)
 - `src/circuits/channel/close_circuit.rs`, `close_pis.rs`
 - `contracts/src/ChannelSettlementManager.sol`, `ChannelSettlementVerifier.sol`
 - `doc/architecture-audit/detail2.md` §K-4

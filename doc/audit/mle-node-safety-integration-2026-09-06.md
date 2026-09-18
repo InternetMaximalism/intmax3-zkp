@@ -1,108 +1,118 @@
-# MLE更新とノード安全性修正の統合記録
+# Integration record: MLE update and node safety remediation
 
-日付: 2026-09-06。
-親ブランチ: `codex/node-presign-safety-20260905`。
-作業場所: `/private/tmp/intmax3-node-preflight-audit-20260905.m7xtV6/checkout`。
-本書の統合はローカルのみ。push・デプロイ・L1送信は実施していない。
+Date: 2026-09-06.
+Parent branch: `codex/node-presign-safety-20260905`.
+Working location: `/private/tmp/intmax3-node-preflight-audit-20260905.m7xtV6/checkout`.
+The integration described here is local only. No push, no deployment, and no L1 submission was performed.
 
-## 1. 何を取り込んだか
+## 1. What was pulled in
 
-リモートを確認した結果、MLEの新しい修復統合は
-`InternetMaximalism/intmax-plonky2` の
-`origin/codex/main-mle-whir-repair-20260905`、
-`ca5c8fc6a4d3bd40bc9616af0e62df82ff764a2f` だった。
+Checking the remote showed that the new MLE repair integration was
+`origin/codex/main-mle-whir-repair-20260905`,
+`ca5c8fc6a4d3bd40bc9616af0e62df82ff764a2f`, in
+`InternetMaximalism/intmax-plonky2`.
 
-ただし、親が既に使っていた `b569e0d7` の直系後継ではない。
-共通起点 `5b1c28ae` から分岐しており、単純な参照置換では既存の
-target-105 / inverse-rate-6 とガス最適化を失う。
-したがって両方を残す実際のマージをサブモジュール内で作成した。
+However, it is not a direct descendant of `b569e0d7`, which the parent was already using.
+It diverges from the common ancestor `5b1c28ae`, so a plain pin replacement would lose the
+existing target-105 / inverse-rate-6 and the gas optimizations.
+We therefore created a real merge inside the submodule that keeps both.
 
-| 対象 | コミット |
+| Item | Commit |
 | --- | --- |
-| ノード修正の基点 | `a2886fff08c2619ba47604e4d2fa5634b9e17471` |
-| 前回のノード修正を保全したコミット | `b5bafb7` |
-| 更新前のMLE pin | `b569e0d71c6a7a180fe616915b7a76976540b155` |
-| 取り込んだMLE更新 | `ca5c8fc6a4d3bd40bc9616af0e62df82ff764a2f` |
-| 統合後のMLE pin | `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` |
+| Base of the node remediation | `a2886fff08c2619ba47604e4d2fa5634b9e17471` |
+| Commit that preserved the previous node remediation | `b5bafb7` |
+| MLE pin before the update | `b569e0d71c6a7a180fe616915b7a76976540b155` |
+| MLE update that was pulled in | `ca5c8fc6a4d3bd40bc9616af0e62df82ff764a2f` |
+| MLE pin after integration | `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` |
 
-MLE側ブランチは `codex/mle-node-safety-integration-20260906`。
-統合コミットは更新前pinと取り込んだ更新の双方を親に持つ。
-親リポジトリの `main` 全体や、過去のPCS修復を戻す別ブランチは取り込んでいない。
+The branch on the MLE side is `codex/mle-node-safety-integration-20260906`.
+The merge commit has both the pre-update pin and the pulled-in update as parents.
+Neither the parent repository's `main` as a whole nor any other branch that reverts the earlier PCS repair was pulled in.
 
-## 2. 維持・変更したもの
+## 2. What was kept and what was changed
 
-- 前回の署名前・入金前・永続化・復旧のノード修正は、`b5bafb7` に保存したまま維持。
-  詳細は `doc/audit/audit05-09-2026-node-presign-remediation.md`。
-- productionのwire形式、profile JSON、Solidity生成定数、v3 verifier、
-  canonical v3 fixtureは既存の最適化済み版と同一。親のproof/config/companion一式も再生成していない。
-- 新しい変更として、Rust旧APIの `legacy-conformance` 隔離、旧Solidity
-  `MleVerifier` のabstract化、CI、過去のLean文書を統合した。
-- 親の `deprecated-msu` は、明示的な旧fixture用ビルドに限り
-  `plonky2_mle/legacy-conformance` を伝播する。通常版・WASM版で旧APIやMSUを有効化しない。
-- `.gitmodules` の追跡先を統合ブランチへ修正。リリースで使うのは常に親のgitlink。
-  `git submodule update --init --recursive` を使い、`--remote` で古い別系統へ移動しない。
-- 文書の競合は履歴を区別して解消。旧transcriptテストは同じ値の生成済み定数を参照する。
-  古いLean監査や上流Plonky2監査を、現在のMLE/WHIR全体の保証と読み替えない旨を明記した。
+- The previous node remediation for pre-signing, pre-deposit, persistence, and recovery is kept as
+  preserved in `b5bafb7`. Details are in `doc/audit/audit05-09-2026-node-presign-remediation.md`.
+- The production wire format, the profile JSON, the generated Solidity constants, the v3 verifier,
+  and the canonical v3 fixtures are identical to the existing optimized versions. The parent's
+  proof/config/companion set was not regenerated either.
+- As new changes, we integrated the `legacy-conformance` isolation of the old Rust API, making the old
+  Solidity `MleVerifier` abstract, CI, and the historical Lean documents.
+- The parent's `deprecated-msu` propagates `plonky2_mle/legacy-conformance` only for builds explicitly
+  targeting the old fixtures. The old API and MSU are not enabled in the normal or WASM builds.
+- The `.gitmodules` tracking target was corrected to the integration branch. What a release uses is
+  always the parent's gitlink. Use `git submodule update --init --recursive`; do not move to the older,
+  divergent line with `--remote`.
+- Documentation conflicts were resolved by keeping the two histories distinct. The old transcript tests
+  reference generated constants with the same values. We stated explicitly that the old Lean audit and
+  the upstream Plonky2 audit must not be reread as a guarantee covering the whole of the current MLE/WHIR.
 
-元の `/Users/andropov/repos/intmax3-zkp` のチェックアウトと未追跡監査文書は変更していない。
-専用作業ツリーにあったソース展開コピーは、同じpinの実Git作業ツリーに置き換えた。
-旧コピーは専用一時ディレクトリ内の `polygon-plonky2-b569-export-backup` と
-`forge-std-export-backup` に保全。forge-stdの依存pinは変更していない。
+The original `/Users/andropov/repos/intmax3-zkp` checkout and its untracked audit documents were not modified.
+The exported source copies that were in the dedicated working tree were replaced with real Git working trees at the same pin.
+The old copies are preserved as `polygon-plonky2-b569-export-backup` and
+`forge-std-export-backup` inside the dedicated temporary directory. The forge-std dependency pin was not changed.
 
-## 3. 確認結果
+## 3. Verification results
 
-Rustは固定nightly `nightly-2025-03-23` と `--locked --offline`、
-Solidityは `0.8.29` / via-IR / optimizer 200 / Prague で確認した。
+Rust was checked with the pinned nightly `nightly-2025-03-23` and `--locked --offline`;
+Solidity with `0.8.29` / via-IR / optimizer 200 / Prague.
 
-| 確認 | 結果 |
+| Check | Result |
 | --- | --- |
-| 親Rust全target + 現行4種のfixture生成featureのコンパイル | 成功 |
-| WASMライブラリのコンパイル | 成功 |
-| MLEの通常版旧API隔離doctest | 4/4 |
-| MLE v3 schemaとWHIR profileのdrift確認 | 3/3 |
-| 明示的legacy版の旧schema確認 | 1/1 |
-| 正常な小回路での新規証明生成・native/JSON/compact/ABI/config roundtrip | 1/1 |
-| MLE旧artifact隔離・凍結transcriptのSolidityテスト | 5/5 |
-| 親の既存正常証明・public input・ガス検査 | 32/32 |
-| 親のrelease fixture整合性（既存cohort/config/proof/companion） | 選択した9/9、失敗0 |
-| production Solidityのサイズ確認 | 成功 |
+| Compilation of all parent Rust targets plus the 4 current fixture-generation features | succeeded |
+| Compilation of the WASM library | succeeded |
+| MLE normal-build old-API isolation doctests | 4/4 |
+| Drift check of the MLE v3 schema and the WHIR profile | 3/3 |
+| Old-schema check of the explicit legacy build | 1/1 |
+| Fresh proof generation on a small happy-path circuit, plus native/JSON/compact/ABI/config roundtrip | 1/1 |
+| Solidity tests for MLE legacy-artifact isolation and the frozen transcript | 5/5 |
+| The parent's existing happy-path proof, public-input, and gas checks | 32/32 |
+| The parent's release fixture consistency (existing cohort/config/proof/companion) | 9/9 of those selected, 0 failures |
+| Size check of the production Solidity | succeeded |
 
-親の32件は、fixture網羅性17、claim正常検証5、compact正常検証3、
-public-input-returnガス6、Managerクローズガス1。
-Rustのfixtureテストは `mle_v2_fixture_release` の10件中、
-既存生成物の整合性を確認する9件を選択。入力変形を行うhelperテスト1件は今回の選択外。
-テスト全体の表示ガスにはfixture読込・準備も含むので、それを実トランザクションのガスと混同しない。
+The parent's 32 consist of 17 fixture-coverage, 5 happy-path claim verification, 3 happy-path compact
+verification, 6 public-input-return gas, and 1 Manager close gas.
+Of the 10 Rust fixture tests in `mle_v2_fixture_release`, we selected the 9 that check the consistency
+of the existing artifacts. The 1 helper test that mutates inputs was outside this selection.
+The gas a test reports as a whole also includes fixture loading and setup, so it must not be confused
+with the gas of a real transaction.
 
-現fixtureによるcold Managerクローズの計測値は、
-実行 `16,963,263` + intrinsic calldata `2,060,788` = **`19,024,051` gas**。
-2,000万上限に `975,949` gasの余裕がある。compact proofは `131,716` bytes。
-これは今回のfixtureによるローカルharness測定であり、過去の別fixtureの測定値との直接比較ではない。
+The measured cold Manager close with the current fixture is
+execution `16,963,263` + intrinsic calldata `2,060,788` = **`19,024,051` gas**.
+That leaves `975,949` gas of headroom against the 20,000,000 limit. The compact proof is `131,716` bytes.
+This is a local-harness measurement with this fixture, not a direct comparison against measurements
+taken with a different fixture in the past.
 
-主要runtimeサイズは `MleVerifierV2` 20,053 B、`PinnedMleVerifierV2` 12,570 B、
-`SpongefishWhirVerify` 23,656 Bで既存の記録と同じ。
-`ChannelSettlementManager` は24,398 Bで、EIP-170上限まで178 B。
-証明時間の比較ベンチマークは実施していない。productionの証明生成アルゴリズムと設定は維持したが、
-全実行環境で性能不変と測定済みである、とは主張しない。
+The main runtime sizes are `MleVerifierV2` 20,053 B, `PinnedMleVerifierV2` 12,570 B, and
+`SpongefishWhirVerify` 23,656 B, the same as the existing record.
+`ChannelSettlementManager` is 24,398 B, 178 B below the EIP-170 limit.
+No comparative proving-time benchmark was run. The production proof-generation algorithm and
+configuration were kept, but we do not claim to have measured that performance is unchanged in every
+execution environment.
 
-既存のunused／dead-code／Solidity lint等の警告は残る。
-今回の確認は統合互換性の確認であり、新しい全面的な脆弱性監査や攻撃再現ではない。
+The pre-existing unused / dead-code / Solidity lint and similar warnings remain.
+This round of checking verifies integration compatibility; it is not a new comprehensive vulnerability
+audit or an attack reproduction.
 
-## 4. 次の作業・共有順序
+## 4. Next steps and sharing order
 
-1. pushする場合は、先にMLE側 `codex/mle-node-safety-integration-20260906` をpushし、
-   `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` がリモートから取得できることを確認する。
-   その後、親の `codex/node-presign-safety-20260905` をpushする。
-   親だけを先に共有すると、取得できないsubmoduleを参照する状態になる。
-2. 別環境で親の固定gitlinkを取得し、nativeとWASMを再ビルドする。
-   本マージだけを理由に既存state、署名履歴、入金予約、outbox、exit-kitを削除しない。
-3. 前回からの残作業である通常PWのexact backing attestation自動接続、
-   watcherの確定済み履歴による入金分類、browser／daemon／chainを通した本番同等E2Eを継続する。
-   今回の統合だけでこれらが完了したとはしない。
-4. 本番配布では既存の `doc/tasks/regen-and-redeploy-runbook.md` に従い、
-   circuit/config/profile/runtime hashと実デプロイ先を照合する。
-   既存の今回対象fixtureに形式変更はないため、マージ作業中の一律再生成・再デプロイは行っていない。
-5. MLE独立レビューと残るrelease gateは、サブモジュールの `mle/README.md`、
-   `mle/audit/node-safety-integration-2026-09-06.md` の対象範囲を守って扱う。
+1. If pushing, push the MLE-side `codex/mle-node-safety-integration-20260906` first and confirm that
+   `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` can be fetched from the remote.
+   Then push the parent's `codex/node-presign-safety-20260905`.
+   Sharing the parent alone first leaves it referencing a submodule commit that cannot be fetched.
+2. In another environment, fetch the parent's pinned gitlink and rebuild native and WASM.
+   Do not delete existing state, signing history, deposit reservations, the outbox, or exit kits merely
+   because of this merge.
+3. Continue the work outstanding since last time: automatic wiring of the exact backing attestation for
+   the normal PW path, deposit classification by the watcher using finalized history, and
+   production-equivalent E2E through browser/daemon/chain.
+   This integration alone does not make any of these complete.
+4. For a production rollout, follow the existing `doc/tasks/regen-and-redeploy-runbook.md` and
+   cross-check the circuit/config/profile/runtime hashes against the actual deployment targets.
+   Since there is no format change to the existing fixtures in scope here, no blanket regeneration or
+   redeployment was performed during the merge work.
+5. The independent MLE review and the remaining release gates are to be handled within the scope defined
+   by the submodule's `mle/README.md` and `mle/audit/node-safety-integration-2026-09-06.md`.
 
-KZG ceremonyの信頼、少なくとも一人の正直な署名者によるオフチェーン検査、
-自チャネル内の全署名者結託の許容、MSU廃止の方針は変更していない。
+The trust in the KZG ceremony, the off-chain checking by at least one honest signer,
+the acceptance of collusion by all signers within one's own channel, and the policy of retiring MSU are unchanged.

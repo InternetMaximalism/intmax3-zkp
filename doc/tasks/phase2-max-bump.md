@@ -23,7 +23,7 @@ Prereq: Phase 1 (A5 O(N²)→O(N·h) in-circuit) is committed (ca1f8c6). This ph
 2. **Solidity constants** — IntmaxRollup:444, Verifier:45, Manager:135 (MAX_MEMBER_COUNT) to the
    same value. If >=256: widen the uint8 count fields → uint16 (Manager/Verifier + the close-PI
    limb encoding) and re-derive the PI limb layout.
-3. **Commitment consistency (致命)** — `member_set_commitment` (Rust close_member_set_commitment /
+3. **Commitment consistency (critical)** — `member_set_commitment` (Rust close_member_set_commitment /
    circuit) and `_channelRegHashChain` must byte-match Solidity over the SAME MAX slot count. Update
    the Solidity loops (IntmaxRollup:998, 1029; Verifier:1035) and re-run the cross-check tests.
 4. **Solidity gas** — rewrite the iterative `abi.encodePacked` builders (IntmaxRollup:998-1001,

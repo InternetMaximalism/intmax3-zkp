@@ -2500,7 +2500,7 @@ async function attemptSend(to, amountBase, token) {
   if (!witnessBacksTokenSlot(rr, token.tokenSlot)) {
     log('  witness does not back ' + token.label + ' (position ' + token.tokenSlot + ') -- refreshing that token first...');
     sendPhase = 'Refreshing ' + token.label;
-    log('  re-encrypting balance (秘匿化)...', 'zk');
+    log('  re-encrypting balance...', 'zk');
     const refreshPayload = await call('refresh', { tokenSlot: token.tokenSlot });
     sendPhase = 'Waiting for co-sign';
     const cosigned = await api('/api/refresh-cosign', refreshPayload);
@@ -2514,7 +2514,7 @@ async function attemptSend(to, amountBase, token) {
   sendPhase = 'Proving';
   log('  generating ZKP (zero-knowledge proof)...', 'zk');
   const payload = await call('send', { recipientSlot: to, amount: amountBase, tokenSlot: token.tokenSlot });
-  log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
+  log('  ZKP generated · amount encrypted', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
   // VERSIONED BINARY SLIM wire (IMSW v1): Rust performs the canonical projection and packs Regev
@@ -2632,7 +2632,7 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   mySlot = rr.slot; showBalance(rr);
   log('  syncing balance witness (refresh)...');
   sendPhase = 'Proving';
-  log('  re-encrypting balance (秘匿化)...', 'zk');
+  log('  re-encrypting balance...', 'zk');
   // Genesis position: `wallet_send_inter_channel` resolves an omitted token index to the source
   // channel's registry[0], so the witness this refresh must produce is the one for position 0.
   const refreshPayload = await call('refresh', { tokenSlot: 0 });
@@ -2652,7 +2652,7 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   const baseHead = JSON.parse(await api('/api/base-head', null, 'GET'));
   if (!Number.isInteger(baseHead.nonce)) throw new Error('live base nonce is unavailable');
   sendPhase = 'Proving';
-  log('  generating ZKP · encrypting amount for recipient (秘匿化)...', 'zk');
+  log('  generating ZKP · encrypting amount for recipient...', 'zk');
   const built = JSON.parse(await call('sendInterChannel', {
     toChannel: toCh, toSlot: to, amount: amountBase, destRecipientJson,
     baseNonce: baseHead.nonce,
@@ -2940,7 +2940,7 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     if (!witnessBacksTokenSlot(rr, 0)) {
       log('  refresh needed before burn...');
       sendPhase = 'Refreshing';
-      log('  re-encrypting balance (秘匿化)...', 'zk');
+      log('  re-encrypting balance...', 'zk');
       const refreshPayload = await call('refresh', { tokenSlot: 0 });
       const cosigned = await api('/api/refresh-cosign', refreshPayload);
       rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
@@ -2954,7 +2954,7 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     const built = JSON.parse(await call('burnSend', {
       amount: toBase(amt), withdrawalAddress: addr, baseNonce: baseHead.nonce,
     }));
-    log('  burn ZKP generated · amount encrypted (秘匿化)', 'zk');
+    log('  burn ZKP generated · amount encrypted', 'zk');
     log('  burn proved -- co-signing...');
     sendPhase = 'Co-signing';
     const cosigned = await api('/api/cosign-burn', JSON.stringify({

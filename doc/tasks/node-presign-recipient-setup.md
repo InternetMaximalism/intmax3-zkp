@@ -1,30 +1,30 @@
-# 初期入金前の cosigner 回収先設定
+# Configuring cosigner payout recipients before the initial deposit
 
-対象: native CLI、および同じ CLI を利用する API／Node の新規チャネル初期化。
+Applies to: the native CLI, and new-channel initialization from the API / Node that uses the same CLI.
 
-## 新しい本番チャネル
+## New production channels
 
-`INTMAX_COSIGNER_KEYFILE` を使う本番鍵モードでは、`setup-backing` より前に、全 controlled cosigner の `CLI_RECIPIENT_SLOT_<slot>` を明示する。既定の cosigner 数は3なので、その場合は slot 0・1・2 が対象。`INTMAX_CLI_COSIGNERS` を増やした場合は追加 slot も必要であり、初期残高がゼロでも省略できない。
+In production key mode, which uses `INTMAX_COSIGNER_KEYFILE`, specify `CLI_RECIPIENT_SLOT_<slot>` explicitly for every controlled cosigner before `setup-backing`. The default cosigner count is 3, so in that case slots 0, 1, and 2 are the ones concerned. If `INTMAX_CLI_COSIGNERS` is increased, the additional slots are required too, and they cannot be omitted even when the initial balance is zero.
 
-各値には、その参加者が実際に回収操作を行える20-byte L1アドレスを指定する。API／Node から CLI を起動する場合も、その子プロセスに同じ設定を渡す。設定だけで鍵の保有が証明されるわけではないため、運用側で対象チェーン上の回収方法を確認する。
+For each value, specify a 20-byte L1 address on which that participant can actually perform the payout operation. When launching the CLI from the API / Node, pass the same settings to the child process. Because configuration alone does not prove key ownership, operators must confirm the payout method on the target chain.
 
-- EOA は対応する署名鍵を本人が保有し、安全にバックアップしていること。
-- smart wallet は、その wallet 自身から Manager の `claimWithdrawalCredit` を呼び、必要な native/token を受け取れること。
-- 全員を operator のアドレスへ自動割当てしない。新しい鍵も自動生成しない。
-- 設定は `setup-backing` と `init` の両方で利用可能にしておく。genesis の署名前には、出来上がった各 slot の recipient が意図した回収先か確認する。
+- For an EOA, the participant must hold the corresponding signing key themselves and have it backed up safely.
+- For a smart wallet, it must be able to call the Manager's `claimWithdrawalCredit` from the wallet itself and receive the required native/token.
+- Do not auto-assign everyone to the operator's address. Do not auto-generate new keys.
+- Keep the settings available to both `setup-backing` and `init`. Before signing genesis, check that the resulting recipient for each slot is the intended payout destination.
 
-本番鍵モードでは、未設定・空値・形式不正・ゼロアドレスと、このチャネルの既知の synthetic cosigner 既定値を拒否する。`setup-backing` は、証明生成と L1 signer 利用より前に全 slot を検査する。`init` の genesis 作成も同じ resolver を使う。
+In production key mode, unset values, empty values, malformed values, the zero address, and this channel's known synthetic cosigner defaults are all rejected. `setup-backing` inspects all slots before proof generation and before using the L1 signer. Genesis creation in `init` uses the same resolver.
 
-## テストモード
+## Test mode
 
-`INTMAX_INSECURE_DETERMINISTIC_KEYS=1` を明示した既存テストモードだけは、未設定時に従来の `test_recipient_for` を使える。このアドレスは実資金の回収先ではない。実払い出しを確認するテストでは、回収可能なアドレスを明示する。
+Only the existing test mode, enabled by explicitly setting `INTMAX_INSECURE_DETERMINISTIC_KEYS=1`, may fall back to the previous `test_recipient_for` when nothing is set. That address is not a payout destination for real funds. In tests that check real payouts, specify a recoverable address explicitly.
 
-テストモードでも、明示した値が不正またはゼロなら拒否する。本番 keyfile と insecure flag の併用拒否は従来どおり。
+Even in test mode, an explicitly specified value is rejected if it is malformed or zero. Combining a production keyfile with the insecure flag is still rejected, as before.
 
-## 既存の署名済み H に関する警告
+## Warning about existing signed H
 
-この変更は、既存 H の recipient を書き換えない。環境変数を後から設定しても、既に署名された recipient は修正されない。また、正常な既存チャネルの通常操作・close・claim を、新規 genesis 用設定の不足だけで停止させない。
+This change does not rewrite the recipient in an existing H. Setting the environment variables after the fact does not fix an already-signed recipient. Nor does it stop normal operation, close, or claim on a healthy existing channel merely because the settings for a new genesis are missing.
 
-既存 H に synthetic recipient と正残高がある場合、そのまま close すると当該 slot の払い出しを引き出せる既知の鍵がない。まず最新の完全署名済み H、各 slot の recipient、本人が回収可能な鍵／wallet を照合する。状態ファイルや recipient の直接書換えで解決しようとしない。
+If an existing H has a synthetic recipient and a positive balance, closing it as-is leaves no known key able to withdraw that slot's payout. First cross-check the latest fully signed H, the recipient of each slot, and the keys/wallets the participant can actually recover from. Do not try to resolve this by directly rewriting state files or recipients.
 
-全員が協力でき、通常の正規遷移がまだ可能な場合は、回収可能な既存 slot への合意済み移動や、新しい正しく構成したチャネルへの移行を検討する。宛先を変更する遷移や、停止済み MSU を勝手に再有効化しない。既に凍結・close 済み、または必要な署名者が不在なら、そのような救済が可能とは保証しない。追加署名不要の正常退出が可能になったと見なしてはいけない。
+If everyone can cooperate and normal legitimate transitions are still possible, consider an agreed move to an existing recoverable slot, or migration to a new, correctly configured channel. Do not perform transitions that change the destination, and do not re-enable a halted MSU on your own authority. If the channel is already frozen or closed, or a required signer is absent, there is no guarantee that such a rescue is possible. Do not assume that a normal exit requiring no additional signatures has become possible.

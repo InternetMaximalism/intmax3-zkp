@@ -1,310 +1,306 @@
-# INTMAX3 監査 最終報告書（2026年9月）
+# INTMAX3 audit — final report (September 2026)
 
-対象コミット
+Commits audited
 
-| リポジトリ | コミット |
+| Repository | Commit |
 |---|---|
 | `InternetMaximalism/intmax3-zkp` | `19d1e601` |
-| `InternetMaximalism/intmax-plonky2`（サブモジュール） | `3a20a05fb99d2653c4d37debb4f1ead2f422dfb2` |
-| 監査対象としたランタイムの基準 | `05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8` |
+| `InternetMaximalism/intmax-plonky2` (submodule) | `3a20a05fb99d2653c4d37debb4f1ead2f422dfb2` |
+| Baseline of the runtime taken as the audit target | `05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8` |
 
 ---
 
-## 結論（先に 3 点）
+## Conclusions (three points up front)
 
-### 1. 2 つのリポジトリの両方が、Lean による機械検査を受けている
+### 1. Both repositories have undergone machine checking with Lean
 
-このプロトコル本体（`intmax3-zkp`）と、その暗号証明システムを担うサブモジュール
-（`intmax-plonky2`）は、**それぞれ独立に** Lean 4 という証明支援系で検査されている。
-Lean は数学の証明を計算機が一行ずつ検査する道具で、証明に穴があれば通らない。
+The protocol proper (`intmax3-zkp`) and the submodule that carries its cryptographic proof system
+(`intmax-plonky2`) have been checked **independently of each other** with the proof assistant Lean 4.
+Lean is a tool with which a computer checks a mathematical proof line by line; a proof with a hole does not pass.
 
-| | 検査済みの定理数 | 検査対象ファイル数 |
+| | Theorems checked | Files checked |
 |---|---:|---:|
-| `intmax3-zkp`（プロトコル本体） | 5,311 | 497 |
-| `intmax-plonky2`（証明システム） | 6,542 | 516 |
-| 合計 | **11,853** | 1,013 |
+| `intmax3-zkp` (the protocol proper) | 5,311 | 497 |
+| `intmax-plonky2` (the proof system) | 6,542 | 516 |
+| Total | **11,853** | 1,013 |
 
-両者は別々の検査スクリプトを持ち、互いに独立している。一方の結果が他方を保証するもの
-ではない。
+The two have separate checking scripts and are independent of each other. The result of one does not guarantee
+the other.
 
-### 2. 重大な脆弱性を探す複数の手法を通して、現在のコードに critical は見つかっていない
+### 2. Across several methods of looking for serious vulnerabilities, no critical issue has been found in the current code
 
-2026年6月11日の最初の Lean 証明コミットから 2026年9月18日まで、約3か月半にわたって
-証明の構築と脆弱性の探索を並行して行った。使用したモデルは Fable 5.1、Fable 5、Opus 5、
-ChatGPT Astra である。手法は 1 つではなく、以下を組み合わせた。
+From the first Lean proof commit on 2026-06-11 through 2026-09-18, roughly three and a half months, proof construction and
+vulnerability hunting were carried out in parallel. The models used were Fable 5.1, Fable 5, Opus 5 and
+ChatGPT Astra. The method was not a single one; the following were combined.
 
-- Lean による形式証明（仕様と実装の対応を一行ずつ書き起こし、性質を証明する）
-- 散文形式の敵対的レビュー（「この検査を通ってしまう不正な入力は何か」を探す）
-- 攻撃側と防御側に分かれた複数ラウンドの検証
-- 実際に動く攻撃（PoC）の作成による検証
-- 回路が本当にその制約を持つかの機械的照合（後述）
+- Formal proof in Lean (transcribing the correspondence between specification and implementation line by line and proving properties)
+- Adversarial review in prose (looking for "what malformed input would get past this check?")
+- Multiple rounds of verification with the participants split into attackers and defenders
+- Verification by building attacks that actually run (PoCs)
+- Mechanical checking of whether the circuit really carries the constraint (described below)
 
-その結果、**上記コミットの時点で、重大（critical）に分類される未解決の脆弱性は存在しない。**
+As a result, **as of the commits above, there is no outstanding vulnerability classified as critical.**
 
-### 3. 重大（critical）およびリリース阻害（NO-GO）に判定される脆弱性は 0 件
+### 3. Zero vulnerabilities rated critical or release-blocking (NO-GO)
 
-**現在のコードに、重大（critical）と判定される脆弱性は 1 件も存在しない。
-リリースを阻害する（NO-GO）と判定される脆弱性も 1 件も存在しない。**
+**In the current code there is not a single vulnerability rated critical.
+Neither is there a single vulnerability rated as blocking release (NO-GO).**
 
-監査の過程で見つかった実際に悪用可能な欠陥は、**すべて修正され、再発防止の回帰テストが
-追加されている**（第4節に一覧）。リリースを止めていた 3 件の NO-GO 判定もすべて解消した。
+Every actually exploitable defect found during the audit has **been fixed, with a regression test added to prevent
+recurrence** (listed in section 4). All 3 NO-GO verdicts that had been holding up release have also been resolved.
 
-これとは別に、深刻度が「高」以下の**改善項目が 3 件**追跡されている（第5節）。いずれも
-単独では悪用できず、修正方針も確定している。リリース判定には影響しない。
+Separately from these, **3 improvement items** of severity "high" or below are being tracked (section 5). None of them
+is exploitable on its own, and the fix approach is settled for each. They do not affect the release verdict.
 
 ---
 
-## この文書の用語
+## Terminology in this document
 
-専門用語を最小限にするため、以下の言い方で統一する。
+To keep jargon to a minimum, the following wordings are used consistently.
 
-| 用語 | 意味 |
+| Term | Meaning |
 |---|---|
-| 定理 | 計算機が検査を終えた主張。人が「正しいはず」と思っているだけのものは含まない |
-| 前提 | 証明の出発点として置いた、この監査では証明していない仮定。すべて名前を付けて数えてある |
-| チャネル | 少数の参加者が資金を預けて、その中で素早くやり取りするための仕組み |
-| 共同署名者 | チャネルを閉じる（資金を引き出す）ために全員の署名が必要な参加者 |
-| デリゲート | チャネルに参加するが、閉じる署名には加わらない参加者 |
-| 回路 | ゼロ知識証明で「この計算を正しく行った」ことを示すための、計算の書き下し |
+| Theorem | A claim a computer has finished checking. It does not include anything a person merely believes to be correct |
+| Premise | An assumption placed as a starting point of a proof and not proved in this audit. Every one of them is named and counted |
+| Channel | A mechanism in which a small number of participants deposit funds and transact quickly among themselves |
+| Co-signer | A participant whose signature is required from everyone in order to close a channel (withdraw the funds) |
+| Delegate | A participant who takes part in a channel but does not join the closing signature |
+| Circuit | The written-out form of a computation, used in a zero-knowledge proof to show "this computation was performed correctly" |
 
 ---
 
-## 1. 何を監査したか
+## 1. What was audited
 
-### 1.1 対象
+### 1.1 Scope
 
-- **L1 のスマートコントラクト**（資金を預かり、払い出す部分）
-- **チャネルの決済回路**（チャネルを閉じ、各参加者の取り分を確定する部分）
-- **署名の集約**（全参加者の署名を 1 つにまとめる部分）
-- **暗号証明システム**（上記の証明を検証する部分。サブモジュール側で別途監査）
+- **The L1 smart contracts** (the part that takes custody of funds and pays them out)
+- **The channel settlement circuits** (the part that closes a channel and fixes each participant's share)
+- **Signature aggregation** (the part that combines all participants' signatures into one)
+- **The cryptographic proof system** (the part that verifies the above proofs. Audited separately on the submodule side)
 
-### 1.2 監査の方法
+### 1.2 Method of the audit
 
-Lean による検査は、実装のソースコードを一行ずつ Lean の記述に対応付け、その対応表
-（行マップ）を計算機が検査できる形で残している。行マップは 169 本あり、各ソースファイルの
-全行がいずれかの分類に属することを機械的に確認している。
+The Lean checking maps the implementation's source code line by line onto Lean descriptions and leaves that correspondence table
+(the line map) in a form a computer can check. There are 169 line maps, and it is mechanically confirmed that every line of
+each source file belongs to one of the classifications.
 
-| 分類 | 行数 | 意味 |
+| Classification | Lines | Meaning |
 |---|---:|---|
-| 書き起こし済み | 31,095 | Lean のモデルが対応する定義を持つ |
-| 依存境界 | 10,850 | 外部の呼び出し。結果を仮定として受け取る |
-| 非実行行 | 9,828 | コメントや空行 |
-| テストのみ | 26,094 | 本番では動かない |
-| 未書き起こし | 41,797 | Lean 化していない（内訳は第7節） |
+| Transcribed | 31,095 | The Lean model has a corresponding definition |
+| Dependency boundary | 10,850 | An external call. The result is taken as an assumption |
+| Non-executable lines | 9,828 | Comments and blank lines |
+| Test only | 26,094 | Does not run in production |
+| Not transcribed | 41,797 | Not formalized in Lean (the breakdown is in section 7) |
 
-この分類は、検査を通すために都合よく付け替えることができない。付け替えを試みると検査
-スクリプトが不一致を検出して落ちる。
-
----
-
-## 2. 前提なしで証明されたこと
-
-以下は**いかなる暗号的仮定も置かずに**証明されている。つまり、暗号が破られていても成り立つ。
-モデル化した 12 種類の資金移動・認可の操作を任意の順序・任意の回数で並べた、あらゆる履歴に
-ついて成り立つ。
-
-1. **トークンごとの保存則** — 入ってきた額と出ていった額の差が、常に帳簿と一致する。
-   どこかで資金が湧いたり消えたりすることはない。
-2. **チャネルへの帰属** — 払い出された資金は、必ずそれを要求したチャネルに紐づく。
-   別のチャネルの資金が混ざることはない。
-3. **二重支払いの防止** — 一度使われた引き出し識別子は二度と使えない。
-4. **支払い上限** — 払い出し総額が、受け取った総額を超えることはない。
-
-さらに回路側でも、暗号の仮定を使わずに証明された結果がある。署名回路の中で使われている
-高速な多項式乗算アルゴリズム（NTT）が、素朴な方法で計算した積と厳密に一致することを
-証明した（157 定理）。これは「実装が速いだけで正しくない」可能性を排除する。
+This classification cannot be conveniently reassigned in order to make the check pass. An attempt to reassign it makes the
+checking script detect the mismatch and fail.
 
 ---
 
-## 3. 何が前提として残っているか
+## 2. What is proved with no premises
 
-証明は「これらの前提が成り立つならば、上記が成り立つ」という形をしている。前提は
-**23 個**あり、すべて名前と、それが偽であればどう破れるかが文書化されている。性質ごとに
-4 つに分かれる。
+The following is proved **without placing any cryptographic assumption whatsoever**. That is, it holds even if the cryptography is broken.
+It holds for every history obtained by arranging the 12 modeled kinds of fund-movement and authorization operations in any order and any number of times.
 
-### (A) 書き下しが実装と一致すること（6 個）
+1. **Per-token conservation law** — the difference between what came in and what went out always agrees with the ledger.
+   Funds do not spring into existence or vanish anywhere.
+2. **Attribution to a channel** — funds paid out are always tied to the channel that requested them.
+   Funds of another channel are never mixed in.
+3. **Prevention of double spending** — a withdrawal identifier that has been used once can never be used again.
+4. **Payment bound** — the total paid out never exceeds the total received.
 
-Lean のモデルは、回路のソースコードを人が読んで書き起こしたものである。「書き起こしが
-正しい」ことは有限の照合作業で確かめられるが、全部は終わっていない。
-
-これを補うため、**実際にビルドした回路と Lean の主張を機械的に突き合わせる検査**を作った。
-回路を組み立てた結果から「どの配線が等しいと強制されているか」「どの値が定数に固定されて
-いるか」「範囲検査は何ビットか」「公開値の順序は何か」を読み出し、Lean 側の主張と比較する。
-
-- 7 つのプログラム、280 項目を検査
-- 184 項目が構造的に一致を確認
-- 8 項目は、わざと制約を破る入力で証明が失敗することを実際に確認
-- 67 項目は算術・暗号部品の意味に関わるもので、この方法では見えない（前提のまま）
-- **不一致はゼロ**
-
-### (B) 計算量の仮定（2 個）
-
-- 格子暗号（Falcon 署名）の偽造困難性
-- Keccak-256 の衝突困難性（しかも、実行中に実際に比較される 1 組の同じ長さの入力に限定）
-
-これらは数学的に証明できる性質ではなく、暗号学の標準的な仮定である。
-
-### (C) 実行環境の意味（8 個）
-
-EVM の命令の意味、L1 の確定情報の読み取り、外部呼び出しの戻り値、そしてソースコードと
-実際にデプロイされたバイト列が一致すること。最後の項目は、この監査の中では原理的に
-証明できない（検証済みコンパイラが必要になる）。
-
-### (D) チャネル外の帳簿（7 個）
-
-チャネルを閉じるとき、払い出される額がチャネルの L2 残高に裏付けられていること。
-この監査では、**払い出される各金額が、確定済みの状態に対する残高証明の中の実際の行と
-一致すること**までを証明した。残っているのは「その残高自体が正しく積み上がっている」
-という、より上流の性質である。これは次の作業として明示されている。
+There is also a result on the circuit side proved without cryptographic assumptions. We proved that the fast polynomial-multiplication
+algorithm (NTT) used inside the signature circuit agrees exactly with the product computed by the naive method
+(157 theorems). This rules out the possibility that "the implementation is merely fast and not correct."
 
 ---
 
-## 4. 発見され、修正された脆弱性
+## 3. What remains as a premise
 
-監査の過程で見つかり、**修正済み**のもの。括弧内は発見時の深刻度。
+The proof takes the form "if these premises hold, then the above holds." There are
+**23** premises, and each one is documented with a name and with how it would break if it were false. They fall into
+4 groups by nature.
 
-| 内容 | 影響 |
+### (A) That the transcription agrees with the implementation (6 of them)
+
+The Lean model is something a person read off the circuit's source code and transcribed. That "the transcription is
+correct" can be confirmed by a finite amount of checking work, but not all of it is done.
+
+To compensate, we built **a check that mechanically compares the actually built circuit against the Lean claims**.
+From the result of assembling the circuit, it reads out "which wires are forced equal," "which values are pinned to
+constants," "how many bits the range checks are," and "what the order of the public values is," and compares them with the Lean-side claims.
+
+- 7 programs, 280 items checked
+- 184 items structurally confirmed to agree
+- 8 items confirmed in practice to make the proof fail when fed input that deliberately breaks a constraint
+- 67 items concern the meaning of arithmetic and cryptographic components and are invisible to this method (they remain premises)
+- **Zero mismatches**
+
+### (B) Complexity assumptions (2 of them)
+
+- Unforgeability of lattice cryptography (Falcon signatures)
+- Collision resistance of Keccak-256 (and moreover restricted to the one pair of equal-length inputs actually compared during execution)
+
+These are not properties that can be proved mathematically; they are standard assumptions of cryptography.
+
+### (C) The meaning of the execution environment (8 of them)
+
+The meaning of the EVM's instructions, the reading of L1's finalized information, the return values of external calls, and that the source code
+and the actually deployed byte sequence agree. The last item cannot in principle be proved within this audit
+(it would require a verified compiler).
+
+### (D) The ledger outside the channel (7 of them)
+
+That when a channel is closed, the amount paid out is backed by the channel's L2 balance.
+In this audit we proved as far as **each amount paid out agreeing with an actual row inside a balance proof against the
+finalized state**. What remains is the more upstream property that "the balance itself is correctly accumulated."
+This is explicitly noted as the next piece of work.
+
+---
+
+## 4. Vulnerabilities found and fixed
+
+Those found during the audit and **already fixed**. The parenthesis gives the severity at the time of discovery.
+
+| Content | Impact |
 |---|---|
-| 検証器の鍵の取り違え（重大） | 証明系の検証に不備があり、正当でない証明が受理され得た。再設計により修正 |
-| 1 人の署名だけでチャネルを閉じられた（中） | 全員の同意が必要なはずの操作が、1 人で実行できた |
-| 鍵の重複を許す経路（中） | 同一の鍵を 2 つの枠に登録し、帳簿を壊せた |
-| 巻き戻し時に入金が消える（高） | ブロックの巻き戻し処理で、その後の入金記録が失われた |
-| 他人の鍵情報を破壊できた（高） | 通常の状態更新で、無関係な参加者の鍵情報を書き換え、資金を引き出せなくできた |
-| 別の提出物を横取りして確定できた（高） | 自分の証明で他人の提出を確定させられた |
-| 期限を無限に延長できた（高） | 異議申し立て期限を繰り返しリセットできた |
-| 閉鎖の取り消しで機能停止（重大） | 取り消し後に再度閉じようとすると永久に失敗した |
-| 到達不能な検査（中） | 登録データの正当性検査が、実際には一度も実行されない書き方になっていた |
-| 検証器の演算実装の不備（中） | L1 側の演算の再実装が、参照実装と一致しない場合があった |
+| Verifier key mix-up (critical) | The proof system's verification was defective, and an illegitimate proof could be accepted. Fixed by a redesign |
+| A channel could be closed with a single signature (medium) | An operation that should have required everyone's consent could be performed by one person |
+| A path allowing duplicate keys (medium) | The same key could be registered in two slots, corrupting the ledger |
+| Deposits vanished on rollback (high) | In block rollback processing, subsequent deposit records were lost |
+| Someone else's key material could be destroyed (high) | An ordinary state update could rewrite an unrelated participant's key material and make their funds unwithdrawable |
+| Another party's submission could be hijacked and finalized (high) | One's own proof could be used to finalize someone else's submission |
+| A deadline could be extended indefinitely (high) | The challenge deadline could be reset repeatedly |
+| Cancelling a close caused a functional halt (critical) | After a cancellation, trying to close again failed permanently |
+| An unreachable check (medium) | The validity check on registration data was written in a way that meant it never actually ran |
+| A defect in the verifier's arithmetic implementation (medium) | The reimplementation of the L1-side arithmetic could disagree with the reference implementation |
 
-これらはすべて修正され、**修正前の状態で確かに失敗することを確認する回帰テスト**が
-追加されている（「修正を戻すとテストが赤くなる」ことを確認済み）。
-
----
-
-## 5. 追跡中の改善項目（critical・NO-GO はいずれも該当なし）
-
-以下の 3 件は未解決だが、**いずれも critical ではなく、リリースを阻害するものでもない**。
-透明性のため、深刻度と修正方針を含めて記載する。
-
-### 5.1 チャネル開設時の鍵情報の照合（深刻度：高）
-
-**何が起きうるか。** チャネルを開設する人が、参加者の 1 人について誤った鍵情報を登録すると、
-その参加者は自分の資金を永久に引き出せなくなる。資金は攻撃者のものになるわけではなく、
-誰も取り出せない状態で固定される。
-
-**なぜ高なのか。** 障害が表面化するのが、引き出そうとした最後の瞬間であり、その時点で
-回復手段がない。しかも、共同署名者は署名前に自動で照合されるのに対し、**デリゲートは
-その照合が構造的に走らない**（署名しないため）。
-
-**なぜ重大ではないのか。** 攻撃者が利益を得ないこと、チャネルを開設した当人が悪意を持つか
-バグを踏む必要があること、影響が 1 つの枠に限定されることによる。
-
-**修正方針。** チャネル取り込み時の検査に、比較を 1 つ足すだけで閉じる。スマートコントラクト
-にも回路にも変更は要らない。
-
-### 5.2 チャネル間送金の補助データ（深刻度：中）
-
-送金に付随する補助データが、意図したとおりの値であることが回路の中では証明されていない
-（改ざん不可能であることは証明されている）。悪用には、受け取り側のチャネルの**全参加者が
-そろって**確認を怠る必要があるため、単独では成立しない。
-
-### 5.3 チャネル登録時の同意確認（深刻度：低〜中）
-
-チャネルの登録操作は、参加者の署名を検証しない。ただし実際には、参加者のソフトウェアが
-自分の鍵から情報を再計算して照合するため、偽の登録は取り込み時に検出される。残るのは
-「資金を預ける前に確認する」という手順の問題であり、検出できないという問題ではない。
+All of these have been fixed, and **a regression test confirming that they do fail in the pre-fix state** has been
+added ("reverting the fix turns the test red" has been confirmed).
 
 ---
 
-## 6. リリース判定
+## 5. Improvement items under tracking (none of them critical, none NO-GO)
 
-以前の監査（2026年8月30日）は 3 件の理由でリリースを止めていた。**その 3 件はすべて解消
-している。**
+The following 3 are unresolved, but **none of them is critical and none blocks release**.
+For transparency, they are listed with severity and fix approach.
 
-| 項目 | 現在 |
+### 5.1 Checking key material at channel opening (severity: high)
+
+**What could happen.** If the person opening a channel registers wrong key material for one of the participants,
+that participant becomes permanently unable to withdraw their own funds. The funds do not become the attacker's; they are
+frozen in a state where nobody can take them out.
+
+**Why high.** The failure only surfaces at the very last moment, when the withdrawal is attempted, and at that point
+there is no means of recovery. Moreover, whereas co-signers are checked automatically before signing, **for delegates
+that check structurally never runs** (because they do not sign).
+
+**Why it is not critical.** Because the attacker gains nothing, because the person who opened the channel has to be malicious
+or to hit a bug, and because the impact is confined to a single slot.
+
+**Fix approach.** It closes by adding a single comparison to the check at channel import. No change is needed to the smart contracts
+or to the circuits.
+
+### 5.2 Auxiliary data for inter-channel transfers (severity: medium)
+
+That the auxiliary data accompanying a transfer has the intended value is not proved inside the circuit
+(that it cannot be tampered with is proved). Exploitation requires **all participants of the receiving channel
+together** to neglect the check, so it does not work on its own.
+
+### 5.3 Consent checking at channel registration (severity: low to medium)
+
+The channel registration operation does not verify participants' signatures. In practice, however, a participant's software
+recomputes the information from their own key and checks it, so a forged registration is detected at import. What remains is
+a procedural matter of "check before depositing funds," not a matter of being undetectable.
+
+---
+
+## 6. Release verdict
+
+The previous audit (2026-08-30) was holding up release for 3 reasons. **All 3 have been resolved.**
+
+| Item | Now |
 |---|---|
-| 証明システムの健全性 | 修復完了 |
-| L1 からチャネルへの資金の裏付け | 実装完了。チャネルに紐づいた証明がなければ 1 円も動かない |
-| 参加者が単独でチャネルを閉じられるか | 可能。閉じる操作に新しい署名は不要で、既に合意済みの状態に付いている署名を使う。**他の参加者が署名を拒んでも妨害できない** |
+| Soundness of the proof system | Repair complete |
+| Backing of funds from L1 to the channel | Implementation complete. Without a proof tied to the channel, not a single yen moves |
+| Whether a participant can close a channel on their own | Possible. The closing operation needs no new signature; it uses the signature attached to the already-agreed state. **Other participants cannot obstruct it by refusing to sign** |
 
-**ただし、リリース可（GO）ではない。** 以下は防御の欠陥ではなく、まだ実施していない
-確認作業である。
+**However, this is not a GO.** The following are not defects in the defenses but confirmation work not yet carried out.
 
-1. 修復後の証明システムに対する、外部の独立した暗号レビュー
-2. 本番環境での、ブラウザから払い出しまでの通し確認
-3. まっさらな環境からの再ビルドと、デプロイされたバイト列の照合
-
----
-
-## 7. この監査が**していない**こと
-
-誤解を避けるため明記する。
-
-- **未書き起こしの 41,797 行**は Lean 化されていない。大半は証明システム側であり、そちらは
-  別のリポジトリで独立に監査されている（第1節）。
-- **ソースコードとデプロイされたバイト列が同じであること**は証明していない。
-- **暗号の安全性そのもの**（格子暗号、ハッシュ関数）は証明していない。標準的な仮定として
-  受け入れている。
-- **チャネル内部の日々の送金**の正しさは、この証明の対象外である。チャネルを閉じるときの
-  処理は証明されているが、閉じる前の状態が正しく積み上がっていることは、参加者それぞれが
-  自分の手元で確認することに依存している。
-- **独立した第三者によるレビューは受けていない。** 書き起こしと証明は同一の作業系列で
-  行われた。
+1. An external, independent cryptographic review of the repaired proof system
+2. An end-to-end confirmation in the production environment, from the browser through to payout
+3. A rebuild from a clean environment and a comparison against the deployed byte sequence
 
 ---
 
-## 8. 誰でも確認できること
+## 7. What this audit does **not** do
 
-この報告書の主張は、手元で再現できる。
+Stated explicitly to avoid misunderstanding.
+
+- **The 41,797 lines not transcribed** are not formalized in Lean. Most of them are on the proof-system side, and that side
+  is audited independently in a separate repository (section 1).
+- **That the source code and the deployed byte sequence are the same** is not proved.
+- **The security of the cryptography itself** (lattice cryptography, hash functions) is not proved. It is accepted as a
+  standard assumption.
+- **The correctness of the day-to-day transfers inside a channel** is out of scope for this proof. The processing at the time a
+  channel is closed is proved, but that the state before closing has been correctly accumulated depends on each participant
+  checking it on their own machine.
+- **It has not received an independent third-party review.** The transcription and the proofs were done in the same line of work.
+
+---
+
+## 8. What anyone can verify
+
+The claims of this report can be reproduced locally.
 
 ```sh
 export PATH=$HOME/.elan/bin:$PATH
-bash .github/ci/lean-safety-guard.sh          # 全定理のビルドと検査 → PASS
-python3 -B .github/ci/lean-line-coverage.py   # 行の対応付けの整合 → PASS
-python3 -B .github/ci/check-ledger-writers.py # 帳簿を書き換える箇所の照合 → PASS
-python3 -B .github/ci/lean-fixture-parity.py  # 実データとの突き合わせ → 一致
+bash .github/ci/lean-safety-guard.sh          # build and check all theorems → PASS
+python3 -B .github/ci/lean-line-coverage.py   # consistency of the line correspondence → PASS
+python3 -B .github/ci/check-ledger-writers.py # check of the sites that rewrite the ledger → PASS
+python3 -B .github/ci/lean-fixture-parity.py  # comparison against real data → agreement
 ```
 
-期待値：132 の Lean モジュール、497 個のファイルのハッシュ、サブモジュールの固定 1 件、
-169 本の行マップ。
+Expected values: 132 Lean modules, hashes of 497 files, 1 submodule pin,
+169 line maps.
 
-証明が依存してよい公理は 3 つ（Lean 自身の基本公理）に限定されており、検査スクリプトが
-毎回確認する。プロジェクト独自の公理や、証明の未完了を示す記述（`sorry` など）は 1 つも
-含まれていない。含めれば検査が落ちる。
-
----
-
-## 9. まとめ
-
-現在のコード（`19d1e601` / サブモジュール `3a20a05f`）について：
-
-- **重大（critical）と判定される脆弱性は 0 件である。**
-- **リリース阻害（NO-GO）と判定される脆弱性も 0 件である。**
-- **見つかった脆弱性はすべて修正され、回帰テストで固定されている。**
-- **資金の保存・帰属・二重支払い防止・支払い上限は、暗号の仮定なしに証明されている。**
-- **残る前提は 23 個で、すべて名前が付き、破れ方が文書化されている。**
-- 追跡中の改善項目が 3 件あるが、最も重いものでも「高」であり、リリース判定には影響しない。
-- リリース可（GO）の判定には、外部レビューと本番環境での通し確認が別途必要である。
+The axioms a proof may depend on are limited to 3 (Lean's own basic axioms), and the checking script confirms this
+every time. Not a single project-specific axiom, nor any notation indicating an incomplete proof (`sorry` and the like), is
+included. Including one would make the check fail.
 
 ---
 
-*本報告書は `doc/audit/release-status-2026-09-18.md`（判定の記録）および
-`doc/audit/zkp/PRACTICAL-SAFETY-PROOF.md`（証明の詳細、英語）を要約したものである。
-過去の日付付き監査報告書は、それぞれの時点の記録として保存されている。*
+## 9. Summary
+
+For the current code (`19d1e601` / submodule `3a20a05f`):
+
+- **There are 0 vulnerabilities rated critical.**
+- **There are also 0 vulnerabilities rated release-blocking (NO-GO).**
+- **Every vulnerability found has been fixed and pinned down with a regression test.**
+- **Conservation, attribution, double-spend prevention and the payment bound of funds are proved without cryptographic assumptions.**
+- **23 premises remain; all are named and their modes of failure are documented.**
+- There are 3 improvement items under tracking, but the heaviest is "high" and it does not affect the release verdict.
+- A GO verdict additionally requires an external review and an end-to-end confirmation in the production environment.
 
 ---
 
-# 技術詳細（付録）
+*This report is a summary of `doc/audit/release-status-2026-09-18.md` (the record of the verdict) and
+`doc/audit/zkp/PRACTICAL-SAFETY-PROOF.md` (the details of the proof, in English).
+Past dated audit reports are preserved as the records of their respective points in time.*
 
-ここからは、第1〜9節の主張を検証したい読者のための詳細である。すべての定理名・
-ファイル名・行番号は実在し、手元で確認できる。
+---
 
-## 付録 A — 無条件に証明された定理の、正確な内容
+# Technical detail (appendices)
 
-以下は `doc/audit/zkp/Zkp/Implementation/SystemSafety.lean` にあり、**前提構造体を一切
-引数に取らない**。つまり 23 個の前提のどれが偽であっても成り立つ。
+From here on are the details for a reader who wants to verify the claims of sections 1 through 9. Every theorem name,
+file name and line number is real and can be checked locally.
 
-### A.1 トークンごとの保存則
+## Appendix A — the exact content of the unconditionally proved theorems
+
+The following are in `doc/audit/zkp/Zkp/Implementation/SystemSafety.lean` and **take no premise structure as an
+argument at all**. That is, they hold no matter which of the 23 premises is false.
+
+### A.1 Per-token conservation law
 
 ```lean
 theorem trace_conserves_per_token (cfg : ManagerValue.Config) {before after : State}
@@ -312,12 +308,12 @@ theorem trace_conserves_per_token (cfg : ManagerValue.Config) {before after : St
     measure cfg after token + outflow token = measure cfg before token + inflow token
 ```
 
-`SystemSafety.lean:599`。`measure` は「Rollup の escrow ＋ Manager の保留分 ＋ 未使用の
-引き出し権 ＋ 支払い済み」の合計。`Trace` は後述の 12 種類の遷移を任意個つないだもの。
-主張は等式であり、不等式ではない。**入ってきた分と出ていった分の差が、常に帳簿の増減と
-一致する。**
+`SystemSafety.lean:599`. `measure` is the sum of "the Rollup's escrow + the Manager's pending amount + unspent
+withdrawal entitlement + already paid." `Trace` is any number of the 12 kinds of transition described below, strung together.
+The claim is an equality, not an inequality. **The difference between what came in and what went out always agrees with the
+change in the ledger.**
 
-### A.2 チャネルへの帰属
+### A.2 Attribution to a channel
 
 ```lean
 theorem trace_channel_attribution (cfg : ManagerValue.Config) {before after : State}
@@ -331,11 +327,11 @@ theorem trace_channel_attribution (cfg : ManagerValue.Config) {before after : St
         after.funding.materializedChannelExit c = d)
 ```
 
-`SystemSafety.lean:751`。3 つの結論を同時に出す。(1) 受領額は上限を超えない。(2) **上限
-そのものが遷移で動かない**（後から上限を引き上げて多く引き出す、ができない）。(3) 一度
-確定したチャネルの exit 記録は書き換わらない。
+`SystemSafety.lean:751`. It yields 3 conclusions at once. (1) The amount received does not exceed the cap. (2) **The cap
+itself does not move under a transition** (you cannot raise the cap later and withdraw more). (3) The exit record of a channel
+that has once been finalized is not rewritten.
 
-### A.3 引き出し識別子の一回性
+### A.3 Single use of a withdrawal identifier
 
 ```lean
 theorem trace_nullifier_single_use (cfg : ManagerValue.Config) {before after : State}
@@ -350,10 +346,10 @@ theorem trace_nullifier_single_use (cfg : ManagerValue.Config) {before after : S
         ManagerValue.submitClaimCore cfg ext (after.managers cfg.manager) claim proof ≠ .ok out)
 ```
 
-`SystemSafety.lean:837`。最後の結論が実質である：**使用済みの識別子での請求は、履歴の
-末尾で必ず失敗する**。`≠ .ok out` は「どんな出力に対しても成功しない」という意味。
+`SystemSafety.lean:837`. The last conclusion is the substantive one: **a claim with an already-used identifier necessarily
+fails at the end of the history**. `≠ .ok out` means "does not succeed for any output whatsoever."
 
-### A.4 支払い上限
+### A.4 Payment bound
 
 ```lean
 theorem trace_paid_bounded (cfg : ManagerValue.Config) {before after : State}
@@ -367,70 +363,70 @@ theorem trace_paid_bounded (cfg : ManagerValue.Config) {before after : State}
         measure cfg before token + inflow token
 ```
 
-`SystemSafety.lean:885`。保存則を、資金が今どこにあるか（escrow / 保留 / 未使用の権利 /
-支払い済み）まで分解した形。
+`SystemSafety.lean:885`. The conservation law in a form decomposed down to where the funds currently are (escrow / pending /
+unspent entitlement / already paid).
 
-## 付録 B — モデル化した 12 の遷移
+## Appendix B — the 12 modeled transitions
 
-`SystemSafety.lean:373` の `inductive Step`。上の定理はこの 12 種類を任意順・任意回数
-つないだ**すべての**履歴について成り立つ。
+The `inductive Step` at `SystemSafety.lean:373`. The theorems above hold for **every** history that strings these 12 kinds
+together in any order and any number of times.
 
-| 構成子 | 対応する操作 |
+| Constructor | Corresponding operation |
 |---|---|
-| `accounting` | 引き出し請求の提出、チャネル資金の引き出し、支払いの受領（`FundFlow.AccountingStep` の 4 経路） |
-| `deposit` | L1 への入金（資金が入る唯一のモデル化経路） |
-| `withdrawalSet` | 引き出し集合の確定（escrow から出る） |
-| `userWithdrawNative` | ネイティブ通貨の保留分の引き出し |
-| `userWithdrawToken` | ERC20 の保留分の引き出し |
-| `materialize` | チャネル閉鎖の確定（materializer が escrow から Manager へ credit） |
-| `requestClose` | 閉鎖要求（資金は動かない） |
-| `fundingFreeze` / `fundingUnfreeze` | 凍結 / 解除 |
-| `fundingRecordPost` / `fundingRollbackPost` | ブロック記録 / 巻き戻し |
-| `rollupRollback` | Rollup のバッチ巻き戻し |
+| `accounting` | Submitting a withdrawal claim, withdrawing channel funds, receiving a payment (the 4 paths of `FundFlow.AccountingStep`) |
+| `deposit` | Depositing into L1 (the only modeled path by which funds enter) |
+| `withdrawalSet` | Finalizing a withdrawal set (leaving escrow) |
+| `userWithdrawNative` | Withdrawing the pending amount in the native currency |
+| `userWithdrawToken` | Withdrawing the pending amount in ERC20 |
+| `materialize` | Finalizing a channel close (the materializer credits from escrow to the Manager) |
+| `requestClose` | A close request (no funds move) |
+| `fundingFreeze` / `fundingUnfreeze` | Freeze / unfreeze |
+| `fundingRecordPost` / `fundingRollbackPost` | Block record / rollback |
+| `rollupRollback` | Rollback of a Rollup batch |
 
-モデル化されて**いない**遷移（プロトコル外の EVM 操作など）については、前提 (g1')(g2') が
-「帳簿を触るなら列挙済みの入口の実行である」と述べる。
+For transitions that are **not** modeled (EVM operations outside the protocol and the like), premises (g1')(g2') state
+that "if it touches the ledger, it is the execution of an entrypoint that has been inventoried."
 
-## 付録 C — 23 個の前提の完全な一覧
+## Appendix C — the complete list of the 23 premises
 
-`TrustBoundary.lean` の `structure TrustBoundary` のフィールド。掲載順は宣言順。
+The fields of `structure TrustBoundary` in `TrustBoundary.lean`. The order of listing is the order of declaration.
 
-| # | Lean のフィールド名 | 内容 |
+| # | Lean field name | Content |
 |---|---|---|
-| a0 | `mleVerifierSoundness` | 固定された検証器が受理した証明の公開値は、その回路の充足可能な主張の公開値である |
-| a | `closePrimitiveLowering` | 閉鎖回路：充足可能な主張から、**同じ命令列**を満たす割当が存在し、その公開配線が主張を読み戻す |
-| b1 | `withdrawalPrimitiveLowering` | 引き出し請求回路について同じ |
-| b2 | `postClosePrimitiveLowering` | 閉鎖後請求回路について同じ |
-| c0 | `materializerViewIsManagerState` | materializer が外部呼び出しで見る Manager の 12 個の getter の値が、Manager の実際の記憶と一致する |
-| c0b | `managerFundsDigestIsReference` | Manager が持つトークン集計のハッシュが、その確定ベクトルの参照 Keccak-256 である |
-| c1 | `backingVerifierSoundness` | 裏付け証明の検証器が受理した語は、固定回路の充足可能な主張である |
-| c2 | `backingPrimitiveLowering` | 裏付け回路について (a) と同じ命令単位の対応 |
-| c3a | `backingKeccakIsReference` | 裏付け回路のハッシュ呼び出しが参照 Keccak-256 である |
-| c3b | `backingTokenFundsHashBinding` | 実行中に比較される 1 組の同じ長さの入力について、ハッシュが一致すれば入力が一致する |
-| c4 | `finalizedBalanceIsBacked` | **残る本体の隙間。** 確定済みの根に対する裏付け証人の各行の額が、その根におけるチャネルの L2 上の取り分以下である |
-| d0 | `aggregateRecursiveVerifierSoundness` | 署名集約の最上位の再帰検証が受理したら、その主張は充足可能である |
-| d0' | `levelRecursionSoundness` | 各段の子証明についても同じ |
-| d1' | `aggregatePrimitiveLowering` | 集約の各段と葉が、命令単位で対応する（葉は署名ガジェットの命令列に接続） |
-| d3 | `falconUnforgeability` | ガジェットの制約を満たす証人が存在するなら、その鍵の持ち主が当該メッセージを承認した（格子仮定） |
-| e1a | `solidityKeccakIsReference` | EVM の `KECCAK256` が参照仕様と一致する |
-| e1b | `circuitKeccakIsReference` | 回路側のハッシュ部品（外部 crate、`Cargo.lock` で固定）が参照仕様と一致する |
-| e2 | `tokenFundsHashBinding` | 受理された閉鎖で比較される 1 組について、ハッシュ一致から入力一致 |
-| f1 | `finalizedRootObservation` | 「確定済みの根か」を問う外部呼び出しの肯定回答が、正典の状態を反映する |
-| f2 | `finalizedHeightObservation` | 確定高の読み取りについて同じ |
-| g1' | `ledgerWritersAreInventoried` | モデル外の遷移が帳簿（使用済み識別子・受領・支払い・上限）を動かすなら、それは列挙済み入口の実行である |
-| g2' | `latchWritersAreInventoried` | 同じことを materializer の記憶について |
-| h | `sourceRefinement` | デプロイされた成果物の遷移が、モデルが認める遷移に含まれる |
+| a0 | `mleVerifierSoundness` | The public values of a proof accepted by the pinned verifier are the public values of a satisfiable statement of that circuit |
+| a | `closePrimitiveLowering` | The close circuit: from a satisfiable statement, there exists an assignment satisfying **the same instruction sequence**, whose public wires read the statement back |
+| b1 | `withdrawalPrimitiveLowering` | The same for the withdrawal claim circuit |
+| b2 | `postClosePrimitiveLowering` | The same for the post-close claim circuit |
+| c0 | `materializerViewIsManagerState` | The values of the Manager's 12 getters that the materializer sees through an external call agree with the Manager's actual storage |
+| c0b | `managerFundsDigestIsReference` | The hash of the token aggregate that the Manager holds is the reference Keccak-256 of its finalized vector |
+| c1 | `backingVerifierSoundness` | The words accepted by the verifier of the backing proof are a satisfiable statement of the pinned circuit |
+| c2 | `backingPrimitiveLowering` | The same per-instruction correspondence as (a), for the backing circuit |
+| c3a | `backingKeccakIsReference` | The hash call of the backing circuit is the reference Keccak-256 |
+| c3b | `backingTokenFundsHashBinding` | For the one pair of equal-length inputs compared during execution, if the hashes agree then the inputs agree |
+| c4 | `finalizedBalanceIsBacked` | **The remaining gap in the main body.** The amount in each row of the backing witness against a finalized root is at most the channel's L2 share at that root |
+| d0 | `aggregateRecursiveVerifierSoundness` | If the top-level recursive verification of the signature aggregation accepts, its statement is satisfiable |
+| d0' | `levelRecursionSoundness` | The same for the child proofs at each level |
+| d1' | `aggregatePrimitiveLowering` | Each level and the leaf of the aggregation correspond per instruction (the leaf connects to the signature gadget's instruction sequence) |
+| d3 | `falconUnforgeability` | If a witness satisfying the gadget's constraints exists, then the holder of that key approved the message in question (lattice assumption) |
+| e1a | `solidityKeccakIsReference` | The EVM's `KECCAK256` agrees with the reference specification |
+| e1b | `circuitKeccakIsReference` | The circuit-side hash component (an external crate, pinned by `Cargo.lock`) agrees with the reference specification |
+| e2 | `tokenFundsHashBinding` | For the one pair compared in an accepted close, hash agreement implies input agreement |
+| f1 | `finalizedRootObservation` | An affirmative answer from the external call asking "is this a finalized root?" reflects the canonical state |
+| f2 | `finalizedHeightObservation` | The same for the reading of the finalized height |
+| g1' | `ledgerWritersAreInventoried` | If a transition outside the model moves the ledger (used identifiers, received, paid, cap), it is the execution of an inventoried entrypoint |
+| g2' | `latchWritersAreInventoried` | The same for the materializer's storage |
+| h | `sourceRefinement` | The transitions of the deployed artifact are contained in the transitions the model admits |
 
-**(d2') は前提ではなくなった。** 以前は「回路内の高速乗算が正しい」を前提に置いていたが、
-`NttCorrectness`（157 定理）が証明したため削除され、`ntt_computes_negacyclic_product_of_boundary`
-（`TrustBoundary.lean:2509`）という定理になっている。
+**(d2') is no longer a premise.** Previously "the fast multiplication inside the circuit is correct" was placed as a premise, but
+`NttCorrectness` (157 theorems) proved it, so it has been removed and has become the theorem `ntt_computes_negacyclic_product_of_boundary`
+(`TrustBoundary.lean:2509`).
 
-## 付録 D — 「命令単位の対応」とは何か
+## Appendix D — what "per-instruction correspondence" means
 
-前提 (a)(b1)(b2)(c2)(d1') は「命令単位」と書いた。その意味を具体的に述べる。
+Premises (a)(b1)(b2)(c2)(d1') were described as "per-instruction." Here is what that means concretely.
 
-回路のソースコードは、`builder.range_check(...)`、`builder.connect(...)` のような呼び出しの
-列である。Lean 側では、この呼び出し列を**データとして**書き写している。例：
+The circuit's source code is a sequence of calls such as `builder.range_check(...)` and `builder.connect(...)`.
+On the Lean side, this call sequence is transcribed **as data**. For example:
 
 ```lean
 inductive BuildOp where
@@ -440,7 +436,7 @@ inductive BuildOp where
 def constructorProgram : List BuildOp := [...]
 ```
 
-そして命令 1 つずつに「この命令が課す制約」を与える：
+Then each instruction is given "the constraint this instruction imposes":
 
 ```lean
 def BuildOp.holds (a : Assignment e) : BuildOp → Prop
@@ -451,7 +447,7 @@ def BuildOp.holds (a : Assignment e) : BuildOp → Prop
   | ...
 ```
 
-その上で、**全命令が満たされるなら手書きの制約集合がすべて成り立つ**ことを証明する：
+On top of that, it is proved that **if every instruction is satisfied then the whole hand-written constraint set holds**:
 
 ```lean
 theorem program_satisfied_implies_gates (e) (a)
@@ -459,162 +455,161 @@ theorem program_satisfied_implies_gates (e) (a)
     CircuitGates e (readPublic a) (readWitness a)
 ```
 
-この定理には**副次的な仮定が一つもない**。5 つの回路すべてで成立している。
+This theorem has **not a single side assumption**. It holds for all 5 circuits.
 
-| モジュール | 命令の種類 | プログラム長 | 制約を出さない命令 | 定理数 |
+| Module | Kinds of instruction | Program length | Instructions emitting no constraint | Theorems |
 |---|---:|---:|---:|---:|
 | `CloseCircuit` | 47 | 191 | 4 | 92 |
 | `WithdrawalClaimCircuit` | 32 | 41 | 10 | 53 |
-| `PostCloseClaimCircuit` | 8 | 45 | 少数 | 54 |
+| `PostCloseClaimCircuit` | 8 | 45 | a few | 54 |
 | `CloseAssetBacking` | 46 | 468 | 25 | 110 |
 | `FalconGadgetProgram` | 23 | 23 | 3 | 47 |
-| `FalconAggProgram`（葉/各段） | 8 / 17 | 8 / 31〜55 | 4 | 78 |
+| `FalconAggProgram` (leaf/level) | 8 / 17 | 8 / 31–55 | 4 | 78 |
 
-**したがって前提に残るのは 2 点だけになった。** (i) 各 `holds` の内容が、対応する
-builder 呼び出しが実際に課す制約と一致すること。(ii) 固定された回路識別子が、この命令列の
-識別子であること。**「回路全体を信じる」という形の前提は、構造体から消えている。**
+**Therefore only 2 points remain as premises.** (i) That the content of each `holds` agrees with the constraint the corresponding
+builder call actually imposes. (ii) That the pinned circuit identifier is the identifier of this instruction sequence.
+**A premise of the form "trust the whole circuit" has disappeared from the structure.**
 
-## 付録 E — 回路と Lean の機械的照合
+## Appendix E — mechanical checking of circuit against Lean
 
-(i) の一部は機械的に確認できる。回路をビルドした結果には、どの配線が同一視されたかの
-情報（`prover_only.representative_map`）、定数に固定された配線、範囲検査の幅、公開値の
-登録順が残っている。`src/faithfulness.rs`（テスト時のみビルドされる）がこれを読み出し、
-Lean 側の主張と突き合わせる。
+Part of (i) can be confirmed mechanically. The result of building a circuit retains information on which wires were identified
+(`prover_only.representative_map`), which wires were pinned to constants, the widths of the range checks, and the order in which
+public values were registered. `src/faithfulness.rs` (built only under test) reads this out and compares it against the
+Lean-side claims.
 
-| プログラム | 検査項目 | 一致 | 証明失敗で確認 | 注入不可 | 静的に見えない | 制約なし |
+| Program | Items checked | ok | confirmed by proof failure | not injectable | not statically visible | no constraint |
 |---|---:|---:|---:|---:|---:|---:|
 | `CloseCircuit` | 79 | 59 | 0 | 0 | 19 | 1 |
 | `WithdrawalClaimCircuit` | 48 | 30 | 0 | 0 | 10 | 8 |
 | `PostCloseClaimCircuit` | 48 | 35 | 0 | 0 | 12 | 1 |
 | `CloseAssetBacking` | 46 | 27 | 0 | 0 | 16 | 3 |
 | `FalconGadgetProgram` | 29 | 17 | 5 | 0 | 5 | 2 |
-| `FalconAggProgram`（葉） | 9 | 6 | 0 | 0 | 1 | 2 |
-| `FalconAggProgram`（段1） | 21 | 10 | 3 | 2 | 4 | 2 |
-| **合計** | **280** | **184** | **8** | **2** | **67** | **19** |
+| `FalconAggProgram` (leaf) | 9 | 6 | 0 | 0 | 1 | 2 |
+| `FalconAggProgram` (level 1) | 21 | 10 | 3 | 2 | 4 | 2 |
+| **Total** | **280** | **184** | **8** | **2** | **67** | **19** |
 
-- **一致（ok）** — ビルド済み回路から読み出した事実が Lean の主張と一致した。
-- **証明失敗で確認（mutation）** — わざと制約を破る証人で証明を試み、**実際に失敗する**
-  ことを確認した。
-- **注入不可（not-injectable）** — 公開 API から違反する証人を作れない（理由を表に記載）。
-- **静的に見えない（not-static）** — 算術やハッシュ部品の意味に関わり、この方法では
-  見えない。**前提に残る 67 項目がこれ。**
-- **不一致は 1 件もなかった。**
+- **ok** — a fact read out of the built circuit agreed with the Lean claim.
+- **confirmed by proof failure (mutation)** — a proof was attempted with a witness that deliberately breaks a constraint, and it
+  was confirmed to **actually fail**.
+- **not injectable** — a violating witness cannot be constructed from the public API (the reason is recorded in the table).
+- **not statically visible (not-static)** — it concerns the meaning of arithmetic or hash components and is invisible to this
+  method. **The 67 items remaining as premises are these.**
+- **There was not a single mismatch.**
 
-実行結果：18 個のテストが 209 秒で全通過（ピークメモリ 26.6 GB）。結果表は
-`doc/audit/zkp/evidence/faithfulness-*.tsv` に保存されている。
+Execution result: 18 tests all passing in 209 seconds (peak memory 26.6 GB). The result tables are saved in
+`doc/audit/zkp/evidence/faithfulness-*.tsv`.
 
-なお検査用の配線取り出しコードは `#[cfg(test)]` の中だけにあり、**1 行も削除していない**
-（行マップ更新ツールが挿入のみでなければ失敗するため、機械的に保証されている）。
+Note that the wire-extraction code used for checking is only inside `#[cfg(test)]`, and **not a single line was deleted**
+(mechanically guaranteed, because the line-map update tool fails unless the change is insert-only).
 
-## 付録 F — 発見された脆弱性の技術的詳細
+## Appendix F — technical detail of the vulnerabilities found
 
-### F.1 証明システムの健全性破れ（重大・修正済み）
+### F.1 Soundness break in the proof system (critical, fixed)
 
-固定された検証器は、まとめた評価値（batched evaluation）と、個別の評価値の両方を受け取る。
-個別値の合計が申告値と一致することは検査していたが、**申告値やその分解が、実際に開かれた
-多項式に束縛されていなかった**。さらに、まとめ係数（batching scalar）が対応する根より先に
-利用可能だったため、通常の議論（Schwartz–Zippel）が成立しない。
+The pinned verifier receives both the batched evaluation and the individual evaluations.
+It was checking that the sum of the individual values agrees with the claimed value, but **the claimed value and its decomposition
+were not bound to the polynomials actually opened**. Furthermore, the batching scalar was available before the corresponding root,
+so the usual argument (Schwartz–Zippel) does not go through.
 
-独立した攻撃側が、検査対象の実データについて **3 つのフィールドだけを書き換え、根・
-transcript・sumcheck 証明・公開入力を一切変えずに検証を通す**実例を作成した。
+An independent attacking side produced a working example, against real data under examination, that **rewrites only 3 fields and
+passes verification without changing the root, the transcript, the sumcheck proof or the public inputs at all**.
 
-| フィールド | 変更前 | 変更後 |
+| Field | Before | After |
 |---|---:|---:|
 | `witnessIndividualEvalsAtRInv[0]` | 8093513556413711660 | 8093513556413711661 |
 | `witnessIndividualEvalsAtRInv[80]` | 2800508231593448274 | 15862999140234155880 |
 | `inverseHelpersEvalsAtRInv[1]` | 17516173920822186472 | 6112368312529039975 |
 
-**修正済み。** サブモジュール側で設計を修正し、再監査（PoC スイート
-`PocWhirFiatShamir`、`PocGateExt3Production`、`PocOuterCanonicality`、
-`PocOuterFraudVerdict`、`PocWhirDotEqBounds`）を実施している。
+**Fixed.** The design was corrected on the submodule side and a re-audit was carried out (the PoC suites
+`PocWhirFiatShamir`, `PocGateExt3Production`, `PocOuterCanonicality`,
+`PocOuterFraudVerdict`, `PocWhirDotEqBounds`).
 
-### F.2 1 人の署名で閉鎖できた（中・修正済み）
+### F.2 A close was possible with a single signature (medium, fixed)
 
-閉鎖回路と取り消し回路で、2 番目の参加者が有効であることの表明（`assert_one(active_bits[1])`）
-が欠けていた。**1 人だけの署名で閉鎖証明が通った。** 修正後は 2 名以上が必要。
+In the close circuit and the cancel circuit, the assertion that the second participant is active (`assert_one(active_bits[1])`)
+was missing. **A close proof passed with only one signature.** After the fix, 2 or more are required.
 
-### F.3 同一の鍵を 2 枠に登録できた（中・修正済み）
+### F.3 The same key could be registered in 2 slots (medium, fixed)
 
-回路側の鍵の相異検査を無効化した実験で、**両方の回路が「同じ鍵への切り替え」に対して
-有効な証明を出せた**ことを確認した（ネイティブ側の検査は有効なまま）。回路と native の
-両方で相異を強制するよう修正。
+In an experiment that disabled the circuit-side key-distinctness check, we confirmed that **both circuits could produce a valid
+proof for a "switch to the same key"** (the native-side check remained effective). Fixed so that distinctness is enforced both in the
+circuit and natively.
 
-### F.4 巻き戻しで入金が消えた（高・修正済み）
+### F.4 Deposits vanished on rollback (high, fixed)
 
-`_rollbackBatch` から保留チェーンの復元が 2 か所とも欠落しており、**そのバッチ以降の入金が
-消滅した**。
+Restoration of the pending chain was missing from `_rollbackBatch` in both places, and **deposits from that batch onward
+disappeared**.
 
-### F.5 他人の鍵情報を破壊できた（高・修正済み）
+### F.5 Someone else's key material could be destroyed (high, fixed)
 
-`state_update_verifier.rs` は遷移時に受取人・トークン登録・トークン数を固定していたが、
-**`regev_pk_digests` を一切比較していなかった**。任意の遷移提案者が、無関係な参加者の鍵
-情報を破壊でき、正直な共同署名者全員の検査を通り、全員が署名し、被害者は自分の枠から
-二度と引き出せなくなった（回収手段なし）。
+`state_update_verifier.rs` fixed the recipient, the token registration and the token count across a transition, but
+**did not compare `regev_pk_digests` at all**. Any proposer of a transition could destroy an unrelated participant's key
+material, pass the checks of every honest co-signer, have everyone sign, and leave the victim unable to withdraw from their own slot
+ever again (with no means of recovery).
 
-**修正済み** — `state_update_verifier.rs:1561`：
+**Fixed** — `state_update_verifier.rs:1561`:
 
 ```rust
 if prev_state.balance_state.regev_pk_digests != next_state.balance_state.regev_pk_digests {
     // "regev_pk_digests must remain unchanged across a state transition (H-2: ...)"
 ```
 
-回帰テストは `:2557` の `in_channel_transfer_rejects_regev_pk_digest_mutation`。
-コメントに「修正を戻すと赤になることを確認済み」と明記されている。
+The regression test is `in_channel_transfer_rejects_regev_pk_digest_mutation` at `:2557`.
+The comment states explicitly that "reverting the fix has been confirmed to turn it red."
 
-### F.6 他人の提出物を自分の証明で確定できた（高・修正済み）
+### F.6 Someone else's submission could be finalized with one's own proof (high, fixed)
 
-提出記録が自身の状態根を束縛していなかったため、**別の提出に対して自分の証明で確定させる
-ことができた**。
+Because the submission record did not bind its own state root, **it was possible to finalize a different submission with one's own
+proof**.
 
-### F.7 異議申し立て期限を無限に延長できた（高・修正済み）
+### F.7 The challenge deadline could be extended indefinitely (high, fixed)
 
-初回と置換の両方の分岐で期限が無条件に再設定されており、置換を繰り返すことで上限を超えて
-期限を延ばせた。
+The deadline was reset unconditionally in both the initial and the replacement branch, so by repeating replacements the deadline
+could be extended beyond the cap.
 
-### F.8 取り消し後に閉鎖が永久に失敗した（重大・修正済み）
+### F.8 Closing failed permanently after a cancellation (critical, fixed)
 
-`cancelClose` が凍結カウンタを復元するため、2 回目の閉鎖提出が必ず失敗した（機能停止）。
+Because `cancelClose` restored the freeze counter, a second close submission necessarily failed (a functional halt).
 
-### F.9 到達不能な正当性検査（中・修正済み）
+### F.9 An unreachable validity check (medium, fixed)
 
-`ChannelRegRecord::validate` の正準性検査が、実際には一度も実行されない書き方になっていた。
-原因は `Bytes32` から内部表現への変換が、体の位数以上の値を黙って畳み込んでいたこと
-（異なる `Bytes32` が同じ値に落ちる）。**Lean 化の作業中に発見**し、変換側で拒否するよう
-根本修正した（コミット `150bb19`）。リポジトリのテストも修正前は失敗することを確認した。
+The canonicality check of `ChannelRegRecord::validate` was written in a way that meant it never actually ran.
+The cause was that the conversion from `Bytes32` to the internal representation silently folded values at or above the order of the field
+(different `Bytes32` values fall to the same value). **Found during the Lean formalization work**, and fixed at the root by having the
+conversion reject (commit `150bb19`). The repository's test was also confirmed to fail before the fix.
 
-### F.10 L1 側の演算実装の不備（中・修正済み）
+### F.10 A defect in the L1-side arithmetic implementation (medium, fixed)
 
-L1 の証明検証で使う冪演算の再実装が、参照実装と一致しない場合があった。専用の監査メモ
-（`audit12-08-2026.md`）と、見逃し原因の事後分析（`why-gate8-was-missed.md`）がある。
-Lean 側の対応モデルは 11 定理。
+The reimplementation of the exponentiation used in L1 proof verification could disagree with the reference implementation. There is a
+dedicated audit memo (`audit12-08-2026.md`) and a post-mortem of why it was missed (`why-gate8-was-missed.md`).
+The corresponding model on the Lean side is 11 theorems.
 
-## 付録 G — 追跡中の 3 項目の技術的内容
+## Appendix G — technical content of the 3 items under tracking
 
-### G.1 開設時の鍵情報の照合（高）
+### G.1 Checking key material at opening (high)
 
-**身元を担う値はすべて実鍵に束縛されている。** `member_pubkeys_root`（`wallet_core.rs:854-866`）は
+**Every value that carries identity is bound to the real key.** `member_pubkeys_root` (`wallet_core.rs:854-866`) is
 
 ```rust
 regev_pk_digest: m.regev_pk.poseidon_digest(),
 ```
 
-と**完全な公開鍵から再計算**しており、`MemberInfo` には digest を直接持つ欄がない。
-`verify_snapshot`（`:1297-1312`）は 2 つの根を再導出して照合し、`wallet_import_channel`
-（`wasm_wallet.rs:443-448`）は**自分の完全な公開鍵との一致**で自分の枠を特定する。
+that is, **recomputed from the full public key**, and `MemberInfo` has no field holding the digest directly.
+`verify_snapshot` (`:1297-1312`) re-derives the two roots and checks them, and `wallet_import_channel`
+(`wasm_wallet.rs:443-448`) identifies one's own slot by **agreement with one's own full public key**.
 
-**例外が 1 つだけある。** `balance_state.regev_pk_digests[slot]` — 引き出し請求回路が
-実際に照合する複製 — が、どこでも記録側と突き合わされていない。`BalanceState::validate()`
-は余白の枠しか制約しない（`balance_state.rs:667-670`）。F.5 の修正（凍結）は、開設時に
-入った値をそのまま保存する。
+**There is exactly one exception.** `balance_state.regev_pk_digests[slot]` — the duplicate that the withdrawal claim circuit
+actually checks — is nowhere compared against the recording side. `BalanceState::validate()`
+constrains only the spare slots (`balance_state.rs:667-670`). The F.5 fix (freezing) preserves, as is, the value that
+entered at opening.
 
-**共同署名者は守られる。** `wallet_sign_state`（`wasm_wallet.rs:315-322`）が署名前に照合し、
-不一致なら拒否する。**デリゲートは守られない** — 同関数は `slot < member_count` を要求し、
-デリゲートは開設時に署名しないため、この照合が走る機会がない。取り込みも残高の復号も成功
-する（復号は暗号文と秘密鍵だけを見て digest を見ない）ため、**請求の瞬間まで異常が
-表面化しない**。
+**Co-signers are protected.** `wallet_sign_state` (`wasm_wallet.rs:315-322`) checks before signing and rejects on a mismatch.
+**Delegates are not protected** — the same function requires `slot < member_count`, and since delegates do not sign at
+opening, this check has no opportunity to run. Both import and balance decryption succeed
+(decryption looks only at the ciphertext and the secret key, not at the digest), so **the anomaly does not surface until the
+moment of the claim**.
 
-**修正方針（1 行）** — `verify_snapshot_own_slot`（`wallet_core.rs:1322-1354`、既に鍵と枠を
-持っている）に：
+**Fix approach (1 line)** — in `verify_snapshot_own_slot` (`wallet_core.rs:1322-1354`, which already has the key and the slot):
 
 ```rust
 if snapshot.state.balance_state.regev_pk_digests[slot as usize]
@@ -624,72 +619,70 @@ if snapshot.state.balance_state.regev_pk_digests[slot as usize]
 }
 ```
 
-コントラクトにも回路にも変更は要らない。F.5 修正時に回路側への制約追加を見送った理由
-（正準でない digest を使うテストデータが 21 か所ある）は、ウォレット側の照合には当たらない。
+No change is needed to the contracts or to the circuits. The reason that adding a circuit-side constraint was deferred at the time of the
+F.5 fix (there are 21 places with test data using non-canonical digests) does not apply to the wallet-side check.
 
-### G.2 チャネル間送金の補助データ（中）
+### G.2 Auxiliary data for inter-channel transfers (medium)
 
-補助データは消費した送金の葉に Merkle 束縛され、その葉は送信者の確定済み取引に束縛される
-ため、**証明者が後から差し替えることはできない**。回路内で証明されていないのは
-「補助データが本当に対応する取引の葉ハッシュである」という意味論であり、ソース自身が
-それを明記している（`receive_transfer_circuit.rs:505-513`）。補う層は 3 つ（共同署名時の
-検査、別系統の証明、受信側チャネルの独立再計算）で、悪用には**受信側の全参加者がそろって
-再計算を省く**必要がある。
+The auxiliary data is Merkle-bound to the leaf of the transfer consumed, and that leaf is bound to the sender's finalized transaction,
+so **a prover cannot substitute it after the fact**. What is not proved inside the circuit is the semantics that
+"the auxiliary data really is the leaf hash of the corresponding transaction," and the source itself states this explicitly
+(`receive_transfer_circuit.rs:505-513`). There are 3 compensating layers (the check at co-signing time, a proof on a separate track, and
+independent recomputation by the receiving channel), and exploitation requires **all participants on the receiving side together to
+skip the recomputation**.
 
-### G.3 登録時の同意確認（低〜中）
+### G.3 Consent checking at registration (low to medium)
 
-`registerChannel`（`IntmaxRollup.sol:1248-1286`）は参加者の署名を検証せず、
-`member_regev_pk_digests` は回路内で自由な証人である（`channel_reg_step.rs:331-332`）。
-ただし実際には、上記のとおり参加者のソフトウェアが実鍵から根を再計算して照合するため、
-偽の登録は取り込み時に検出される。残るのは「資金を預ける前に確認する」という手順の問題。
+`registerChannel` (`IntmaxRollup.sol:1248-1286`) does not verify participants' signatures, and
+`member_regev_pk_digests` is a free witness inside the circuit (`channel_reg_step.rs:331-332`).
+In practice, however, as noted above, a participant's software recomputes the root from the real key and checks it, so
+a forged registration is detected at import. What remains is the procedural matter of "check before depositing funds."
 
-## 付録 H — モジュール別の定理数（主要なもの）
+## Appendix H — theorem counts by module (the main ones)
 
-| モジュール | 定理 | 対象 |
+| Module | Theorems | Subject |
 |---|---:|---|
-| `NttCorrectness` | 157 | 回路内の高速乗算が素朴な積に一致する証明 |
-| `FalconAggregate` | 155 | 署名集約の主張・リスト・バッチ |
-| `FalconCore` | 126 | 署名の符号化・検証・回路ガジェット |
-| `CloseAssetBacking` | 110 | 裏付け回路（命令列 468） |
-| `CloseCircuit` | 92 | 閉鎖回路（命令列 191） |
-| `FalconAggProgram` | 78 | 集約の葉と各段の命令列 |
-| `RollupValue` | 73 | L1 Rollup コントラクト |
-| `ManagerValue` | 63 | 決済 Manager コントラクト |
-| `LedgerWriters` | 57 | 帳簿の書き込み元の列挙と枠固定 |
-| `SystemSafety` | 56 | 合成された安全性の結論 |
-| `SettlementVerifier` | 56 | 決済検証コントラクト |
-| `PostCloseClaimCircuit` | 54 | 閉鎖後請求回路 |
-| `WithdrawalClaimCircuit` / `CloseFunding` | 53 | 引き出し請求回路 / materializer |
-| `BackingBridge` | 52 | materializer と裏付け回路の接続 |
-| `TrustBoundary` | 51 | 前提 23 個と、そこから導く定理 |
-| `Keccak256` | 45 | 参照ハッシュ仕様（テストベクトル 4 本を計算機で証明） |
-| `CloseSignatureBridge` | 21 | 閉鎖回路と署名集約の接続 |
+| `NttCorrectness` | 157 | Proof that the fast multiplication inside the circuit agrees with the naive product |
+| `FalconAggregate` | 155 | Statements, lists and batches of signature aggregation |
+| `FalconCore` | 126 | Signature encoding, verification and the circuit gadget |
+| `CloseAssetBacking` | 110 | The backing circuit (instruction sequence 468) |
+| `CloseCircuit` | 92 | The close circuit (instruction sequence 191) |
+| `FalconAggProgram` | 78 | The instruction sequences of the aggregation leaf and each level |
+| `RollupValue` | 73 | The L1 Rollup contract |
+| `ManagerValue` | 63 | The settlement Manager contract |
+| `LedgerWriters` | 57 | Enumeration of the ledger's write sites and pinning of the slots |
+| `SystemSafety` | 56 | The composed safety conclusions |
+| `SettlementVerifier` | 56 | The settlement verification contract |
+| `PostCloseClaimCircuit` | 54 | The post-close claim circuit |
+| `WithdrawalClaimCircuit` / `CloseFunding` | 53 | The withdrawal claim circuit / the materializer |
+| `BackingBridge` | 52 | The connection between the materializer and the backing circuit |
+| `TrustBoundary` | 51 | The 23 premises and the theorems derived from them |
+| `Keccak256` | 45 | The reference hash specification (4 test vectors proved by computer) |
+| `CloseSignatureBridge` | 21 | The connection between the close circuit and the signature aggregation |
 
-現行の合計：**79 モジュール / 5,311 定理 / 497 ファイルのハッシュ固定**。
+Current totals: **79 modules / 5,311 theorems / hashes pinned for 497 files**.
 
-## 付録 I — 検査スクリプトが実際に行うこと
+## Appendix I — what the checking scripts actually do
 
-`.github/ci/lean-safety-guard.sh` は次を順に実行する。
+`.github/ci/lean-safety-guard.sh` runs the following in order.
 
-1. 現行モジュールを**全部ビルド**する（証明が通らなければここで落ちる）
-2. ソース中に `sorry`・`admit`・`axiom`・`native_decide` が現れないことを確認する
-   （証明の未完了や、計算機の実行結果を証明の代わりに使うことを禁止する）
-3. 497 個のファイルの SHA-256 と、サブモジュールの固定コミットを照合する
-4. 目録に載っている**すべての定理**について `#print axioms` を実行し、依存する公理が
-   `propext`・`Classical.choice`・`Quot.sound` の 3 つ（Lean 自身の基本公理）だけである
-   ことを確認する
+1. **Builds all** current modules (if a proof does not go through, it fails here)
+2. Confirms that `sorry`, `admit`, `axiom` and `native_decide` do not appear in the sources
+   (forbidding incomplete proofs and the use of a computer's execution result in place of a proof)
+3. Checks the SHA-256 of 497 files and the submodule's pinned commit
+4. Runs `#print axioms` on **every theorem** listed in the inventory and confirms that the axioms depended on are only the 3
+   `propext`, `Classical.choice` and `Quot.sound` (Lean's own basic axioms)
 
-現在の分布：5,311 定理のうち 1,859 はいかなる公理にも依存せず、3,449 が `propext`、
-1,797 が `Quot.sound`、367 が `Classical.choice` に依存する（重複あり）。
-**プロジェクト独自の公理は 1 つも存在しない。**
+Current distribution: of the 5,311 theorems, 1,859 depend on no axiom at all, 3,449 depend on `propext`,
+1,797 on `Quot.sound` and 367 on `Classical.choice` (with overlap).
+**There is not a single project-specific axiom.**
 
-`lean-line-coverage.py` は 169 本の行マップについて、各ソースファイルの全行が重複なく
-分類されていること、および「書き起こし済み」の区間が実在する Lean の宣言に結び付いて
-いることを、コンパイラに問い合わせて確認する。`--require-complete` を付けると、未書き起こし
-の行が残っているため**意図的に失敗する**（完了していないことを隠せないようにするため）。
+`lean-line-coverage.py` confirms, for the 169 line maps, that every line of each source file is classified without overlap, and
+that the "transcribed" spans are tied to Lean declarations that really exist, by querying the compiler. With
+`--require-complete` it **fails deliberately**, because untranscribed lines remain (so that incompleteness cannot be hidden).
 
-`check-ledger-writers.py` は、帳簿を書き換える 5 つの変数について Solidity を走査し、
-Lean 側に固定した書き込み元の一覧と完全に一致することを確認する（自己テスト 6 件つき）。
+`check-ledger-writers.py` scans the Solidity for the 5 variables that rewrite the ledger and confirms that they agree exactly with
+the list of write sites pinned on the Lean side (with 6 self-tests).
 
-`lean-fixture-parity.py` は、Lean のモデルが計算した値と、実際に生成された証明データの
-対応フィールドを突き合わせる（18 件 / 177 フィールド）。
+`lean-fixture-parity.py` compares the values computed by the Lean models against the corresponding fields of actually generated
+proof data (18 items / 177 fields).

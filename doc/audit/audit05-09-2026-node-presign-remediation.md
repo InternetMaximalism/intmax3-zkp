@@ -1,138 +1,138 @@
-# ノード署名前・入金前検査の修正と運用引継ぎ
+# Remediation of the node pre-signing and pre-deposit checks, and operational handover
 
-日付: 2026-09-05。基点: `a2886fff08c2619ba47604e4d2fa5634b9e17471`。
-作業ブランチ: `codex/node-presign-safety-20260905`。
-作業場所: `/private/tmp/intmax3-node-preflight-audit-20260905.m7xtV6/checkout`。
-本書の初版作成時点では未コミット・未 push。2026-09-06 の MLE 更新統合に先立ち、このノード修正を独立した保存コミットにまとめる。元の作業ディレクトリ／ブランチは変更していない。
+Date: 2026-09-05. Base: `a2886fff08c2619ba47604e4d2fa5634b9e17471`.
+Working branch: `codex/node-presign-safety-20260905`.
+Working location: `/private/tmp/intmax3-node-preflight-audit-20260905.m7xtV6/checkout`.
+As of the first version of this document, nothing was committed and nothing was pushed. Ahead of the MLE update integration of 2026-09-06, this node remediation is collected into an independent preservation commit. The original working directory and branch were not modified.
 
-## 1. 結論と対象
+## 1. Conclusion and scope
 
-前回の監査の主要6件（N-01〜N-06）に対する防御を実装した。条件付き指摘のうち、ブラウザ署名履歴、退出鍵の重複、claim の非退化条件、Node 数値変換、burn／destination の復旧、freeze 前の投稿準備確認にも対応した。
+We implemented defenses against the six main findings of the previous audit (N-01 through N-06). Among the conditional findings, we also addressed the browser signing history, duplicated exit keys, the non-degeneracy condition for claims, Node numeric conversion, burn/destination recovery, and the pre-freeze posting-readiness check.
 
-「確認できない状態を署名して進める」のではなく、正常な取引を早い段階で検査し、一時失敗では保存済みの同じ処理から再開する方針である。**全リリース条件の完了宣言ではない。** 通常 PW の backing attestation 自動接続、watcher の入金分類、および本番同等 E2E は後述の残作業。
+Rather than "signing and proceeding on a state that cannot be verified", the policy is to check legitimate transactions at an early stage and, on a transient failure, to resume from the same persisted operation. **This is not a declaration that all release conditions are complete.** Automatic wiring of the backing attestation on the normal PW path, the watcher's deposit classification, and production-equivalent E2E are outstanding work described below.
 
-設計上の信頼条件は変更していない。
+The trust assumptions of the design are unchanged.
 
-- 自チャネル内の全 sig-cluster 結託による自チャネル資産の不正配分は許容する。他チャネルの原資は保護する。
-- 少なくとも一人の正直な署名者がオフチェーン検査を実施する設計を受容する。
-- 最後の N-of-N 署名済み H から、追加のチャネル署名なしに退出できることを目標とする。
-- KZG ceremony は信頼する。MLE/WHIR submodule と Solidity は今回変更していない。MSU／旧 CloseFunding は再有効化していない。
-- ノードの local service・設定・private state は信頼境界内。外部入力の残高申告や recipient 申告を、private な検証済み記録と同一視しない。
+- Misallocation of a channel's own assets through collusion of the entire sig-cluster within that channel is accepted. The funds of other channels are protected.
+- We accept a design in which at least one honest signer performs the off-chain checks.
+- The goal is that exit from the last N-of-N signed H is possible without any additional channel signature.
+- The KZG ceremony is trusted. The MLE/WHIR submodule and the Solidity code were not changed in this work. MSU / the old CloseFunding have not been re-enabled.
+- The node's local services, configuration, and private state are inside the trust boundary. Balance claims and recipient claims arriving as external input are not treated as equivalent to private, verified records.
 
-## 2. 主要6件
+## 2. The six main findings
 
-| 指摘 | 変更 | 正常系・再開への配慮 |
+| Finding | Change | Care for the happy path and for resumption |
 | --- | --- | --- |
-| N-01 提案生成時の早過ぎる状態署名 | `wallet_core` の send、refresh、inter-send／credit、deposit、token-register の builder は状態を未署名で返す。native／browser の明示的な検査済み署名境界を使う | 送信者本人の A11 取引認証は維持。二段階 import の構造検査と正常テストも未署名提案に対応 |
-| N-02 通常遷移の close metadata | trusted record の参加人数、前 H の close-freeze nonce を照合。通常 send／refresh の small-block number も維持 | 正当な close-cancel 後の新しい era を、genesis の値に固定して拒否しない。import 固有のカウンタ増分は維持 |
-| N-03 累積受取残高の u64 範囲 | `channel_credit_safety` で、検証済み保存則・token fund・自分の復号・private な保守的上限から、変更後の cell を署名前に確認 | チャネル全体に u64 の fund 上限を設けない。不明な残高をゼロ扱いしない。関係しない不明 cell だけでは全操作を止めない |
-| N-04 架空の初期回収先 | 本番 `setup-backing`／genesis は全 controlled cosigner の回収先を明示必須化。形式不正、ゼロ、既知の synthetic 既定値を拒否 | 既存の署名済み recipient は変更しない。既存チャネルの操作に新規 genesis 設定を一律要求しない。明示 insecure テストだけ既定値を維持 |
-| N-05 再加入後の誤った入金 slot | contribution の pkG・pkB・Regev key・署名済み recipient から元の正確な slot を解決 | 再加入者を「末尾 slot」と仮定しない。異なる intent への request ID 再利用は拒否 |
-| N-06 支出後に初めて入金不可と判明 | native と同じ amount／token／slot／加算回数／受取余力を支出前に検査。余力を予約し、raw L1 transaction を永続化後に送信 | タイムアウトで新しい送金を作らない。同じ request ID・同じ raw・同じ tx hash で再開。完了した予約は再 credit しない tombstone として保持 |
+| N-01 state signed too early when a proposal is generated | The `wallet_core` builders for send, refresh, inter-send/credit, deposit, and token-register return the state unsigned. The explicit checked signing boundary of native/browser is used instead | The sender's own A11 transaction authentication is retained. The structural checks of the two-phase import and the happy-path tests also handle unsigned proposals |
+| N-02 close metadata on normal transitions | Cross-check the participant count from the trusted record and the close-freeze nonce of the previous H. The small-block number of a normal send/refresh is also preserved | A new era after a legitimate close-cancel is not rejected by pinning it to the genesis value. The import-specific counter increment is preserved |
+| N-03 u64 range of the cumulative received balance | In `channel_credit_safety`, the post-change cell is checked before signing, from the verified conservation law, the token fund, one's own decryption, and private conservative upper bounds | No u64 fund cap is imposed on the channel as a whole. An unknown balance is not treated as zero. Unrelated unknown cells alone do not block every operation |
+| N-04 fictitious initial recovery destination | Production `setup-backing`/genesis now requires the recovery destination of every controlled cosigner to be stated explicitly. Malformed values, zero, and known synthetic defaults are rejected | Existing signed recipients are not changed. Operations on existing channels are not uniformly required to carry the new genesis configuration. Only explicitly insecure tests keep the default values |
+| N-05 wrong deposit slot after re-joining | Resolve the exact original slot from the contribution's pkG, pkB, Regev key, and signed recipient | A re-joining member is not assumed to be in the "last slot". Reuse of a request ID for a different intent is rejected |
+| N-06 the deposit is found to be un-creditable only after funds have been spent | Check the same amount/token/slot/increment count/receive headroom as native does, before spending. Reserve the headroom and broadcast the raw L1 transaction only after persisting it | A timeout does not create a new transfer. Resumption uses the same request ID, the same raw bytes, and the same tx hash. A completed reservation is kept as a tombstone that is never credited again |
 
-### N-03 の限界を正確に読む
+### Reading the limits of N-03 precisely
 
-保存するのは private な上限であり、公開 snapshot や証明の public input は増やしていない。自分の暗号鍵で復号できる残高は exact に確認する。大きい fund でも、対象 cell の十分な上限が分かれば処理できる。
+What is persisted is a private upper bound; no public snapshot and no proof public input was added. Balances that can be decrypted with one's own key are checked exactly. Even with a large fund, an operation can proceed as long as a sufficient upper bound for the target cell is known.
 
-一方、巨大な token fund の下で他人の残高上限が分からない場合、正当な credit でも保守的に拒否することはある。これを完全に取り除くには、必要な範囲情報を安全に得る別の設計が要る。既存 refresh proof だけが u64 上限の証明になる、とは扱っていない。加算回数不足は通常 refresh で解消できるが、**隠れた残高の範囲情報不足が refresh だけで常に解消するわけではない**。
+On the other hand, when the upper bound of another party's balance is unknown under a very large token fund, even a legitimate credit may be conservatively rejected. Removing this entirely would require a different design that safely obtains the necessary range information. We do not treat the existing refresh proof by itself as a proof of the u64 bound. An insufficient increment count can be resolved by an ordinary refresh, but **a lack of range information about hidden balances is not always resolved by refresh alone**.
 
-新しい入金予約を追加した際は、未署名の将来 head に対する以前の admission cache を破棄する。入金自身の予約は、その入金の検査時だけ二重計上から除き、署名途中では解放しない。全 N-of-N 完成後の状態と同じ WAL で完了させる。
+When a new deposit reservation is added, the earlier admission cache for the unsigned future head is discarded. A deposit's own reservation is excluded from double counting only while that deposit is being checked, and is not released midway through signing. It is completed in the same WAL as the state after the full N-of-N is complete.
 
-## 3. 入金の保存・再開順序
+## 3. Deposit persistence and resumption order
 
-1. private な signed head と recipient identity から受入条件を検査する。
-2. trusted local live service が自チャネルの one-time deposit recipient を発行・保存する。
-3. operation journal と native capacity reservation に intent／候補 slot／その recipient を固定する。
-4. L1 transaction を署名し、raw bytes を fsync してから broadcast する。
-5. reservation に exact tx hash を固定する。別 hash への付替えは禁止。
-6. canonical chain receipt、recipient、depositor、amount、token、producer/live の処理を検証する。
-7. fund-import と bundle の両後継を検査し、必要な exit kit と N-of-N を用意する。
-8. `.pending-deposit-import.json` に完成後の状態と結果を保存してから head／結果を反映する。
-9. 完了 receipt を `.deposit-import-receipts/` に保存し、同じ import の再試行は既存結果を返す。
+1. Check the admission conditions from the private signed head and the recipient identity.
+2. The trusted local live service issues and persists a one-time deposit recipient for its own channel.
+3. Pin the intent, the candidate slot, and that recipient into the operation journal and the native capacity reservation.
+4. Sign the L1 transaction, fsync the raw bytes, and only then broadcast.
+5. Pin the exact tx hash into the reservation. Re-pointing it to a different hash is forbidden.
+6. Verify the canonical chain receipt, the recipient, the depositor, the amount, the token, and the producer/live processing.
+7. Check both the fund-import and the bundle successors, and prepare the required exit kit and N-of-N.
+8. Persist the completed state and result into `.pending-deposit-import.json` before applying the head/result.
+9. Store the completion receipt in `.deposit-import-receipts/`; a retry of the same import returns the existing result.
 
-回転する one-time recipient は、任意の HTTP パラメータから選択させない。`inspect`／`import` は private reservation と一致する tx hash からのみ、新しい期待 recipient を解決する。予約のない従来入口は `channel_backing.json` の recipient 照合を維持する。recipient の tag 検査だけでチャネル所有が証明できるという意味ではない。
+The rotating one-time recipient must not be selectable from an arbitrary HTTP parameter. `inspect`/`import` resolve a new expected recipient only from a tx hash that matches a private reservation. The legacy entry points that have no reservation keep the `channel_backing.json` recipient check. This does not mean that checking the recipient's tag alone proves channel ownership.
 
-request ID を省略した同一リクエストも同じ入金として再開する。**同額の新しい入金には新しい request ID を使う。** pending 処理があるというエラーを「未送金」と読み替えない。journal／reservation／raw bytes を消して再試行しない。
+An identical request that omits the request ID also resumes as the same deposit. **A new deposit of the same amount must use a new request ID.** An error saying that a pending operation exists must not be reread as "not yet sent". Do not delete the journal/reservation/raw bytes and retry.
 
-## 4. 追加で修正した保存・退出経路
+## 4. Additional persistence and exit paths that were fixed
 
-- **Burn:** `.pending-burn-publication.json` が signed head と `last_burn.json`／`burn_cosigned.json` を束ねる。両 burn API は結果ファイルを見る前に native recovery を実行し、保存済みの burn を再署名しない。
-- **Inter-channel:** A・B 両方の native process lock を保持する。逆方向の同時操作は非ブロッキングで競合を検出し、deadlock せず再試行する。無関係なチャネル pair の journal は復旧対象にしない。
-- **B の保留操作:** B の deposit／burn／inter WAL が未復旧なら A の署名前に止める。標準 API は A と B の両方を事前復旧する。
-- **B の kit:** archive、Balance verifier data、backing をすべて B のディレクトリで検証する。A の cwd にある別チャネルのファイルを使わない。
-- **Inter WAL v2:** 保存された JSON に対して checksum を確認してから型付き状態を復元する。HashSet の再シリアライズ順序で正常な journal が破損扱いにならない。v1 は元の compact bytes と旧 checksum が一致する場合のみ読み込む。
-- **Destination-only recovery:** `incoming_inter_transfer_recovery.json` を 2PC の保存対象に加える。B は保存済みの source input、producer receipt、live source artifact から receive と kit インストールまで再開できる。A の後続操作が source の便宜ファイルを上書きしても、それらに依存しない。
-- **旧 inter 処理:** 完成済み入力に限る sidecar 補完、同一 request／input に限る旧 argv の再利用を実装。履歴削除や署名判断のリセットは行わない。
-- **API exit-kit:** 子プロセス開始後の曖昧失敗を無条件 abandon しない。正確な提案・kit・request ID を保持し、受理済み head から完了状態を回復する。
-- **Participant close／credit pull:** read-only `staticCall` に本人の `from` を明示する。
-- **新規 freeze 前の readiness:** 完全な public-close bundle と pinned deployment に対し、exact H、両 state root、anchor、L1 finality、runtime/config、Active 状態、次の nonce を読取専用で確認する。同じ bundle を後段 publisher でも使う。既存 raw transaction の復旧には新たな readiness を要求しない。
-- **Publisher 接続:** native の attest／materialize を含む全進行 phase と schema 3 の結果を Node 側で厳密に解釈する。
+- **Burn:** `.pending-burn-publication.json` binds the signed head together with `last_burn.json`/`burn_cosigned.json`. Both burn APIs run native recovery before looking at the result files, and do not re-sign an already persisted burn.
+- **Inter-channel:** hold the native process lock for both A and B. A concurrent operation in the opposite direction detects the conflict non-blockingly and retries without deadlocking. Journals of unrelated channel pairs are not subject to recovery.
+- **B's pending operations:** if B's deposit/burn/inter WAL has not been recovered, stop before A signs. The standard API pre-recovers both A and B.
+- **B's kit:** the archive, the Balance verifier data, and the backing are all verified in B's own directory. Files of a different channel that happen to sit in A's cwd are not used.
+- **Inter WAL v2:** the checksum of the persisted JSON is verified before the typed state is restored. HashSet re-serialization order no longer causes a healthy journal to be treated as corrupt. v1 is read only when the original compact bytes match the old checksum.
+- **Destination-only recovery:** `incoming_inter_transfer_recovery.json` is added to what the 2PC persists. B can resume from the persisted source input, producer receipt, and live source artifact through receive and kit installation. It does not depend on the source's convenience files, even if a later operation by A overwrites them.
+- **Legacy inter processing:** sidecar completion is implemented only for already-complete inputs, and reuse of the old argv only for the same request/input. No history deletion and no reset of signing decisions.
+- **API exit-kit:** an ambiguous failure after the child process has started is not unconditionally abandoned. The exact proposal, kit, and request ID are retained, and the completion state is recovered from the accepted head.
+- **Participant close / credit pull:** the read-only `staticCall` explicitly passes the caller's own `from`.
+- **Readiness before a new freeze:** against the complete public-close bundle and the pinned deployment, the exact H, both state roots, the anchor, L1 finality, the runtime/config, the Active status, and the next nonce are checked read-only. The same bundle is also used by the downstream publisher. Recovery of an existing raw transaction does not require a fresh readiness check.
+- **Publisher wiring:** the Node side strictly interprets every progress phase, including native attest/materialize, and the schema 3 result.
 
-readiness は「未投稿・未確定の依存データがあるまま自分から freeze する」ことを抑える検査である。検査と実際の L1 transaction の間を契約上の原子的操作にするものではなく、他の L1 操作との全 race を排除する保証ではない。
+Readiness is a check that discourages freezing on one's own initiative while dependent data is still unposted or unfinalized. It does not make the check and the actual L1 transaction atomic at the contract level, and it is not a guarantee that all races with other L1 operations are eliminated.
 
-## 5. ブラウザ・鍵・数値
+## 5. Browser, keys, numerics
 
-- browser member mode は、署名を worker の外へ返す前に strict IndexedDB transaction の完了を待つ。同じ predecessor の別 successor は拒否し、同じ successor は保存済み signature を返す。通常 delegate 送信には不要な保存を追加しない。
-- `wallet_sign_state` は contribution 時の期待 recipient と own Regev digest を署名前に照合する。
-- 新規参加者／genesis では Regev exit key の重複、padding digest、退化した key を拒否する。変更された balance ciphertext は既存 withdrawal claim の非退化条件も確認する。資産ゼロの canonical empty slot は許可する。
-- Node の金額・slot・token・channel・nonce を WASM 呼出し前に検査し、JS／WASM の数値切り詰めを資金移動の intent と取り違えない。
+- Browser member mode waits for a strict IndexedDB transaction to complete before returning a signature outside the worker. A different successor for the same predecessor is rejected; the same successor returns the persisted signature. No unnecessary persistence is added to the ordinary delegate send path.
+- `wallet_sign_state` cross-checks the expected recipient at contribution time and its own Regev digest before signing.
+- For new participants/genesis, duplicated Regev exit keys, padding digests, and degenerate keys are rejected. A modified balance ciphertext is also checked against the non-degeneracy condition of existing withdrawal claims. A canonical empty slot with zero assets is allowed.
+- The Node-side amount, slot, token, channel, and nonce are checked before the WASM call, so that a JS/WASM numeric truncation is never mistaken for a fund-movement intent.
 
-browser ledger は同一 origin／profile の永続領域である。削除、古いバックアップへの巻戻し、別 profile で同じ signer key を使う運用を安全化するものではない。raw WASM を直接利用する独自 host は同等の永続署名境界を必要とする。
+The browser ledger is persistent storage scoped to one origin/profile. It does not make deletion, rollback to an old backup, or use of the same signer key under a different profile safe. A custom host that uses the raw WASM directly needs an equivalent durable signing boundary.
 
-## 6. 配布・移行
+## 6. Distribution and migration
 
-1. 旧／新 native を同じ state directory に混在させず、native・API・Node を合わせて更新する。private schema は6、inter WAL writer は2。旧バイナリへのそのままの downgrade はしない。
-2. 既存の必要な security ledger が存在する旧 schema は読み込み可能。新しい bounds の欠落を「残高ゼロ」や「検査済み」として補完しない。
-3. `channel_member`／`public_close_publisher` と WASM package を再ビルドする。ソースだけ更新して古い生成 WASM を配布しない。
-4. `wallet-worker.js` と新しい `signature-release-ledger.mjs` を同じリリースで配布する。詳しい配布コマンドは `doc/docs/deploy-runbook.md`。
-5. 新規チャネルは `doc/tasks/node-presign-recipient-setup.md` に従って全 cosigner の回収先を設定する。EOA の鍵保有・smart wallet の実回収方法は運用側でも確認する。
-6. `api/` と `node/` の両 lockfile の依存をインストールし、同じ L1 signer を使う全 publisher／deposit sender で signer lock root を共有する。
-7. state、replay ledger、exit-kit archive、入金／burn／inter journal、L1 outbox、browser signing ledger は一貫した世代で保全する。可用性を戻すために削除・TTL解除しない。
+1. Do not mix old and new native binaries over the same state directory; update native, API, and Node together. The private schema is 6 and the inter WAL writer is 2. Do not downgrade to an old binary as-is.
+2. An old schema can be read as long as the required existing security ledger is present. A missing new bound is not filled in as "zero balance" or as "already checked".
+3. Rebuild `channel_member`/`public_close_publisher` and the WASM package. Do not update only the source and ship a stale generated WASM.
+4. Ship `wallet-worker.js` and the new `signature-release-ledger.mjs` in the same release. The detailed distribution commands are in `doc/docs/deploy-runbook.md`.
+5. For a new channel, configure the recovery destination of every cosigner following `doc/tasks/node-presign-recipient-setup.md`. Key custody for EOAs and the actual recovery path for smart wallets must also be confirmed on the operations side.
+6. Install the dependencies from both the `api/` and `node/` lockfiles, and share the signer lock root across every publisher/deposit sender that uses the same L1 signer.
+7. Preserve the state, the replay ledger, the exit-kit archive, the deposit/burn/inter journals, the L1 outbox, and the browser signing ledger as one consistent generation. Do not delete them or lift their TTL in order to restore availability.
 
-この作業は既存 H の不適切な recipient、既に範囲を超えた残高、重複 exit key を書き換えない。追加署名なしで既存の不整合を必ず救済できる、とは宣言しない。
+This work does not rewrite an improper recipient in an existing H, a balance that is already out of range, or a duplicated exit key. We do not declare that existing inconsistencies can always be remedied without additional signatures.
 
-## 7. 検証と性能
+## 7. Verification and performance
 
-Node の最終全 suite は **506件中497成功、失敗0、既存 skip 9**。skip は未ビルドの daemon 条件1件と、未生成の state-delta fixture 条件8件。
+The final full Node suite is **497 passing out of 506, 0 failing, 9 pre-existing skips**. The skips are 1 conditional on an unbuilt daemon and 8 conditional on ungenerated state-delta fixtures.
 
-| Rust の対象テスト | 成功数 |
+| Targeted Rust tests | Passing |
 | --- | ---: |
 | private credit bounds | 11 |
 | native capacity reservation | 11 |
 | deposit recovery | 6 |
 | burn publication recovery | 2 |
-| inter WAL codec／正常ファイル永続化 | 5 |
-| cosigner recipient 設定 | 5 |
-| 通常 metadata の単体検査 | 4 |
-| native signing ledger／B の kit context | 11 |
-| 正常 send／deposit／refresh／inter／register／close-era（release） | 9 |
-| 正常 participant record／鍵 admission（release） | 1 |
-| public-close publisher 全42件（readiness 3件を含む） | 42 |
-| public-close publisher CLI 引数 | 3 |
+| inter WAL codec / happy-path file persistence | 5 |
+| cosigner recipient configuration | 5 |
+| unit checks of normal metadata | 4 |
+| native signing ledger / B's kit context | 11 |
+| happy-path send/deposit/refresh/inter/register/close-era (release) | 9 |
+| happy-path participant record / key admission (release) | 1 |
+| public-close publisher, all 42 (including 3 readiness tests) | 42 |
+| public-close publisher CLI arguments | 3 |
 
-上表は選択した対象テストであり、Rust リポジトリ全 suite の完走ではない。native の最終 library／`channel_member`／`public_close_publisher` test build と WASM target check は offline・lockfile 固定で成功。既存 warning は残る。実サービスやチェーンに接続せず、publisher は既存の fake backend で動作を検証した。`git diff --check` も成功。
+The table above is a selection of targeted tests; it is not a full run of the Rust repository's entire suite. The final native library / `channel_member` / `public_close_publisher` test builds and the WASM target check succeeded offline with a pinned lockfile. Pre-existing warnings remain. No real service and no chain was contacted; the publisher was exercised against the existing fake backend. `git diff --check` also passed.
 
-- Rust の正常な send／deposit／refresh／inter／token-register と close-era metadata の release テスト9件は成功。
-- 新しい private bounds、capacity reservation、deposit recovery、inter WAL codec、recipient 設定と署名 ledger の対象テストを実行。
-- 実際の `cast mktx` 出力は公開ダミー鍵・金額ゼロ・全 tx field 明示・通信なしで確認した。実資金／実チェーンの送信は行っていない。
-- WASM target の `cargo check` は成功。生成 package のブラウザ実行・IndexedDB の実ブラウザ E2E は未実施。
-- 正常運用の proof circuit／public input／proof format は増やしていない。サブモジュールの暗号実装は変更していない。pre-freeze proof は後段に再利用し、二重生成しない。
-- 一方、復号・host 検査・fsync と private journal／sidecar の保存量は増える。変更前後の証明時間・end-to-end latency・メモリ／disk の比較測定は未実施で、実測で性能不変とは主張しない。
+- The 9 Rust release tests for happy-path send/deposit/refresh/inter/token-register and close-era metadata passed.
+- Ran the targeted tests for the new private bounds, capacity reservation, deposit recovery, inter WAL codec, recipient configuration, and signing ledger.
+- The actual `cast mktx` output was checked with a public dummy key, a zero amount, all tx fields explicit, and no network access. No real funds and no real chain were submitted to.
+- `cargo check` for the WASM target succeeded. Running the generated package in a browser, and a real-browser IndexedDB E2E, have not been carried out.
+- No proof circuit, public input, or proof format was added for normal operation. The cryptographic implementation in the submodule was not changed. The pre-freeze proof is reused downstream rather than generated twice.
+- On the other hand, decryption, host-side checks, fsyncs, and the volume stored in private journals/sidecars all increase. Comparative before/after measurements of proving time, end-to-end latency, and memory/disk use have not been made, so we do not claim by measurement that performance is unchanged.
 
-## 8. 残作業 — 完了扱いにしないもの
+## 8. Outstanding work — items not to be treated as done
 
-### A. 通常 PW の exact backing attestation
+### A. Exact backing attestation on the normal PW path
 
-通常 API／CLI の PW submit は、exact signed-head backing が既に L1 attested なら進めるが、それを自動的に成立させる接続は未実装。契約の後段検査は維持しているため、欠けていれば拒否する。
+PW submit over the normal API/CLI proceeds when the exact signed-head backing has already been attested on L1, but the wiring that establishes this automatically is not implemented. The contract's downstream check is retained, so if it is missing the submission is rejected.
 
-次の実装は、PW が生成する既存 close proof と public-close bundle を一本化し、同じ artifact を backing attest と PW submit に再利用する形が候補。単に別の full close proof 生成を追加すると二重生成になる。devnet の fixture attestation script を production の代用品にしない。追加の channel signature は不要だが permissionless L1 transaction の gas signer と durable outbox が必要。
+A candidate for the next implementation is to unify the existing close proof that PW generates with the public-close bundle, and to reuse the same artifact for both the backing attestation and the PW submit. Simply adding a separate full close proof generation would mean generating it twice. The devnet fixture attestation script must not be used as a substitute for production. No additional channel signature is required, but a gas signer for the permissionless L1 transaction and a durable outbox are.
 
-### B. Watcher の無関係 deposit による停止
+### B. Watcher stalling on an unrelated deposit
 
-現在の watcher は、無関係な入金を native が拒否すると同じ block で再試行し、後続の監視を妨げる場合がある。今回、拒否エラーを無視して cursor を進める変更はしていない。
+When native rejects an unrelated deposit, the current watcher can retry at the same block and thereby obstruct subsequent monitoring. In this work we did not make a change that ignores the rejection error and advances the cursor.
 
-安全な修正には、live service の現在分だけでなく履歴分も含む authoritative な `required / proven-unrelated / unresolved` 判定が必要。salt は消費後に current getter から消えるため、現在の recipient と不一致というだけでは「無関係」と証明できない。RPC エラー、reorg、未知 recipient も skip の根拠にしない。履歴照会と監視進行の分離は次の優先タスク。
+A safe fix requires an authoritative `required / proven-unrelated / unresolved` decision that covers the live service's history as well as its current entries. Because a salt disappears from the current getter once consumed, a mismatch against the current recipient alone cannot prove that a deposit is "unrelated". RPC errors, reorgs, and unknown recipients are likewise not grounds for skipping. Separating the historical lookup from the progress of monitoring is the next priority task.
 
-### C. 本番同等の通し検証
+### C. Production-equivalent end-to-end verification
 
-実ブラウザの永続署名、実 daemon、L1 posting/finality、入金から最新 H の signer-independent exit／claim までの通し検証は残る。新しい readiness も本番同等で計測する。実資金を入れる前に、正常系・中断後再開・複数 token・同時処理を隔離した環境で確認する必要がある。
+End-to-end verification covering real-browser durable signing, a real daemon, L1 posting/finality, and the path from deposit to a signer-independent exit/claim at the latest H remains outstanding. The new readiness check must also be measured in a production-equivalent setting. Before real funds are introduced, the happy path, resumption after interruption, multiple tokens, and concurrent operation must be confirmed in an isolated environment.

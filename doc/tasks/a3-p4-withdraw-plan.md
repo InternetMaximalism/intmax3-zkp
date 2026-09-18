@@ -1,97 +1,97 @@
-# A-3 P4 `withdraw` — 実装計画 + 脅威モデル
+# A-3 P4 `withdraw` — implementation plan + threat model
 
-母艦: `doc/tasks/a3-close-lifecycle-spec.md` / `doc/tasks/a3-impl-todo.md` / `doc/tasks/a3-p4-withdraw-handoff.md`.
-決定(ユーザー承認済み): **Q1 = withdraw に全パイプライン内包**, **Q2 = ビルダは wallet_core**, **Q3 = anvil 含め全自動**。
+Parent documents: `doc/tasks/a3-close-lifecycle-spec.md` / `doc/tasks/a3-impl-todo.md` / `doc/tasks/a3-p4-withdraw-handoff.md`.
+Decisions (user-approved): **Q1 = embed the whole pipeline in withdraw**, **Q2 = the builders live in wallet_core**, **Q3 = fully automated, including anvil**.
 
-## 0. ゴール(完了条件)
-`channel_member withdraw <manager> [rpc]` が、実 channel の withdrawal 証明を生成し、
-**registerChannel → deposit → postBlock×3(blob) → finalize → withdrawNative → pullChannelFunds** を
-live(anvil)で通す。manager の L1 残高が増えることを assert。
+## 0. Goal (completion criteria)
+`channel_member withdraw <manager> [rpc]` generates a real channel's withdrawal proof and drives
+**registerChannel → deposit → postBlock×3 (blob) → finalize → withdrawNative → pullChannelFunds** through
+live (anvil). Assert that the manager's L1 balance increases.
 
-## 1. アーキテクチャ確定事項(調査済み)
-- `withdrawNative` は `finalizedStateRoots[extCommitment]` を要求(`IntmaxRollup.sol:1262`)。
-  → withdrawal 証明の ext_commitment は **finalize 済み rollup root** 必須。
-- finalize は **3 block(registration / deposit / withdrawal-tx)が postBlock 済み**である前提
-  (`fullVerify` が `blockHashChainAt[finalBlockNumber]` と照合)。
-- postBlock は **EIP-4844 blob tx**(`postBlockAndSubmit`、stake 1 ETH)。**forge script は blob 不可** →
-  `cast send --blob --path <128KiB>` で送る(`doc/docs/sepolia-smoke-runbook.md` 既存手順)。
-- 権威ある on-chain シーケンス = `contracts/test/WithdrawNativeE2E.t.sol::_runLifecycleThroughFinalize`:
+## 1. Architectural facts established (investigated)
+- `withdrawNative` requires `finalizedStateRoots[extCommitment]` (`IntmaxRollup.sol:1262`).
+  → the withdrawal proof's ext_commitment must be a **finalized rollup root**.
+- finalize presupposes that **3 blocks (registration / deposit / withdrawal-tx) have been postBlock'd**
+  (`fullVerify` cross-checks against `blockHashChainAt[finalBlockNumber]`).
+- postBlock is an **EIP-4844 blob tx** (`postBlockAndSubmit`, 1 ETH stake). **forge script cannot do blobs** →
+  send it with `cast send --blob --path <128KiB>` (the existing procedure in `doc/docs/sepolia-smoke-runbook.md`).
+- The authoritative on-chain sequence = `contracts/test/WithdrawNativeE2E.t.sol::_runLifecycleThroughFinalize`:
   1. `registerChannel(channelId,bpSlot,0,sphincs[],pkBs[],regev[],recipients[])`
   2. postBlock(block0=registration)  ← blob
-  3. `deposit{value}(recipient,token,amount,aux)`(msg.sender == 証明された depositor)
+  3. `deposit{value}(recipient,token,amount,aux)` (msg.sender == the proven depositor)
   4. postBlock(block1=deposit)  ← blob
-  5. postBlock(block2=withdrawal)  ← blob, この submissionId を finalize
+  5. postBlock(block2=withdrawal)  ← blob; this submissionId is the one to finalize
   6. `finalize(subId, finalRoot, vpis, validityMle)`
   7. `withdrawNative(ws, prover, withdrawalMle)`
-  8. `pullChannelFunds()`(manager が rollup.withdraw(expectedAmount) で当該 channel 分だけ引く)
-- 生成物 4 点(`generate_withdrawal_fixture.rs` が出力、`build_channel_withdrawal` が同一生成):
-  `lifecycle.json` / `lifecycle_validity_mle.json` / `withdrawal_mle.json` / `withdrawal_payout.json`。
+  8. `pullChannelFunds()` (the manager pulls only that channel's share via rollup.withdraw(expectedAmount))
+- The 4 artifacts (emitted by `generate_withdrawal_fixture.rs`; `build_channel_withdrawal` generates the same ones):
+  `lifecycle.json` / `lifecycle_validity_mle.json` / `withdrawal_mle.json` / `withdrawal_payout.json`.
 
-## 2. 実装ステップ
-- [ ] **S1. wallet_core::build_channel_withdrawal** — `generate_withdrawal_fixture.rs` の全パイプライン
+## 2. Implementation steps
+- [ ] **S1. wallet_core::build_channel_withdrawal** — move the whole `generate_withdrawal_fixture.rs` pipeline
   (Phase1 registration → Phase2 deposit → Phase3 withdrawal-tx → Phase4 block-hash-chain + validity →
-  wrap+MLE×2 → sanity re-fold → JSON 4 点組み立て)を `wallet_core.rs` に移設。
+  wrap+MLE×2 → sanity re-fold → assembling the 4 JSON artifacts) into `wallet_core.rs`.
   - `ChannelWithdrawalParams { channel_id, deposit_amount, withdrawal_amount, depositor: Option<Address>,
-    withdrawal_recipient: Option<Address> }`(None=従来 rng 由来=fixture parity 維持)。
-  - 返り値 `ChannelWithdrawalArtifacts { lifecycle_json, validity_mle_json, withdrawal_mle_json, payout_json }`。
-  - fixture 構造体(LifecycleFixture 等)を wallet_core へ移し、binary は文字列を書くだけ。
-- [ ] **S2. generate_withdrawal_fixture.rs を委譲化** — env(WD_DEPOSITOR/WD_RECIPIENT/WD_OUT_PREFIX)読取り →
-  `build_channel_withdrawal` 呼出し → 4 ファイル書込み。**出力は従来と byte 同一**。
-- [x] **S3. parity 検証(完了・知見更新)** — **MLE/WHIR 証明は非決定的**(ZK blinding/masking;
-  同一バイナリ 2 回で MLE バイト差分)。よって byte-parity は不可能=正しい検証基準ではない。
-  実際に確認した正しい基準: **構造/意味フィールド(genesis/final state root, vpis, blocks, deposit,
-  registration, withdrawal_payout の recipient/amount/nullifier/ext_commitment)が committed fixture と
-  完全一致**(✓)+ ビルダ内部 self-verify(verify_mle_proof×2, single/chain/validity verify, keccak re-fold,
-  ext_commitment 一致)が全 PASS(✓ バイナリ完走)。→ port は忠実。committed fixture は git checkout で復元済。
-- [ ] **S4. self-verify テスト** — `wallet_core` に `#[cfg_attr(debug_assertions, ignore)] a3_channel_withdrawal_builds_and_verifies`:
-  build → withdrawal proof self-verify + ext_commitment==validity final root + withdrawal keccak re-fold 一致。
-  P2 各ビルダと同型。
-- [ ] **S5. setup-backing の永続化追加** — `ChannelBacking` に `deposit_salt`, `depositor`, `deposit_recipient` を追加
-  (depositor は既に live receipt から取得済=`channel_member.rs:360`)。`cmd_withdraw` が同一 deposit を再構築するため。
-- [ ] **S6. cmd_withdraw** — 上記 on-chain シーケンスを cast/forge で駆動:
-  - build_channel_withdrawal(channel の実 params + recipient=manager)→ 4 JSON 書込み → `sepolia_*` へ staging。
-  - registerChannel / deposit / postBlock×3(`cast send --blob --path blob.bin`)/ finalize(forge RunClose finalizeStep)/
-    withdrawNative(forge RunClose withdrawNativeStep 既存)/ `cast send <manager> pullChannelFunds()`。
-  - dispatcher の `"withdraw" => cmd_close_lifecycle_unimplemented` を `cmd_withdraw` に置換。
-- [ ] **S7. live 検証(anvil)** — fresh deploy + VK init(validity/withdrawal)+ register + withdraw 全行程 →
-  manager 残高増 assert。`#[ignore]` + release。
+    withdrawal_recipient: Option<Address> }` (None = the previous rng-derived behavior = fixture parity preserved).
+  - Return value `ChannelWithdrawalArtifacts { lifecycle_json, validity_mle_json, withdrawal_mle_json, payout_json }`.
+  - Move the fixture structs (LifecycleFixture etc.) into wallet_core; the binary just writes the strings.
+- [ ] **S2. make generate_withdrawal_fixture.rs delegate** — read the env vars (WD_DEPOSITOR/WD_RECIPIENT/WD_OUT_PREFIX) →
+  call `build_channel_withdrawal` → write the 4 files. **The output is byte-identical to before.**
+- [x] **S3. parity verification (done; finding updated)** — **MLE/WHIR proofs are non-deterministic** (ZK blinding/masking;
+  two runs of the same binary produce differing MLE bytes). Byte parity is therefore impossible = it is not the right verification criterion.
+  The correct criterion, confirmed in practice: **the structural/semantic fields (genesis/final state root, vpis, blocks, deposit,
+  registration, and the withdrawal_payout recipient/amount/nullifier/ext_commitment) match the committed fixture
+  exactly** (✓), plus the builder's internal self-verification (verify_mle_proof×2, single/chain/validity verify, keccak re-fold,
+  ext_commitment match) all PASS (✓ the binary ran to completion). → the port is faithful. The committed fixtures were restored via git checkout.
+- [ ] **S4. self-verify test** — add `#[cfg_attr(debug_assertions, ignore)] a3_channel_withdrawal_builds_and_verifies` to `wallet_core`:
+  build → withdrawal proof self-verify + ext_commitment==validity final root + withdrawal keccak re-fold match.
+  Same shape as the P2 builders.
+- [ ] **S5. add persistence to setup-backing** — add `deposit_salt`, `depositor`, `deposit_recipient` to `ChannelBacking`
+  (the depositor is already taken from the live receipt = `channel_member.rs:360`). Needed so `cmd_withdraw` can reconstruct the same deposit.
+- [ ] **S6. cmd_withdraw** — drive the on-chain sequence above with cast/forge:
+  - build_channel_withdrawal (the channel's real params + recipient=manager) → write the 4 JSON files → stage them into `sepolia_*`.
+  - registerChannel / deposit / postBlock×3 (`cast send --blob --path blob.bin`) / finalize (forge RunClose finalizeStep) /
+    withdrawNative (the existing forge RunClose withdrawNativeStep) / `cast send <manager> pullChannelFunds()`.
+  - Replace the dispatcher's `"withdraw" => cmd_close_lifecycle_unimplemented` with `cmd_withdraw`.
+- [ ] **S7. live verification (anvil)** — fresh deploy + VK init (validity/withdrawal) + register + the whole withdraw run →
+  assert the manager's balance increases. `#[ignore]` + release.
 
-## 3. 脅威モデル(attacker subagent 観点)
-soundness は **全て in-circuit + on-chain**。CLI は配線のみ。攻撃面の確認:
-1. **over/double-withdraw**: nullifier 使用済みマップ + `totalEscrowed` 減算 + `pendingWithdrawals` pull、
-   `totalCreditedOut ≤ receivedChannelFunds`(manager 側大域上限)。CLI は値を選べない(payout は proof PI 由来)。✅既存 REAL。
-2. **偽 ext_commitment**: `finalizedStateRoots[ext]` gate。finalize が validity MLE/WHIR + PI binding を検証。
-   CLI が任意 root を渡しても finalize が落ちる(fail-closed)。✅
-3. **改竄 withdrawal set**: withdrawNative が keccak re-fold で pis_hash 照合。amount 改竄→revert。✅(WithdrawNativeE2E で実証)。
-4. **depositor 不一致**: deposit hash は msg.sender を folding。証明された depositor と on-chain msg.sender がズレると
-   block2 hash 不一致→finalize revert。→ 非ローカルでは `cast send --account $INTMAX_L1_ACCOUNT` の送信元 =
-   証明 depositor を保証(persist した depositor を使用)。raw key は chain 31337 の公開 Anvil key のみ。
-5. **registration 不一致**: registerChannel の member set が証明の registration block と不一致→block1 hash 不一致→finalize revert。
-   → lifecycle.json の registration をそのまま registerChannel に渡す。
-6. **fixture 競合**: withdraw/claim/close が `sepolia_*` に staging。**各 step 直前に書く**(順序厳守)。
-7. **build_channel_withdrawal の port バグ**: S3 の byte-parity 検証で reference と一致を担保。差分=即停止。
-8. **秘密鍵**: 非ローカルは Foundry encrypted keystore の `INTMAX_L1_ACCOUNT` を
-   `--account` で選択し、秘密鍵/パスワードを argv に載せない。anvil 31337 のみ公開 dev key。
-9. **IntmaxRollup/Manager bytecode 不変**: 一切変更しない(CREATE2 drift→fixture 再生成回避)。
+## 3. Threat model (attacker subagent perspective)
+Soundness is **entirely in-circuit + on-chain**. The CLI is only wiring. Attack-surface review:
+1. **over/double-withdraw**: the used-nullifier map + the `totalEscrowed` decrement + the `pendingWithdrawals` pull,
+   plus `totalCreditedOut ≤ receivedChannelFunds` (the manager-side global cap). The CLI cannot choose the value (the payout comes from the proof PI). ✅ existing REAL.
+2. **fake ext_commitment**: the `finalizedStateRoots[ext]` gate. finalize verifies the validity MLE/WHIR + the PI binding.
+   Even if the CLI passes an arbitrary root, finalize fails (fail-closed). ✅
+3. **tampered withdrawal set**: withdrawNative cross-checks pis_hash via a keccak re-fold. Tampering with the amount → revert. ✅ (demonstrated in WithdrawNativeE2E).
+4. **depositor mismatch**: the deposit hash folds in msg.sender. If the proven depositor and the on-chain msg.sender diverge, the
+   block2 hash mismatches → finalize reverts. → off local, `cast send --account $INTMAX_L1_ACCOUNT` guarantees the sender ==
+   the proven depositor (using the persisted depositor). Raw keys are only the public Anvil key on chain 31337.
+5. **registration mismatch**: if registerChannel's member set does not match the proof's registration block → block1 hash mismatch → finalize reverts.
+   → pass lifecycle.json's registration straight into registerChannel.
+6. **fixture contention**: withdraw/claim/close all stage into `sepolia_*`. **Write immediately before each step** (order must be respected).
+7. **port bugs in build_channel_withdrawal**: the S3 byte-parity check guarantees a match with the reference. Any difference = stop immediately.
+8. **secret keys**: off local, select the Foundry encrypted keystore's `INTMAX_L1_ACCOUNT` with
+   `--account`, and never put the secret key/password in argv. The public dev key is for anvil 31337 only.
+9. **IntmaxRollup/Manager bytecode unchanged**: do not modify them at all (avoiding CREATE2 drift → fixture regeneration).
 
-**不変条件チェック(完了前必須)**:
-- [ ] withdrawal proof self-verify PASS、ext_commitment == validity final root、keccak re-fold 一致(S4)。
-- [ ] build_channel_withdrawal が reference と byte 同一(S3)。
-- [ ] cmd_withdraw が IntmaxRollup/Manager bytecode を変えない。
-- [ ] live で withdrawNative + pullChannelFunds 成功、manager 残高増(S7)。
+**Invariant checks (mandatory before completion)**:
+- [ ] the withdrawal proof self-verifies PASS, ext_commitment == validity final root, keccak re-fold matches (S4).
+- [ ] build_channel_withdrawal is byte-identical to the reference (S3).
+- [ ] cmd_withdraw does not change the IntmaxRollup/Manager bytecode.
+- [ ] withdrawNative + pullChannelFunds succeed live and the manager's balance increases (S7).
 
-## 4. 所見ログ
-- **S1–S2 完了**: `build_channel_withdrawal` を wallet_core に移設、`generate_withdrawal_fixture` 委譲化。compile OK。
-- **S3 完了(知見)**: MLE/WHIR は ZK blinding で非決定的(同一バイナリ 2 回で MLE バイト差)。byte-parity 不可=誤った基準。
-  正しい基準で確認: 構造/意味フィールド(state roots, vpis, blocks, deposit, registration, payout)= committed と一致 +
-  内部 self-verify 全 PASS。記憶 [[project_mle_whir_nondeterministic]] に保存。
-- **S4 完了**: `a3_channel_withdrawal_builds_and_verifies` PASS(94.8s)。amount==要求額、ext_commitment==final root。
-- **S5 不要化**: 自己完結パイプライン(cmd_withdraw が自前 deposit、depositor=送信鍵)→ setup-backing 永続化不要。
-- **S6 完了**: `cmd_withdraw` 実装、dispatcher 置換、unimplemented スタブ撤去。compile OK。
-- **S7 完了(anvil live)**: DeployClose → `INTMAX_CHANNEL=1 ROLLUP=… channel_member withdraw <manager>`。
-  結果: manager 0→3 ETH、pendingWithdrawals 3→0、totalEscrowed=7、receivedChannelFunds=3、finalizedBlock=3。**全不変条件 ✓。**
+## 4. Findings log
+- **S1–S2 done**: `build_channel_withdrawal` moved into wallet_core, `generate_withdrawal_fixture` made to delegate. compile OK.
+- **S3 done (finding)**: MLE/WHIR is non-deterministic because of ZK blinding (two runs of the same binary differ in the MLE bytes). Byte parity is impossible = it was the wrong criterion.
+  Confirmed under the correct criterion: the structural/semantic fields (state roots, vpis, blocks, deposit, registration, payout) match the committed ones +
+  all internal self-verification PASS. Saved to memory [[project_mle_whir_nondeterministic]].
+- **S4 done**: `a3_channel_withdrawal_builds_and_verifies` PASS (94.8s). amount == the requested amount, ext_commitment == final root.
+- **S5 made unnecessary**: the pipeline is self-contained (cmd_withdraw makes its own deposit, depositor = the sending key) → no setup-backing persistence needed.
+- **S6 done**: `cmd_withdraw` implemented, dispatcher replaced, the unimplemented stub removed. compile OK.
+- **S7 done (anvil live)**: DeployClose → `INTMAX_CHANNEL=1 ROLLUP=… channel_member withdraw <manager>`.
+  Result: manager 0→3 ETH, pendingWithdrawals 3→0, totalEscrowed=7, receivedChannelFunds=3, finalizedBlock=3. **All invariants ✓.**
 
-## 5. 完了サマリ
-P4 `withdraw` 完成。close ライフサイクル全 CLI コマンド(close→settle→withdraw→claim)が live で一気通貫。
-soundness は in-circuit + on-chain(CLI は配線のみ、payout は proof PI 由来で改竄不可、finalize/withdrawNative が
-fail-closed gate)。残: P5(relay + 完全 close-lifecycle E2E、real channel deposit との統合)、P6(stub revert 化)。
+## 5. Completion summary
+P4 `withdraw` is complete. Every CLI command in the close lifecycle (close→settle→withdraw→claim) works end to end live.
+Soundness is in-circuit + on-chain (the CLI is only wiring, the payout comes from the proof PI and cannot be tampered with, and
+finalize/withdrawNative are fail-closed gates). Remaining: P5 (relay + a full close-lifecycle E2E, integrated with a real channel deposit), P6 (turning the stubs into reverts).

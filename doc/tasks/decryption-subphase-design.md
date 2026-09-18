@@ -70,8 +70,8 @@ signature inclusion. Larger than the decryption core; its own design + threat mo
 need this (its slot is pinned to finalized H1).
 
 ## DECISION (user, 2026-06-18): Option 1 — commit Regev pk into the signed state-channel H1
-User reversed the earlier "don't disturb H1" stance: "state channel で登録してください。H1 の署名対象も変更
-してしまっていい。" So pk-binding = commit each member's Regev pk into `BalanceState`/`h1()` (the signed
+User reversed the earlier "don't disturb H1" stance: "Please register it in the state channel. It is fine to
+change what H1 signs over as well." So pk-binding = commit each member's Regev pk into `BalanceState`/`h1()` (the signed
 preimage), and the claim circuit binds the witnessed `(a,b)` to the H1-committed value via the SAME one-hot
 select already used for `enc_balance_digests[member_index]`. Strongest trust (bound to the cryptographically
 signed H1, no deployer-trust for the Regev pk). Cost: the signed H1 preimage changes → ripples everything that

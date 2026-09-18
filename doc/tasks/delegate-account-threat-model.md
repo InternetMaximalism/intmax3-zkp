@@ -9,8 +9,9 @@ that co-signs channel-state updates. It relies on the co-signing members for sta
 
 ## 0. Security model (the load-bearing interpretation — please confirm/correct)
 
-From the spec ("送金時の署名しかしない" + "range proof 等 証明・検証は通常アカウントと同じ" + "自分の残高
-維持・他人の残高健全性は完全にメンバーに頼り切る"; 検閲/liveness は当面スコープ外):
+From the spec ("it signs only when sending" + "range proofs and other proving/verification are the same as for a
+normal account" + "it relies entirely on the members for maintaining its own balance and for the soundness of
+others' balances"; censorship/liveness are out of scope for now):
 
 - **DLG-1 (theft protection — TRANSITION LAYER ONLY, confirmed):** a debit of a delegate's balance is
   bound to the delegate's OWN send signature, and **honest signing members will NOT co-sign a state

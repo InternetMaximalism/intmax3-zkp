@@ -4432,7 +4432,7 @@ fn cmd_setup_backing(args: &[String]) {
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
     let amount = fund;
 
-    // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
+    // P5-B option B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
     // folds the deposit in the exact order its proof models (the standalone fold order). The
     // default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
     // reconciliation — the browser demo path). When `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` is set
@@ -8601,7 +8601,7 @@ fn cmd_withdraw(args: &[String]) {
         &mut proof_da_journal,
     );
 
-    // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration
+    // 3. Deposit (P5-B option B: `withdraw` ALWAYS makes the deposit here, between the registration
     //    block and the deposit block — the standalone fold order the withdrawal proof models. In
     //    integrated mode `setup-backing` deliberately deferred the on-chain deposit to this point,
     //    so there is no earlier pending deposit to pollute the registration block. Sent BY the
