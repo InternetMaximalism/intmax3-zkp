@@ -461,8 +461,8 @@
     },
     {
       "path": "contracts/lib/polygon-plonky2/mle/src/verifier.rs",
-      "sha256": "1334d197dbc24f88fda525b901dba35217a91541e8c10161351b0ffafdf82e30",
-      "lines": 1634,
+      "sha256": "ad2df2307e7d5391d2de3d10b6bfb2ca0b720a47044996ade8cbb6f01e5ea1d1",
+      "lines": 1647,
       "category": "dependency",
       "line_map": null
     },
