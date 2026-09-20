@@ -1720,10 +1720,31 @@ async function sendDepositViaWallet(amountBase, token) {
   const value = token.tokenIndex === NATIVE_TOKEN_INDEX ? '0x' + BigInt(amountBase).toString(16) : '0x0';
   log('DEPOSIT: ' + shown + ' (' + amountBase + ' base units, token #' + token.tokenIndex
     + ') → rollup ' + info.rollup + ', value ' + value, 'zk');
-  const txHash = await walletProvider.request({
-    method: 'eth_sendTransaction',
-    params: [{ from: walletAccount, to: info.rollup, value, data }],
-  });
+  let txHash;
+  try {
+    txHash = await walletProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: walletAccount, to: info.rollup, value, data }],
+    });
+  } catch (err) {
+    // The #1 cause of a wedged local deposit: the dev chain (anvil) was restarted, so its account
+    // nonces reset to 0, but the wallet still holds the OLD, higher nonce from the previous chain.
+    // The wallet then re-broadcasts a transaction the fresh chain already has (or a nonce it has
+    // moved past), and the node answers "transaction already imported" / "nonce too low" /
+    // "already known". No amount of retrying fixes it because the wallet keeps sending the same
+    // stale nonce. Turn that opaque RPC string into the one instruction that actually resolves it.
+    const m = String((err && (err.message || err.data && err.data.message)) || err || '').toLowerCase();
+    if (m.includes('already imported') || m.includes('already known')
+        || m.includes('nonce too low') || m.includes('replacement transaction underpriced')
+        || m.includes('tx already') || m.includes('known transaction')) {
+      throw new Error(
+        'Your wallet\'s transaction nonce is out of sync with the dev chain — this happens after '
+        + 'anvil is restarted. Reset it in your wallet: MetaMask → Settings → Advanced → '
+        + '"Clear activity tab data" (or remove & re-add the network), then deposit again. '
+        + '(underlying error: ' + (err && err.message ? err.message : String(err)) + ')');
+    }
+    throw err;
+  }
   log('deposit tx sent via ' + walletName + ': ' + txHash, 'ok');
   log('waiting for the deposit to be mined...');
   const receipt = await awaitReceipt(txHash, 'deposit');
@@ -1799,6 +1820,13 @@ function openClaimSnapshotDb() {
   });
 }
 
+// The part of a ChannelState its `digest` actually commits to. `memberSignatures` sign that
+// digest, so they are an envelope around the head rather than part of it (and are randomized).
+function digestCommittedStateJson(state) {
+  const { memberSignatures, ...committed } = state || {};
+  return claimCanonicalJson(committed);
+}
+
 async function archiveVerifiedClaimSnapshot(snapshotJson) {
   if (typeof snapshotJson !== 'string'
       || new TextEncoder().encode(snapshotJson).byteLength > MAX_CLAIM_SNAPSHOT_BYTES) {
@@ -1823,15 +1851,33 @@ async function archiveVerifiedClaimSnapshot(snapshotJson) {
           store.add({ key, channelId, digest, snapshotJson });
           return;
         }
-        let same = false;
+        // The key names `state.digest`, so the only integrity claim this entry can make is "this
+        // digest holds this state body" — compare THAT, not the whole snapshot, and not the raw
+        // `state` either. Two faithful snapshots of the SAME head differ in ways the digest does
+        // not cover:
+        //   * `record` moves while the head does not (`status`/`closeFreezeNonce` on requestClose,
+        //     `setVersion` and the member roots on a join);
+        //   * `state.memberSignatures` are signatures OVER this digest, not inputs to it, and
+        //     Falcon is randomized — re-signing the same head yields different bytes every time.
+        // Comparing whole snapshots turned each of those into a PERMANENT archive failure with no
+        // in-app recovery. It also bought no protection: this store is trust-on-first-use, so the
+        // first write is accepted unconditionally and a hostile writer that gets there first was
+        // never refused — only an honest user whose envelope moved. Integrity comes from WASM,
+        // which re-verifies the FULL snapshot (N-of-N signatures, member roots, record/state
+        // channel agreement) both before this archive write and again on every recovery read.
+        let sameState = false;
         try {
-          same = claimCanonicalJson(JSON.parse(existing.result.snapshotJson))
-            === claimCanonicalJson(parsed);
+          sameState = digestCommittedStateJson(JSON.parse(existing.result.snapshotJson).state)
+            === digestCommittedStateJson(parsed.state);
         } catch (_) { /* malformed prior archive is a hard conflict */ }
-        if (!same) {
+        if (!sameState) {
           conflict = new Error('refusing to replace a different verified snapshot under the same digest');
           tx.abort();
+          return;
         }
+        // Same head, refreshed envelope: keep the NEWEST record/members so restart recovery
+        // imports a snapshot that still matches the live channel.
+        store.put({ key, channelId, digest, snapshotJson });
       };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('cannot archive verified claim snapshot'));
@@ -2851,21 +2897,48 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     if (!token) throw new Error('select a token to deposit');
     // Denominated with THIS token's verified decimals — never the global 18-dp toBase().
     const amt = parseDepositAmount($('depositAmount').value, token.decimals);
-    log('sending L1 deposit via wallet (' + fmtUnits(amt, token.decimals) + ' ' + token.label
-      + ', token #' + token.tokenIndex + ')...');
-    const dr = await sendDepositViaWallet(amt, token);
+
+    // IDEMPOTENCE: if a deposit is already pending (its L1 tx landed but the import did not finish),
+    // sending another L1 transaction here is exactly the double-submit that surfaces as
+    // "transaction already imported" on the chain and "deposit already pending" (409) from the
+    // ticket store — and it risks a second on-chain deposit for the same intent. RESUME that
+    // deposit's import instead of broadcasting a new one. The recovery handle is the ticket's L1
+    // txHash; the import reads the deposit's economics from that transaction's on-chain log.
+    await fetchTickets();
+    const pendingDeposit = (activeTickets || []).find(
+      (t) => t.type === 'deposit' && t.status === 'l1_done'
+        && t.params && String(t.params.txHash || '').length > 0,
+    );
+    let dr;
+    if (pendingDeposit) {
+      log('a deposit is already on L1 and awaiting import — resuming it instead of sending a new one '
+        + '(tx ' + pendingDeposit.params.txHash + ')', '');
+      dr = {
+        txHash: pendingDeposit.params.txHash,
+        depositor: pendingDeposit.params.depositor,
+        recipientSlot: pendingDeposit.params.recipientSlot,
+      };
+    } else {
+      log('sending L1 deposit via wallet (' + fmtUnits(amt, token.decimals) + ' ' + token.label
+        + ', token #' + token.tokenIndex + ')...');
+      dr = await sendDepositViaWallet(amt, token);
+    }
 
     // The ticket is the recovery handle: saved BEFORE the (possibly long) import, so an
     // interrupted/abandoned import is resumable from "Resume Import". `tokenIndex` is carried for
-    // DISPLAY only — the import itself sends nothing but { recipientSlot, txHash }.
-    try {
-      await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: token.tokenIndex }));
-    } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+    // DISPLAY only — the import itself sends nothing but { recipientSlot, txHash }. When resuming an
+    // already-pending deposit the ticket already exists, so do not re-post it (the relay would 409).
+    if (!pendingDeposit) {
+      try {
+        await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: token.tokenIndex }));
+      } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+    }
     await fetchTickets(); applyTicketState();
 
+    const importSlot = (pendingDeposit && Number.isInteger(dr.recipientSlot)) ? dr.recipientSlot : mySlot;
     phase = 'Importing';
-    log('importing deposit into channel (slot ' + mySlot + ')...');
-    const snap = await importDepositAwaitingConfirmations(mySlot, dr.txHash, (text) => {
+    log('importing deposit into channel (slot ' + importSlot + ')...');
+    const snap = await importDepositAwaitingConfirmations(importSlot, dr.txHash, (text) => {
       phase = 'Confirming';
       pend.textContent = text;
       pend.classList.remove('hidden');

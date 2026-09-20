@@ -242,6 +242,22 @@ function liveReceiveConfiguredDeposit(channelId, producerReceipt, deposit) {
   return execute({ command: 'liveReceiveConfiguredDeposit', channelId, producerReceipt, deposit });
 }
 
+// Put the live balance on the base account `setup-backing` already created, named by the salt it
+// recorded in channel_backing.json. `liveInit` would mint a SECOND account for the same channel,
+// whose settle chain can never match the signed snapshot's.
+function liveInitWithAccountSalt(channelId, accountSalt) {
+  return execute({ command: 'liveInitWithAccountSalt', channelId, accountSalt });
+}
+
+// Adopt a deposit made to that account's recipient, using the salt it recorded in
+// channel_backing.json. The daemon re-derives the recipient from that salt and rejects any salt
+// that does not reproduce the deposit's on-chain recipient, so this cannot mis-credit.
+function liveReceiveBackingDeposit(channelId, producerReceipt, deposit, depositSalt) {
+  return execute({
+    command: 'liveReceiveBackingDeposit', channelId, producerReceipt, deposit, depositSalt,
+  });
+}
+
 function liveBindSnapshot(channelId, signedSnapshot) {
   return execute({ command: 'liveBindSnapshot', channelId, signedSnapshot });
 }
@@ -347,6 +363,8 @@ module.exports = {
   liveInit,
   livePrepareDepositRecipient,
   liveReceiveConfiguredDeposit,
+  liveReceiveBackingDeposit,
+  liveInitWithAccountSalt,
   liveBindSnapshot,
   liveSettleInterChannel,
   liveSendArtifact,

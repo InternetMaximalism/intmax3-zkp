@@ -369,8 +369,50 @@ pub fn parse_public_close_backing_envelope(
         json.len(),
         MAX_PUBLIC_BACKING_ENVELOPE_BYTES,
     )?;
-    serde_json::from_slice(json)
-        .map_err(|error| PublicCloseError::InvalidEnvelope(error.to_string()))
+    // Parse via `serde_json::Value` and reassemble by hand instead of the derived `Deserialize`.
+    // The struct uses `#[serde(flatten)]` for `backing`, and flatten — like an internally-tagged
+    // enum — routes the flattened fields through serde's buffered `Content` tree, whose map keys
+    // are strings. That makes `u8::deserialize` reject the `"0"` token keys of the sparse
+    // `encBalances`/`pendingAdds` rows inside `signed_head` ("invalid type: string \"0\", expected
+    // u8"), even though the exact same bytes parse fine when the backing is deserialized on its own.
+    // Pulling the four transport scalars out and `from_value`-ing the rest into the (plain,
+    // non-flattened) `LiveChannelBackingArtifact` restores serde_json's own key coercion. The wire
+    // shape is unchanged: the backing fields stay flat beside the transport metadata, exactly as
+    // the daemon/API writes them.
+    let value: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|error| PublicCloseError::InvalidEnvelope(error.to_string()))?;
+    let take_u64 = |key: &str| -> PublicCloseResult<u64> {
+        value.get(key).and_then(|v| v.as_u64()).ok_or_else(|| {
+            PublicCloseError::InvalidEnvelope(format!("envelope missing numeric {key}"))
+        })
+    };
+    let schema_version = u32::try_from(take_u64("schemaVersion")?)
+        .map_err(|_| PublicCloseError::InvalidEnvelope("schemaVersion out of range".into()))?;
+    let chain_id = take_u64("chainId")?;
+    let source = value
+        .get("source")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| PublicCloseError::InvalidEnvelope("envelope missing source".into()))?
+        .to_string();
+    let rollup: Address = value
+        .get("rollup")
+        .cloned()
+        .ok_or_else(|| PublicCloseError::InvalidEnvelope("envelope missing rollup".into()))
+        .and_then(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| PublicCloseError::InvalidEnvelope(format!("envelope rollup: {e}")))
+        })?;
+    // The backing fields are flat in `value`; `from_value` on the whole object fills the plain
+    // `LiveChannelBackingArtifact` and ignores the four transport keys above.
+    let backing: LiveChannelBackingArtifact = serde_json::from_value(value)
+        .map_err(|error| PublicCloseError::InvalidEnvelope(error.to_string()))?;
+    Ok(PublicCloseBackingEnvelope {
+        schema_version,
+        source,
+        chain_id,
+        rollup,
+        backing,
+    })
 }
 
 fn validate_transport_context(

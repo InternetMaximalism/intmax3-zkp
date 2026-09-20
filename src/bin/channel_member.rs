@@ -175,6 +175,28 @@ const BP_SLOT: u8 = 0;
 // (liveness caveat, see tasks/a3-close-lifecycle-spec.md threat model Threat 7).
 // detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
+/// The identity the block producer assigns the backing deposit when it journals it. Both are
+/// inputs to `Deposit::nullifier()`, whose value becomes the `settled_tx_chain` leaf, so the
+/// genesis must prove the SAME instance the producer records or the two settle chains diverge
+/// permanently. Supplied by the caller that journaled the deposit; never guessed here.
+const DEPOSIT_INDEX_ENV: &str = "SETUP_BACKING_DEPOSIT_INDEX";
+const DEPOSIT_BLOCK_NUMBER_ENV: &str = "SETUP_BACKING_INTMAX_BLOCK_NUMBER";
+
+/// Read a required numeric environment input, failing closed with the reason. A missing or
+/// unparseable value must never fall back to a default: `0` is a legal deposit identity, so a
+/// silent default is indistinguishable from a real value and forks the settle chain.
+fn required_env_u64(name: &str) -> u64 {
+    let raw = std::env::var(name).unwrap_or_else(|_| {
+        die(format!(
+            "{name} is required: the backing deposit must be proved with the exact identity the \
+             block producer journaled for it (deposit index and INTMAX block number). Journal the \
+             deposit first and pass both values."
+        ))
+    });
+    raw.trim()
+        .parse::<u64>()
+        .unwrap_or_else(|e| die(format!("{name}={raw:?} is not a u64: {e}")))
+}
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
 const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
 /// Production `deploy-settlement` consumes a complete, self-verified `public_close_prover` bundle
@@ -701,11 +723,20 @@ fn enforce_exit_kit_before_signature_release(
              verified signer exit-kit receipt; legacy/key-equality-only reuse is forbidden"
                 .to_string()
         })?;
+        // An intra-channel, value-preserving H2=0 successor (send / batch / refresh) does NOT change
+        // the L1-backed exit statement: the reuse-refusals just above pin (channel_id,
+        // settled_tx_chain, token_funds_digest) EQUAL to the predecessor's, and this receipt is
+        // bound to that head. So the SAME exit kit that was cryptographically verified when it was
+        // installed (`install-exit-kit` / the prepared-kit path — both run the full Balance/backing
+        // verification before the receipt is ever written) already backs this successor unchanged.
+        // Re-running that plonky2 Balance/backing verification here re-proves nothing about the new
+        // head — the statement is byte-identical — and it dominated cosign latency (~6 s per send)
+        // because the relay spawns a fresh CLI per co-sign, so the process-local `verified` cache
+        // was always cold. Trust the durable, head-bound receipt for the reuse path; the receipt's
+        // creation is the verification boundary, and tampering cli_state.json already implies key
+        // compromise. Fresh exit kits for asset/composition-moving successors (deposit / inter-
+        // channel / close) still take the full prepare+verify path above.
         validate_exit_kit_receipt_for_head(receipt, predecessor)?;
-        if !cli.signer_exit_kit_receipt_verified {
-            verify_persisted_signer_exit_kit(cli)?;
-            cli.signer_exit_kit_receipt_verified = true;
-        }
     }
 
     Ok(())
@@ -1824,14 +1855,61 @@ fn derive_key_seed(master: &[u8; 32], label: u64) -> zeroize::Zeroizing<[u8; 32]
 fn keys_for(seed: u64) -> MemberKeys {
     match key_provenance() {
         KeyProvenance::Master(master) => {
+            // Production: derive the per-slot identity in memory every time. The NTRU keygen
+            // (~455 ms) is paid per invocation on purpose — the ONLY persistent secret is the
+            // operator's external keyfile, and caching a derived signing key to disk beside
+            // cli_state would newly expose it at rest. A long-lived signing process (not a
+            // per-co-sign CLI spawn) is the right place to amortize keygen in production.
             MemberKeys::generate(&mut StdRng::from_seed(*derive_key_seed(master, seed)))
         }
         // SECURITY: reachable ONLY via an explicit `INTMAX_INSECURE_DETERMINISTIC_KEYS=1`, which
         // printed the banner in `key_provenance`. Publicly computable by construction.
         KeyProvenance::InsecureDeterministic => {
-            MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
+            // These identities derive from a PUBLIC constant and are worthless, so caching the NTRU
+            // basis on disk leaks nothing. The relay spawns one CLI per co-sign, so without a cache
+            // every co-sign re-ran NTRU keygen (~455 ms) for EVERY controlled co-signer — the
+            // dominant `cosign` cost (measured ~2.6 s for a 3-of-3 cluster). Cache each drawn
+            // sig_seed's basis so later co-signs reconstruct the identical key in microseconds.
+            MemberKeys::generate_with_falcon(&mut StdRng::seed_from_u64(seed), cached_insecure_falcon)
         }
     }
+}
+
+/// Directory for cached NTRU bases of `INTMAX_INSECURE_DETERMINISTIC_KEYS` identities. Relative to
+/// the CLI's cwd (the per-channel working dir), like `FALCON_AGG_CACHE_DIR`.
+const FALCON_KEY_CACHE_DIR: &str = "falcon_key_cache";
+
+/// Load (or generate and persist) the NTRU keypair for `sig_seed` from the insecure-mode basis
+/// cache, reconstructing the EXACT key without re-running `ntru_gen`. A missing/corrupt/mismatched
+/// entry falls back to a fresh `from_seed` (and rewrites the cache), so correctness never depends
+/// on the cache. NEVER used under a production master key — see `keys_for`.
+fn cached_insecure_falcon(sig_seed: [u8; 32]) -> std::sync::Arc<intmax3_zkp::falcon_sig::FalconKeys> {
+    use intmax3_zkp::falcon_sig::FalconKeys;
+    let path =
+        std::path::Path::new(FALCON_KEY_CACHE_DIR).join(format!("{}.ntru", hex::encode(sig_seed)));
+    // Cache file layout: [32-byte pk_g][NTRU basis bytes]. On load we reconstruct the key from the
+    // basis (FFT + LDL only — no `ntru_gen`) and re-derive its pk_g, then require it to equal the
+    // stored pk_g. That consistency check is cheap (~ms, NOT keygen) and rejects a corrupted basis;
+    // any miss falls back to a full `from_seed` keygen and rewrites the cache, so correctness never
+    // depends on the file being present or intact.
+    if let Ok(bytes) = fs::read(&path) {
+        if bytes.len() > 32 {
+            if let Ok(keys) = FalconKeys::from_insecure_ntru_basis_bytes(&bytes[32..]) {
+                if keys.pk_g().to_bytes_be() == bytes[..32] {
+                    return std::sync::Arc::new(keys);
+                }
+            }
+        }
+        // Fall through: corrupt/mismatched entry is regenerated below.
+    }
+    let keys = FalconKeys::from_seed(sig_seed);
+    if fs::create_dir_all(FALCON_KEY_CACHE_DIR).is_ok() {
+        // Best-effort: a write failure only forfeits the speedup, never correctness.
+        let mut blob = keys.pk_g().to_bytes_be();
+        blob.extend_from_slice(&keys.insecure_ntru_basis_bytes());
+        let _ = fs::write(&path, blob);
+    }
+    std::sync::Arc::new(keys)
 }
 
 /// The CLI's canonical keygen seed base for cosigner slots.
@@ -3353,6 +3431,18 @@ struct ChannelBacking {
     /// backing files deserialize to `None` and burns fail closed with a migration instruction.
     #[serde(default)]
     base_private_state: Option<FullPrivateState>,
+    /// The exact identity the block producer assigns the backing deposit when it journals it:
+    /// `deposit_index` (its position in the deposit tree) and `block_number` (the INTMAX validity
+    /// block that folds it). BOTH are inputs to `Deposit::nullifier()`, and the nullifier is the
+    /// leaf pushed onto `settled_tx_chain` — so a genesis proved with different values than the
+    /// producer journals yields a different settle chain, and the resident `LiveBalanceService`
+    /// can never be bound to the signed snapshot. These used to be hardcoded `0`/`0` here while
+    /// the producer assigns `deposit_counts` / `block_number + 1`, which is exactly that split.
+    /// Recorded so every later consumer proves the SAME deposit instance.
+    #[serde(default)]
+    deposit_index: u64,
+    #[serde(default)]
+    deposit_block_number: u64,
 }
 
 /// Canonical form for comparing hex identifiers that different producers spell differently
@@ -4441,14 +4531,16 @@ fn cmd_setup_backing(args: &[String]) {
     // withdrawal proof's finalized-root check at exit (IntmaxRollup.sol:1262) — this only
     // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
     let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
-    let (depositor, txhash) = if no_onchain_deposit {
+    let (depositor, txhash, deposit_index, deposit_block_number) = if no_onchain_deposit {
         let dep_hex = l1_signer.get().address();
         let dep = Address::from_hex(&dep_hex)
             .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
         eprintln!(
             "setup-backing: NO on-chain deposit (P5-B: deferred to `withdraw`); depositor = {dep_hex}."
         );
-        (dep, String::new())
+        // Deferred: there is no journaled deposit yet, so `0`/`0` is the honest identity here —
+        // `withdraw` makes the real one and records its own.
+        (dep, String::new(), 0u64, 0u64)
     } else {
         // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
         // really escrows the value, and we read the deposit back from the receipt.
@@ -4489,9 +4581,22 @@ fn cmd_setup_backing(args: &[String]) {
         // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain,
         // else the witness would not mirror the real deposit. Refuse to back the channel on
         // any mismatch.
+        // The deposit's IDENTITY, not a placeholder. `Deposit::nullifier()` hashes
+        // `deposit_index` and `block_number` along with the payment fields, and that nullifier is
+        // the leaf pushed onto `settled_tx_chain`. The block producer journals this same deposit
+        // as `deposit_index = deposit_counts`, `block_number = block_number + 1`
+        // (`BlockWitnessGenerator::add_deposit`), so proving the genesis with `0`/`0` — as this
+        // did — mints a DIFFERENT nullifier for the same on-chain deposit. The settle chains then
+        // disagree for ever and the resident `LiveBalanceService` can never bind this channel.
+        // Both values are required for a real deposit and come from the producer that journaled
+        // it; there is no default, because guessing one silently forks the chain again.
+        let deposit_index = required_env_u64(DEPOSIT_INDEX_ENV);
+        let deposit_block_number = required_env_u64(DEPOSIT_BLOCK_NUMBER_ENV);
         let rust_deposit = Deposit {
-            deposit_index: Default::default(),
-            block_number: Default::default(),
+            deposit_index: U63::new(deposit_index)
+                .unwrap_or_else(|e| die(format!("{DEPOSIT_INDEX_ENV}: {e:?}"))),
+            block_number: U63::new(deposit_block_number)
+                .unwrap_or_else(|e| die(format!("{DEPOSIT_BLOCK_NUMBER_ENV}: {e:?}"))),
             depositor,
             recipient,
             token_index: 0,
@@ -4504,10 +4609,11 @@ fn cmd_setup_backing(args: &[String]) {
             );
         }
         eprintln!(
-            "setup-backing: on-chain deposit reconciled (depositHashChain {}).",
+            "setup-backing: on-chain deposit reconciled (depositHashChain {}, deposit_index \
+             {deposit_index}, intmax block {deposit_block_number}).",
             onchain_chain.to_hex()
         );
-        (depositor, txhash)
+        (depositor, txhash, deposit_index, deposit_block_number)
     };
 
     // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
@@ -4591,6 +4697,8 @@ fn cmd_setup_backing(args: &[String]) {
             deposit_salt: Some(deposit_salt),
             deposit_recipient: recipient.to_hex(),
             base_private_state: Some(bwg.full_private_state.clone()),
+            deposit_index,
+            deposit_block_number,
         },
     );
     // SECURITY (§10.2, second aggravating detail): this line used to say "REAL on-chain deposit"
@@ -10191,10 +10299,19 @@ fn join_delegate(
     record.set_version = prev.snapshot.record.set_version;
 
     // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any
-    // sends), add the new delegate's slot, bump delegate_count + state_version, clear sigs,
+    // sends), add the new delegate's slot, bump epoch + delegate_count + state_version, clear sigs,
     // members re-sign.
     let mut state = prev.snapshot.state.clone();
     state.prev_digest = state.digest;
+    // A delegate join is a header-only (H2=0) re-signed transition, exactly like a balance refresh,
+    // and every such transition MUST advance `epoch` by one. Omitting it left the join head with an
+    // epoch equal to its parent's, which is malformed as an off-chain advance: the producer's
+    // replay-fenced public head (`sync_offchain_heads`) and the live balance's signed-head bind
+    // both require `epoch == previous.epoch + 1`, so a post-join deposit could never be journaled
+    // ("stale/skipped counters" at the producer; "channel record changed" at the live balance).
+    // Small block and every base asset cursor stay put — a join moves no funds. See the refresh
+    // next-state in `wallet_core` for the canonical header-only shape this mirrors.
+    state.epoch += 1;
     state.balance_state.delegate_count = new_delegate_count;
     // SECURITY (A-1): a JOINING delegate opens at the canonical ZERO ciphertext in EVERY token
     // position — including position 0, which used to receive the joiner-supplied `genesis_ct`. See
@@ -15135,6 +15252,10 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
         "--rpc-url",
         rpc,
         "--broadcast",
+        // Concurrent tx submission hangs forge's broadcaster indefinitely against a local anvil
+        // in this environment (observed: it stalls forever right after the local simulation,
+        // before sending anything, regardless of anvil's mining mode). One-at-a-time avoids it.
+        "--slow",
         "--code-size-limit",
         "50000",
     ]);

@@ -225,6 +225,15 @@ pub struct ProductionDepositRequest {
 }
 
 impl ProductionBlockProducer {
+
+    /// The deposit index this producer will assign to the NEXT deposit it journals. A caller that
+    /// must prove the same deposit instance the producer records (the genesis backing deposit is
+    /// proved by `setup-backing`, journaled here) needs this and `block_number + 1` BEFORE the
+    /// deposit exists: both are hashed into `Deposit::nullifier()`, whose value is the leaf pushed
+    /// onto `settled_tx_chain`.
+    pub fn next_deposit_index(&self) -> u64 {
+        self.witness.deposit_counts
+    }
     pub fn new(supported_user_counts: &[u32]) -> Self {
         Self {
             witness: BlockWitnessGenerator::new(supported_user_counts),

@@ -452,8 +452,8 @@ fn close_funding_prepare_is_durable_frozen_and_exactly_committed() {
         assert!(matches!(
             service.execute(BlockProducerCommand::PostCloseFunding {
                 request_id: "legacy-command".to_string(),
-                signed_state: signed_state.clone(),
-                plan: plan.clone(),
+                signed_state: serde_json::to_value(&signed_state).unwrap(),
+                plan: serde_json::to_value(&plan).unwrap(),
             }),
             Err(BlockProducerServiceError::InvalidRequest(reason))
                 if reason == IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON
@@ -762,7 +762,14 @@ fn prepared_journal_metadata_and_semantic_result_tampering_fail_closed() {
                 disk["prepared"]["requestFingerprint"] =
                     serde_json::to_value(Bytes32::default()).unwrap()
             }
-            3 => disk["prepared"]["action"]["timestamp"] = serde_json::json!(0),
+            3 => {
+                // The journal action is externally tagged, so its fields live under the single
+                // variant key (e.g. `action.postCloseFunding.timestamp`), not directly on
+                // `action`. Reach the timestamp through whatever that one key is.
+                let action = disk["prepared"]["action"].as_object_mut().expect("action object");
+                let variant = action.keys().next().expect("one variant key").clone();
+                action[&variant]["timestamp"] = serde_json::json!(0);
+            }
             4 => {
                 let block = disk["prepared"]["result"]["blockNumber"]
                     .as_u64()
@@ -1035,10 +1042,10 @@ fn retired_member_set_update_has_only_fail_closed_tombstones() {
 
     let command_refused = service.execute(BlockProducerCommand::PostMemberSetUpdate {
         request_id: "retired-msu-command".to_string(),
-        signed_state: snapshot.state.clone(),
-        old_members: snapshot.members.clone(),
-        new_record: snapshot.record.clone(),
-        new_members: snapshot.members.clone(),
+        signed_state: serde_json::to_value(&snapshot.state).unwrap(),
+        old_members: serde_json::to_value(&snapshot.members).unwrap(),
+        new_record: serde_json::to_value(&snapshot.record).unwrap(),
+        new_members: serde_json::to_value(&snapshot.members).unwrap(),
     });
     assert!(matches!(
         command_refused,

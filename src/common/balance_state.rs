@@ -992,6 +992,49 @@ mod tests {
         .unwrap()
     }
 
+    /// The sparse `enc_balances`/`pending_adds` rows must round-trip through BOTH codecs that
+    /// carry a `BalanceState`:
+    ///   * serde_json — `channel_snapshot.json`, `channel_backing.json`, and every daemon IPC
+    ///     payload (the daemon materializes those payloads with `serde_json::from_value`, whose
+    ///     map-key deserializer coerces JSON's mandatory string keys back to `u8`);
+    ///   * bincode — the live balance service's on-disk snapshot
+    ///     (`wallet-live-work/producer/live/channel-N/balance.snapshot`), a NON-self-describing
+    ///     format with no `deserialize_any` and true `u8` map keys.
+    ///
+    /// The second bullet is the one that was broken in the field: a key type "fixed" for JSON
+    /// with `deserialize_any` decoded every snapshot read into
+    /// `snapshot verification failed: decode snapshot payload: Serde(AnyNotSupported)`, taking
+    /// every live channel down. Keys must stay plain `u8`; the JSON tagged-enum quirk is handled
+    /// at the daemon boundary (payloads travel as `serde_json::Value`), not here.
+    #[test]
+    fn sparse_token_rows_round_trip_through_both_codecs() {
+        let state = sample_state();
+        assert!(
+            state.enc_balances.iter().any(|row| row.iter().any(|ct| *ct != *zero_ciphertext())),
+            "the fixture must exercise a non-empty sparse row, or this test proves nothing"
+        );
+
+        let json = serde_json::to_string(&state).expect("serialize json");
+        let from_json: BalanceState = serde_json::from_str(&json).expect("json round-trip");
+        assert_eq!(state, from_json);
+
+        // The daemon's payload path: a buffered `serde_json::Value`, then `from_value`.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse to Value");
+        let from_value: BalanceState =
+            serde_json::from_value(value).expect("from_value must coerce string keys to u8");
+        assert_eq!(state, from_value);
+
+        let bytes = bincode::serde::encode_to_vec(&state, bincode::config::standard())
+            .expect("serialize bincode");
+        let (from_bincode, consumed) = bincode::serde::decode_from_slice::<BalanceState, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .expect("bincode round-trip: the live snapshot codec has no deserialize_any");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(state, from_bincode);
+    }
+
     #[test]
     fn h1_is_deterministic_and_sensitive_to_every_field() {
         let base = sample_state();

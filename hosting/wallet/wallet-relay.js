@@ -14,6 +14,37 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// Signer-independent exit: any asset-moving CLI command (L1 deposit import included) refuses to
+// sign until the resident block-producer/live-balance daemon has proved an exit kit for the exact
+// successor. It lazily spawns target/release/block_producer_service on first use, against the same
+// wallet-live-work/ch<N> directories this relay already writes to. `importL1Deposit` is the
+// complete, crash-recoverable orchestration api/server.js already wires up (inspect -> post to the
+// producer journal -> advance the live balance proof -> CLI cosign with its exit kit -> bind the
+// signed snapshot -> sync off-chain heads); a bare `cli(ch, ['cosign-l1-deposit-import', ...])`
+// only does the CLI step, and `liveBindSnapshot` alone fails because the live-balance proof was
+// never advanced past genesis to include this deposit in the first place.
+const { importL1Deposit } = require('../../api/lib/deposit-pipeline');
+const producer = require('../../api/lib/block-producer');
+const { flushPublishedHead } = require('../../api/lib/producer-head');
+const { installHeadExitKit } = require('../../api/lib/exit-kit');
+
+// A `channel_member` failure prints its real diagnosis to STDOUT and only the persistent insecure-
+// keys banner to STDERR, so reporting `e.stderr` alone hides the cause. Combine message, stdout and
+// stderr (stripping the banner noise) into one readable error string for API responses and logs.
+function fullCliError(e) {
+  const parts = [];
+  if (e && e.message) parts.push(String(e.message));
+  for (const stream of [e && e.stdout, e && e.stderr]) {
+    if (!stream) continue;
+    const text = String(stream)
+      .split('\n')
+      .filter((l) => l.trim() && !l.startsWith('!!') && !/INSECURE DETERMINISTIC KEYS/.test(l))
+      .join('\n');
+    if (text.trim()) parts.push(text);
+  }
+  const seen = new Set();
+  return parts.filter((p) => (seen.has(p) ? false : seen.add(p))).join('\n') || String(e);
+}
 const { execFileSync, spawn } = require('child_process');
 const { createBatchWindow, projectToSlim, partitionByAnchor } = require('./batch-window');
 const { publicBacking } = require('./public-backing');
@@ -319,11 +350,28 @@ app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
 // SAME channel N as a distinct delegate. cli_state.json is reset only on relay startup.
 app.post('/api/init', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.mkdirSync(chDir(ch), { recursive: true });
     fs.writeFileSync(wc(ch, 'contribution.json'), JSON.stringify(req.body));
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
+    const snapshot = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    // `init` is create OR join. A delegate JOIN advances the signed head (a new zero-balance
+    // delegate at the boundary, H2=0, epoch+1) while leaving every asset cursor untouched. That
+    // new head must be propagated to the daemon's THREE durable stores or the channel is left
+    // inconsistent: a later deposit's bind fails "settle chain differs"/"record changed", and a
+    // refresh/send fails "SIGNER-INDEPENDENT EXIT REQUIRED: predecessor has no exit-kit receipt".
+    // Only propagate once the channel actually has a bound live balance (a funded/adopted channel);
+    // an unbound genesis has nothing to advance and the first deposit's adoption binds it fresh.
+    // liveBindSnapshot is idempotent, so the initial create and idempotent re-joins are no-ops here.
+    if (producer.liveSnapshotExists(ch)) {
+      const st = await producer.liveStatus(ch);
+      if (Number(st.appliedTransitionCount) > 0 && !st.awaitingChannelBinding) {
+        await producer.liveBindSnapshot(ch, snapshot); // live balance follows (delegate-add gate)
+        await flushPublishedHead(ch);                  // producer public head follows
+        await installHeadExitKit(ch);                  // install the exit-kit receipt for the new head
+      }
+    }
+    res.json(snapshot);
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
@@ -814,7 +862,7 @@ app.post('/api/l1-deposit', (req, res) => {
 // them from the on-chain `Deposited` log. See doc/tasks/deposit-import-threat-model.md.
 app.post('/api/import-deposit', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const b = req.body || {};
     if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
       throw new Error('import-deposit no longer accepts { depositor, amount, tokenIndex }: they are read from the on-chain Deposited log. Send { recipientSlot, txHash }.');
@@ -834,14 +882,16 @@ app.post('/api/import-deposit', (req, res) => {
     }
     if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error('txHash must be 0x + 64 hex chars');
     if (!/^[0-9]{1,4}$/.test(String(slot))) throw new Error('recipientSlot must be a small decimal integer');
-    const args = ['cosign-l1-deposit-import', String(slot), String(txHash), RPC, 'l1_import_cosigned.json'];
-    if (operatorFunded) args.push('--allow-unbound-depositor');
-    cli(ch, args);
+    await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: operatorFunded });
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+    // A failing `channel_member` step writes its real diagnosis to STDOUT and only its persistent
+    // key-safety banner to STDERR, so `e.stderr` alone hides the actual cause (a CLI exit surfaced
+    // as just the banner). Surface message + stdout + stderr so the wallet shows why an import
+    // failed instead of an opaque warning.
+  }).catch((e) => { const full = fullCliError(e); console.error(full); res.status(500).json({ error: full }); });
 });
 
 // ─── Testnet $ITX faucet ───────────────────────────────────────────────────────────────────
@@ -1085,7 +1135,11 @@ function ensureAnvil() {
   if (!rpcUp()) { console.error('anvil did not come up on ' + RPC); process.exit(1); }
 }
 function deployRollup() {
-  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts') });
+  // --slow: concurrent tx submission hangs forge's broadcaster indefinitely against a local
+  // anvil in this environment (observed: it stalls forever right after the local simulation,
+  // before sending anything, regardless of anvil's mining mode). Sending and confirming one
+  // transaction at a time avoids it.
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--slow', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts') });
   const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
   return m[1];
@@ -1094,25 +1148,41 @@ function deployRollup() {
 const needBacking = CHANNELS.filter((ch) =>
   !['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) => fs.existsSync(wc(ch, f)))
 );
-if (needBacking.length) {
+async function bootstrapBacking() {
+  if (!needBacking.length) return;
   console.log(`Setting up REAL on-chain deposit backing (one-time) for channels: ${needBacking.join(', ')}…`);
   ensureAnvil();
   for (const ch of needBacking) {
     console.log(`  channel ${ch}: deploying its own IntmaxRollup…`);
     const addr = deployRollup();
+    // The genesis deposit must be proved with the SAME identity the block producer will journal
+    // for it: `Deposit::nullifier()` hashes the deposit index and the INTMAX block number, and
+    // that nullifier is the leaf pushed onto `settled_tx_chain`. Read both from the producer
+    // before the deposit exists — `add_deposit` assigns `deposit_counts` and `block_number + 1` —
+    // so the genesis proof and the producer's journal describe one deposit, not two.
+    const producerStatus = await producer.status();
+    const depositIdentity = {
+      SETUP_BACKING_DEPOSIT_INDEX: String(producerStatus.nextDepositIndex),
+      SETUP_BACKING_INTMAX_BLOCK_NUMBER: String(Number(producerStatus.blockNumber) + 1),
+    };
     console.log(`  channel ${ch}: IntmaxRollup @ ${addr} — setup-backing (real ETH deposit + balance proof, ~30s)…`);
-    cli(ch, ['setup-backing', RPC, addr]);
+    cli(ch, ['setup-backing', RPC, addr], depositIdentity);
   }
 }
 
-// After backing exists (verification reads channel_backing.json's rollup).
-loadTokenManifests(RPC);
-
-https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
-  console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);
-});
 const http = require('http');
 const HTTP_PORT = PORT + 1;
-http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
-  console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
+
+bootstrapBacking().then(() => {
+  // After backing exists (verification reads channel_backing.json's rollup).
+  loadTokenManifests(RPC);
+  https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
+    console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);
+  });
+  http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
+    console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
+  });
+}).catch((e) => {
+  console.error('backing bootstrap failed:', e.stderr ? String(e.stderr) : (e.message || e));
+  process.exit(1);
 });

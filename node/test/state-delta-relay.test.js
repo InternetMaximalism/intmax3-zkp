@@ -226,9 +226,31 @@ test('every row changing falls back rather than shipping a delta with no savings
   const baseSnap = JSON.parse(fs.readFileSync(SNAP, 'utf8'));
   const n = baseSnap.state.balanceState.encBalances.length;
   const headSnap = nextSnapshot(baseSnap, 0, 1);
+  // Change EVERY row, so the delta saves nothing and must fall back. A row with a populated token
+  // position changes when we perturb its ciphertext; an EMPTY sparse row (e.g. a freshly joined
+  // zero-balance delegate — this fixture is a live working-tree snapshot whose shape moves with
+  // joins) has no key to perturb, so it only "changes" if we give it one. Without this, an empty
+  // row stays identical, the delta legitimately saves that one row, and the all-rows-changed
+  // fallback never triggers — which used to make this assertion break the first time the live ch7
+  // channel had a delegate join.
+  const template = (() => {
+    for (let i = 0; i < n; i++) {
+      const keys = Object.keys(baseSnap.state.balanceState.encBalances[i]);
+      if (keys.length) {
+        return JSON.parse(JSON.stringify(baseSnap.state.balanceState.encBalances[i][keys[0]]));
+      }
+    }
+    return null;
+  })();
   for (let i = 0; i < n; i++) {
-    for (const k of Object.keys(headSnap.state.balanceState.encBalances[i])) {
-      headSnap.state.balanceState.encBalances[i][k].c1[0] = (i + 1) * 7919;
+    const row = headSnap.state.balanceState.encBalances[i];
+    const keys = Object.keys(row);
+    if (keys.length) {
+      for (const k of keys) row[k].c1[0] = (i + 1) * 7919;
+    } else if (template) {
+      const injected = JSON.parse(JSON.stringify(template));
+      injected.c1[0] = (i + 1) * 7919;
+      row['0'] = injected;
     }
   }
   R.recordFingerprint(7, R.fingerprintState(baseSnap.state));

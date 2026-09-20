@@ -64,7 +64,7 @@ use crate::{
         tx::Tx,
         withdrawal::Withdrawal,
     },
-    constants::BURN_CHANNEL_ID,
+    constants::{BURN_CHANNEL_ID, MAX_CHANNEL_MEMBERS},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -1296,16 +1296,22 @@ impl LiveBalanceService {
                     "bound live balance has no previous signed head".into(),
                 )
             })?;
-            if self
-                .disk
-                .channel_record
-                .as_ref()
-                .map(ChannelRecord::signing_digest)
-                != Some(signed_snapshot.record.signing_digest())
-            {
-                return Err(LiveBalanceServiceError::InvalidRequest(
-                    "channel record changed during ordinary signed-head advancement".into(),
-                ));
+            let pinned_record = self.disk.channel_record.as_ref().ok_or_else(|| {
+                LiveBalanceServiceError::Snapshot(
+                    "bound live balance has no pinned channel record".into(),
+                )
+            })?;
+            if pinned_record.signing_digest() != signed_snapshot.record.signing_digest() {
+                // The ONLY record change an ordinary signed-head advance may carry is a single
+                // delegate join. The co-signer set — the sole signing authority — is invariant
+                // across a join, so the SAME N-of-N that signed the previous head signs this one;
+                // no sitting member is added or evicted without consent. Anything else (a co-signer
+                // add/rotate) needs the retired validity-chain member-set-update, not this path.
+                // A join is otherwise an ordinary header-only transition (epoch + 1,
+                // state_version + 1, small_block and every asset cursor unchanged, a provably
+                // zero-balance new slot), so once the record delta itself is authorized here it
+                // flows through the ordinary counter/asset checks below unchanged.
+                is_single_delegate_add(pinned_record, &signed_snapshot.record)?;
             }
             if signed_snapshot.state.prev_digest != previous.digest
                 || signed_snapshot.state.close_freeze_nonce != previous.close_freeze_nonce
@@ -3076,6 +3082,73 @@ fn verify_record_and_head_continuity(
     Ok(())
 }
 
+/// Is `new_record` exactly `old_record` with ONE delegate appended at the left-packed boundary,
+/// and nothing else touched? This is the shape `channel_member`'s `join_delegate` produces: the
+/// co-signer set (`member_count`, `member_pk_gs[0..member_count]`, `set_version`) is untouched, a
+/// single new delegate lands at slot `member_count + old_delegate_count`, and `delegate_count`
+/// grows by one.
+///
+/// SECURITY: a delegate add is the one member-set change the live balance may follow WITHOUT a
+/// dedicated authenticated transition proof, and only because the co-signer set is invariant. The
+/// caller re-verifies that the new head is N-of-N signed (`verify_candidate_semantics`); since the
+/// co-signers are unchanged, the SAME authority that signed the previous head signs this one, so no
+/// sitting member is added or evicted without consent. A co-signer rotate/add (which WOULD change
+/// `member_count`/`member_pk_gs[0..member_count]`/`set_version`) is deliberately rejected here — it
+/// needs the retired validity-chain member-set-update block, not this path. The new delegate opens
+/// at a zero balance, checked separately by the caller's asset-vector invariants.
+fn is_single_delegate_add(
+    old_record: &ChannelRecord,
+    new_record: &ChannelRecord,
+) -> Result<(), LiveBalanceServiceError> {
+    let reject = |m: &str| Err(LiveBalanceServiceError::InvalidRequest(m.to_string()));
+    if new_record.channel_id != old_record.channel_id {
+        return reject("delegate add: channel id changed");
+    }
+    // The co-signer set — the only signing authority — must be byte-for-byte unchanged.
+    if new_record.member_count != old_record.member_count {
+        return reject("delegate add: co-signer member_count changed (not a delegate add)");
+    }
+    if new_record.set_version != old_record.set_version {
+        return reject("delegate add: set_version changed (co-signer updates are retired here)");
+    }
+    if new_record.status != old_record.status || new_record.bp_member_slot != old_record.bp_member_slot
+    {
+        return reject("delegate add: record status/bp slot changed");
+    }
+    // delegate_count grows by exactly one, staying within the slot array.
+    let old_delegates = old_record.delegate_count;
+    if new_record.delegate_count != old_delegates.checked_add(1).ok_or_else(|| {
+        LiveBalanceServiceError::InvalidRequest("delegate add: delegate_count overflow".into())
+    })? {
+        return reject("delegate add: delegate_count did not grow by exactly one");
+    }
+    let boundary = old_record.member_count as usize + old_delegates as usize;
+    if boundary >= MAX_CHANNEL_MEMBERS {
+        return reject("delegate add: channel is full");
+    }
+    // `member_pk_gs` must be an exact prefix-preserving append: every active-or-padding slot equals
+    // the old array, except the boundary slot which goes from empty (zero) to a nonzero identity.
+    for slot in 0..MAX_CHANNEL_MEMBERS {
+        if slot == boundary {
+            if old_record.member_pk_gs[slot] != Bytes32::default() {
+                return reject("delegate add: boundary slot was not empty");
+            }
+            if new_record.member_pk_gs[slot] == Bytes32::default() {
+                return reject("delegate add: new delegate identity is empty");
+            }
+        } else if new_record.member_pk_gs[slot] != old_record.member_pk_gs[slot] {
+            return reject("delegate add: an existing slot's identity changed");
+        }
+    }
+    // The new identity must be distinct from every other slot — a duplicate is a removal in
+    // disguise (mirrors `validate_member_set_delta`'s M-1 guard for co-signers).
+    let added = new_record.member_pk_gs[boundary];
+    if (0..MAX_CHANNEL_MEMBERS).any(|i| i != boundary && new_record.member_pk_gs[i] == added) {
+        return reject("delegate add: the new delegate identity duplicates an existing slot");
+    }
+    Ok(())
+}
+
 fn make_receipt(
     disk: &LiveBalanceSnapshot,
     producer_receipt: &BlockProducerReceipt,
@@ -3760,5 +3833,103 @@ impl Drop for SnapshotLock {
     fn drop(&mut self) {
         // SAFETY: the descriptor remains valid until after this Drop implementation returns.
         let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(test)]
+mod delegate_add_gate_tests {
+    use super::*;
+    use crate::common::channel::ChannelStatus;
+
+    // A pk_g value that is nonzero and distinct per `n` (0 is the empty/padding sentinel).
+    fn pkg(n: u8) -> Bytes32 {
+        let mut limbs = [0u32; 8];
+        limbs[0] = 0x1000 + n as u32;
+        Bytes32::from_u32_slice(&limbs).unwrap()
+    }
+
+    /// A record with `members` co-signers at slots 0..members and `delegates` delegates packed
+    /// immediately after, each slot carrying a distinct nonzero identity.
+    fn record(members: u8, delegates: u16) -> ChannelRecord {
+        let active = members as usize + delegates as usize;
+        let member_pk_gs = std::array::from_fn(|i| {
+            if i < active { pkg(i as u8) } else { Bytes32::default() }
+        });
+        ChannelRecord {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: members,
+            delegate_count: delegates,
+            member_pk_gs,
+            member_pubkeys_root: Bytes32::default(),
+            set_version: 1,
+            bp_member_slot: 0,
+            special_close_penalty: U256::default(),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: Bytes32::default(),
+        }
+    }
+
+    #[test]
+    fn accepts_a_single_delegate_added_at_the_boundary() {
+        let old = record(3, 1); // slots 0,1,2 co-signers; slot 3 delegate
+        let new = record(3, 2); // slot 4 delegate appended
+        assert!(is_single_delegate_add(&old, &new).is_ok());
+    }
+
+    #[test]
+    fn accepts_the_first_delegate_join() {
+        assert!(is_single_delegate_add(&record(3, 0), &record(3, 1)).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_co_signer_add_masquerading_as_a_record_change() {
+        // member_count grew: this is a co-signer change, which needs the retired validity-chain
+        // member-set-update — never this fast path.
+        let old = record(3, 1);
+        let new = record(4, 1);
+        assert!(is_single_delegate_add(&old, &new).is_err());
+    }
+
+    #[test]
+    fn rejects_a_set_version_bump() {
+        let old = record(3, 1);
+        let mut new = record(3, 2);
+        new.set_version = old.set_version + 1;
+        assert!(is_single_delegate_add(&old, &new).is_err());
+    }
+
+    #[test]
+    fn rejects_two_delegates_at_once() {
+        assert!(is_single_delegate_add(&record(3, 1), &record(3, 3)).is_err());
+    }
+
+    #[test]
+    fn rejects_no_change() {
+        assert!(is_single_delegate_add(&record(3, 1), &record(3, 1)).is_err());
+    }
+
+    #[test]
+    fn rejects_a_changed_existing_identity() {
+        let old = record(3, 1);
+        let mut new = record(3, 2);
+        new.member_pk_gs[1] = pkg(99); // rewrote a sitting co-signer's identity
+        assert!(is_single_delegate_add(&old, &new).is_err());
+    }
+
+    #[test]
+    fn rejects_a_duplicate_new_identity() {
+        let old = record(3, 1);
+        let mut new = record(3, 2);
+        new.member_pk_gs[4] = new.member_pk_gs[2]; // the "new" delegate duplicates slot 2
+        assert!(is_single_delegate_add(&old, &new).is_err());
+    }
+
+    #[test]
+    fn rejects_an_empty_new_identity() {
+        let old = record(3, 1);
+        let mut new = record(3, 2);
+        new.member_pk_gs[4] = Bytes32::default(); // count says added, but the slot is empty
+        assert!(is_single_delegate_add(&old, &new).is_err());
     }
 }

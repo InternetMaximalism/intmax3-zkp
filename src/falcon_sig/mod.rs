@@ -179,6 +179,56 @@ impl FalconKeys {
         Self { sk }
     }
 
+    /// Serialize the NTRU short lattice basis — the expensive `ntru_gen` output — as
+    /// `4 * FALCON_N` little-endian `i16` coefficients, so a caller can cache it and later
+    /// reconstruct this EXACT keypair via [`from_ntru_basis_bytes`] WITHOUT re-running keygen
+    /// (`ntru_gen` dominates keygen at ~455 ms; rebuilding the LDL tree from the basis is far
+    /// cheaper).
+    ///
+    /// SECURITY: this exposes SECRET key material as bytes — exactly the leak-by-default the type
+    /// otherwise refuses. It exists ONLY to cache the publicly-derivable
+    /// `INTMAX_INSECURE_DETERMINISTIC_KEYS` test identities (worthless by construction). NEVER
+    /// persist a production key with it. Callers must gate on the insecure key provenance.
+    ///
+    /// [`from_ntru_basis_bytes`]: FalconKeys::from_ntru_basis_bytes
+    pub fn insecure_ntru_basis_bytes(&self) -> Vec<u8> {
+        let basis = self.sk.short_lattice_basis();
+        let mut out = Vec::with_capacity(4 * FALCON_N * 2);
+        for poly in basis.iter() {
+            for coeff in poly.coefficients.iter() {
+                out.extend_from_slice(&coeff.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Reconstruct a keypair from [`insecure_ntru_basis_bytes`], skipping `ntru_gen`. The LDL tree
+    /// is recomputed deterministically from the basis, so the result is byte-identical to the
+    /// original keypair (same `pk_g`, same signing behavior). See the security note there — insecure
+    /// test identities only.
+    ///
+    /// [`insecure_ntru_basis_bytes`]: FalconKeys::insecure_ntru_basis_bytes
+    pub fn from_insecure_ntru_basis_bytes(bytes: &[u8]) -> Result<Self, FalconSigError> {
+        let expected = 4 * FALCON_N * 2;
+        if bytes.len() != expected {
+            return Err(FalconSigError::InvalidLength(bytes.len(), expected));
+        }
+        let mut polys: Vec<Polynomial<i16>> = Vec::with_capacity(4);
+        for poly_bytes in bytes.chunks_exact(FALCON_N * 2) {
+            let coefficients: Vec<i16> = poly_bytes
+                .chunks_exact(2)
+                .map(|le| i16::from_le_bytes([le[0], le[1]]))
+                .collect();
+            polys.push(Polynomial { coefficients });
+        }
+        let basis: [Polynomial<i16>; 4] = polys
+            .try_into()
+            .map_err(|_| FalconSigError::InvalidLength(bytes.len(), expected))?;
+        Ok(Self {
+            sk: SecretKey::from_short_lattice_basis(basis),
+        })
+    }
+
     /// The canonical coefficients of the public polynomial `h` (each `< q = 12289`).
     pub fn pk_coefficients(&self) -> [u16; FALCON_N] {
         let pk = self.sk.public_key();
@@ -586,6 +636,34 @@ mod tests {
     /// `constants.rs::all_domain_constants_pairwise_distinct` and will be merged there in
     /// Phase 2).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn ntru_basis_cache_round_trips_to_the_identical_key() {
+        // Caching the NTRU basis and reconstructing (skipping `ntru_gen`) must yield the EXACT same
+        // keypair: same pk_g, and signatures it produces verify under the original identity. This
+        // pins the perf cache used for INSECURE deterministic co-signer keys (keys_for), which cut
+        // ~2.6 s of per-co-sign NTRU keygen.
+        let original = FalconKeys::from_seed([42u8; 32]);
+        let bytes = original.insecure_ntru_basis_bytes();
+        let restored = FalconKeys::from_insecure_ntru_basis_bytes(&bytes)
+            .expect("basis round-trip must decode");
+        assert_eq!(restored.pk_g(), original.pk_g(), "reconstructed identity must match");
+        assert_eq!(
+            restored.pk_coefficients(),
+            original.pk_coefficients(),
+            "reconstructed public polynomial must match"
+        );
+        // A signature from the restored key verifies under the original identity.
+        let digest = sample_digest(0x5a);
+        let sig = restored.sign(digest);
+        assert!(
+            verify(&original.pk_coefficients(), digest, &sig),
+            "signature from the cache-reconstructed key must verify under the original pk"
+        );
+        // A truncated/oversized blob is rejected, not silently mis-decoded.
+        assert!(FalconKeys::from_insecure_ntru_basis_bytes(&bytes[..bytes.len() - 1]).is_err());
+        assert!(FalconKeys::from_insecure_ntru_basis_bytes(&[]).is_err());
+    }
+
     #[test]
     fn falcon_domains_do_not_collide() {
         assert_eq!(DOMAIN_FALCON_H2P, u32::from_be_bytes(*b"IMFH"));

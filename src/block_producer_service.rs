@@ -78,7 +78,17 @@ impl BlockProducerServiceError {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+// EXTERNALLY tagged on purpose. This enum is only ever written to and read from the daemon's own
+// on-disk journal (a private format, not a cross-process contract), and its variants hold a
+// `ChannelState`/`ChannelSnapshot` whose sparse `encBalances`/`pendingAdds` rows are `u8`-keyed
+// maps. An internally-tagged (`tag = "kind"`) enum deserializes through serde's buffered `Content`
+// tree, whose map keys are strings, so `u8::deserialize` there rejects `"0"` — which meant every
+// daemon restart failed to parse its own journal ("invalid type: string \"0\", expected u8") and
+// took the whole producer, and every channel it serves, permanently offline. External tagging
+// deserializes each variant's payload straight from the deserializer with no `Content` buffer, so
+// serde_json coerces the string keys back to `u8`. The `u8` key type is deliberately unchanged:
+// the live snapshot persists the same rows through bincode, which has no `deserialize_any`.
+#[serde(rename_all = "camelCase")]
 enum ProductionJournalAction {
     Register {
         snapshot: ChannelSnapshot,
@@ -289,15 +299,34 @@ pub struct BlockProducerServiceStatus {
     pub registered_channel_count: usize,
     pub channel_heads: Vec<ProductionChannelHead>,
     pub holds_local_signing_keys: bool,
+    /// The index this producer will assign the NEXT deposit it journals. With `block_number + 1`
+    /// this is the exact identity a deposit will get, which a genesis prover must use so both
+    /// sides hash the same `Deposit` into the same nullifier and the same settle chain.
+    pub next_deposit_index: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "command", rename_all = "camelCase")]
+// `rename_all_fields` matters as much as `rename_all` here: the JSONL wire this enum is read from
+// is camelCase throughout, and its two sibling command sets (`ValidityCommand`, `LiveCommand`)
+// both declare it. Without it the VARIANT names matched while every FIELD stayed snake_case, so
+// `{"command":"postDeposit","requestId":...}` — exactly what api/lib/block-producer.js sends —
+// failed to deserialize, and the untagged `ServiceCommand` wrapper reported only a generic "did
+// not match any variant". That silently disabled the whole producer command surface (every
+// variant here carries a `request_id`), which is why no deposit could ever be journaled.
+#[serde(tag = "command", rename_all = "camelCase", rename_all_fields = "camelCase")]
+// Payloads that carry a `ChannelState`/`ChannelSnapshot` travel as `serde_json::Value` and are
+// materialized inside `execute` with `serde_json::from_value`. This is deliberate, not laziness:
+// an internally-tagged enum deserializes its fields through serde's buffered `Content` tree, whose
+// map-key deserializer rejects the `u8` token positions of the sparse `encBalances`/`pendingAdds`
+// rows ("invalid type: string \"0\", expected u8") even though the exact same JSON parses fine on
+// its own. `from_value` uses serde_json's own key coercion, and the `u8` keys themselves must not
+// change: the live balance snapshot persists the same rows through bincode, which has no
+// `deserialize_any` for a stringly-typed key to hide behind.
 pub enum BlockProducerCommand {
     Status,
     Register {
         request_id: String,
-        snapshot: ChannelSnapshot,
+        snapshot: serde_json::Value,
     },
     PostDeposit {
         request_id: String,
@@ -305,41 +334,41 @@ pub enum BlockProducerCommand {
     },
     SyncOffchainHeads {
         request_id: String,
-        signed_states: Vec<ChannelState>,
+        signed_states: serde_json::Value,
     },
     PostInterChannel {
         request_id: String,
-        signed_state: ChannelState,
-        debit_payload: InterChannelDebitPayload,
-        descriptor: InterChannelTransferDescriptor,
+        signed_state: serde_json::Value,
+        debit_payload: serde_json::Value,
+        descriptor: serde_json::Value,
     },
     PostCloseFunding {
         request_id: String,
-        signed_state: ChannelState,
-        plan: CloseFundingPlan,
+        signed_state: serde_json::Value,
+        plan: serde_json::Value,
     },
     PrepareCloseFunding {
         request_id: String,
-        signed_state: ChannelState,
-        plan: CloseFundingPlan,
+        signed_state: serde_json::Value,
+        plan: serde_json::Value,
     },
     /// Stage the exit-kit block of a proposed, unsigned post-debit state (see
     /// [`BlockProducerService::prepare_inter_channel_exit_kit`]).
     PrepareInterChannelExitKit {
         request_id: String,
-        proposed_state: ChannelState,
-        debit_payload: InterChannelDebitPayload,
-        descriptor: InterChannelTransferDescriptor,
+        proposed_state: serde_json::Value,
+        debit_payload: serde_json::Value,
+        descriptor: serde_json::Value,
     },
     AbandonPreparedInterChannelExitKit {
         request_id: String,
     },
     PostMemberSetUpdate {
         request_id: String,
-        signed_state: ChannelState,
-        old_members: Vec<MemberInfo>,
-        new_record: ChannelRecord,
-        new_members: Vec<MemberInfo>,
+        signed_state: serde_json::Value,
+        old_members: serde_json::Value,
+        new_record: serde_json::Value,
+        new_members: serde_json::Value,
     },
 }
 
@@ -420,8 +449,20 @@ impl BlockProducerService {
             registered_channel_count: head.registered_channel_count,
             channel_heads: head.channel_heads,
             holds_local_signing_keys: self.producer.holds_any_local_signing_keys(),
+            next_deposit_index: self.producer.next_deposit_index(),
         })
     }
+
+
+/// Materialize a command payload that traveled as `serde_json::Value` (see the note on
+/// [`BlockProducerCommand`] for why the tagged enum cannot hold these types directly).
+fn command_payload<T: serde::de::DeserializeOwned>(
+    what: &'static str,
+    value: serde_json::Value,
+) -> Result<T, BlockProducerServiceError> {
+    serde_json::from_value(value)
+        .map_err(|e| BlockProducerServiceError::InvalidRequest(format!("invalid {what}: {e}")))
+}
 
     pub fn execute(
         &mut self,
@@ -432,9 +473,12 @@ impl BlockProducerService {
             BlockProducerCommand::Register {
                 request_id,
                 snapshot,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.register(request_id, snapshot)?,
-            )),
+            } => {
+                let snapshot: ChannelSnapshot = Self::command_payload("register snapshot", snapshot)?;
+                Ok(BlockProducerCommandResult::Receipt(
+                    self.register(request_id, snapshot)?,
+                ))
+            }
             BlockProducerCommand::PostDeposit {
                 request_id,
                 deposit,
@@ -444,17 +488,29 @@ impl BlockProducerService {
             BlockProducerCommand::SyncOffchainHeads {
                 request_id,
                 signed_states,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.sync_offchain_heads(request_id, signed_states)?,
-            )),
+            } => {
+                let signed_states: Vec<ChannelState> =
+                    Self::command_payload("signed head states", signed_states)?;
+                Ok(BlockProducerCommandResult::Receipt(
+                    self.sync_offchain_heads(request_id, signed_states)?,
+                ))
+            }
             BlockProducerCommand::PostInterChannel {
                 request_id,
                 signed_state,
                 debit_payload,
                 descriptor,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
-            )),
+            } => {
+                let signed_state: ChannelState =
+                    Self::command_payload("inter-channel signed state", signed_state)?;
+                let debit_payload: InterChannelDebitPayload =
+                    Self::command_payload("inter-channel debit payload", debit_payload)?;
+                let descriptor: InterChannelTransferDescriptor =
+                    Self::command_payload("inter-channel descriptor", descriptor)?;
+                Ok(BlockProducerCommandResult::Receipt(
+                    self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
+                ))
+            }
             BlockProducerCommand::PostCloseFunding {
                 request_id: _,
                 signed_state: _,
@@ -472,14 +528,22 @@ impl BlockProducerService {
                 proposed_state,
                 debit_payload,
                 descriptor,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.prepare_inter_channel_exit_kit(
-                    request_id,
-                    proposed_state,
-                    debit_payload,
-                    descriptor,
-                )?,
-            )),
+            } => {
+                let proposed_state: ChannelState =
+                    Self::command_payload("proposed exit-kit state", proposed_state)?;
+                let debit_payload: InterChannelDebitPayload =
+                    Self::command_payload("exit-kit debit payload", debit_payload)?;
+                let descriptor: InterChannelTransferDescriptor =
+                    Self::command_payload("exit-kit descriptor", descriptor)?;
+                Ok(BlockProducerCommandResult::Receipt(
+                    self.prepare_inter_channel_exit_kit(
+                        request_id,
+                        proposed_state,
+                        debit_payload,
+                        descriptor,
+                    )?,
+                ))
+            }
             BlockProducerCommand::AbandonPreparedInterChannelExitKit { request_id } => {
                 self.abandon_prepared_inter_channel_exit_kit(&request_id)?;
                 Ok(BlockProducerCommandResult::Status(self.status()?))
@@ -2235,6 +2299,137 @@ impl Drop for JournalLock {
         {
             // SAFETY: the descriptor remains valid until this field is dropped after `drop`.
             let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod journal_roundtrip_tests {
+    use super::*;
+    use crate::common::balance_state::BalanceState;
+    use crate::common::channel::{ChannelFund, ChannelState};
+    use crate::common::channel_id::ChannelId;
+    use crate::ethereum_types::u256::U256;
+    use crate::regev::encrypt::RegevCiphertext;
+    use crate::regev::{REGEV_N, REGEV_Q};
+
+    fn nonzero_ciphertext() -> RegevCiphertext {
+        // A canonical, distinctly non-padding ring element, so its sparse row carries a real
+        // `"0"` token key (padding would be filtered out and the bug would not trigger).
+        RegevCiphertext {
+            c1: (0..REGEV_N as u32).map(|i| (i * 2 + 1) % REGEV_Q).collect(),
+            c2: (0..REGEV_N as u32).map(|i| (i * 3 + 2) % REGEV_Q).collect(),
+        }
+    }
+
+    /// The producer journal is written and re-read across every daemon restart, and its
+    /// `ProductionJournalAction` variants carry a `ChannelState`/`ChannelSnapshot` whose sparse
+    /// `encBalances`/`pendingAdds` rows are `u8`-keyed. When the enum was internally tagged the
+    /// reread failed with `invalid type: string "0", expected u8` — a restart could not parse the
+    /// daemon's own journal, taking the producer and every channel it serves permanently offline.
+    /// This pins the JSON round-trip on a state that actually has a non-empty sparse row, the case
+    /// the pre-existing deposit-only restart test never exercised (a bare `ProductionDepositRequest`
+    /// has no `u8` maps, and a genesis state's rows are all padding).
+    #[test]
+    fn journal_action_round_trips_with_a_non_empty_sparse_row() {
+        let state = ChannelState {
+            channel_id: ChannelId::new(7).unwrap(),
+            epoch: 0,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id: ChannelId::new(7).unwrap(),
+                amounts: std::array::from_fn(|_| U256::default()),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: BalanceState {
+                channel_id: ChannelId::new(7).unwrap(),
+                member_count: 1,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances_token0(&[nonzero_ciphertext()]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[]),
+                settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 1,
+                pending_adds: BalanceState::pad_pending_adds_token0(&[5]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::default(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: Vec::new(),
+        };
+        // Sanity: the fixture must actually carry a non-empty sparse row, or it proves nothing.
+        let raw = serde_json::to_string(&state.balance_state).unwrap();
+        assert!(raw.contains("\"0\""), "fixture must have a sparse u8 key to exercise the bug");
+
+        let action = ProductionJournalAction::SyncOffchainHeads {
+            signed_states: vec![state],
+            timestamp: 42,
+        };
+        let json = serde_json::to_string(&action).expect("serialize journal action");
+        let back: ProductionJournalAction = serde_json::from_str(&json)
+            .expect("the journal must re-read across a daemon restart");
+        assert_eq!(format!("{action:?}"), format!("{back:?}"));
+    }
+}
+
+#[cfg(test)]
+mod command_wire_tests {
+    use super::*;
+
+    /// The JSONL surface `api/lib/block-producer.js` speaks is camelCase throughout — variant
+    /// names AND field names — and so are this enum's two siblings (`ValidityCommand`,
+    /// `LiveCommand`). `rename_all` alone covered only the variant names, so every field-bearing
+    /// command here (all of them carry `requestId`) failed to deserialize, while the untagged
+    /// `ServiceCommand` wrapper reduced the reason to a generic "did not match any variant". The
+    /// entire producer surface was unreachable from the client as a result: no deposit could be
+    /// journaled, so no live balance transition and no exit kit could follow. Pin the exact
+    /// spelling the client sends.
+    #[test]
+    fn producer_commands_deserialize_from_the_camel_case_client_wire() {
+        let sync: BlockProducerCommand = serde_json::from_str(
+            r#"{"command":"syncOffchainHeads","requestId":"r-1","signedStates":[]}"#,
+        )
+        .expect("syncOffchainHeads must parse with camelCase fields");
+        match sync {
+            BlockProducerCommand::SyncOffchainHeads {
+                request_id,
+                signed_states,
+            } => {
+                assert_eq!(request_id, "r-1");
+                // The heavy payload travels as `Value` (materialized in `execute` with
+                // `from_value`); here it is simply the array the client sent.
+                assert_eq!(signed_states, serde_json::json!([]));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let deposit: BlockProducerCommand = serde_json::from_str(
+            r#"{"command":"postDeposit","requestId":"r-2","deposit":{
+                "depositIndex":7,
+                "depositor":"0x1111111111111111111111111111111111111111",
+                "recipient":"0x2222222222222222222222222222222222222222222222222222222222222222",
+                "tokenIndex":0,
+                "amount":"5",
+                "auxData":"0x0000000000000000000000000000000000000000000000000000000000000000",
+                "expectedDepositHashChain":"0x3333333333333333333333333333333333333333333333333333333333333333"
+            }}"#,
+        )
+        .expect("postDeposit must parse with camelCase fields");
+        match deposit {
+            BlockProducerCommand::PostDeposit {
+                request_id,
+                deposit,
+            } => {
+                assert_eq!(request_id, "r-2");
+                assert_eq!(deposit.deposit_index, 7);
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 }

@@ -12,6 +12,7 @@ use intmax3_zkp::{
     common::{
         channel::{ChannelRecord, ChannelState},
         channel_id::ChannelId,
+        salt::Salt,
     },
     ethereum_types::{address::Address, bytes32::Bytes32},
     live_balance_service::{
@@ -172,15 +173,43 @@ enum LiveCommand {
         producer_receipt: BlockProducerReceipt,
         deposit: ProductionDepositRequest,
     },
+    /// Put the live balance on an EXISTING base account instead of minting a second one.
+    ///
+    /// `liveInit` generates a fresh random account salt, which is right only when this service is
+    /// the channel's first mover. When `setup-backing` already created and proved the base account
+    /// (it derives its salt deterministically and records it in `channel_backing.json`), a fresh
+    /// account is a DIFFERENT account: the same deposit folded into it yields a different settle
+    /// chain, so the signed snapshot can never be bound and the channel is unusable. There is one
+    /// account per channel; this names it.
+    LiveInitWithAccountSalt {
+        channel_id: ChannelId,
+        account_salt: Salt,
+    },
+    /// Adopt a deposit made to a recipient this service did NOT configure: the one `setup-backing`
+    /// derived from its own salt before any live balance existed. Without it, a channel whose
+    /// genesis is already funded can never be bound — `liveInit` starts at an empty proof while
+    /// the signed snapshot already carries the backing deposit's settle chain, so
+    /// `bind_signed_snapshot` rejects the pair for ever.
+    ///
+    /// SECURITY: the caller supplies the salt but cannot mis-credit with it. The salt must
+    /// reproduce the deposit's ON-CHAIN recipient (`receive_deposit_unbound` recomputes
+    /// `calculate_recipient_from_user_id` and rejects a mismatch), and the deposit itself is
+    /// authenticated against the producer journal's L1 leaf, not against anything the caller says.
+    LiveReceiveBackingDeposit {
+        channel_id: ChannelId,
+        producer_receipt: BlockProducerReceipt,
+        deposit: ProductionDepositRequest,
+        deposit_salt: Salt,
+    },
     LiveBindSnapshot {
         channel_id: ChannelId,
-        signed_snapshot: ChannelSnapshot,
+        signed_snapshot: serde_json::Value,
     },
     LiveSettleInterChannel {
         channel_id: ChannelId,
         producer_receipt: BlockProducerReceipt,
-        signed_state: ChannelState,
-        debit_payload: InterChannelDebitPayload,
+        signed_state: serde_json::Value,
+        debit_payload: serde_json::Value,
         descriptor: InterChannelTransferDescriptor,
     },
     LiveSendArtifact {
@@ -196,7 +225,7 @@ enum LiveCommand {
     /// it is committed by `postInterChannel` or abandoned.
     LivePrepareExitKit {
         channel_id: ChannelId,
-        proposal: LiveExitKitProposal,
+        proposal: serde_json::Value,
     },
     /// Drop a staged debit exit-kit block whose transition will not be signed.
     LiveAbandonPreparedExitKit {
@@ -215,7 +244,7 @@ enum LiveCommand {
     LiveSettleCloseFunding {
         channel_id: ChannelId,
         producer_receipt: BlockProducerReceipt,
-        signed_state: ChannelState,
+        signed_state: serde_json::Value,
         plan: CloseFundingPlan,
     },
     LiveCloseFundingPayoutArtifacts {
@@ -234,11 +263,11 @@ enum LiveCommand {
     LiveReceiveInterChannel {
         channel_id: ChannelId,
         producer_receipt: BlockProducerReceipt,
-        debit_payload: InterChannelDebitPayload,
+        debit_payload: serde_json::Value,
         descriptor: InterChannelTransferDescriptor,
-        source_artifact: Box<LiveInterChannelSendArtifact>,
-        fund_import_state: ChannelState,
-        destination_snapshot: ChannelSnapshot,
+        source_artifact: serde_json::Value,
+        fund_import_state: serde_json::Value,
+        destination_snapshot: serde_json::Value,
     },
 }
 
@@ -268,6 +297,22 @@ enum BoundedLine {
     Eof,
     Line(Vec<u8>),
     TooLarge,
+}
+
+
+/// Materialize a live-command payload that traveled as `serde_json::Value`. The daemon accepts
+/// these payloads as `Value` and deserializes them HERE, with `serde_json::from_value`, because an
+/// internally-tagged enum buffers its fields through serde's `Content` tree — whose map-key
+/// deserializer rejects the `u8` token positions of the sparse `encBalances`/`pendingAdds` rows a
+/// `ChannelState` carries. `from_value` uses serde_json's own key coercion instead. The `u8` keys
+/// themselves are unchanged: the on-disk live snapshot round-trips the same rows through bincode,
+/// which has no `deserialize_any` to lean on.
+fn live_payload<T: serde::de::DeserializeOwned>(
+    what: &'static str,
+    value: serde_json::Value,
+) -> Result<T, LiveBalanceServiceError> {
+    serde_json::from_value(value)
+        .map_err(|e| LiveBalanceServiceError::InvalidRequest(format!("invalid {what}: {e}")))
 }
 
 fn main() {
@@ -508,10 +553,42 @@ fn execute_live_command(
                 .receive_configured_deposit_unbound(producer, &producer_receipt, &deposit)?;
             to_value(serde_json::to_value(receipt))
         }
+        LiveCommand::LiveInitWithAccountSalt {
+            channel_id,
+            account_salt,
+        } => {
+            let path = live.snapshot_path(channel_id);
+            if path.exists() {
+                // Idempotent restart: never re-randomize or re-salt a channel that already has
+                // state; report what is there.
+                let status = live.service(channel_id, producer)?.status()?;
+                return to_value(serde_json::to_value(status));
+            }
+            let service = LiveBalanceService::initialize(&path, channel_id, account_salt)?;
+            let status = service.status()?;
+            live.services.insert(channel_id.as_u64(), service);
+            to_value(serde_json::to_value(status))
+        }
+        LiveCommand::LiveReceiveBackingDeposit {
+            channel_id,
+            producer_receipt,
+            deposit,
+            deposit_salt,
+        } => {
+            let receipt = live.service(channel_id, producer)?.receive_deposit_unbound(
+                producer,
+                &producer_receipt,
+                &deposit,
+                deposit_salt,
+            )?;
+            to_value(serde_json::to_value(receipt))
+        }
         LiveCommand::LiveBindSnapshot {
             channel_id,
             signed_snapshot,
         } => {
+            let signed_snapshot: ChannelSnapshot =
+                live_payload("bind snapshot", signed_snapshot)?;
             let service = live.service(channel_id, producer)?;
             service.bind_signed_snapshot(producer, &signed_snapshot)?;
             let status = service.status()?;
@@ -524,6 +601,9 @@ fn execute_live_command(
             debit_payload,
             descriptor,
         } => {
+            let signed_state: ChannelState = live_payload("settle signed state", signed_state)?;
+            let debit_payload: InterChannelDebitPayload =
+                live_payload("settle debit payload", debit_payload)?;
             let receipt = live.service(channel_id, producer)?.settle_inter_channel(
                 producer,
                 &producer_receipt,
@@ -552,6 +632,48 @@ fn execute_live_command(
             channel_id,
             proposal,
         } => {
+            // Dispatch the proposal MANUALLY on its `kind`, deserializing each field on its own.
+            // `from_value` coerces the sparse `encBalances`/`pendingAdds` u8 keys for a plain
+            // struct like `ChannelState`, but NOT when the value is an internally-tagged enum:
+            // serde buffers a tagged enum through its `Content` tree first (whether from a string
+            // or a `Value`), and that buffer's map keys are strings, so `LiveExitKitProposal`'s
+            // own `kind` tag reintroduces exactly the `invalid type: string "0", expected u8`
+            // failure the Value boundary was meant to remove. Reading the tag by hand keeps every
+            // heavy field on the plain-struct `from_value` path.
+            let kind = proposal.get("kind").and_then(|k| k.as_str()).ok_or_else(|| {
+                LiveBalanceServiceError::InvalidRequest("exit-kit proposal has no kind".into())
+            })?;
+            let field = |name: &'static str| -> Result<serde_json::Value, LiveBalanceServiceError> {
+                proposal.get(name).cloned().ok_or_else(|| {
+                    LiveBalanceServiceError::InvalidRequest(format!(
+                        "exit-kit proposal ({kind}) is missing {name}"
+                    ))
+                })
+            };
+            let proposal: LiveExitKitProposal = match kind {
+                "tokenRegister" => LiveExitKitProposal::TokenRegister {
+                    successor: live_payload("exit-kit successor", field("successor")?)?,
+                },
+                "l1DepositImport" => LiveExitKitProposal::L1DepositImport {
+                    record: live_payload("exit-kit record", field("record")?)?,
+                    members: live_payload("exit-kit members", field("members")?)?,
+                    fund_import_state: live_payload(
+                        "exit-kit fund-import state",
+                        field("fundImportState")?,
+                    )?,
+                },
+                "interChannelDebit" => LiveExitKitProposal::InterChannelDebit {
+                    request_id: live_payload("exit-kit request id", field("requestId")?)?,
+                    proposed_state: live_payload("exit-kit proposed state", field("proposedState")?)?,
+                    debit_payload: live_payload("exit-kit debit payload", field("debitPayload")?)?,
+                    descriptor: live_payload("exit-kit descriptor", field("descriptor")?)?,
+                },
+                other => {
+                    return Err(LiveBalanceServiceError::InvalidRequest(format!(
+                        "unknown exit-kit proposal kind {other:?}"
+                    )));
+                }
+            };
             let (proposal, staged_request) = match proposal {
                 LiveExitKitProposal::TokenRegister { successor } => {
                     (PreparedExitKitProposal::TokenRegister { successor }, None)
@@ -653,6 +775,14 @@ fn execute_live_command(
             fund_import_state,
             destination_snapshot,
         } => {
+            let debit_payload: InterChannelDebitPayload =
+                live_payload("receive debit payload", debit_payload)?;
+            let source_artifact: Box<LiveInterChannelSendArtifact> =
+                live_payload("receive source artifact", source_artifact)?;
+            let fund_import_state: ChannelState =
+                live_payload("receive fund-import state", fund_import_state)?;
+            let destination_snapshot: ChannelSnapshot =
+                live_payload("receive destination snapshot", destination_snapshot)?;
             let level = live.level;
             let receipt = live.service(channel_id, producer)?.receive_inter_channel(
                 producer,
@@ -699,11 +829,17 @@ fn execute_command(
                 plan,
             } = &command
             {
+                // `signed_state`/`plan` travel as `serde_json::Value` (see `BlockProducerCommand`);
+                // materialize them with serde_json's own key coercion before the typed calls.
+                let signed_state: ChannelState = serde_json::from_value(signed_state.clone())
+                    .map_err(|e| ("invalid_json", format!("invalid close-funding signed state: {e}")))?;
+                let plan: CloseFundingPlan = serde_json::from_value(plan.clone())
+                    .map_err(|e| ("invalid_json", format!("invalid close-funding plan: {e}")))?;
                 let committed = producer
-                    .receipt_for_close_funding(request_id, signed_state, plan)
+                    .receipt_for_close_funding(request_id, &signed_state, &plan)
                     .map_err(|error| (error.code(), error.to_string()))?;
                 let prepared = producer
-                    .prepared_receipt_for_close_funding(request_id, signed_state, plan)
+                    .prepared_receipt_for_close_funding(request_id, &signed_state, &plan)
                     .map_err(|error| (error.code(), error.to_string()))?;
                 if committed.is_none() && prepared.is_none() {
                     let validity = validity.as_deref_mut().ok_or_else(|| {

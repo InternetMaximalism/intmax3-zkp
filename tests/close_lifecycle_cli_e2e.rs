@@ -315,6 +315,13 @@ fn close_lifecycle_cli_e2e() {
                 "--private-key",
                 ANVIL0_KEY,
                 "--broadcast",
+                // Concurrent tx submission hangs forge's broadcaster indefinitely on this
+                // 31-transaction deploy in this environment (observed: it stalls forever right
+                // after the local simulation, before sending anything, regardless of anvil's
+                // mining mode). `--slow` sends and confirms one transaction at a time and is
+                // already the established workaround for this class of heavy deploy script
+                // elsewhere in this repo (see partial_withdrawal_e2e.rs).
+                "--slow",
             ]),
         "forge DeployCloseCli",
     );

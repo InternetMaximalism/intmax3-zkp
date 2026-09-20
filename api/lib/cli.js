@@ -70,18 +70,27 @@ function validChannel(ch) {
   return CHANNELS.includes(n) ? n : null;
 }
 
+// `channel_member` prints large JSON artifacts (signed import states, exit-kit envelopes) to stdout,
+// and those grow with the channel's slot × token count: every co-signer's Falcon signature is ~76 KB,
+// so a channel with several members/delegates and >1 token easily exceeds Node's DEFAULT 1 MB stdout
+// cap and dies `spawnSync ... ENOBUFS` mid-import — a failure that looked like an opaque deposit
+// error the first time a channel grew past a couple of joined delegates. Give the child a generous
+// 512 MB so realistic channel sizes are never truncated.
+const CLI_MAX_BUFFER = 512 * 1024 * 1024;
+
 function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
   return execFileSync(CLI, args, {
     cwd: chDir(ch),
     encoding: 'utf8',
     timeout: 600_000,
+    maxBuffer: CLI_MAX_BUFFER,
     env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
   });
 }
 
 function sh(bin, args, opts) {
-  return execFileSync(bin, args, { encoding: 'utf8', ...opts });
+  return execFileSync(bin, args, { encoding: 'utf8', maxBuffer: CLI_MAX_BUFFER, ...opts });
 }
 
 function rollupOf(ch) {

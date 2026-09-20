@@ -182,11 +182,30 @@ impl MemberKeys {
     /// a specified byte stream, and every step below is integer/byte arithmetic. Keygen runs at
     /// join/restore only (~455 ms native), never per signature.
     pub fn generate(rng: &mut impl Rng) -> Self {
+        Self::generate_with_falcon(rng, |sig_seed| {
+            std::sync::Arc::new(FalconKeys::from_seed(sig_seed))
+        })
+    }
+
+    /// Same deterministic derivation as [`generate`], but the caller supplies the Falcon keypair
+    /// for the drawn 32-byte `sig_seed` instead of always running NTRU keygen. The rng is consumed
+    /// in the EXACT same order and amount as `generate` (sig_seed, then baby_seed, then the Regev
+    /// keygen), so the BabyBear and Regev keys are byte-identical regardless of how the Falcon key
+    /// is obtained — a cached load and a fresh `from_seed` yield the same `MemberKeys`.
+    ///
+    /// This exists purely for a performance cache: NTRU keygen costs ~455 ms, and a caller that
+    /// re-derives the SAME slot's identity in a fresh process every time (e.g. a relay that spawns
+    /// one CLI per co-sign) otherwise pays it on every signature. `load_falcon` receives the
+    /// derived `sig_seed` so it can key a cache by it and fall back to `FalconKeys::from_seed`.
+    pub fn generate_with_falcon<F>(rng: &mut impl Rng, load_falcon: F) -> Self
+    where
+        F: FnOnce([u8; 32]) -> std::sync::Arc<FalconKeys>,
+    {
         // Falcon state-signing key: draw a 32-byte seed from the wallet RNG (the SAME stream
         // position the retired Goldilocks key used) and derive the keypair deterministically.
         let mut sig_seed = [0u8; 32];
         rng.fill_bytes(&mut sig_seed);
-        let falcon_key = std::sync::Arc::new(FalconKeys::from_seed(sig_seed));
+        let falcon_key = load_falcon(sig_seed);
         zeroize::Zeroize::zeroize(&mut sig_seed);
         // Derive the BabyBear hash-sig key from a fresh 32-byte seed drawn from the wallet RNG.
         // `BabyBearSecretKey::random` is defined over `rand` 0.8 (the regev layer), so we bridge by
