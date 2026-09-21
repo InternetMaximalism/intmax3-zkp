@@ -118,11 +118,11 @@ use intmax3_zkp::{
         PostCloseClaimProver, RefreshPayload, SendPayload, SlimSendPayload, WithdrawalClaimProver,
         add_signature, assemble_genesis_state_backed, build_batch_next_state,
         build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
-        build_record, build_refresh, build_send_token, build_token_register, burn_withdrawal_leaf,
-        decrypt_balance_token, default_settled_tx_accumulator, inter_channel_base_transfer,
-        inter_channel_tx_v2, partial_withdrawal_auth_digest, regev_pks_array,
-        resolve_local_token_slot, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_base_nonce_available, verify_inter_channel_credit_transition,
+        build_record, build_refresh, build_send_token_decrypted, build_token_register,
+        burn_withdrawal_leaf, decrypt_balance_token, default_settled_tx_accumulator,
+        inter_channel_base_transfer, inter_channel_tx_v2, partial_withdrawal_auth_digest,
+        regev_pks_array, resolve_local_token_slot, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_base_nonce_available, verify_inter_channel_credit_transition,
         verify_inter_channel_descriptor_matches_debit,
         verify_inter_channel_send_transition_with_lookup, verify_l1_deposit_import_transition,
         verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
@@ -723,13 +723,14 @@ fn enforce_exit_kit_before_signature_release(
              verified signer exit-kit receipt; legacy/key-equality-only reuse is forbidden"
                 .to_string()
         })?;
-        // An intra-channel, value-preserving H2=0 successor (send / batch / refresh) does NOT change
-        // the L1-backed exit statement: the reuse-refusals just above pin (channel_id,
-        // settled_tx_chain, token_funds_digest) EQUAL to the predecessor's, and this receipt is
-        // bound to that head. So the SAME exit kit that was cryptographically verified when it was
-        // installed (`install-exit-kit` / the prepared-kit path — both run the full Balance/backing
-        // verification before the receipt is ever written) already backs this successor unchanged.
-        // Re-running that plonky2 Balance/backing verification here re-proves nothing about the new
+        // An intra-channel, value-preserving H2=0 successor (send / batch / refresh) does NOT
+        // change the L1-backed exit statement: the reuse-refusals just above pin
+        // (channel_id, settled_tx_chain, token_funds_digest) EQUAL to the predecessor's,
+        // and this receipt is bound to that head. So the SAME exit kit that was
+        // cryptographically verified when it was installed (`install-exit-kit` / the
+        // prepared-kit path — both run the full Balance/backing verification before the
+        // receipt is ever written) already backs this successor unchanged. Re-running that
+        // plonky2 Balance/backing verification here re-proves nothing about the new
         // head — the statement is byte-identical — and it dominated cosign latency (~6 s per send)
         // because the relay spawns a fresh CLI per co-sign, so the process-local `verified` cache
         // was always cold. Trust the durable, head-bound receipt for the reuse path; the receipt's
@@ -1870,7 +1871,10 @@ fn keys_for(seed: u64) -> MemberKeys {
             // every co-sign re-ran NTRU keygen (~455 ms) for EVERY controlled co-signer — the
             // dominant `cosign` cost (measured ~2.6 s for a 3-of-3 cluster). Cache each drawn
             // sig_seed's basis so later co-signs reconstruct the identical key in microseconds.
-            MemberKeys::generate_with_falcon(&mut StdRng::seed_from_u64(seed), cached_insecure_falcon)
+            MemberKeys::generate_with_falcon(
+                &mut StdRng::seed_from_u64(seed),
+                cached_insecure_falcon,
+            )
         }
     }
 }
@@ -1883,7 +1887,9 @@ const FALCON_KEY_CACHE_DIR: &str = "falcon_key_cache";
 /// cache, reconstructing the EXACT key without re-running `ntru_gen`. A missing/corrupt/mismatched
 /// entry falls back to a fresh `from_seed` (and rewrites the cache), so correctness never depends
 /// on the cache. NEVER used under a production master key — see `keys_for`.
-fn cached_insecure_falcon(sig_seed: [u8; 32]) -> std::sync::Arc<intmax3_zkp::falcon_sig::FalconKeys> {
+fn cached_insecure_falcon(
+    sig_seed: [u8; 32],
+) -> std::sync::Arc<intmax3_zkp::falcon_sig::FalconKeys> {
     use intmax3_zkp::falcon_sig::FalconKeys;
     let path =
         std::path::Path::new(FALCON_KEY_CACHE_DIR).join(format!("{}.ntru", hex::encode(sig_seed)));
@@ -4522,9 +4528,9 @@ fn cmd_setup_backing(args: &[String]) {
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
     let amount = fund;
 
-    // P5-B option B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
-    // folds the deposit in the exact order its proof models (the standalone fold order). The
-    // default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
+    // P5-B option B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block
+    // chain folds the deposit in the exact order its proof models (the standalone fold order).
+    // The default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
     // reconciliation — the browser demo path). When `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` is set
     // (the close-lifecycle E2E), we only build the off-chain balance proof + persist the
     // params; the deposit is made by `withdraw`. SECURITY: fund custody is gated by the
@@ -10466,59 +10472,36 @@ fn cmd_gen_send(args: &[String]) {
                 "seed {seed}: pk_g not found in snapshot members — join first"
             ))
         });
-    // Fail-closed: the witness must actually OPEN the delegate's current ciphertext at the
-    // selected token position. Two admissible openings, in this order:
-    //
-    // SECURITY (A-1 finding 3): since A-1 a delegate's slot opens at the CANONICAL ZERO ciphertext
-    // (`RegevCiphertext::padding()`) — at genesis via `create_channel` and at join via
-    // `join_delegate` — not at a `gen-contribution`-shaped `encrypt_amount(seed, pk, balance)`. So
-    // the canonical zero is the FIRST case, and it admits exactly ONE balance: 0. The opening is
-    // the public all-zero witness (`zero_amount_witness()`, which opens `padding()` under any key
-    // and cannot open any nonzero amount). Asserting `balance == 0` here rather than silently
-    // coercing it keeps the caller's stated balance and the proven balance the same value — a
-    // silent coercion would let a caller believe it had drafted a spend out of a funded slot.
+    // Refresh-free: the delegate's current ciphertext at the selected token position is opened by
+    // DECRYPTION under its own Regev key inside `build_send_token_decrypted` — the canonical zero
+    // (A-1), a deposit-imported sum, a received transfer or a previous drip's `after` are all
+    // spendable directly. `<balance>` is kept as a fail-closed cross-check: the caller's stated
+    // balance and the proven (decrypted) balance must be the same value, so a stale view can never
+    // silently draft a spend out of a differently funded slot.
     let cur_ct = &snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize];
-    let witness = if cur_ct == intmax3_zkp::common::balance_state::zero_ciphertext() {
-        if balance != 0 {
+    let decrypted =
+        intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, cur_ct).unwrap_or_else(|e| {
             die(format!(
-                "slot {from} token {token_slot}: the slot holds the CANONICAL ZERO ciphertext \
-                 (a delegate's A-1 opening balance), so its only valid opening is 0 — but \
-                 <balance> = {balance} was requested. A delegate is funded through the L1 deposit \
-                 import or an in-channel transfer, never by declaring an opening balance; after \
-                 funding, the slot is no longer the canonical zero and this simulator needs a \
-                 refresh-derived witness it does not have."
-            ));
-        }
-        intmax3_zkp::regev::encrypt::zero_amount_witness()
-    } else {
-        // The legacy lane: the slot still holds the exact deterministic ciphertext this simulator
-        // can rebuild from `(balance, seed)`. Kept for any snapshot whose slot was seeded that way.
-        let (genesis_ct, w) = encrypt_amount(
-            &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
-            &keys.regev_pk,
-            balance,
-        )
-        .unwrap_or_else(|e| die(e));
-        if *cur_ct != genesis_ct {
-            die(format!(
-                "slot {from} token {token_slot}: ciphertext is neither the canonical zero opening \
-                 nor the deterministic ct for balance {balance} / seed {seed} (sent or received \
-                 since join) — the deterministic witness is stale; gen-send cannot build this \
-                 payload"
-            ));
-        }
-        w
-    };
+                "slot {from} token {token_slot}: cannot decrypt: {e}"
+            ))
+        });
+    if decrypted != balance {
+        die(format!(
+            "slot {from} token {token_slot}: <balance> = {balance} but the slot's ciphertext \
+             decrypts to {decrypted} (sent or received since the caller's view) — re-read the \
+             snapshot and pass the current balance"
+        ));
+    }
 
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
     // SECURITY: the send's encryption randomness comes from the OS CSPRNG, NOT from `seed`.
     //
-    // WHY THE GENESIS GUARD ABOVE IS NOT SUFFICIENT. It only pins the ciphertext this payload
-    // spends FROM, which stops randomness reuse ACROSS co-signed states (the second call fails the
-    // guard once the first payload is applied). It does NOT stop two gen-send calls made against
-    // the SAME, still-untouched genesis state: neither has been co-signed, so both pass the guard,
-    // and with a `seed`-derived RNG both would replay the same `r` for `enc_amount` and for the
-    // sender's `after_ct`. Two Regev encryptions under one key with one `r` reveal the difference
+    // WHY THE BALANCE CROSS-CHECK ABOVE IS NOT SUFFICIENT. It only pins the ciphertext this
+    // payload spends FROM, which stops randomness reuse ACROSS co-signed states (the second call
+    // fails the check once the first payload is applied). It does NOT stop two gen-send calls made
+    // against the SAME, still-untouched state: neither has been co-signed, so both pass, and with
+    // a `seed`-derived RNG both would replay the same `r` for `enc_amount` and for the sender's
+    // `after_ct`. Two Regev encryptions under one key with one `r` reveal the difference
     // of their plaintexts (`c2 - c2' = Δ·(m - m')`), so anyone who sees both drafted payloads
     // learns the difference of the two amounts — and, since `balance` is a CLI argument known to
     // the caller, the second amount outright. Fresh per-invocation randomness closes that.
@@ -10529,8 +10512,8 @@ fn cmd_gen_send(args: &[String]) {
         payload,
         new_balance,
         ..
-    } = build_send_token(
-        &keys, &snapshot, from, to, token_slot, amount, balance, &witness, nonce, LEVEL, &mut rng,
+    } = build_send_token_decrypted(
+        &keys, &snapshot, from, to, token_slot, amount, nonce, LEVEL, &mut rng,
     )
     .unwrap_or_else(|e| die(e));
     // Emit the SLIM wire shape (detail2 §M-1) — the batch path's native format; ~50-100x smaller
@@ -10576,51 +10559,9 @@ fn fresh_seed32() -> [u8; 32] {
     seed
 }
 
-fn parse_seed32(hex_str: &str) -> [u8; 32] {
-    let bytes =
-        hex::decode(hex_str).unwrap_or_else(|e| die(format!("cli_state: bad witness seed: {e}")));
-    <[u8; 32]>::try_from(bytes.as_slice())
-        .unwrap_or_else(|_| die("cli_state: witness seed must be 32 bytes"))
-}
-
-/// Where the reconstructible balance witness for `(member, token_slot)` lives, if any.
-enum WitnessSource {
-    /// `refresh`-recorded: a 32-byte `StdRng` seed (any local token position).
-    Refreshed { amount: u64, seed: [u8; 32] },
-    /// Genesis (local token position 0 only): the legacy u64 `balance_seed` written by
-    /// `cli_members`. Unchanged so every pre-multitoken flow behaves byte-identically.
-    Genesis { amount: u64, seed: u64 },
-}
-
-/// Resolve the sender's balance witness for one LOCAL token position, fail-closed.
-///
-/// SECURITY: a `refresh` record always WINS over the genesis triple for the same position — the
-/// refresh replaced the ciphertext, so the genesis seed is stale there and handing it to the E-1
-/// prover would build an unsatisfiable statement. `has_witness` gates both: a spent position has
-/// no reconstructible witness and must be refreshed before it can send again.
-fn witness_source(cm: &ControlledMember, token_slot: u8) -> Option<WitnessSource> {
-    if let Some(w) = cm
-        .token_witnesses
-        .iter()
-        .find(|w| w.token_slot == token_slot && w.has_witness)
-    {
-        return Some(WitnessSource::Refreshed {
-            amount: w.amount,
-            seed: parse_seed32(&w.seed_hex),
-        });
-    }
-    if token_slot == 0 && cm.has_witness {
-        return Some(WitnessSource::Genesis {
-            amount: cm.balance_amount,
-            seed: cm.balance_seed,
-        });
-    }
-    None
-}
-
-/// Invalidate the witness for `(member, token_slot)` after the position was spent, and record the
-/// new plaintext balance. Fail-closed bookkeeping: the position cannot send again until a
-/// `refresh` re-establishes a reconstructible witness.
+/// Record that `(member, token_slot)` was spent: the store's reproducible witness (if any) no
+/// longer opens the position's ciphertext, and the new plaintext balance is noted. Since the
+/// refresh-free decrypted send, the witness store is informational — sending never needs it.
 fn invalidate_witness(cm: &mut ControlledMember, token_slot: u8, new_balance: u64) {
     if let Some(w) = cm
         .token_witnesses
@@ -10639,9 +10580,10 @@ fn invalidate_witness(cm: &mut ControlledMember, token_slot: u8, new_balance: u6
 /// usage: send <from> <to> <amount> [out.json] [token_slot]
 /// `token_slot` (OPTIONAL, default 0 = the genesis token) is the LOCAL token position to move
 /// (multitoken §N-3); it is signed into the IMPA-v2 digest and enforced by every verifier.
-/// NOTE: the CLI's balance-witness store tracks the member's LAST self-encrypted ciphertext per
-/// position — for a non-genesis token that only exists after `refresh <slot> <token_slot>`, and a
-/// stale witness fails the E-1 proof fail-closed.
+/// Refresh-free: the sender's current ciphertext at the position is opened by DECRYPTION under
+/// its own Regev key (`build_send_token_decrypted`), so a position credited homomorphically (L1
+/// deposit import, incoming transfer) or just spent by a previous send is spendable directly —
+/// no `refresh` and no reproducible witness required.
 fn cmd_send(args: &[String]) {
     let from: u16 = args
         .get(1)
@@ -10668,19 +10610,6 @@ fn cmd_send(args: &[String]) {
         .find(|c| c.slot == from)
         .unwrap_or_else(|| die(format!("slot {from} is not a CLI-controlled member")));
     let keys = keys_for(cm.keygen_seed);
-    // Reconstruct the sender's current balance witness for THIS token position deterministically.
-    let (before_amount, mut wit_rng) = match witness_source(cm, token_slot) {
-        Some(WitnessSource::Refreshed { amount, seed }) => (amount, StdRng::from_seed(seed)),
-        Some(WitnessSource::Genesis { amount, seed }) => (amount, StdRng::seed_from_u64(seed)),
-        None => die(format!(
-            "slot {from} has no spendable balance witness at token slot {token_slot} — the \
-             position was never funded with a locally-witnessed ciphertext, or it was spent. Run \
-             `channel_member refresh {from} {token_slot}` first (a homomorphically credited \
-             position ALWAYS needs one)."
-        )),
-    };
-    let (_ct, witness) =
-        encrypt_amount(&mut wit_rng, &keys.regev_pk, before_amount).unwrap_or_else(|e| die(e));
 
     // SECURITY: the send's own encryption randomness comes from the OS CSPRNG, NOT from a
     // per-sender constant. A fixed seed was safe only while every CLI member sent at most once;
@@ -10693,24 +10622,22 @@ fn cmd_send(args: &[String]) {
         payload,
         new_balance,
         ..
-    } = build_send_token(
+    } = build_send_token_decrypted(
         &keys,
         &state.snapshot,
         from,
         to,
         token_slot,
         amount,
-        before_amount,
-        &witness,
         nonce,
         LEVEL,
         &mut rng,
     )
     .unwrap_or_else(|e| die(e));
 
-    // Mark the SENT position as having no reproducible witness for its new ciphertext (the send's
-    // `after_ct` randomness is not recorded). Sending again from this position requires a
-    // `refresh` first. Balance commits on finalize.
+    // Bookkeeping only: the SENT position's store witness (if any) no longer opens its new
+    // ciphertext (the send's `after_ct` randomness is not recorded). The next send decrypts the
+    // position again, so nothing is blocked. Balance commits on finalize.
     if let Some(c) = state.controlled.iter_mut().find(|c| c.slot == from) {
         invalidate_witness(c, token_slot, new_balance);
     }
@@ -11948,12 +11875,11 @@ fn cmd_register_token(args: &[String]) {
 /// encryption witness this process can reconstruct later, and reset that position's
 /// `pending_adds`. This is the CLI twin of the browser's `wallet_refresh`.
 ///
-/// WHY IT IS NEEDED. A position credited HOMOMORPHICALLY — an L1 deposit import (`+= delta`,
-/// `pending_adds += 1`) or an incoming in-channel transfer — leaves a ciphertext for which this
-/// process holds NO encryption witness, and `build_send_token` refuses to spend it twice over:
-/// once on the `pending_adds != 0` gate and once because a stale witness cannot satisfy E-1.
-/// A refresh is the only value-preserving way out. That is exactly the situation of the testnet
-/// ITX faucet member, whose supply arrives via `cosign-l1-deposit-import`.
+/// WHEN IT IS NEEDED. Since the refresh-free decrypted send, a position credited HOMOMORPHICALLY
+/// — an L1 deposit import (`+= delta`, `pending_adds += 1`) or an incoming in-channel transfer —
+/// is spendable directly (`send` decrypts it). A refresh remains the value-preserving way to
+/// reset a position's digits/noise WITHOUT spending: a pure receiver approaching the 64-add
+/// noise budget, or any flow that wants a locally reproducible witness.
 ///
 /// NOTHING IS MINTED. `RefreshAir` proves `old_ct` and `new_ct` encrypt the SAME hidden value, and
 /// `verify_refresh_transition` re-runs that proof plus the structural witness (only this position
@@ -12067,9 +11993,8 @@ fn cmd_refresh(args: &[String]) {
             None => c.token_witnesses.push(entry),
         }
         // A refresh of position 0 REPLACES the genesis ciphertext, so the legacy `balance_seed`
-        // triple is stale from here on. Retire it explicitly rather than relying on the lookup
-        // order in `witness_source` — if this record is ever spent and invalidated, the fallback
-        // must not silently resurrect a seed that no longer matches state.
+        // triple is stale from here on. Retire it explicitly so no reader of the store can
+        // resurrect a seed that no longer matches state.
         if token_slot == 0 {
             c.has_witness = false;
             c.balance_amount = witness.amount;

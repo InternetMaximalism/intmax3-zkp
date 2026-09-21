@@ -900,11 +900,9 @@ app.post('/api/faucet', (req, res) => {
     writeFaucetState(ch, faucetPolicy.reserveDrip(state, slot, amount, Date.now()));
     console.log(`[faucet] channel ${ch}: drip reserved — ${amount} of base token ${FAUCET.tokenIndex} (local slot ${localTokenSlot}) from slot ${FAUCET.faucetSlot} → slot ${slot}`);
     try {
-      // `refresh` re-encrypts the faucet's own position to a locally-witnessed ciphertext and
-      // clears its `pending_adds`. A position credited homomorphically (the L1 deposit import
-      // that seeded the faucet) or just spent by the previous drip is otherwise UNSPENDABLE —
-      // the refresh proof is value-preserving (RefreshAir) and every co-signer re-verifies it.
-      await cli(ch, ['refresh', String(FAUCET.faucetSlot), String(localTokenSlot), 'faucet_refresh.json']);
+      // No refresh leg: `send` opens the faucet's position by DECRYPTION (refresh-free
+      // decrypted-send proof), so the L1-deposit-imported supply and every previous drip's
+      // `after` are spendable directly; every co-signer re-verifies the proof before signing.
       await cli(ch, ['send', String(FAUCET.faucetSlot), String(slot), amount, 'faucet_payload.json', String(localTokenSlot)]);
       await cli(ch, ['cosign', 'faucet_payload.json', 'faucet_cosigned.json']);
     } catch (e) {

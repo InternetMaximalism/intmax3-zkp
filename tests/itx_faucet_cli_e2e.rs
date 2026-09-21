@@ -363,8 +363,8 @@ fn itx_faucet_cli_e2e() {
         "a TokenRegister is header-only — it must not fund anything"
     );
 
-    // FAIL-CLOSED (1): an unfunded, never-witnessed position cannot send. The faucet member has
-    // no ITX yet and no locally-reproducible ciphertext at that position.
+    // FAIL-CLOSED (1): an unfunded position cannot send. The faucet member has no ITX yet: the
+    // position decrypts to 0 (refresh-free decrypted send), so a drip is an overspend.
     let (ok, out) = cli_allow_fail(&[
         "send",
         &FAUCET_SLOT.to_string(),
@@ -373,13 +373,10 @@ fn itx_faucet_cli_e2e() {
         "faucet_payload.json",
         &ITX_LOCAL_SLOT.to_string(),
     ]);
+    assert!(!ok, "an unfunded position must not send:\n{out}");
     assert!(
-        !ok,
-        "a position with no balance witness must not send:\n{out}"
-    );
-    assert!(
-        out.contains("no spendable balance witness"),
-        "the refusal must name the missing witness, got:\n{out}"
+        out.contains("insufficient balance"),
+        "the refusal must name the overspend, got:\n{out}"
     );
 
     // ── runbook 3c.4: escrow the faucet supply on L1 (msg.value 0, measured balanceOf delta) ─
@@ -770,8 +767,9 @@ fn itx_faucet_cli_e2e() {
         "a refused replay must not have inflated the ITX position"
     );
 
-    // FAIL-CLOSED (2): the freshly IMPORTED position is a HOMOMORPHIC credit — still unspendable.
-    // This is the exact reason the faucet needs a refresh leg, pinned as a negative.
+    // REFRESH-FREE (2): the freshly IMPORTED position is a HOMOMORPHIC credit, and the decrypted
+    // send spends it directly — no refresh leg is required any more (the payload built here is
+    // discarded; the drips below re-build against the head they are applied to).
     let (ok, out) = cli_allow_fail(&[
         "send",
         &FAUCET_SLOT.to_string(),
@@ -781,8 +779,8 @@ fn itx_faucet_cli_e2e() {
         &ITX_LOCAL_SLOT.to_string(),
     ]);
     assert!(
-        !ok,
-        "a homomorphically credited position must not be spendable:\n{out}"
+        ok,
+        "a homomorphically credited position must be spendable without a refresh:\n{out}"
     );
 
     // ── drip 1: the realistic path — faucet member → browser DELEGATE ───────────────────────
