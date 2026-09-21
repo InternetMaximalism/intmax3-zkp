@@ -37,7 +37,7 @@
 //! bit column `m`, and that very column is the message of the encryption constraints for
 //! `new_ct` — the plaintext-equality link is structural and fully in-circuit.
 //!
-//! **Decrypted send ([`DecryptedSendAir`], 3 ciphertexts, refresh-free spend):** the same
+//! **Decrypted send / update ([`DecryptedDualKeyAir`], refresh-free spend):** the same
 //! public statement as E-1 (`before`/`after` under the SENDER key, `enc_amount` under the
 //! RECIPIENT key, `before = after + amount`), but the `before` leg is opened by DECRYPTION —
 //! the decryption core (key binding + decryption identity + digit extraction + normalization)
@@ -45,7 +45,10 @@
 //! of the ripple-carry conservation chain. `after` and `enc_amount` remain fresh well-formed
 //! encryptions (E-1's ring identities, with their own message columns). The sender therefore
 //! needs no encryption witness for `before`: a slot that accumulated homomorphic additions
-//! (deposits, received transfers) is spendable directly, without a prior balance refresh.
+//! (deposits, received transfers) is spendable directly, without a prior balance refresh. The
+//! same AIR in its E-2 shape (`after`, `sender_delta`, `receiver_delta`, both deltas' message
+//! evaluations published and pinned to the PUBLIC amount exactly as in E-2) is the refresh-free
+//! inter-channel debit.
 //!
 //! SECURITY (why this adds no assumption): the `before` opening is exactly the decryption core
 //! the E-3 withdraw claim and the balance refresh already rely on, with the same
@@ -176,6 +179,9 @@ pub const BALANCE_REFRESH_ZKP_DOMAIN: u32 = 0x494d5246;
 /// Domain word for the decryption-based channel transfer ("IMDS"): the E-1 statement with the
 /// `before` leg opened by decryption under the sender's secret key (see the module docs).
 pub const CHANNEL_TX_DECRYPTED_ZKP_DOMAIN: u32 = 0x494d4453;
+/// Domain word for the decryption-based channel update ("IMDU"): the E-2 statement with the
+/// `before` leg opened by decryption under the sender's secret key (see the module docs).
+pub const CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN: u32 = 0x494d4455;
 
 // SECURITY: every domain word must be < REGEV_Q so that `F::from_u32(domain)` is injective and
 // two purposes can never collide in the transcript. "IM.." words are ~0x494d_0000 ≈ 1.23e9,
@@ -186,13 +192,16 @@ const _: () = {
     assert!(WITHDRAW_CLAIM_ZKP_DOMAIN < super::params::REGEV_Q);
     assert!(BALANCE_REFRESH_ZKP_DOMAIN < super::params::REGEV_Q);
     assert!(CHANNEL_TX_DECRYPTED_ZKP_DOMAIN < super::params::REGEV_Q);
+    assert!(CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN < super::params::REGEV_Q);
 };
 
 /// The lattice-proof purposes of detail2 §E-4: `ChannelTx` (E-1), `ChannelUpdate` (E-2),
-/// `WithdrawClaim` (E-3), `BalanceRefresh` (§B-3), and `ChannelTxDecrypted` — the E-1
-/// statement proved by [`DecryptedSendAir`] (the `before` leg opened by decryption, no refresh
-/// needed). `ChannelTx` and `ChannelTxDecrypted` share the [`RegevStatement::ChannelTx`]
-/// statement shape but are bound to distinct transcript domains and structurally different AIRs.
+/// `WithdrawClaim` (E-3), `BalanceRefresh` (§B-3), plus the refresh-free variants
+/// `ChannelTxDecrypted` / `ChannelUpdateDecrypted` — the E-1 / E-2 statements proved by
+/// [`DecryptedDualKeyAir`] with the `before` leg opened by decryption. Each decrypted purpose
+/// shares its statement shape ([`RegevStatement::ChannelTx`] / [`RegevStatement::ChannelUpdate`])
+/// with the witnessed one but is bound to a distinct transcript domain and a structurally
+/// different AIR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegevProofPurpose {
     ChannelTx,
@@ -200,6 +209,7 @@ pub enum RegevProofPurpose {
     WithdrawClaim,
     BalanceRefresh,
     ChannelTxDecrypted,
+    ChannelUpdateDecrypted,
 }
 
 impl RegevProofPurpose {
@@ -211,6 +221,7 @@ impl RegevProofPurpose {
             Self::WithdrawClaim => WITHDRAW_CLAIM_ZKP_DOMAIN,
             Self::BalanceRefresh => BALANCE_REFRESH_ZKP_DOMAIN,
             Self::ChannelTxDecrypted => CHANNEL_TX_DECRYPTED_ZKP_DOMAIN,
+            Self::ChannelUpdateDecrypted => CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN,
         }
     }
 }
@@ -1427,17 +1438,79 @@ const RF_K1: usize = RF_E2V + 1;
 const RF_K2: usize = RF_K1 + 1;
 const RF_COLS: usize = RF_K2 + 1;
 
-// DecryptedSendAir extra main columns: the recipient key pair, then the `after` ciphertext
-// block (sender key) and the `enc_amount` block (recipient key) — each laid out exactly like an
-// E-1 ciphertext block (`OFF_*` offsets, `CT_COLS` wide, WITH its own message column) — and the
-// conservation carry. The `before` leg is the decryption core; its `DEC_BIT` column is
-// `m_before`.
-const DS_A_R: usize = DEC_CORE_COLS;
-const DS_B_R: usize = DS_A_R + 1;
-const DS_AFTER: usize = DS_B_R + 1;
-const DS_AMT: usize = DS_AFTER + CT_COLS;
-const DS_CARRY: usize = DS_AMT + CT_COLS;
-const DS_COLS: usize = DS_CARRY + 1;
+// Decrypted dual-key AIRs (`DecryptedDualKeyAir`): the decryption core opens `before` under the
+// SENDER key `(a, b)`; then come the recipient key pair, `num_cts` E-1-style fresh ciphertext
+// blocks (`OFF_*` offsets, `CT_COLS` wide, each WITH its own message column), and the
+// conservation carry. The core's `DEC_BIT` column is `m_before`.
+const DD_A_R: usize = DEC_CORE_COLS;
+const DD_B_R: usize = DD_A_R + 1;
+const DD_CT_BASE: usize = DD_B_R + 1;
+
+/// Static shape of a decrypted dual-key statement (mirrors [`AirShape`] for the E-1/E-2
+/// family): how many fresh ciphertext blocks follow the decryption core, which of them bind to
+/// the recipient key, which message evaluations are published, and which two blocks the
+/// conservation chain `m_before = m_after + m_delta` runs over (`m_before` is always the core's
+/// normalized bit column).
+#[derive(Clone, Copy, Debug)]
+struct DecShape {
+    num_cts: usize,
+    recipient_ct: &'static [bool],
+    expose_m: &'static [bool],
+    carry_after: usize,
+    carry_delta: usize,
+}
+
+impl DecShape {
+    const fn ct_col(&self, j: usize) -> usize {
+        DD_CT_BASE + j * CT_COLS
+    }
+
+    const fn carry_col(&self) -> usize {
+        self.ct_col(self.num_cts)
+    }
+
+    const fn num_cols(&self) -> usize {
+        self.carry_col() + 1
+    }
+
+    const fn ct_aux(&self, j: usize) -> usize {
+        DDAUX_CT_BASE + j * CT_AUX
+    }
+
+    /// `[domain] ++ extra ++ a_s ++ b_s ++ c1_before ++ c2_before ++ a_r ++ b_r
+    ///  ++ (c1, c2)×num_cts`.
+    const fn num_public_values(&self, n: usize, num_extra: usize) -> usize {
+        1 + num_extra + (6 + 2 * self.num_cts) * n
+    }
+
+    /// Published (`Kind::Global`) evaluations, in lookup order: the core's `a, b, c1, c2`, then
+    /// `a_r, b_r`, then per block `c1, c2` (+ `m` where exposed).
+    fn num_published_evals(&self) -> usize {
+        6 + 2 * self.num_cts + self.expose_m.iter().filter(|&&e| e).count()
+    }
+}
+
+/// Decrypted send (the E-1 statement shape): blocks `after` (sender) and `enc_amount`
+/// (recipient); no message evaluation is published — balance and amount are secret.
+const DS_SHAPE: DecShape = DecShape {
+    num_cts: 2,
+    recipient_ct: &[false, true],
+    expose_m: &[false, false],
+    carry_after: 0,
+    carry_delta: 1,
+};
+
+/// Decrypted update (the E-2 statement shape): blocks `after` (sender), `sender_delta`
+/// (sender, `m` published), `receiver_delta` (recipient, `m` published); conservation
+/// `before = after + sender_delta`, and both deltas are pinned to the PUBLIC amount by the
+/// verifier exactly as in E-2 (F2-C).
+const DU_SHAPE: DecShape = DecShape {
+    num_cts: 3,
+    recipient_ct: &[false, false, true],
+    expose_m: &[false, true, true],
+    carry_after: 0,
+    carry_delta: 1,
+};
 
 // Aux (permutation) columns, in lookup order (= position in the spec lists below).
 const DAUX_A: usize = 0;
@@ -1458,12 +1531,11 @@ const RFAUX_E1: usize = RFAUX_R + 1;
 const RFAUX_E2: usize = RFAUX_E1 + 1;
 const RFAUX_K1: usize = RFAUX_E2 + 1;
 const RFAUX_K2: usize = RFAUX_K1 + 1;
-// DecryptedSendAir aux columns (lookup order): decryption core, `a_r`, `b_r`, then one
-// E-1-style block (`AOFF_*` offsets, `CT_AUX` wide) for `after` and one for `enc_amount`.
-const DSAUX_A_R: usize = DEC_CORE_AUX;
-const DSAUX_B_R: usize = DSAUX_A_R + 1;
-const DSAUX_AFTER: usize = DSAUX_B_R + 1;
-const DSAUX_AMT: usize = DSAUX_AFTER + CT_AUX;
+// Decrypted dual-key aux columns (lookup order): decryption core, `a_r`, `b_r`, then one
+// E-1-style block (`AOFF_*` offsets, `CT_AUX` wide) per fresh ciphertext.
+const DDAUX_A_R: usize = DEC_CORE_AUX;
+const DDAUX_B_R: usize = DDAUX_A_R + 1;
+const DDAUX_CT_BASE: usize = DDAUX_B_R + 1;
 
 /// Published (`Kind::Global`) evaluations of E-3, in lookup order:
 /// `a, b, c1, c2, amount-bits`.
@@ -1472,11 +1544,6 @@ const DEC_NUM_PUBLISHED: usize = 5;
 /// `a, b, c1_old, c2_old, c1_new, c2_new` — the bit column stays `Kind::Local` (see the privacy
 /// note in the module docs).
 const RF_NUM_PUBLISHED: usize = 6;
-/// Published evaluations of the decrypted send, in lookup order:
-/// `a_s, b_s, c1_before, c2_before, a_r, b_r, c1_after, c2_after, c1_amount, c2_amount`. The
-/// three message columns (`m_before` = the core's bit column, `m_after`, `m_amount`) stay
-/// `Kind::Local`: the balance and the amount are secret.
-const DS_NUM_PUBLISHED: usize = 10;
 
 fn main_col_expr<Fld: Field>(c: usize) -> Vec<Vec<SymbolicExpression<Fld>>> {
     vec![vec![
@@ -1550,27 +1617,37 @@ fn refresh_lookup_specs<Fld: Field>() -> Vec<(Kind, Vec<Vec<SymbolicExpression<F
     specs
 }
 
-fn decrypted_send_lookup_specs<Fld: Field>() -> Vec<(Kind, Vec<Vec<SymbolicExpression<Fld>>>)> {
+fn decrypted_dual_key_lookup_specs<Fld: Field>(
+    shape: &DecShape,
+) -> Vec<(Kind, Vec<Vec<SymbolicExpression<Fld>>>)> {
     // SECURITY: `expose_bit = false` — the core's bit column is the secret balance.
     let mut specs = decryption_core_lookup_specs(false);
     specs.extend([
-        (Kind::Global("eval:a_r".to_string()), main_col_expr(DS_A_R)),
-        (Kind::Global("eval:b_r".to_string()), main_col_expr(DS_B_R)),
+        (Kind::Global("eval:a_r".to_string()), main_col_expr(DD_A_R)),
+        (Kind::Global("eval:b_r".to_string()), main_col_expr(DD_B_R)),
     ]);
-    for (label, base) in [("after", DS_AFTER), ("amount", DS_AMT)] {
+    for j in 0..shape.num_cts {
+        let base = shape.ct_col(j);
+        let m_kind = if shape.expose_m[j] {
+            // SECURITY: publishing m(z) is only sound privacy-wise when the plaintext is public
+            // by design (the decrypted update's deltas, whose plaintext is the public amount).
+            Kind::Global(format!("eval:m:ct{j}"))
+        } else {
+            Kind::Local
+        };
         specs.extend([
             (
-                Kind::Global(format!("eval:c1:{label}")),
+                Kind::Global(format!("eval:c1:ct{j}")),
                 main_col_expr(base + OFF_C1),
             ),
             (
-                Kind::Global(format!("eval:c2:{label}")),
+                Kind::Global(format!("eval:c2:ct{j}")),
                 main_col_expr(base + OFF_C2),
             ),
             (Kind::Local, main_col_expr(base + OFF_R)),
             (Kind::Local, main_diff_expr(base + OFF_E1U, base + OFF_E1V)),
             (Kind::Local, main_diff_expr(base + OFF_E2U, base + OFF_E2V)),
-            (Kind::Local, main_col_expr(base + OFF_M)),
+            (m_kind, main_col_expr(base + OFF_M)),
             (Kind::Local, main_col_expr(base + OFF_K1)),
             (Kind::Local, main_col_expr(base + OFF_K2)),
         ]);
@@ -1824,11 +1901,12 @@ where
     }
 }
 
-/// Decrypted-send-only constraints: `after` is a fresh well-formed encryption under the SENDER
-/// key `(a_s, b_s)` (= the core's `(a, b)`), `enc_amount` is a fresh well-formed encryption under
-/// the RECIPIENT key `(a_r, b_r)`, and the plaintexts satisfy `m_before = m_after + m_amount`
-/// over the integers, where `m_before` is the decryption core's normalized bit column.
-fn eval_decrypted_send<AB>(builder: &mut AB, n: usize, delta: AB::F)
+/// Constraints of a decrypted dual-key statement beyond the decryption core: every fresh block
+/// is a well-formed encryption under its key (`after`/sender-side blocks under the core's
+/// `(a, b)`, recipient blocks under `(a_r, b_r)`), and the plaintexts satisfy
+/// `m_before = m_after + m_delta` over the integers, where `m_before` is the core's normalized
+/// bit column.
+fn eval_decrypted_dual_key<AB>(builder: &mut AB, n: usize, delta: AB::F, shape: &DecShape)
 where
     AB: PermutationAirBuilder,
 {
@@ -1836,8 +1914,9 @@ where
     let local: &[AB::Var] = main.current_slice();
     let next: &[AB::Var] = main.next_slice();
 
-    // --- Per-ciphertext smallness (E-1's constraints) for `after` and `enc_amount` ----------
-    for base in [DS_AFTER, DS_AMT] {
+    // --- Per-ciphertext smallness (E-1's constraints) for every fresh block -----------------
+    for j in 0..shape.num_cts {
+        let base = shape.ct_col(j);
         let r: AB::Expr = local[base + OFF_R].into();
         builder.assert_zero(r.clone() * (r.clone() - AB::Expr::ONE) * (r + AB::Expr::ONE));
         for off in [OFF_E1U, OFF_E1V, OFF_E2U, OFF_E2V] {
@@ -1848,20 +1927,20 @@ where
         builder.assert_bool(m);
     }
 
-    // --- Ripple-carry conservation: before = after + amount --------------------------------
-    // SECURITY: identical to E-1's chain, with `m_before` taken from the decryption core. All
-    // three operands are boolean columns, so the field equation is the integer one, `c_0 = 0`,
-    // and the last-row form forces the final carry to zero — `amount` can never exceed the
-    // DECRYPTED balance (underflow impossible).
+    // --- Ripple-carry conservation: before = after + delta ----------------------------------
+    // SECURITY: identical to E-1/E-2's chain, with `m_before` taken from the decryption core.
+    // All three operands are boolean columns, so the field equation is the integer one,
+    // `c_0 = 0`, and the last-row form forces the final carry to zero — the delta can never
+    // exceed the DECRYPTED balance (underflow impossible).
     let m_before: AB::Expr = local[DEC_BIT].into();
-    let m_after: AB::Expr = local[DS_AFTER + OFF_M].into();
-    let m_amount: AB::Expr = local[DS_AMT + OFF_M].into();
-    let carry: AB::Expr = local[DS_CARRY].into();
-    let carry_next: AB::Expr = next[DS_CARRY].into();
+    let m_after: AB::Expr = local[shape.ct_col(shape.carry_after) + OFF_M].into();
+    let m_delta: AB::Expr = local[shape.ct_col(shape.carry_delta) + OFF_M].into();
+    let carry: AB::Expr = local[shape.carry_col()].into();
+    let carry_next: AB::Expr = next[shape.carry_col()].into();
 
     builder.assert_bool(carry.clone());
     builder.when_first_row().assert_zero(carry.clone());
-    let lhs = m_after + m_amount + carry - m_before;
+    let lhs = m_after + m_delta + carry - m_before;
     builder
         .when_transition()
         .assert_zero(lhs.clone() - carry_next * AB::Expr::TWO);
@@ -1876,13 +1955,17 @@ where
             .into()
     };
 
-    // SECURITY: `after` binds to the core's key `(a, b)` — the very key whose secret `s`
-    // decrypted `before` — and `enc_amount` binds to the recipient key; this is what makes the
-    // statement dual-key (same roles as E-1).
-    for (key_a, key_b, ab) in [
-        (DAUX_A, DAUX_B, DSAUX_AFTER),
-        (DSAUX_A_R, DSAUX_B_R, DSAUX_AMT),
-    ] {
+    for j in 0..shape.num_cts {
+        // SECURITY: sender-side blocks bind to the core's key `(a, b)` — the very key whose
+        // secret `s` decrypted `before` — and recipient blocks bind to `(a_r, b_r)`; this is what
+        // makes the statement dual-key (same roles as E-1/E-2).
+        let (key_a, key_b) = if shape.recipient_ct[j] {
+            (DDAUX_A_R, DDAUX_B_R)
+        } else {
+            (DAUX_A, DAUX_B)
+        };
+        let ab = shape.ct_aux(j);
+
         // c1(z) = a(z)·r(z) + e1(z) − (z^n + 1)·k1(z)
         let eq1 = s(key_a) * s(ab + AOFF_R) + s(ab + AOFF_E1)
             - s(ab + AOFF_C1)
@@ -1899,45 +1982,62 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Decrypted send: DecryptedSendAir (decryption core on `before` + two fresh encryptions)
+// Decrypted dual-key AIR (decryption core on `before` + fresh encryptions), two shapes
 // ---------------------------------------------------------------------------
 
-/// AIR for one refresh-free channel transfer: `before` decrypts (under the secret key bound to
-/// the public sender key) to a HIDDEN bit column `m_before`; `after` is a fresh well-formed
-/// encryption under the sender key and `enc_amount` under the recipient key; and
-/// `m_before = m_after + m_amount` over the integers.
+/// AIR for one refresh-free transfer statement: `before` decrypts (under the secret key bound
+/// to the public sender key) to a HIDDEN bit column `m_before`; the fresh ciphertexts are
+/// well-formed encryptions under their keys; and `m_before = m_after + m_delta` over the
+/// integers. [`DecryptedDualKeyAir::send`] is the E-1 shape (`after`, `enc_amount`),
+/// [`DecryptedDualKeyAir::update`] the E-2 shape (`after`, `sender_delta`, `receiver_delta`,
+/// with both deltas' message evaluations published for the public-amount binding).
 #[derive(Clone, Debug)]
-pub struct DecryptedSendAir<Fld> {
+pub struct DecryptedDualKeyAir<Fld> {
     pub n: usize,
     delta: Fld,
     half_delta: Fld,
+    shape: DecShape,
 }
 
-impl<Fld: Field> DecryptedSendAir<Fld> {
-    pub fn new(n: usize) -> Self {
+impl<Fld: Field> DecryptedDualKeyAir<Fld> {
+    fn new(n: usize, shape: DecShape) -> Self {
         assert!(n.is_power_of_two());
         Self {
             n,
             delta: Fld::from_u32(DELTA_U32),
             half_delta: Fld::from_u32(HALF_DELTA_U32),
+            shape,
         }
+    }
+
+    /// The decrypted-send (E-1-shaped) instance.
+    pub fn send(n: usize) -> Self {
+        Self::new(n, DS_SHAPE)
+    }
+
+    /// The decrypted-update (E-2-shaped) instance.
+    pub fn update(n: usize) -> Self {
+        Self::new(n, DU_SHAPE)
     }
 }
 
-impl<Fld: Field> BaseAir<Fld> for DecryptedSendAir<Fld> {
+impl<Fld: Field> BaseAir<Fld> for DecryptedDualKeyAir<Fld> {
     fn width(&self) -> usize {
-        DS_COLS
+        self.shape.num_cols()
     }
 
     fn num_public_values(&self) -> usize {
-        // [domain] ++ a_s ++ b_s ++ c1_before ++ c2_before ++ a_r ++ b_r
-        //          ++ c1_after ++ c2_after ++ c1_amount ++ c2_amount.
-        1 + 10 * self.n
+        let extra = if self.shape.num_cts == DU_SHAPE.num_cts {
+            E2_NUM_EXTRA_PVS
+        } else {
+            0
+        };
+        self.shape.num_public_values(self.n, extra)
     }
 
     fn main_next_row_columns(&self) -> Vec<usize> {
         (DEC_CARRY..DEC_CARRY + CARRY_BITS)
-            .chain([DS_CARRY])
+            .chain([self.shape.carry_col()])
             .collect()
     }
 
@@ -1946,19 +2046,19 @@ impl<Fld: Field> BaseAir<Fld> for DecryptedSendAir<Fld> {
     }
 }
 
-impl<Fld: Field> LookupAir<Fld> for DecryptedSendAir<Fld> {
+impl<Fld: Field> LookupAir<Fld> for DecryptedDualKeyAir<Fld> {
     fn get_lookups(&mut self) -> Vec<Lookup<Fld>> {
-        specs_to_lookups(decrypted_send_lookup_specs())
+        specs_to_lookups(decrypted_dual_key_lookup_specs(&self.shape))
     }
 }
 
-impl<AB> Air<AB> for DecryptedSendAir<AB::F>
+impl<AB> Air<AB> for DecryptedDualKeyAir<AB::F>
 where
     AB: PermutationAirBuilder,
 {
     fn eval(&self, builder: &mut AB) {
         eval_decryption_core(builder, self.n, self.delta, self.half_delta);
-        eval_decrypted_send(builder, self.n, self.delta);
+        eval_decrypted_dual_key(builder, self.n, self.delta, &self.shape);
     }
 }
 
@@ -2222,45 +2322,50 @@ fn fill_ct_block(
     row[base + OFF_K2] = w.k2[i];
 }
 
-/// Build the decrypted-send trace. The caller has already validated the core witness and both
-/// encryption witnesses plus conservation, so the asserts here are unreachable defense.
-#[allow(clippy::too_many_arguments)]
-fn generate_decrypted_send_trace(
+/// Build the trace of one decrypted dual-key instance. The caller has already validated the
+/// core witness, every encryption witness and conservation, so the asserts here are
+/// unreachable defense.
+fn generate_decrypted_dual_key_trace(
+    shape: &DecShape,
     sender_pk: &UpstreamPublicKey,
     recipient_pk: &UpstreamPublicKey,
     before_ct: &UpstreamCiphertext,
     core: &DecCoreWitness,
-    after_ct: &UpstreamCiphertext,
-    after_w: &EncryptionWitness,
-    amount_ct: &UpstreamCiphertext,
-    amount_w: &EncryptionWitness,
+    cts: &[&UpstreamCiphertext],
+    wits: &[&EncryptionWitness],
 ) -> RowMajorMatrix<F> {
     let n = REGEV_N;
-    let mut values = F::zero_vec(n * DS_COLS);
+    let width = shape.num_cols();
+    debug_assert_eq!(cts.len(), shape.num_cts);
+    debug_assert_eq!(wits.len(), shape.num_cts);
+    let mut values = F::zero_vec(n * width);
+    let (wa, wd) = (wits[shape.carry_after], wits[shape.carry_delta]);
+    let carry_col = shape.carry_col();
     let mut carry = 0u8;
     for i in 0..n {
-        let row = &mut values[i * DS_COLS..(i + 1) * DS_COLS];
+        let row = &mut values[i * width..(i + 1) * width];
         fill_decryption_core_row(row, i, sender_pk, before_ct, core);
-        row[DS_A_R] = recipient_pk.a[i];
-        row[DS_B_R] = recipient_pk.b[i];
-        fill_ct_block(row, DS_AFTER, i, after_ct, after_w);
-        fill_ct_block(row, DS_AMT, i, amount_ct, amount_w);
+        row[DD_A_R] = recipient_pk.a[i];
+        row[DD_B_R] = recipient_pk.b[i];
+        for (j, (ct, w)) in cts.iter().zip(wits).enumerate() {
+            fill_ct_block(row, shape.ct_col(j), i, ct, w);
+        }
 
-        // Ripple carry: after[i] + amount[i] + c[i] − before[i] = 2·c[i+1].
-        row[DS_CARRY] = F::from_u8(carry);
-        let sum = after_w.m[i] + amount_w.m[i] + carry;
+        // Ripple carry: after[i] + delta[i] + c[i] − before[i] = 2·c[i+1].
+        row[carry_col] = F::from_u8(carry);
+        let sum = wa.m[i] + wd.m[i] + carry;
         let out = sum as i16 - core.bits[i] as i16;
         assert!(
             out == 0 || out == 2,
-            "decrypted-send witness inconsistent at bit {i}: before != after + amount"
+            "decrypted dual-key witness inconsistent at bit {i}: before != after + delta"
         );
         carry = (out / 2) as u8;
     }
     assert_eq!(
         carry, 0,
-        "decrypted-send witness inconsistent: after + amount overflows n bits"
+        "decrypted dual-key witness inconsistent: after + delta overflows n bits"
     );
-    RowMajorMatrix::new(values, DS_COLS)
+    RowMajorMatrix::new(values, width)
 }
 
 // ---------------------------------------------------------------------------
@@ -2485,39 +2590,94 @@ pub fn verify_balance_refresh(
 }
 
 // ---------------------------------------------------------------------------
-// Decrypted send prove / verify
+// Decrypted send / decrypted update prove / verify
 // ---------------------------------------------------------------------------
 
-/// Decrypted-send public values:
-/// `[domain] ++ a_s ++ b_s ++ c1_before ++ c2_before ++ a_r ++ b_r ++ c1_after ++ c2_after
-///  ++ c1_amount ++ c2_amount` (purpose word first, full statement absorbed before any
-/// challenge — F2-A/F2-B, see module docs).
-fn decrypted_send_public_values(
+/// Decrypted dual-key public values:
+/// `[domain] ++ extra ++ a_s ++ b_s ++ c1_before ++ c2_before ++ a_r ++ b_r ++ (c1, c2)×cts`
+/// (purpose word first, then the extra PVs — the decrypted update's amount limbs + token index
+/// — then the full statement, all absorbed before any challenge: F2-A/F2-B, see module docs).
+fn decrypted_dual_key_public_values(
     domain: u32,
+    extra: &[F],
     sender_pk: &UpstreamPublicKey,
     recipient_pk: &UpstreamPublicKey,
     before: &UpstreamCiphertext,
-    after: &UpstreamCiphertext,
-    enc_amount: &UpstreamCiphertext,
+    cts: &[&UpstreamCiphertext],
 ) -> Vec<F> {
-    let mut pv = Vec::with_capacity(1 + 10 * REGEV_N);
+    let mut pv = Vec::with_capacity(1 + extra.len() + (6 + 2 * cts.len()) * REGEV_N);
     pv.push(F::from_u32(domain));
+    pv.extend_from_slice(extra);
     pv.extend_from_slice(&sender_pk.a);
     pv.extend_from_slice(&sender_pk.b);
     pv.extend_from_slice(&before.c1);
     pv.extend_from_slice(&before.c2);
     pv.extend_from_slice(&recipient_pk.a);
     pv.extend_from_slice(&recipient_pk.b);
-    pv.extend_from_slice(&after.c1);
-    pv.extend_from_slice(&after.c2);
-    pv.extend_from_slice(&enc_amount.c1);
-    pv.extend_from_slice(&enc_amount.c2);
+    for ct in cts {
+        pv.extend_from_slice(&ct.c1);
+        pv.extend_from_slice(&ct.c2);
+    }
     pv
 }
 
+/// The expected published evaluations of a decrypted dual-key instance, in lookup order: the
+/// core's `a_s, b_s, c1_before, c2_before`, then `a_r, b_r`, then per block `c1, c2` and —
+/// where `shape.expose_m[j]` — the public message polynomial (`encode_amount(amount)`).
+fn expected_decrypted_published_evals(
+    shape: &DecShape,
+    sender_pk: &UpstreamPublicKey,
+    recipient_pk: &UpstreamPublicKey,
+    before: &UpstreamCiphertext,
+    cts: &[&UpstreamCiphertext],
+    exposed_m: Option<&[F]>,
+    z: Challenge,
+) -> Vec<Challenge> {
+    let ev = |coeffs: &[F]| eval_at(coeffs.iter().copied(), z);
+    let mut expected = vec![
+        ev(&sender_pk.a),
+        ev(&sender_pk.b),
+        ev(&before.c1),
+        ev(&before.c2),
+        ev(&recipient_pk.a),
+        ev(&recipient_pk.b),
+    ];
+    for (j, ct) in cts.iter().enumerate() {
+        expected.push(ev(&ct.c1));
+        expected.push(ev(&ct.c2));
+        if shape.expose_m[j] {
+            expected.push(ev(
+                exposed_m.expect("shape exposes m but no public message supplied")
+            ));
+        }
+    }
+    expected
+}
+
+/// Open `before` by decryption: the decrypted balance (upstream rounding semantics) plus the
+/// decryption-core witness, which must decode to the same value (they can differ only on
+/// rounding-boundary noise, unreachable within the enforced budget). Refuses cleanly when `sk`
+/// does not match `pk` or `before` is outside the noise/width budget.
+fn open_before_by_decryption(
+    sender_pk: &UpstreamPublicKey,
+    sender_sk: &RegevSk,
+    before: &RegevCiphertext,
+    ubefore: &UpstreamCiphertext,
+) -> Result<(u64, DecCoreWitness), RegevError> {
+    let balance = decrypt_amount(sender_sk, before)?;
+    let core = build_decryption_witness(sender_pk, sender_sk, ubefore)?;
+    if core.value != balance {
+        return Err(RegevError::InvalidWitness(format!(
+            "digit decomposition decodes to {}, not the decrypted balance {balance} (rounding-boundary noise)",
+            core.value
+        )));
+    }
+    Ok((balance, core))
+}
+
 /// Everything a refresh-free send produces: the two fresh ciphertexts (with the witnesses the
-/// proof was built against, so the sender can keep spending `after` and the recipient-side
-/// tooling can keep `enc_amount`'s opening if it needs it) and the proof.
+/// proof was built against, so a wallet that still tracks witnesses can keep them) and the
+/// proof.
 #[derive(Clone, Debug)]
 pub struct DecryptedSend {
     pub enc_amount: (RegevCiphertext, AmountWitness),
@@ -2527,9 +2687,9 @@ pub struct DecryptedSend {
 
 /// Spend `amount` out of `before` WITHOUT a balance refresh: decrypt `before` under
 /// `sender_sk`, freshly encrypt `amount` under `recipient_pk` and the remainder under
-/// `sender_pk`, and prove the statement with [`DecryptedSendAir`]. Refuses cleanly (no panic)
-/// when `sender_sk` does not match `sender_pk`, when `before` does not decrypt within the
-/// noise/width budget, or when `amount` exceeds the decrypted balance.
+/// `sender_pk`, and prove the E-1-shaped statement with [`DecryptedDualKeyAir::send`]. Refuses
+/// cleanly (no panic) when `sender_sk` does not match `sender_pk`, when `before` does not
+/// decrypt within the noise/width budget, or when `amount` exceeds the decrypted balance.
 ///
 /// SECURITY: the caller must supply a cryptographically secure RNG for the fresh encryption
 /// randomness (same contract as `encrypt_amount`).
@@ -2607,23 +2767,11 @@ fn prove_channel_tx_decrypted_with_domain(
     let spk = to_upstream_pk(sender_pk)?;
     let rpk = to_upstream_pk(recipient_pk)?;
     let ubefore = to_upstream_ct(before)?;
-    let uamount = to_upstream_ct(enc_amount.0)?;
-    let uafter = to_upstream_ct(after.0)?;
+    let cts = [to_upstream_ct(after.0)?, to_upstream_ct(enc_amount.0)?];
 
-    // `before` opening: decrypt under sk (upstream rounding semantics) and build the core
-    // witness; the circuit's own digit decomposition must agree (they differ only on
-    // rounding-boundary noise, unreachable within the enforced budget).
-    let balance = decrypt_amount(sender_sk, before)?;
-    let core = build_decryption_witness(&spk, sender_sk, &ubefore)?;
-    if core.value != balance {
-        return Err(RegevError::InvalidWitness(format!(
-            "digit decomposition decodes to {}, not the decrypted balance {balance} (rounding-boundary noise)",
-            core.value
-        )));
-    }
-
-    check_amount_witness(&rpk, &uamount, enc_amount.1, "enc_amount")?;
-    check_amount_witness(&spk, &uafter, after.1, "after")?;
+    let (balance, core) = open_before_by_decryption(&spk, sender_sk, before, &ubefore)?;
+    check_amount_witness(&spk, &cts[0], after.1, "after")?;
+    check_amount_witness(&rpk, &cts[1], enc_amount.1, "enc_amount")?;
 
     // Conservation over u64 — equivalent to the in-circuit ripple carry because every message
     // vector equals encode_amount(u64) (bits 64..128 are zero).
@@ -2637,18 +2785,18 @@ fn prove_channel_tx_decrypted_with_domain(
         }
     }
 
-    let air = DecryptedSendAir::<F>::new(REGEV_N);
-    let trace = generate_decrypted_send_trace(
+    let air = DecryptedDualKeyAir::<F>::send(REGEV_N);
+    let ct_refs = [&cts[0], &cts[1]];
+    let trace = generate_decrypted_dual_key_trace(
+        &DS_SHAPE,
         &spk,
         &rpk,
         &ubefore,
         &core,
-        &uafter,
-        &after.1.witness,
-        &uamount,
-        &enc_amount.1.witness,
+        &ct_refs,
+        &[&after.1.witness, &enc_amount.1.witness],
     );
-    let pvs = decrypted_send_public_values(domain, &spk, &rpk, &ubefore, &uafter, &uamount);
+    let pvs = decrypted_dual_key_public_values(domain, &[], &spk, &rpk, &ubefore, &ct_refs);
     prove_one(&level.config(), &air, &trace, pvs)
 }
 
@@ -2666,36 +2814,197 @@ pub fn verify_channel_tx_decrypted(
     let spk = to_upstream_pk(sender_pk)?;
     let rpk = to_upstream_pk(recipient_pk)?;
     let ubefore = to_upstream_ct(before)?;
-    let uamount = to_upstream_ct(enc_amount)?;
-    let uafter = to_upstream_ct(after)?;
+    let cts = [to_upstream_ct(after)?, to_upstream_ct(enc_amount)?];
+    let ct_refs = [&cts[0], &cts[1]];
 
-    let air = DecryptedSendAir::<F>::new(REGEV_N);
+    let air = DecryptedDualKeyAir::<F>::send(REGEV_N);
     // SECURITY: the verifier rebuilds the public values itself, with ITS purpose domain word —
     // an E-1 proof (or any other purpose) over the same statement diverges the transcript and
-    // fails (F2-B); the AIRs also differ structurally (width, PV count, published count).
-    let pvs = decrypted_send_public_values(
+    // fails (F2-B); the AIRs also differ structurally (width, PV count).
+    let pvs = decrypted_dual_key_public_values(
         CHANNEL_TX_DECRYPTED_ZKP_DOMAIN,
+        &[],
         &spk,
         &rpk,
         &ubefore,
-        &uafter,
-        &uamount,
+        &ct_refs,
     );
-    let (z, proof) = verify_one(&level.config(), air, proof, pvs, DS_NUM_PUBLISHED)?;
+    let (z, proof) = verify_one(
+        &level.config(),
+        air,
+        proof,
+        pvs,
+        DS_SHAPE.num_published_evals(),
+    )?;
+    let expected =
+        expected_decrypted_published_evals(&DS_SHAPE, &spk, &rpk, &ubefore, &ct_refs, None, z);
+    check_published_evals(&proof, &expected)
+}
 
-    let ev = |coeffs: &[F]| eval_at(coeffs.iter().copied(), z);
-    let expected = vec![
-        ev(&spk.a),
-        ev(&spk.b),
-        ev(&ubefore.c1),
-        ev(&ubefore.c2),
-        ev(&rpk.a),
-        ev(&rpk.b),
-        ev(&uafter.c1),
-        ev(&uafter.c2),
-        ev(&uamount.c1),
-        ev(&uamount.c2),
+/// Prove the decrypted update (the E-2 statement, detail2 §E-2 + §N-4, with `before` opened by
+/// decryption): `after`/`sender_delta` well-formed under `sender_pk`, `receiver_delta`
+/// well-formed under `recipient_pk`, `decrypt(before) = after + amount`, and both deltas
+/// encrypt exactly the public `amount`; `token_index` is absorbed as its own PV under the
+/// "IMDU" domain (TM-6). `before` needs no witness. Refuses cleanly on any inconsistency.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_channel_update_decrypted(
+    level: RegevSecurityLevel,
+    sender_pk: &RegevPk,
+    sender_sk: &RegevSk,
+    recipient_pk: &RegevPk,
+    before: &RegevCiphertext,
+    after: (&RegevCiphertext, &AmountWitness),
+    sender_delta: (&RegevCiphertext, &AmountWitness),
+    receiver_delta: (&RegevCiphertext, &AmountWitness),
+    amount: u64,
+    token_index: u32,
+) -> Result<Vec<u8>, RegevError> {
+    prove_channel_update_decrypted_with_domain(
+        level,
+        CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN,
+        sender_pk,
+        sender_sk,
+        recipient_pk,
+        before,
+        after,
+        sender_delta,
+        receiver_delta,
+        amount,
+        token_index,
+    )
+}
+
+/// Domain-parameterized decrypted-update prover. Private: only `prove_channel_update_decrypted`
+/// (and the purpose-binding adversarial test) call this.
+#[allow(clippy::too_many_arguments)]
+fn prove_channel_update_decrypted_with_domain(
+    level: RegevSecurityLevel,
+    domain: u32,
+    sender_pk: &RegevPk,
+    sender_sk: &RegevSk,
+    recipient_pk: &RegevPk,
+    before: &RegevCiphertext,
+    after: (&RegevCiphertext, &AmountWitness),
+    sender_delta: (&RegevCiphertext, &AmountWitness),
+    receiver_delta: (&RegevCiphertext, &AmountWitness),
+    amount: u64,
+    token_index: u32,
+) -> Result<Vec<u8>, RegevError> {
+    let spk = to_upstream_pk(sender_pk)?;
+    let rpk = to_upstream_pk(recipient_pk)?;
+    let ubefore = to_upstream_ct(before)?;
+    let cts = [
+        to_upstream_ct(after.0)?,
+        to_upstream_ct(sender_delta.0)?,
+        to_upstream_ct(receiver_delta.0)?,
     ];
+
+    let (balance, core) = open_before_by_decryption(&spk, sender_sk, before, &ubefore)?;
+    check_amount_witness(&spk, &cts[0], after.1, "after")?;
+    check_amount_witness(&spk, &cts[1], sender_delta.1, "sender_delta")?;
+    check_amount_witness(&rpk, &cts[2], receiver_delta.1, "receiver_delta")?;
+
+    // Both deltas must encrypt exactly the public amount.
+    if sender_delta.1.amount != amount || receiver_delta.1.amount != amount {
+        return Err(RegevError::InvalidWitness(format!(
+            "delta plaintexts (sender {}, receiver {}) do not match the public amount {amount}",
+            sender_delta.1.amount, receiver_delta.1.amount
+        )));
+    }
+    match after.1.amount.checked_add(amount) {
+        Some(sum) if sum == balance => {}
+        _ => {
+            return Err(RegevError::InvalidWitness(format!(
+                "conservation violated: before decrypts to {balance} != after ({}) + amount ({amount})",
+                after.1.amount
+            )));
+        }
+    }
+
+    let air = DecryptedDualKeyAir::<F>::update(REGEV_N);
+    let ct_refs = [&cts[0], &cts[1], &cts[2]];
+    let trace = generate_decrypted_dual_key_trace(
+        &DU_SHAPE,
+        &spk,
+        &rpk,
+        &ubefore,
+        &core,
+        &ct_refs,
+        &[
+            &after.1.witness,
+            &sender_delta.1.witness,
+            &receiver_delta.1.witness,
+        ],
+    );
+    let pvs = decrypted_dual_key_public_values(
+        domain,
+        &e2_extra_pvs(amount, token_index),
+        &spk,
+        &rpk,
+        &ubefore,
+        &ct_refs,
+    );
+    prove_one(&level.config(), &air, &trace, pvs)
+}
+
+/// Verify a decrypted-update proof against the claimed E-2-shaped statement (including the
+/// public `amount` and the base `token_index`, both rebuilt by the VERIFIER — TM-6). Validates
+/// all keys and ciphertexts canonically BEFORE touching the proof bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_channel_update_decrypted(
+    level: RegevSecurityLevel,
+    sender_pk: &RegevPk,
+    recipient_pk: &RegevPk,
+    before: &RegevCiphertext,
+    after: &RegevCiphertext,
+    sender_delta: &RegevCiphertext,
+    receiver_delta: &RegevCiphertext,
+    amount: u64,
+    token_index: u32,
+    proof: &[u8],
+) -> Result<(), RegevError> {
+    let spk = to_upstream_pk(sender_pk)?;
+    let rpk = to_upstream_pk(recipient_pk)?;
+    let ubefore = to_upstream_ct(before)?;
+    let cts = [
+        to_upstream_ct(after)?,
+        to_upstream_ct(sender_delta)?,
+        to_upstream_ct(receiver_delta)?,
+    ];
+    let ct_refs = [&cts[0], &cts[1], &cts[2]];
+
+    let air = DecryptedDualKeyAir::<F>::update(REGEV_N);
+    let pvs = decrypted_dual_key_public_values(
+        CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN,
+        &e2_extra_pvs(amount, token_index),
+        &spk,
+        &rpk,
+        &ubefore,
+        &ct_refs,
+    );
+    let (z, proof) = verify_one(
+        &level.config(),
+        air,
+        proof,
+        pvs,
+        DU_SHAPE.num_published_evals(),
+    )?;
+
+    // SECURITY (F2-C): pin both deltas' committed message polynomials to the public amount by
+    // recomputing eval(encode_amount(amount), z) — see module docs for the soundness argument.
+    let m_pub: Vec<F> = encode_amount(amount)
+        .iter()
+        .map(|&b| F::from_u8(b))
+        .collect();
+    let expected = expected_decrypted_published_evals(
+        &DU_SHAPE,
+        &spk,
+        &rpk,
+        &ubefore,
+        &ct_refs,
+        Some(&m_pub),
+        z,
+    );
     check_published_evals(&proof, &expected)
 }
 
@@ -2715,6 +3024,8 @@ pub enum RegevStatement {
         enc_amount: RegevCiphertext,
         after: RegevCiphertext,
     },
+    /// E-2 shape, shared by the `ChannelUpdate` (encryption-witnessed `before`) and
+    /// `ChannelUpdateDecrypted` (decryption-opened `before`) purposes.
     ChannelUpdate {
         sender_pk: RegevPk,
         recipient_pk: RegevPk,
@@ -2811,6 +3122,30 @@ impl RealRegevProofVerifier {
                     token_index,
                 },
             ) => verify_channel_update(
+                self.level,
+                sender_pk,
+                recipient_pk,
+                before,
+                after,
+                sender_delta,
+                receiver_delta,
+                *amount,
+                *token_index,
+                proof,
+            ),
+            (
+                RegevProofPurpose::ChannelUpdateDecrypted,
+                RegevStatement::ChannelUpdate {
+                    sender_pk,
+                    recipient_pk,
+                    before,
+                    after,
+                    sender_delta,
+                    receiver_delta,
+                    amount,
+                    token_index,
+                },
+            ) => verify_channel_update_decrypted(
                 self.level,
                 sender_pk,
                 recipient_pk,
@@ -4286,25 +4621,27 @@ mod tests {
         let uamount = to_upstream_ct(&enc_amount).unwrap();
         let uafter = to_upstream_ct(&after).unwrap();
         let core = build_decryption_witness(&spk, &sender_sk, &ubefore).unwrap();
-        let honest = generate_decrypted_send_trace(
+        let ct_refs = [&uafter, &uamount];
+        let honest = generate_decrypted_dual_key_trace(
+            &DS_SHAPE,
             &spk,
             &rpk,
             &ubefore,
             &core,
-            &uafter,
-            &after_w.witness,
-            &uamount,
-            &enc_amount_w.witness,
+            &ct_refs,
+            &[&after_w.witness, &enc_amount_w.witness],
         );
-        let pvs = decrypted_send_public_values(
+        let pvs = decrypted_dual_key_public_values(
             CHANNEL_TX_DECRYPTED_ZKP_DOMAIN,
+            &[],
             &spk,
             &rpk,
             &ubefore,
-            &uafter,
-            &uamount,
+            &ct_refs,
         );
-        let air = DecryptedSendAir::<F>::new(REGEV_N);
+        let air = DecryptedDualKeyAir::<F>::send(REGEV_N);
+        let (ds_after, ds_amt, ds_carry) =
+            (DS_SHAPE.ct_col(0), DS_SHAPE.ct_col(1), DS_SHAPE.carry_col());
         let verify = |proof: &[u8]| {
             verify_channel_tx_decrypted(
                 LEVEL,
@@ -4322,27 +4659,27 @@ mod tests {
         verify(&ok).unwrap();
 
         fn flip(t: &mut RowMajorMatrix<F>, row: usize, col: usize) {
-            let idx = row * DS_COLS + col;
+            let idx = row * DS_SHAPE.num_cols() + col;
             t.values[idx] = F::ONE - t.values[idx];
         }
         type Forge = Box<dyn Fn(&mut RowMajorMatrix<F>)>;
         let cases: Vec<(&str, Forge)> = vec![
             (
                 "m_amount bumped at bit 0",
-                Box::new(|t| flip(t, 0, DS_AMT + OFF_M)),
+                Box::new(move |t| flip(t, 0, ds_amt + OFF_M)),
             ),
             (
                 "m_before and m_after flipped at bit 0",
-                Box::new(|t| {
+                Box::new(move |t| {
                     flip(t, 0, DEC_BIT);
-                    flip(t, 0, DS_AFTER + OFF_M);
+                    flip(t, 0, ds_after + OFF_M);
                 }),
             ),
             (
                 "foreign ternary secret key in the core",
                 Box::new(|t| {
                     for row in 0..REGEV_N {
-                        let idx = row * DS_COLS + DEC_S;
+                        let idx = row * DS_SHAPE.num_cols() + DEC_S;
                         // Rotate {-1, 0, 1} → {0, 1, -1}: still ternary, but not the key.
                         let cur = field_to_centered(t.values[idx]);
                         let next = if cur == 1 { -1 } else { cur + 1 };
@@ -4352,7 +4689,7 @@ mod tests {
             ),
             (
                 "conservation carry forced at row 0",
-                Box::new(|t| flip(t, 0, DS_CARRY)),
+                Box::new(move |t| flip(t, 0, ds_carry)),
             ),
         ];
         for (label, forge) in cases {
@@ -4397,5 +4734,426 @@ mod tests {
             g.send.proof = bad.to_vec();
             assert!(ds_verify(&g).is_err());
         }
+    }
+    // -----------------------------------------------------------------------
+    // Decrypted update (refresh-free inter-channel debit) tests
+    // -----------------------------------------------------------------------
+
+    struct DuFixture {
+        sender_pk: RegevPk,
+        sender_sk: crate::regev::RegevSk,
+        recipient_pk: RegevPk,
+        before: RegevCiphertext,
+        balance: u64,
+        after: (RegevCiphertext, AmountWitness),
+        sender_delta: (RegevCiphertext, AmountWitness),
+        receiver_delta: (RegevCiphertext, AmountWitness),
+        amount: u64,
+        proof: Vec<u8>,
+    }
+
+    /// A decrypted update of `amount` out of `before` (built by `mk_before`), proved under
+    /// `TEST_TOKEN_INDEX`.
+    fn du_fixture(
+        seed: u64,
+        amount: u64,
+        mk_before: impl FnOnce(&mut SmallRng, &RegevPk) -> RegevCiphertext,
+    ) -> DuFixture {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let (sender_pk, sender_sk) = channel_keygen(&mut rng);
+        let (recipient_pk, _) = channel_keygen(&mut rng);
+        let before = mk_before(&mut rng, &sender_pk);
+        let balance = decrypt_amount(&sender_sk, &before).unwrap();
+        let after = encrypt_amount(&mut rng, &sender_pk, balance - amount).unwrap();
+        let sender_delta = encrypt_amount(&mut rng, &sender_pk, amount).unwrap();
+        let receiver_delta = encrypt_amount(&mut rng, &recipient_pk, amount).unwrap();
+        let proof = prove_channel_update_decrypted(
+            LEVEL,
+            &sender_pk,
+            &sender_sk,
+            &recipient_pk,
+            &before,
+            (&after.0, &after.1),
+            (&sender_delta.0, &sender_delta.1),
+            (&receiver_delta.0, &receiver_delta.1),
+            amount,
+            TEST_TOKEN_INDEX,
+        )
+        .unwrap();
+        DuFixture {
+            sender_pk,
+            sender_sk,
+            recipient_pk,
+            before,
+            balance,
+            after,
+            sender_delta,
+            receiver_delta,
+            amount,
+            proof,
+        }
+    }
+
+    fn du_verify(f: &DuFixture, amount: u64, token_index: u32) -> Result<(), RegevError> {
+        du_verify_cts(
+            f,
+            &f.before,
+            &f.after.0,
+            &f.sender_delta.0,
+            &f.receiver_delta.0,
+            amount,
+            token_index,
+            &f.proof,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn du_verify_cts(
+        f: &DuFixture,
+        before: &RegevCiphertext,
+        after: &RegevCiphertext,
+        sender_delta: &RegevCiphertext,
+        receiver_delta: &RegevCiphertext,
+        amount: u64,
+        token_index: u32,
+        proof: &[u8],
+    ) -> Result<(), RegevError> {
+        verify_channel_update_decrypted(
+            LEVEL,
+            &f.sender_pk,
+            &f.recipient_pk,
+            before,
+            after,
+            sender_delta,
+            receiver_delta,
+            amount,
+            token_index,
+            proof,
+        )
+    }
+
+    /// Happy path + boundary amounts on fresh `before` ciphertexts, then the load-bearing
+    /// 64-homomorphic-adds `before` (the shape E-2 could NOT debit without a refresh).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn decrypted_update_roundtrip_fresh_and_after_64_adds() {
+        for (seed, balance, amount) in [(4_000u64, 1_000u64, 250u64), (4_001, 5, 0), (4_002, 7, 7)]
+        {
+            let f = du_fixture(seed, amount, fresh_before(balance));
+            assert_eq!(f.balance, balance);
+            du_verify(&f, amount, TEST_TOKEN_INDEX).unwrap();
+        }
+        let amount_each = u32::MAX as u64;
+        let total = amount_each * MAX_HOMO_ADDS_BEFORE_REFRESH as u64;
+        let f = du_fixture(4_100, 12_345, move |rng, pk| {
+            accumulated_ct(rng, pk, amount_each, MAX_HOMO_ADDS_BEFORE_REFRESH)
+        });
+        assert_eq!(f.balance, total);
+        du_verify(&f, 12_345, TEST_TOKEN_INDEX).unwrap();
+        assert_eq!(
+            decrypt_amount(&f.sender_sk, &f.after.0).unwrap(),
+            total - 12_345
+        );
+    }
+
+    /// Adversarial (verify side): wrong public amount (±1), wrong token index, a tampered
+    /// coefficient in any of the four ciphertexts, a substituted delta of the same amount, and
+    /// swapped/foreign keys must all be rejected.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn decrypted_update_rejects_wrong_public_amount_token_and_tampering() {
+        let f = du_fixture(4_200, 250, fresh_before(1_000));
+        du_verify(&f, 250, TEST_TOKEN_INDEX).unwrap();
+
+        assert!(du_verify(&f, 249, TEST_TOKEN_INDEX).is_err());
+        assert!(du_verify(&f, 251, TEST_TOKEN_INDEX).is_err());
+        assert!(du_verify(&f, 250, TEST_TOKEN_INDEX + 1).is_err());
+        assert!(du_verify(&f, 250, 0).is_err());
+
+        for ct_idx in 0..4 {
+            for c2 in [false, true] {
+                let mut cts = [
+                    f.before.clone(),
+                    f.after.0.clone(),
+                    f.sender_delta.0.clone(),
+                    f.receiver_delta.0.clone(),
+                ];
+                let poly = if c2 {
+                    &mut cts[ct_idx].c2
+                } else {
+                    &mut cts[ct_idx].c1
+                };
+                poly[3] = (poly[3] + 1) % REGEV_Q;
+                assert!(
+                    du_verify_cts(
+                        &f,
+                        &cts[0],
+                        &cts[1],
+                        &cts[2],
+                        &cts[3],
+                        250,
+                        TEST_TOKEN_INDEX,
+                        &f.proof
+                    )
+                    .is_err(),
+                    "tampered ct {ct_idx} ({}): verification must fail",
+                    if c2 { "c2" } else { "c1" }
+                );
+            }
+        }
+
+        let mut rng = SmallRng::seed_from_u64(4_201);
+        let (sub_rd, _) = encrypt_amount(&mut rng, &f.recipient_pk, 250).unwrap();
+        assert!(
+            du_verify_cts(
+                &f,
+                &f.before,
+                &f.after.0,
+                &f.sender_delta.0,
+                &sub_rd,
+                250,
+                TEST_TOKEN_INDEX,
+                &f.proof
+            )
+            .is_err()
+        );
+        let (other_pk, _) = channel_keygen(&mut rng);
+        for (spk, rpk) in [
+            (&f.recipient_pk, &f.sender_pk),
+            (&f.sender_pk, &other_pk),
+            (&other_pk, &f.recipient_pk),
+        ] {
+            assert!(
+                verify_channel_update_decrypted(
+                    LEVEL,
+                    spk,
+                    rpk,
+                    &f.before,
+                    &f.after.0,
+                    &f.sender_delta.0,
+                    &f.receiver_delta.0,
+                    250,
+                    TEST_TOKEN_INDEX,
+                    &f.proof,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// Prove-side refusals: a delta encrypting a different amount than the public one, an
+    /// `after` that does not close conservation against the DECRYPTED balance, an overspend, and
+    /// a secret key that does not match the sender public key.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn decrypted_update_prove_refuses_inconsistent_witnesses() {
+        let mut rng = SmallRng::seed_from_u64(4_300);
+        let (spk, ssk) = channel_keygen(&mut rng);
+        let (rpk, _) = channel_keygen(&mut rng);
+        let (_other_pk, other_sk) = channel_keygen(&mut rng);
+        let (before, _) = encrypt_amount(&mut rng, &spk, 100).unwrap();
+        let after = encrypt_amount(&mut rng, &spk, 70).unwrap();
+        let sd = encrypt_amount(&mut rng, &spk, 30).unwrap();
+        let rd = encrypt_amount(&mut rng, &rpk, 30).unwrap();
+        let prove = |sk: &crate::regev::RegevSk,
+                     after: &(RegevCiphertext, AmountWitness),
+                     sd: &(RegevCiphertext, AmountWitness),
+                     rd: &(RegevCiphertext, AmountWitness),
+                     amount: u64| {
+            prove_channel_update_decrypted(
+                LEVEL,
+                &spk,
+                sk,
+                &rpk,
+                &before,
+                (&after.0, &after.1),
+                (&sd.0, &sd.1),
+                (&rd.0, &rd.1),
+                amount,
+                TEST_TOKEN_INDEX,
+            )
+        };
+        prove(&ssk, &after, &sd, &rd, 30).unwrap();
+
+        // Public amount disagrees with the deltas.
+        assert!(matches!(
+            prove(&ssk, &after, &sd, &rd, 31),
+            Err(RegevError::InvalidWitness(_))
+        ));
+        // One delta encrypts a different amount.
+        let sd_29 = encrypt_amount(&mut rng, &spk, 29).unwrap();
+        assert!(matches!(
+            prove(&ssk, &after, &sd_29, &rd, 30),
+            Err(RegevError::InvalidWitness(_))
+        ));
+        let rd_31 = encrypt_amount(&mut rng, &rpk, 31).unwrap();
+        assert!(matches!(
+            prove(&ssk, &after, &sd, &rd_31, 30),
+            Err(RegevError::InvalidWitness(_))
+        ));
+        // `after` does not close conservation (69 / 71).
+        for wrong in [69u64, 71] {
+            let bad_after = encrypt_amount(&mut rng, &spk, wrong).unwrap();
+            assert!(matches!(
+                prove(&ssk, &bad_after, &sd, &rd, 30),
+                Err(RegevError::InvalidWitness(_))
+            ));
+        }
+        // Overspend: deltas of 101 with an `after` of 0 cannot close against balance 100.
+        let after_0 = encrypt_amount(&mut rng, &spk, 0).unwrap();
+        let sd_101 = encrypt_amount(&mut rng, &spk, 101).unwrap();
+        let rd_101 = encrypt_amount(&mut rng, &rpk, 101).unwrap();
+        assert!(matches!(
+            prove(&ssk, &after_0, &sd_101, &rd_101, 101),
+            Err(RegevError::InvalidWitness(_))
+        ));
+        // Secret key that does not match the sender public key.
+        assert!(prove(&other_sk, &after, &sd, &rd, 30).is_err());
+    }
+
+    /// Purpose binding: an E-2 proof over the identical statement must not verify as a
+    /// decrypted update and vice versa; a foreign domain word must not verify; the E-1-shaped
+    /// decrypted send must not verify as an update; and the dispatcher routes
+    /// `ChannelUpdateDecrypted` correctly.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn decrypted_update_purpose_binding() {
+        let mut rng = SmallRng::seed_from_u64(4_400);
+        let (spk, ssk) = channel_keygen(&mut rng);
+        let (rpk, _) = channel_keygen(&mut rng);
+        let before = encrypt_amount(&mut rng, &spk, 1_000).unwrap();
+        let after = encrypt_amount(&mut rng, &spk, 750).unwrap();
+        let sd = encrypt_amount(&mut rng, &spk, 250).unwrap();
+        let rd = encrypt_amount(&mut rng, &rpk, 250).unwrap();
+
+        let e2 = prove_channel_update(
+            LEVEL,
+            &spk,
+            &rpk,
+            (&before.0, &before.1),
+            (&after.0, &after.1),
+            (&sd.0, &sd.1),
+            (&rd.0, &rd.1),
+            250,
+            TEST_TOKEN_INDEX,
+        )
+        .unwrap();
+        let du = prove_channel_update_decrypted(
+            LEVEL,
+            &spk,
+            &ssk,
+            &rpk,
+            &before.0,
+            (&after.0, &after.1),
+            (&sd.0, &sd.1),
+            (&rd.0, &rd.1),
+            250,
+            TEST_TOKEN_INDEX,
+        )
+        .unwrap();
+        let foreign = prove_channel_update_decrypted_with_domain(
+            LEVEL,
+            CHANNEL_UPDATE_ZKP_DOMAIN,
+            &spk,
+            &ssk,
+            &rpk,
+            &before.0,
+            (&after.0, &after.1),
+            (&sd.0, &sd.1),
+            (&rd.0, &rd.1),
+            250,
+            TEST_TOKEN_INDEX,
+        )
+        .unwrap();
+        let ver_e2 = |proof: &[u8]| {
+            verify_channel_update(
+                LEVEL,
+                &spk,
+                &rpk,
+                &before.0,
+                &after.0,
+                &sd.0,
+                &rd.0,
+                250,
+                TEST_TOKEN_INDEX,
+                proof,
+            )
+        };
+        let ver_du = |proof: &[u8]| {
+            verify_channel_update_decrypted(
+                LEVEL,
+                &spk,
+                &rpk,
+                &before.0,
+                &after.0,
+                &sd.0,
+                &rd.0,
+                250,
+                TEST_TOKEN_INDEX,
+                proof,
+            )
+        };
+        ver_e2(&e2).unwrap();
+        ver_du(&du).unwrap();
+        assert!(
+            ver_du(&e2).is_err(),
+            "an E-2 proof must not verify as a decrypted update"
+        );
+        assert!(
+            ver_e2(&du).is_err(),
+            "a decrypted-update proof must not verify as E-2"
+        );
+        assert!(
+            ver_du(&foreign).is_err(),
+            "a foreign-domain proof must not verify"
+        );
+        assert!(ver_e2(&foreign).is_err());
+
+        // An E-1-shaped decrypted send over crafted "matching" ciphertexts is not an update.
+        let ds = prove_channel_tx_decrypted(
+            LEVEL,
+            &spk,
+            &ssk,
+            &rpk,
+            &before.0,
+            (&rd.0, &rd.1),
+            (&after.0, &after.1),
+        )
+        .unwrap();
+        assert!(ver_du(&ds).is_err());
+
+        let verifier = RealRegevProofVerifier { level: LEVEL };
+        let statement = RegevStatement::ChannelUpdate {
+            sender_pk: spk.clone(),
+            recipient_pk: rpk.clone(),
+            before: before.0.clone(),
+            after: after.0.clone(),
+            sender_delta: sd.0.clone(),
+            receiver_delta: rd.0.clone(),
+            amount: 250,
+            token_index: TEST_TOKEN_INDEX,
+        };
+        verifier
+            .verify(RegevProofPurpose::ChannelUpdateDecrypted, &du, &statement)
+            .unwrap();
+        verifier
+            .verify(RegevProofPurpose::ChannelUpdate, &e2, &statement)
+            .unwrap();
+        assert!(matches!(
+            verifier.verify(RegevProofPurpose::ChannelUpdate, &du, &statement),
+            Err(RegevError::ProofVerification(_))
+        ));
+        assert!(matches!(
+            verifier.verify(RegevProofPurpose::ChannelUpdateDecrypted, &e2, &statement),
+            Err(RegevError::ProofVerification(_))
+        ));
+        assert!(matches!(
+            verifier.verify(RegevProofPurpose::ChannelTxDecrypted, &du, &statement),
+            Err(RegevError::PurposeMismatch(_))
+        ));
+        assert_eq!(
+            RegevProofPurpose::ChannelUpdateDecrypted.domain(),
+            CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN
+        );
     }
 }

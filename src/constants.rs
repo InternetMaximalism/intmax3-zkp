@@ -406,6 +406,10 @@ mod tests {
                 "IMDS CHANNEL_TX_DECRYPTED_ZKP_DOMAIN (transfer_stark.rs)",
                 crate::regev::CHANNEL_TX_DECRYPTED_ZKP_DOMAIN,
             ),
+            (
+                "IMDU CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN (transfer_stark.rs)",
+                crate::regev::CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN,
+            ),
             ("IMLL LIST_LEAF_DOMAIN (poseidon_sig/list.rs)", 0x494d_4c4c),
             ("IMPG DOMAIN_PK_G (poseidon_sig/mod.rs)", 0x494d_5047),
             ("IMSG DOMAIN_SIG_G (poseidon_sig/mod.rs)", 0x494d_5347),
