@@ -23,7 +23,7 @@ const crypto = require('crypto');
 // signed snapshot -> sync off-chain heads); a bare `cli(ch, ['cosign-l1-deposit-import', ...])`
 // only does the CLI step, and `liveBindSnapshot` alone fails because the live-balance proof was
 // never advanced past genesis to include this deposit in the first place.
-const { importL1Deposit } = require('../../api/lib/deposit-pipeline');
+const { importL1Deposit, journalBackingDeposit } = require('../../api/lib/deposit-pipeline');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const { installHeadExitKit } = require('../../api/lib/exit-kit');
@@ -370,6 +370,21 @@ app.post('/api/init', (req, res) => {
         await producer.liveBindSnapshot(ch, snapshot); // live balance follows (delegate-add gate)
         await flushPublishedHead(ch);                  // producer public head follows
         await installHeadExitKit(ch);                  // install the exit-kit receipt for the new head
+      }
+    } else {
+      // An EMPTY-genesis channel (`setup-backing` with SETUP_BACKING_EMPTY_GENESIS — every local
+      // channel after the first, see bootstrapBacking) has no backing deposit to adopt, so the
+      // durable live-balance spine starts HERE, exactly as `api/routes/channel-init.js` does:
+      // create the balance on the channel's base account, bind the signed genesis (an empty proof
+      // matches it) and register the channel. A funded genesis is adopted lazily by the first
+      // import instead (`ensureLiveBackingAdopted`).
+      const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+      if (!backing.deposit_tx) {
+        const accountSalt = backing.base_private_state && backing.base_private_state.salt;
+        if (accountSalt) await producer.liveInitWithAccountSalt(ch, accountSalt);
+        else await producer.liveInit(ch);
+        await producer.liveBindSnapshot(ch, snapshot);
+        await producer.register(snapshot);
       }
     }
     res.json(snapshot);
@@ -1167,21 +1182,42 @@ async function bootstrapBacking() {
   if (!needBacking.length) return;
   console.log(`Setting up REAL on-chain deposit backing (one-time) for channels: ${needBacking.join(', ')}…`);
   ensureAnvil();
-  for (const ch of needBacking) {
-    console.log(`  channel ${ch}: deploying its own IntmaxRollup…`);
-    const addr = deployRollup();
-    // The genesis deposit must be proved with the SAME identity the block producer will journal
-    // for it: `Deposit::nullifier()` hashes the deposit index and the INTMAX block number, and
-    // that nullifier is the leaf pushed onto `settled_tx_chain`. Read both from the producer
-    // before the deposit exists — `add_deposit` assigns `deposit_counts` and `block_number + 1` —
-    // so the genesis proof and the producer's journal describe one deposit, not two.
-    const producerStatus = await producer.status();
-    const depositIdentity = {
+  // ONE IntmaxRollup shared by every channel. The block producer is shared too and journals ONE
+  // L1 deposit sequence (`deposit_index` must be consecutive), so per-channel rollups — each
+  // restarting its on-chain deposit index at 0 — could never all be adopted: the second channel's
+  // backing deposit (on-chain index 0) was refused with "producer expects N". A shared rollup
+  // keeps the on-chain and producer sequences identical; reuse the address an already-backed
+  // channel recorded so a partial bootstrap resumes onto the same contract.
+  let addr = null;
+  for (const ch of CHANNELS) {
+    const f = wc(ch, 'channel_backing.json');
+    if (fs.existsSync(f)) { addr = JSON.parse(fs.readFileSync(f, 'utf8')).rollup || null; if (addr) break; }
+  }
+  if (!addr) { console.log('  deploying the shared IntmaxRollup…'); addr = deployRollup(); }
+  // The genesis deposit must be proved with the SAME identity the block producer will journal
+  // for it: `Deposit::nullifier()` hashes the deposit index and the INTMAX block number, and
+  // that nullifier is the leaf pushed onto `settled_tx_chain`. Read both from the producer
+  // before the deposit exists — `add_deposit` assigns `deposit_counts` and `block_number + 1`.
+  // `setup-backing` proves its genesis against a FRESH witness generator, i.e. as the
+  // producer's very first block, so only ONE channel per producer can carry a funded genesis
+  // deposit: it is journaled right after it is proved (`journalBackingDeposit`), before anything
+  // else can consume that slot. Every further channel gets an EMPTY genesis (no deposit, fund 0,
+  // settle chain 0 — the bare initial proof, which the live balance binds to trivially) and is
+  // funded through ordinary deposit imports, whose indices then follow the shared sequence.
+  const producerStatus = await producer.status();
+  const fundedGenesisDone = CHANNELS.some((ch) => {
+    const f = wc(ch, 'channel_backing.json');
+    return fs.existsSync(f) && !!JSON.parse(fs.readFileSync(f, 'utf8')).deposit_tx;
+  });
+  for (const [i, ch] of needBacking.entries()) {
+    const deferred = fundedGenesisDone || i > 0;
+    const env = deferred ? { SETUP_BACKING_EMPTY_GENESIS: '1' } : {
       SETUP_BACKING_DEPOSIT_INDEX: String(producerStatus.nextDepositIndex),
       SETUP_BACKING_INTMAX_BLOCK_NUMBER: String(Number(producerStatus.blockNumber) + 1),
     };
-    console.log(`  channel ${ch}: IntmaxRollup @ ${addr} — setup-backing (real ETH deposit + balance proof, ~30s)…`);
-    cli(ch, ['setup-backing', RPC, addr], depositIdentity);
+    console.log(`  channel ${ch}: IntmaxRollup @ ${addr} — setup-backing (${deferred ? 'empty genesis, funded by imports' : 'real ETH deposit + balance proof, ~30s'})…`);
+    cli(ch, ['setup-backing', RPC, addr], env);
+    if (!deferred) await journalBackingDeposit(ch);
   }
 }
 

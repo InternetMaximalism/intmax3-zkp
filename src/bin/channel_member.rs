@@ -4504,9 +4504,22 @@ fn cmd_setup_backing(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund]"));
-    let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
-    });
+    // EMPTY genesis (`SETUP_BACKING_EMPTY_GENESIS`): no deposit at all, fund 0, settle chain 0 —
+    // the balance proof is the bare initial proof, byte-identical in public inputs to the live
+    // balance service's `liveInit`, so the live balance binds to the signed genesis trivially and
+    // the channel is funded purely through deposit imports. This is how a local relay backs its
+    // SECOND and later channels on one shared block producer: `setup-backing` proves a funded
+    // genesis against a fresh witness generator, i.e. as the producer's very first block, which
+    // only one channel per producer can be. `init` gives every cosigner slot a zero genesis
+    // balance when the backing fund is 0 (Σ genesis == fund still holds by construction).
+    let empty_genesis = std::env::var("SETUP_BACKING_EMPTY_GENESIS").is_ok();
+    let fund: u64 = if empty_genesis {
+        0
+    } else {
+        args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+            cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
+        })
+    };
     // Fail before proving or opening the L1 signer: accepting an initial deposit first would
     // leave real assets behind when genesis later rejects an unconfigured recovery address.
     preflight_genesis_recipients(channel_id_env());
@@ -4536,7 +4549,8 @@ fn cmd_setup_backing(args: &[String]) {
     // params; the deposit is made by `withdraw`. SECURITY: fund custody is gated by the
     // withdrawal proof's finalized-root check at exit (IntmaxRollup.sol:1262) — this only
     // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
-    let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
+    let no_onchain_deposit =
+        empty_genesis || std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
     let (depositor, txhash, deposit_index, deposit_block_number) = if no_onchain_deposit {
         let dep_hex = l1_signer.get().address();
         let dep = Address::from_hex(&dep_hex)
@@ -4548,12 +4562,43 @@ fn cmd_setup_backing(args: &[String]) {
         // `withdraw` makes the real one and records its own.
         (dep, String::new(), 0u64, 0u64)
     } else {
-        // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
-        // really escrows the value, and we read the deposit back from the receipt.
+        // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local
+        // chain really escrows the value, and we read the deposit back from the
+        // receipt.
         eprintln!(
             "setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…"
         );
         let recipient_hex = recipient.to_hex();
+        // The rollup's LIVE cumulative deposit chain BEFORE this deposit
+        // (`_pendingDepositHashChain`, which `deposit()` folds and the last `Deposited` log
+        // publishes as `newDepositHashChain`; the public `depositHashChain` is only the
+        // processed checkpoint). Several channels may back themselves on ONE shared rollup
+        // — the local relay does, because the shared block producer journals a single L1
+        // deposit sequence — so this is not necessarily zero.
+        let prior_logs = cast(&[
+            "logs",
+            "--rpc-url",
+            &rpc,
+            "--from-block",
+            "0",
+            "--to-block",
+            "latest",
+            "--address",
+            &rollup,
+            "Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)",
+            "--json",
+        ]);
+        let prev_chain = if prior_logs.contains("\"data\":\"0x") {
+            let last = prior_logs
+                .rsplit("\"data\":\"0x")
+                .next()
+                .and_then(|s| s.split('"').next())
+                .unwrap_or_else(|| die("Deposited log data not found in prior logs"));
+            Bytes32::from_hex(&format!("0x{}", abi_word(last, 5)))
+                .unwrap_or_else(|e| die(format!("parse prior on-chain depositHashChain: {e:?}")))
+        } else {
+            Bytes32::default()
+        };
         let send_out = cast_signed(
             &rpc,
             l1_signer.get(),
@@ -4572,7 +4617,8 @@ fn cmd_setup_backing(args: &[String]) {
         );
         let txhash = parse_cast_tx_hash(&send_out, "setup-backing deposit");
 
-        // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
+        // Read the deposit back from the LIVE receipt: depositor + the on-chain
+        // depositHashChain.
         let receipt = cast(&["receipt", &txhash, "--rpc-url", &rpc, "--json"]);
         let data = receipt
             .split("\"data\":\"0x")
@@ -4584,17 +4630,18 @@ fn cmd_setup_backing(args: &[String]) {
         let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
             .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
 
-        // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain,
-        // else the witness would not mirror the real deposit. Refuse to back the channel on
-        // any mismatch.
+        // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain
+        // depositHashChain, else the witness would not mirror the real deposit.
+        // Refuse to back the channel on any mismatch.
         // The deposit's IDENTITY, not a placeholder. `Deposit::nullifier()` hashes
-        // `deposit_index` and `block_number` along with the payment fields, and that nullifier is
-        // the leaf pushed onto `settled_tx_chain`. The block producer journals this same deposit
-        // as `deposit_index = deposit_counts`, `block_number = block_number + 1`
-        // (`BlockWitnessGenerator::add_deposit`), so proving the genesis with `0`/`0` — as this
-        // did — mints a DIFFERENT nullifier for the same on-chain deposit. The settle chains then
-        // disagree for ever and the resident `LiveBalanceService` can never bind this channel.
-        // Both values are required for a real deposit and come from the producer that journaled
+        // `deposit_index` and `block_number` along with the payment fields, and that nullifier
+        // is the leaf pushed onto `settled_tx_chain`. The block producer journals
+        // this same deposit as `deposit_index = deposit_counts`, `block_number =
+        // block_number + 1` (`BlockWitnessGenerator::add_deposit`), so proving the
+        // genesis with `0`/`0` — as this did — mints a DIFFERENT nullifier for the
+        // same on-chain deposit. The settle chains then disagree for ever and the
+        // resident `LiveBalanceService` can never bind this channel. Both values
+        // are required for a real deposit and come from the producer that journaled
         // it; there is no default, because guessing one silently forks the chain again.
         let deposit_index = required_env_u64(DEPOSIT_INDEX_ENV);
         let deposit_block_number = required_env_u64(DEPOSIT_BLOCK_NUMBER_ENV);
@@ -4609,7 +4656,7 @@ fn cmd_setup_backing(args: &[String]) {
             amount: U256::from(amount),
             aux_data: Bytes32::default(),
         };
-        if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
+        if rust_deposit.hash_with_prev_hash(prev_chain) != onchain_chain {
             die(
                 "on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit",
             );
@@ -4622,34 +4669,44 @@ fn cmd_setup_backing(args: &[String]) {
         (depositor, txhash, deposit_index, deposit_block_number)
     };
 
-    // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
-    bwgen
-        .borrow_mut()
-        .add_deposit(
-            depositor,
-            recipient,
-            0,
-            U256::from(amount),
-            Bytes32::default(),
-        )
-        .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
-    bwgen
-        .borrow_mut()
-        .add_block(0, &[], 0, Bytes32::default())
-        .unwrap_or_else(|e| die(format!("apply deposit block: {e:?}")));
+    let proof = if empty_genesis {
+        eprintln!(
+            "setup-backing: EMPTY genesis (SETUP_BACKING_EMPTY_GENESIS) — no deposit, fund 0; the \
+             attestation is the bare initial balance proof."
+        );
+        bwg.balance_proof.clone()
+    } else {
+        // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed
+        // proof.
+        bwgen
+            .borrow_mut()
+            .add_deposit(
+                depositor,
+                recipient,
+                0,
+                U256::from(amount),
+                Bytes32::default(),
+            )
+            .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
+        bwgen
+            .borrow_mut()
+            .add_block(0, &[], 0, Bytes32::default())
+            .unwrap_or_else(|e| die(format!("apply deposit block: {e:?}")));
 
-    let dw = bwg
-        .receive_deposit_witness(&ReceiveDepositData {
-            receiver: recipient,
-            deposit_salt,
-        })
-        .unwrap_or_else(|e| die(format!("receive deposit witness: {e:?}")));
-    eprintln!("setup-backing: proving the deposit…");
-    let proof = bp
-        .prove_receive_deposit(&dw)
-        .unwrap_or_else(|e| die(format!("prove deposit: {e:?}")));
-    bwg.commit_receive_deposit(&proof, &dw)
-        .unwrap_or_else(|e| die(format!("commit deposit: {e:?}")));
+        let dw = bwg
+            .receive_deposit_witness(&ReceiveDepositData {
+                receiver: recipient,
+                deposit_salt,
+            })
+            .unwrap_or_else(|e| die(format!("receive deposit witness: {e:?}")));
+        eprintln!("setup-backing: proving the deposit…");
+        let proof = bp
+            .prove_receive_deposit(&dw)
+            .unwrap_or_else(|e| die(format!("prove deposit: {e:?}")));
+        bwg.commit_receive_deposit(&proof, &dw)
+            .unwrap_or_else(|e| die(format!("commit deposit: {e:?}")));
+        proof
+    };
     let pis = bwg
         .get_public_inputs()
         .unwrap_or_else(|e| die(format!("balance pis: {e:?}")));
@@ -10042,11 +10099,18 @@ fn cli_members() -> (
     let mut members = Vec::new();
     let mut enc = Vec::new();
     let mut controlled = Vec::new();
+    // An EMPTY-genesis backing (`setup-backing` with `SETUP_BACKING_EMPTY_GENESIS`, fund 0) funds
+    // nobody at genesis: every cosigner slot opens at 0 so that Σ(genesis balances) == fund.
+    let zero_genesis = backing_exists() && load_backing().2.fund == 0;
     for slot in cli_slots() {
         let keygen_seed = 0xC1_0000 + slot as u64;
         let keys = keys_for(keygen_seed);
         members.push(member_info_for(slot, &keys));
-        let amount = genesis_amount(slot);
+        let amount = if zero_genesis {
+            0
+        } else {
+            genesis_amount(slot)
+        };
         let balance_seed = 0xBA_0000 + slot as u64;
         let (ct, _w) = encrypt_amount(
             &mut StdRng::seed_from_u64(balance_seed),

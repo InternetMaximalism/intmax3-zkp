@@ -2696,7 +2696,8 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   const sendTxt = await sendRes.text();
   if (!sendRes.ok) throw new Error('inter-channel transfer failed: ' + sendTxt);
   const transfer = JSON.parse(sendTxt);
-  return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
+  // The relay (api/lib/inter-channel-send.js) answers with `sourceHead`; older builds said `aHead`.
+  return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.sourceHead || transfer.aHead) }));
 }
 
 // ---- SEND token selector --------------------------------------------------------------------

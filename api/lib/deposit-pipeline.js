@@ -70,8 +70,9 @@ async function ensureLiveBackingAdopted(ch) {
   const settled = String(backing.settled_tx_chain || '').toLowerCase();
   const depositSalt = backing.deposit_salt;
   const depositTx = backing.deposit_tx;
-  // An unfunded genesis (no backing deposit) needs no adoption: liveInit's empty proof already
-  // matches the snapshot it will be bound to.
+  // An unfunded genesis (no backing deposit) needs no adoption: the live balance was created and
+  // bound to the signed genesis when the channel was initialized (`/api/init`, mirroring
+  // `api/routes/channel-init.js`), and liveInit's empty proof already matches that snapshot.
   if (!settled || !depositSalt || !depositTx) return null;
   // ONE account per channel. `setup-backing` already created and proved the base account and
   // recorded the salt that names it, so the live balance must be put on THAT account; `liveInit`
@@ -104,18 +105,14 @@ async function ensureLiveBackingAdopted(ch) {
     return producer.liveBindSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
   }
   if (!consumed) {
-    // A distinct filename: `producer_deposit.json` belongs to the in-flight user import below.
-    cli(ch, ['inspect-l1-deposit', String(depositTx), RPC, 'backing_deposit.json']);
-    const deposit = readJson(wc(ch, 'backing_deposit.json'));
     // ORDER IS LOAD-BEARING: the producer assigns this deposit `block_number = block_number + 1`,
     // and that number is hashed into `Deposit::nullifier()` — the leaf of `settled_tx_chain`.
-    // `setup-backing` proved the genesis against a fresh generator, i.e. block 1, so the backing
-    // deposit must be the producer's FIRST journaled block too. Registering the channel first
-    // consumed block 1 and pushed the deposit to block 2, which is exactly the settle-chain
-    // mismatch that made the channel unbindable (measured: CLI index 0/block 1, producer index
-    // 0/block 2). Journal the deposit first; registration follows.
-    const producerReceipt = await producer.postDeposit(deposit);
-    await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
+    // `setup-backing` proved the genesis against the (index, block) the relay bootstrap handed
+    // it, so the backing deposit must be journaled at exactly that position. Registering the
+    // channel first consumed a block and pushed the deposit one later, which is exactly the
+    // settle-chain mismatch that made the channel unbindable (measured: CLI index 0/block 1,
+    // producer index 0/block 2). Journal the deposit first; registration follows.
+    await journalBackingDeposit(ch);
   }
   // Register (idempotent by snapshot-derived request id) then bind. Reached both on a fresh
   // consume and when resuming a consumed-but-unbound channel.
@@ -123,6 +120,29 @@ async function ensureLiveBackingAdopted(ch) {
   // Adoption is only complete once the resulting proof is bound to the signed snapshot; until
   // then the service refuses every further transition (`awaiting_channel_binding`).
   return producer.liveBindSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
+}
+
+// Journal a channel's backing deposit into the shared producer and fold it into the channel's
+// live balance — the consume half of `ensureLiveBackingAdopted`, WITHOUT registration/bind (those
+// need the signed genesis snapshot, which at relay bootstrap does not exist yet). With ONE shared
+// producer the backing deposits of ALL channels form a single L1 deposit sequence
+// (`deposit_index` must be consecutive), so the relay journals them in bootstrap order — each at
+// the (index, block) its genesis was proved against — BEFORE any browser deposit can consume the
+// next index. `ensureLiveBackingAdopted` later takes its consumed-but-unbound resume path
+// (register + bind). Idempotent: a consumed channel is left alone.
+async function journalBackingDeposit(ch) {
+  const backing = readJson(wc(ch, 'channel_backing.json'));
+  if (!backing.settled_tx_chain || !backing.deposit_salt || !backing.deposit_tx) return null;
+  const accountSalt = backing.base_private_state && backing.base_private_state.salt;
+  if (!accountSalt) throw new Error('channel_backing.json has no base account salt to adopt');
+  if (!producer.liveSnapshotExists(ch)) await producer.liveInitWithAccountSalt(ch, accountSalt);
+  const status = await producer.liveStatus(ch);
+  if (Number(status.appliedTransitionCount) > 0) return null;
+  // A distinct filename: `producer_deposit.json` belongs to the in-flight user import.
+  cli(ch, ['inspect-l1-deposit', String(backing.deposit_tx), RPC, 'backing_deposit.json']);
+  const deposit = readJson(wc(ch, 'backing_deposit.json'));
+  const producerReceipt = await producer.postDeposit(deposit);
+  return receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
 }
 
 // One crash-recoverable production ordering for every API deposit import:
@@ -202,4 +222,4 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
-module.exports = { importL1Deposit };
+module.exports = { importL1Deposit, journalBackingDeposit };
