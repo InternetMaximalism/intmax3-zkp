@@ -30,12 +30,13 @@ pub use params::{
     channel_regev_params,
 };
 pub use transfer_stark::{
-    BALANCE_REFRESH_ZKP_DOMAIN, CHANNEL_TX_ZKP_DOMAIN, CHANNEL_UPDATE_ZKP_DOMAIN,
-    RealRegevProofVerifier, RegevProofPurpose, RegevSecurityLevel, RegevStatement,
-    WITHDRAW_CLAIM_ZKP_DOMAIN, prove_balance_refresh, prove_balance_refresh_witnessed,
-    prove_channel_tx, prove_channel_update, prove_hash_sig, prove_withdraw_claim,
-    verify_balance_refresh, verify_channel_tx, verify_channel_update, verify_hash_sig,
-    verify_withdraw_claim,
+    BALANCE_REFRESH_ZKP_DOMAIN, CHANNEL_TX_DECRYPTED_ZKP_DOMAIN, CHANNEL_TX_ZKP_DOMAIN,
+    CHANNEL_UPDATE_ZKP_DOMAIN, DecryptedSend, RealRegevProofVerifier, RegevProofPurpose,
+    RegevSecurityLevel, RegevStatement, WITHDRAW_CLAIM_ZKP_DOMAIN, prove_balance_refresh,
+    prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_tx_decrypted,
+    prove_channel_update, prove_decrypted_send, prove_hash_sig, prove_withdraw_claim,
+    verify_balance_refresh, verify_channel_tx, verify_channel_tx_decrypted,
+    verify_channel_update, verify_hash_sig, verify_withdraw_claim,
 };
 
 use plonky2_keccak::utils::solidity_keccak256;

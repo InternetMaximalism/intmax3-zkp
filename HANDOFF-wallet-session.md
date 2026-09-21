@@ -66,7 +66,15 @@
 
 ---
 
-## 3. 次の大タスク: **#2 refresh 撤廃（復号ベース送金）** — 設計完了・実装未着手
+## 3. 次の大タスク: **#2 refresh 撤廃（復号ベース送金）** — ステージ1（AIR）実装済み・ステージ2以降未着手
+
+### 進捗（2026-09-21, ブランチ `claude/handoff-wallet-session-998f4c`）
+- **ステージ1 完了**: `src/regev/transfer_stark.rs` に `DecryptedSendAir`（decryption core on `before` ＋ after/enc_amount の暗号化恒等式 ＋ 保存則）、`prove_decrypted_send` / `prove_channel_tx_decrypted` / `verify_channel_tx_decrypted`、purpose `RegevProofPurpose::ChannelTxDecrypted`（domain "IMDS" = `CHANNEL_TX_DECRYPTED_ZKP_DOMAIN`、statement は E-1 と同じ `RegevStatement::ChannelTx`）、ディスパッチャ配線。
+- テスト 9 件（positive: fresh/edge/64 準同型加算後/受信後送金/canonical-zero、negative: prove 拒否/statement 差替/purpose 束縛/**forged trace 4 種**/garbage）全緑。既存 transfer_stark 21 件＋ドメイン非衝突テストも緑。
+- **未着手**: ステージ2（`wallet_core` の build/verify を新 purpose へ、refresh 必須チェック撤廃、`state_update_verifier` の受理）、ステージ3（WASM `wallet_send*`、ブラウザ `attemptSend`）。
+- **本番投入前に作者の暗号レビュー必須**（テスト通過は soundness の証明ではない）。
+
+### 元の設計メモ（ステージ1 実装の根拠）
 
 ### 目的
 準同型加算（deposit/受信）で貯まった位置を、送金前に **refresh（復号→再暗号化して witness を取り戻す）せずに直接 spend** できるようにする。ユーザー（プロトコル作者）承認済みの方向。
