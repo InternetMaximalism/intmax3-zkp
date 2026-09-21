@@ -28,7 +28,7 @@ const { createCluster } = require('../../api/lib/cluster');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const { installHeadExitKit } = require('../../api/lib/exit-kit');
-const { interChannelSend } = require('../../api/lib/inter-channel-send');
+const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = require('../../api/lib/inter-channel-send');
 
 // A `channel_member` failure prints its real diagnosis to STDOUT and only the persistent insecure-
 // keys banner to STDERR, so reporting `e.stderr` alone hides the cause. Combine message, stdout and
@@ -69,7 +69,7 @@ const PORT = (() => {
   }
   return n;
 })();
-const CHANNELS = [7, 8];
+const CHANNELS = [7, 8, 9, 10];
 
 fs.mkdirSync(WORK, { recursive: true });
 const chDir = (ch) => path.join(WORK, 'ch' + ch);
@@ -498,6 +498,10 @@ app.post('/api/init', (req, res) => {
         else await producer.liveInit(ch);
         await producer.liveBindSnapshot(ch, snapshot);
         await producer.register(snapshot);
+        // The empty genesis is a signed head like any other: without its signer-independent
+        // exit-kit receipt the co-signer refuses the channel's FIRST inter-channel credit
+        // ("destination signer exit-kit verification: ... no signer exit-kit receipt is installed").
+        await installHeadExitKit(ch);
       }
     }
     res.json(snapshot);
@@ -870,28 +874,73 @@ app.post('/api/refresh-cosign', (req, res) => {
 // Body = { debitPayload, transferDescriptor }. Both are written into A's dir; the combined
 // `cosign-inter-transfer` co-signs A's debit (extending A's COMMITTED head), validates + credits B
 // (resolved as ../ch<dest>/), and persists both only if both legs pass. Returns { aHead, bSnapshot }.
+// Lock BOTH channels of an inter-channel transfer in sorted order so a concurrent B→A transfer
+// can never deadlock against an A→B one.
+function withInterLocks(a, b, fn) {
+  if (!Number.isSafeInteger(b) || b === a) return withLock(a, fn);
+  return a < b ? withLock(a, () => withLock(b, fn)) : withLock(b, () => withLock(a, fn));
+}
+
+// Sender-independent completion of an inter-channel transfer. Once `cosign-inter-transfer` has
+// committed the debit, the transfer MUST land on the destination even if the browser that started
+// it is gone: the relay retains the exact request and resumes it (a) before any new inter-channel
+// send on that source channel, (b) at startup, and (c) on a periodic sweep. A resume that still
+// fails (destination rejecting, daemon down) is logged and retried on the next occasion; the
+// source channel keeps refusing a DIFFERENT transfer until it lands (409 from the shared module).
+async function resumePendingInterTransferLocked(ch) {
+  const pending = pendingInterTransfer(ch);
+  if (!pending) return null;
+  console.log(`[inter] channel ${ch}: resuming pending transfer ${pending.producerRequestId} → channel ${pending.destination} (signed=${pending.signed})`);
+  return withInterLocks(ch, pending.destination, () => resumePendingInterTransfer(ch));
+}
+const INTER_RESUME_MS = Math.max(5000, parseInt(process.env.INTMAX_INTER_RESUME_MS || '30000', 10) || 30000);
+async function sweepPendingInterTransfers() {
+  for (const ch of CHANNELS) {
+    try {
+      const r = await resumePendingInterTransferLocked(ch);
+      if (r) console.log(`[inter] channel ${ch}: pending transfer resumed → ${r.status}`);
+    } catch (e) {
+      console.error(`[inter] channel ${ch}: pending transfer resume failed (will retry): ${String(e.stderr || e.message || e).slice(0, 300)}`);
+    }
+  }
+}
+
+// Ops: (re)archive the live balance service's exit kit for a channel's CURRENT head into the CLI
+// state (`install-exit-kit`). Repairs a channel whose signer receipt is stale or unverifiable.
+app.post('/api/exit-kit/install', (req, res) => {
+  const ch = reqChannel(req);
+  withLock(ch, () => installHeadExitKit(ch)).then(
+    (out) => res.json({ ok: true, channel: ch, log: String(out || '').slice(-400) }),
+    (e) => { const full = fullCliError(e); console.error(full); res.status(500).json({ error: full }); },
+  );
+});
+
+app.get('/api/inter/pending', (req, res) => {
+  const ch = reqChannel(req);
+  const p = pendingInterTransfer(ch);
+  res.json(p ? { pending: true, channel: ch, destination: p.destination, signed: p.signed, producerRequestId: p.producerRequestId, createdAt: p.createdAt } : { pending: false, channel: ch });
+});
+
 app.post('/api/inter/send', (req, res) => {
   const ch = reqChannel(req); // = source channel A
   const descriptor = req.body && req.body.transferDescriptor;
   const destination = descriptor && Number(descriptor.destinationChannelId);
-  // Lock BOTH channels for the whole atomic debit(A)+credit(B); take them in sorted order so a
-  // concurrent B→A transfer can never deadlock against this one. The daemon-backed shared module
-  // now supplies the resident base-state nonce the legacy relay used to lack (hence the old 503).
+  // The daemon-backed shared module supplies the resident base-state nonce the legacy relay used
+  // to lack (hence the old 503). Any transfer left pending on this source channel is completed
+  // FIRST, so an abandoned sender never blocks the next one.
   const runLocked = () => interChannelSend(ch, {
     debitPayload: req.body && req.body.debitPayload,
     transferDescriptor: descriptor,
     tokenIndex: req.body && req.body.tokenIndex,
   }).then(({ status, body }) => res.status(status).json(body));
-  const inner = () => withLock(ch, runLocked);
-  const chain = (Number.isSafeInteger(destination) && destination !== ch)
-    ? (ch < destination ? () => withLock(ch, () => withLock(destination, runLocked))
-                        : () => withLock(destination, () => withLock(ch, runLocked)))
-    : inner;
-  chain().catch((e) => {
-    const full = fullCliError(e);
-    console.error(full);
-    res.status(500).json({ error: full });
-  });
+  resumePendingInterTransferLocked(ch)
+    .catch((e) => console.error(`[inter] channel ${ch}: pending transfer resume failed before a new send: ${String(e.stderr || e.message || e).slice(0, 300)}`))
+    .then(() => withInterLocks(ch, destination, runLocked))
+    .catch((e) => {
+      const full = fullCliError(e);
+      console.error(full);
+      res.status(500).json({ error: full });
+    });
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -1366,6 +1415,8 @@ bootstrapBacking().then(() => {
     for (const ch of CHANNELS) cluster.watch(ch);
     cluster.startWatchdog();
   }
+  // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
+  sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());
 }).catch((e) => {
   console.error('backing bootstrap failed:', e.stderr ? String(e.stderr) : (e.message || e));
   process.exit(1);

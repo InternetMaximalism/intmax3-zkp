@@ -48,10 +48,10 @@ use intmax3_zkp::{
         BuiltInterChannelCredit, BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state, build_inter_channel_credit, build_inter_channel_send,
-        build_inter_channel_send_token, build_record, decrypt_balance, decrypt_balance_token,
-        default_settled_tx_accumulator, sign_state, verify_all_signatures,
-        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
-        verify_snapshot,
+        build_inter_channel_send_token, build_inter_channel_send_token_at_base_nonce_decrypted,
+        build_record, decrypt_balance, decrypt_balance_token, default_settled_tx_accumulator,
+        sign_state, verify_all_signatures, verify_inter_channel_credit_transition,
+        verify_inter_channel_send_transition, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -835,4 +835,88 @@ fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Ad
             .unwrap()
         })
         .collect()
+}
+
+/// Regression (2026-09-21): a channel whose HEAD is a cross-channel DEBIT (`h2_tag` = that send's
+/// `tx_tree_root`) must still be able to RECEIVE. `build_inter_channel_credit` used to spread the
+/// debit head's non-zero `h2_tag` into the fund-import state, which the fund-import witness refuses
+/// ("h2_tag must be zero for this transition kind") — so any channel that had SENT cross-channel
+/// could never be CREDITED again until some other H2=0 transition landed. The credit is proved with
+/// the refresh-free decrypted E-2 debit from B's untouched slot.
+#[test]
+fn inter_channel_live_credit_into_a_channel_at_its_debit_head() {
+    let mut rng = StdRng::seed_from_u64(0xC2ED_17);
+    let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
+    let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);
+
+    // A -> B: A's head becomes the debit head (h2 != 0), with its settled-tx accumulator advanced.
+    let (descriptor_ab, a_send, _credit_b) = run_positive(&a, &b, 0, 1, AMT, &mut rng);
+    assert_ne!(
+        a_send.h2_tag,
+        Bytes32::default(),
+        "a debit head carries the tx_tree_root"
+    );
+    let mut a_accumulator = a.snapshot.settled_tx_accumulator.clone();
+    a_accumulator.push(descriptor_ab.inter_channel_tx.tx_hash);
+    let a_at_debit = ChannelSnapshot {
+        record: a.record.clone(),
+        state: a_send.clone(),
+        members: a.snapshot.members.clone(),
+        settled_tx_accumulator: a_accumulator,
+    };
+
+    // B -> A (decrypted debit from B's slot 0), credited INTO A at its debit head.
+    let dest_id = ChannelId::new(A_ID as u64).unwrap();
+    let recipient_slot = 2u16;
+    let built = build_inter_channel_send_token_at_base_nonce_decrypted(
+        &b.keys[0],
+        &b.snapshot,
+        0,
+        dest_id,
+        recipient_slot,
+        a.keys[recipient_slot as usize].regev_pk.clone(),
+        a.record.member_pk_gs[recipient_slot as usize],
+        intmax3_zkp::common::salt::Salt::default(),
+        b.snapshot.state.balance_state.token_registry[0],
+        0,
+        AMT,
+        fresh_root(0x777),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("B debit builds");
+    let b_send = co_sign_all(built.debit_payload.proposed_next_state.clone(), &b.keys);
+    verify_inter_channel_credit_transition(
+        &a_send,
+        &a.record,
+        &built.transfer_descriptor,
+        &b_send,
+        &b.record,
+        LEVEL,
+    )
+    .expect("A's credit gate accepts a transfer arriving at its debit head");
+    let credit = build_inter_channel_credit(
+        &a.keys[recipient_slot as usize],
+        &a_at_debit,
+        &built.transfer_descriptor,
+        LEVEL,
+        &mut rng,
+    )
+    .expect("a credit into a channel at its debit head builds and self-checks");
+    assert_eq!(credit.fund_import_state.h2_tag, Bytes32::default());
+    assert_eq!(credit.bundle_apply_state.h2_tag, Bytes32::default());
+    assert_eq!(credit.fund_import_state.prev_digest, a_send.digest);
+    let a_credited = ChannelSnapshot {
+        record: a.record.clone(),
+        state: credit.bundle_apply_state.clone(),
+        members: a.snapshot.members.clone(),
+        settled_tx_accumulator: credit.settled_tx_accumulator.clone(),
+    };
+    let after = decrypt_balance(
+        &a.keys[recipient_slot as usize],
+        &a_credited,
+        recipient_slot,
+    )
+    .unwrap();
+    assert_eq!(after, a.balances[recipient_slot as usize] + AMT);
 }

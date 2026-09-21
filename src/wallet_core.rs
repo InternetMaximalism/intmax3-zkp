@@ -4748,6 +4748,11 @@ pub fn build_inter_channel_credit(
         shared_native_nullifier_root: import_nullifier,
         prev_digest: b_prev.digest,
         member_signatures: Vec::new(),
+        // A credit is an H2=0 transition (detail2 §C-2/§D). `b_prev` may itself be a DEBIT head
+        // (its `h2_tag` = that send's tx_tree_root), so the tag must be reset here rather than
+        // ride the spread — the fund-import witness refuses a non-zero tag, which used to make
+        // any channel unable to RECEIVE after it had SENT cross-channel.
+        h2_tag: Bytes32::default(),
         ..b_prev.clone()
     }
     .with_computed_digest();

@@ -135,6 +135,42 @@ impl LiveBalanceServiceError {
     }
 }
 
+/// Base-layer receive window (spec §7.2 / §7.3, `receive_transfer_circuit` /
+/// `receive_deposit_circuit`): once a channel has posted a send (`channel_leaf.prev != 0`) every
+/// later receive must be proved with `new_block_r < send_leaf.cur`, i.e. STRICTLY BEFORE the
+/// channel's NEXT send block. Until that next send is in a block there is no send leaf that
+/// closes the window, `get_account_state` falls back to leaf 0 and the circuit rejects the
+/// witness with an opaque "Not new_block_r < account_state.send_leaf.cur". Refuse up front with
+/// the real reason so the caller can keep the credit pending instead of treating it as corrupt.
+fn ensure_receive_window_open(
+    generator: &BalanceWitnessGenerator<F, C, D>,
+    channel_id: ChannelId,
+    what: &str,
+) -> Result<(), LiveBalanceServiceError> {
+    let prev = generator.get_public_inputs().map_err(|e| {
+        LiveBalanceServiceError::Transition(format!("{what}: balance public inputs: {e}"))
+    })?;
+    let bwg = generator.block_witness_generator.borrow();
+    let status = bwg.get_send_status(channel_id, prev.block_r).map_err(|e| {
+        LiveBalanceServiceError::Transition(format!("{what}: send status: {e}"))
+    })?;
+    let (head_block, account) = bwg.get_account_state(channel_id, prev.block_r).map_err(|e| {
+        LiveBalanceServiceError::Transition(format!("{what}: account state: {e}"))
+    })?;
+    if account.channel_leaf.prev.as_u64() != 0 && status.next_send_block.is_none() {
+        return Err(LiveBalanceServiceError::Transition(format!(
+            "{what} into channel {} is not provable yet (receive-after-send window): the \
+             channel's last base-layer send was block {} and a receive must be proved with \
+             new_block_r strictly below the channel's NEXT send block, which does not exist \
+             (head block {}); the credit stays pending until this channel posts its next send",
+            channel_id.as_u64(),
+            account.channel_leaf.prev.as_u64(),
+            head_block.as_u64(),
+        )));
+    }
+    Ok(())
+}
+
 impl From<BlockProducerServiceError> for LiveBalanceServiceError {
     fn from(value: BlockProducerServiceError) -> Self {
         Self::ProducerReconciliation(value.to_string())
@@ -1137,6 +1173,7 @@ impl LiveBalanceService {
         }
 
         let mut generator = self.generator(producer)?;
+        ensure_receive_window_open(&generator, self.disk.channel_id, "deposit import")?;
         let witness = generator
             .receive_deposit_witness_at_index(
                 &ReceiveDepositData {
@@ -1972,6 +2009,7 @@ impl LiveBalanceService {
         let mut legacy_tx_tree = TxTree::init();
         legacy_tx_tree.update(descriptor.source_channel_id.as_u64(), tx);
         let mut generator = self.generator(producer)?;
+        ensure_receive_window_open(&generator, self.disk.channel_id, "inter-channel credit")?;
         let receive_data = ReceiveTransferData {
             to: self.disk.channel_id,
             transfer,

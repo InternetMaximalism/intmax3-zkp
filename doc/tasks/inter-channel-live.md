@@ -88,3 +88,41 @@ Regression coverage:
 
 Remaining: deploy only. (MEDIUM-1 atomicity and HIGH-1 A-side spend ledger are subsumed by the
 atomic command + replay ledger above.)
+
+## Sender-independent completion (2026-09-21)
+
+A transfer must land even when the sender's process dies after the source leg committed. The relay
+now owns that: `api/lib/inter-channel-send.js` exports `pendingInterTransfer(ch)` /
+`resumePendingInterTransfer(ch)`; `hosting/wallet/wallet-relay.js` runs `sweepPendingInterTransfers`
+at startup and every `INTMAX_INTER_RESUME_MS` (default 30 s), and `/api/inter/send` resumes any
+pending transfer on the source channel BEFORE a new one. `GET /api/inter/pending?channel=A` shows the
+state; `POST /api/exit-kit/install?channel=B` repairs a head without its exit-kit receipt.
+Verified on the local stack with `INTMAX_TEST_FAIL_INTER_TRANSFER_AFTER_SOURCE=1` (channel 9 → 10,
+source committed, sender gone; relay restarted without the failpoint; the sweep completed it:
+9 v3 0.005, 10 v2 0.005, `pending:false`). Mocked coverage: `node/test/inter-channel-crash-recovery.test.js`.
+
+Two destination-side preconditions surfaced by this work:
+
+1. **Empty-genesis channels need an exit-kit receipt before their first credit.** `cosign-inter-transfer`
+   refuses with "destination signer exit-kit verification: SIGNER-INDEPENDENT EXIT REQUIRED: no signer
+   exit-kit receipt is installed". The relay's `/api/init` empty-genesis branch now runs
+   `installHeadExitKit` after `register` (deposit imports already did).
+2. **Receive-after-send window (base layer, NOT fixed).** `receive_transfer_circuit` /
+   `receive_deposit_circuit` (spec §7.2/§7.3) require, for a channel that has ever posted a send
+   (`channel_leaf.prev != 0`), `send_leaf.prev <= prev_block_r` and `new_block_r < send_leaf.cur`:
+   a receive is only provable STRICTLY BEFORE the channel's NEXT send block. The witness generator
+   (`new_block_r = next_send_block - 1`) assumes that next send is already in a block; when it is
+   not, `get_account_state` falls back to send leaf 0 and the prover fails with the opaque
+   "Not new_block_r < account_state.send_leaf.cur". Consequence on the live stack: **a channel that
+   has debited (inter-channel send at block S) cannot be credited or import a deposit at any block
+   >= S until it posts its next send**, and the daemon proves that next send immediately after the
+   block, so the window never opens in the current flow (the 8 → 7 transfer on the local stack is
+   stuck this way: 7 debited at block 7, 8 debited at block 8, 7's credit needs 8 <= new_block_r < next
+   send of 7). `LiveBalanceService::ensure_receive_window_open` now refuses up front with the real
+   reason so the relay keeps the transfer pending instead of treating it as corrupt. Fix options:
+   (a) intmax2-native deferral — queue the receive (`ReceiveTransferData` inputs) in the live
+   snapshot and replay it right after the channel's next send BLOCK is posted but BEFORE that send's
+   balance proof (order: post block c → prove queued receives with new_block_r = c-1 → prove send at
+   c); close/withdraw must drain the queue the same way; (b) a window-opening no-op send block for
+   the destination at credit time (one extra base-layer block per credit, needs a no-op tx shape in
+   the validity circuit). (a) costs no blocks and matches the circuit's intent.

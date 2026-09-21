@@ -16,9 +16,9 @@
 
 const fs = require('fs');
 const { isDeepStrictEqual } = require('node:util');
-const { wc, readJson, writeJson } = require('./cli');
+const { cli, wc, readJson, writeJson } = require('./cli');
 const producer = require('./block-producer');
-const { cliWithPreparedExitKit, installHeadExitKit, acknowledgePreparedExitKit } = require('./exit-kit');
+const { cliWithPreparedExitKit, installHeadExitKit, acknowledgePreparedExitKit, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('./exit-kit');
 const { flushPublishedHead } = require('./producer-head');
 
 // Only the current destination recovery copy is eligible: a source's older completed send must
@@ -91,6 +91,11 @@ async function flushLastProducerBlock(ch, lockedDestination) {
     descriptor,
   );
   acknowledgePreparedExitKit(ch, signedState);
+  // The prepared debit kit was proved for the UNSIGNED successor; once the debit head is settled
+  // the CLI must hold the kit for the SIGNED head (the archive it re-verifies before it can sign
+  // anything else, or accept a later credit as a destination). Archive the live service's kit for
+  // the current source head, exactly as the destination does below.
+  await installHeadExitKit(ch);
   const sourceArtifact = await producer.liveSendArtifact(ch, producerRequestId);
   const destinationLiveReceipt = await producer.liveReceiveInterChannel(destination, {
     producerReceipt: blockReceipt,
@@ -141,6 +146,15 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
   if (operation && operation.status === 'prepared' && operation.producerRequestId !== producerRequestId) {
     return { status: 409, body: { error: 'a different inter-channel transition is signed or pending recovery' } };
   }
+  if (operation && operation.status === 'prepared' && operation.producerRequestId === producerRequestId
+      && !fs.existsSync(wc(ch, 'inter_transfer.json'))) {
+    // The signing command may have died after committing its two-channel PREPARED journal but
+    // before this route saw the result (e.g. the INTMAX_TEST_FAIL_INTER_TRANSFER_AFTER_SOURCE
+    // failpoint, a kill -9). The CLI roll-forward is idempotent and re-creates the exact
+    // `inter_transfer.json` (+ B's incoming copy) from the journal, so the daemon phases below can
+    // resume without re-signing. If nothing was journaled it is a no-op and we sign afresh.
+    cli(ch, ['recover-inter-transfers']);
+  }
   if (operation
       && operation.status === 'prepared'
       && operation.producerRequestId === producerRequestId
@@ -171,8 +185,14 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
     writeJson(wc(ch, 'inter_operation.json'), operation);
   }
   // Both channel locks are held. Roll B's pending native deposit/state WAL and backing/head
-  // publication forward before A's signing command reads that sibling wallet from disk.
-  await flushPublishedHead(destination);
+  // publication forward before A's signing command reads that sibling wallet from disk — unless
+  // THIS transfer's pre-sign exit kit is already staged (a retry after the signing command died):
+  // the staged block freezes every other producer mutation, and B's head cannot have moved since
+  // the kit was proved against it, so the flush would only collide with the freeze.
+  let exitKitOperation = null;
+  try { exitKitOperation = readJson(wc(ch, EXIT_KIT_OPERATION_FILE)); } catch (e) { /* none */ }
+  const exitKitInFlight = exitKitOperation && exitKitOperation.status !== 'complete';
+  if (!exitKitInFlight) await flushPublishedHead(destination);
   // Read under the same lock that encloses signing + producer admission + live settlement, so a
   // second request cannot observe/reuse this cursor before the first advances.
   const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
@@ -203,6 +223,9 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
     ch, blockReceipt, sourceHead, debitPayload, transferDescriptor,
   );
   acknowledgePreparedExitKit(ch, sourceHead);
+  // Replace the promoted prepared kit (proved for the unsigned successor) with the live service's
+  // kit for the now fully signed debit head — see flushLastProducerBlock.
+  await installHeadExitKit(ch);
   // Source settlement alone advances only the sender's private base state. The destination must
   // consume the source proof + both N-of-N credit states before this completes, or the credited
   // snapshot cannot be spent from the resident destination balance proof.
@@ -233,4 +256,43 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
   return { status: 200, body: response };
 }
 
-module.exports = { interChannelSend, flushLastProducerBlock, matchingDestinationRecovery };
+// A PREPARED operation whose client went away — the browser closed after the debit was signed,
+// the relay crashed between the two daemon phases, or the destination rejected a credit that a
+// later fix now accepts — is resumable by the RELAY ALONE: the exact request is retained in
+// `inter_debit_payload.json` / `inter_descriptor.json` / `inter_operation.json`, and
+// `interChannelSend` keys its idempotent resume on that request id. The sender never has to
+// come back, and a new sender on the same source channel is not blocked forever behind it.
+function pendingInterTransfer(ch) {
+  let operation = null;
+  try { operation = readJson(wc(ch, 'inter_operation.json')); } catch (e) { return null; }
+  if (!operation || operation.status !== 'prepared') return null;
+  const debitPath = wc(ch, 'inter_debit_payload.json');
+  const descriptorPath = wc(ch, 'inter_descriptor.json');
+  if (!fs.existsSync(debitPath) || !fs.existsSync(descriptorPath)) return null;
+  const debitPayload = readJson(debitPath);
+  const transferDescriptor = readJson(descriptorPath);
+  const destination = Number(transferDescriptor && transferDescriptor.destinationChannelId);
+  return {
+    operation, debitPayload, transferDescriptor, destination,
+    signed: fs.existsSync(wc(ch, 'inter_transfer.json')),
+    producerRequestId: operation.producerRequestId,
+    createdAt: operation.createdAt,
+  };
+}
+
+// Resume the pending transfer of `ch` with its retained request. The caller MUST hold the locks
+// of `ch` and of the pending destination (see `pendingInterTransfer(ch).destination`). Returns
+// null when nothing is pending, otherwise `interChannelSend`'s { status, body }.
+async function resumePendingInterTransfer(ch) {
+  const pending = pendingInterTransfer(ch);
+  if (!pending) return null;
+  return interChannelSend(ch, {
+    debitPayload: pending.debitPayload,
+    transferDescriptor: pending.transferDescriptor,
+  });
+}
+
+module.exports = {
+  interChannelSend, flushLastProducerBlock, matchingDestinationRecovery,
+  pendingInterTransfer, resumePendingInterTransfer,
+};
