@@ -92,6 +92,12 @@ producer.syncOffchainHeads = async states => {
   return { count: states.length };
 };
 
+// importL1Deposit now archives the new head's exit-kit receipt at the end (installHeadExitKit).
+// Stub it before deposit-pipeline destructures it: the real one calls producer.liveBackingArtifact
+// + `install-exit-kit`, which would otherwise spawn a real daemon in this stub test.
+const exitKit = require('../../api/lib/exit-kit');
+exitKit.installHeadExitKit = async ch => { events.push(`installHeadExitKit:${ch}`); };
+
 // Load only after replacing the collaborators that it destructures at module initialization.
 delete require.cache[require.resolve('../../api/lib/deposit-pipeline')];
 const { importL1Deposit } = require('../../api/lib/deposit-pipeline');
@@ -117,6 +123,9 @@ test('deposit head is never published before durable live receive and N-of-N bin
     'cosign-l1-deposit-import',
     'liveBindSnapshot',
     'syncOffchainHeads',
+    // Archive the new head's exit-kit receipt LAST — only after the head is durably bound and
+    // synced — so a later refresh/send can spend the credited balance.
+    'installHeadExitKit:7',
   ]);
   assert.equal(result.liveReceipt.producerRequestId, 'deposit:4');
   assert.equal(result.liveStatus.signedHeadDigest, 'bundle');

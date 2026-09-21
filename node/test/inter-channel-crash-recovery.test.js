@@ -46,8 +46,8 @@ function harness() {
   Module._load = function mockedLoad(request, parent, isMain) {
     if (request === 'express') return { Router: () => router };
     if (request === '../lib/lock') return { withLocks: (_channels, fn) => Promise.resolve().then(fn) };
-    if (request === '../lib/producer-head') return { flushPublishedHead: async ch => { flushed.push(ch); return null; } };
-    if (request === '../lib/exit-kit') {
+    if (request === '../lib/producer-head' || request === './producer-head') return { flushPublishedHead: async ch => { flushed.push(ch); return null; } };
+    if (request === '../lib/exit-kit' || request === './exit-kit') {
       // The pre-sign exit-kit wrapper is one CLI signing round from the route's point of view;
       // the destination's kit install happens exactly once per completed transfer.
       return {
@@ -59,8 +59,8 @@ function harness() {
         },
       };
     }
-    if (request === '../lib/cli') return cliMock;
-    if (request === '../lib/block-producer') {
+    if (request === '../lib/cli' || request === './cli') return cliMock;
+    if (request === '../lib/block-producer' || request === './block-producer') {
       return {
         stableRequestId,
         authoritativeBaseNonceEnv: async () => ({ INTMAX_LIVE_BASE_NONCE: '0' }),
@@ -84,6 +84,12 @@ function harness() {
   };
   try {
     const routePath = path.resolve(__dirname, '../../api/routes/inter-channel.js');
+    // The route now delegates to api/lib/inter-channel-send.js. Clear BOTH from the module cache so
+    // re-requiring the route re-runs the shared module's requires under THIS harness's Module._load
+    // mock — otherwise the cached shared module keeps the previous harness's mocked wc/producer and
+    // reads a stale (empty) work dir.
+    const sharedPath = path.resolve(__dirname, '../../api/lib/inter-channel-send.js');
+    delete require.cache[sharedPath];
     delete require.cache[routePath];
     require(routePath);
   } finally {

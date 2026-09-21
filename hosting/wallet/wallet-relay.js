@@ -27,6 +27,7 @@ const { importL1Deposit } = require('../../api/lib/deposit-pipeline');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const { installHeadExitKit } = require('../../api/lib/exit-kit');
+const { interChannelSend } = require('../../api/lib/inter-channel-send');
 
 // A `channel_member` failure prints its real diagnosis to STDOUT and only the persistent insecure-
 // keys banner to STDERR, so reporting `e.stderr` alone hides the cause. Combine message, stdout and
@@ -717,20 +718,26 @@ app.post('/api/refresh-cosign', (req, res) => {
 // (resolved as ../ch<dest>/), and persists both only if both legs pass. Returns { aHead, bSnapshot }.
 app.post('/api/inter/send', (req, res) => {
   const ch = reqChannel(req); // = source channel A
-  withLock(ch, () => {
-    const debitPayload = req.body && req.body.debitPayload;
-    const descriptor = req.body && req.body.transferDescriptor;
-    if (!debitPayload || !descriptor) throw new Error('inter/send needs { debitPayload, transferDescriptor }');
-    // This legacy relay has no resident base-state authority: its only nonce source is the frozen
-    // setup-time channel_backing.json. Signing here after any prior send can debit the channel and
-    // then fail base settlement. Keep the endpoint fail-closed; use the daemon-backed api/ service.
-    res.status(503).json({ error: 'inter-channel sends require the daemon-backed API live base nonce' });
-    return;
-    fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(debitPayload));
-    fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
-    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  const descriptor = req.body && req.body.transferDescriptor;
+  const destination = descriptor && Number(descriptor.destinationChannelId);
+  // Lock BOTH channels for the whole atomic debit(A)+credit(B); take them in sorted order so a
+  // concurrent B→A transfer can never deadlock against this one. The daemon-backed shared module
+  // now supplies the resident base-state nonce the legacy relay used to lack (hence the old 503).
+  const runLocked = () => interChannelSend(ch, {
+    debitPayload: req.body && req.body.debitPayload,
+    transferDescriptor: descriptor,
+    tokenIndex: req.body && req.body.tokenIndex,
+  }).then(({ status, body }) => res.status(status).json(body));
+  const inner = () => withLock(ch, runLocked);
+  const chain = (Number.isSafeInteger(destination) && destination !== ch)
+    ? (ch < destination ? () => withLock(ch, () => withLock(destination, runLocked))
+                        : () => withLock(destination, () => withLock(ch, runLocked)))
+    : inner;
+  chain().catch((e) => {
+    const full = fullCliError(e);
+    console.error(full);
+    res.status(500).json({ error: full });
+  });
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────

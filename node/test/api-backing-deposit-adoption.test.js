@@ -95,6 +95,10 @@ producerHead.flushPublishedHead = async () => {};
 // The exit-kit dance itself is covered by api-exit-kit.test.js; keep it out of the way here.
 exitKit.cliWithPreparedExitKit = async (ch, args) => cliModule.cli(ch, args);
 exitKit.acknowledgePreparedExitKit = () => false;
+// importL1Deposit installs the new head's exit-kit receipt at the end (so a later refresh/send can
+// spend). Stub it: the real one calls producer.liveBackingArtifact + `install-exit-kit`, which would
+// otherwise spawn a real daemon here.
+exitKit.installHeadExitKit = async () => { events.push('installHeadExitKit'); };
 
 delete require.cache[require.resolve('../../api/lib/deposit-pipeline')];
 const { importL1Deposit } = require('../../api/lib/deposit-pipeline');
