@@ -1259,6 +1259,33 @@ pub fn verify_all_signatures(
     Ok(())
 }
 
+/// Verify ONE member's cosignature over `state` (the per-slot half of [`verify_all_signatures`]):
+/// the slot is a cosigner slot, the signer's `pk_g` is the registered member at that slot, and
+/// the Falcon signature verifies over the recomputed IMCH digest. Used by the cluster co-signing
+/// protocol, where signatures arrive one host at a time and each must be checked before it is
+/// pooled — a forged or mis-slotted signature never reaches the N-of-N set.
+pub fn verify_member_signature(
+    record: &ChannelRecord,
+    state: &ChannelState,
+    sig: &MemberSignature,
+) -> WResult<()> {
+    let digest = state.signing_digest();
+    if state.digest != digest {
+        return bail("state.digest does not match recomputed signing_digest()");
+    }
+    let slot = sig.member_slot as usize;
+    if slot >= record.member_count as usize {
+        return bail(format!(
+            "signature slot {slot} is not a cosigner slot (member_count {})",
+            record.member_count
+        ));
+    }
+    if sig.pk_g != record.member_pk_gs[slot] {
+        return bail(format!("slot {slot} signature pubkey hash mismatch"));
+    }
+    verify_state_sig(record.member_pk_gs[slot], &digest, &sig.signature)
+}
+
 /// Full import verification of a signed snapshot (tasks/wallet-threat-model.md §G):
 /// record.validate, regev_pk_root match, member-pubkey binding, all real signatures, balance-state
 /// validity, and (if `my_slot`/`my_keys` given) own-slot decryption sanity.

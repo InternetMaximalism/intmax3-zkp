@@ -24,6 +24,7 @@ const crypto = require('crypto');
 // only does the CLI step, and `liveBindSnapshot` alone fails because the live-balance proof was
 // never advanced past genesis to include this deposit in the first place.
 const { importL1Deposit, journalBackingDeposit } = require('../../api/lib/deposit-pipeline');
+const { createCluster } = require('../../api/lib/cluster');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const { installHeadExitKit } = require('../../api/lib/exit-kit');
@@ -98,6 +99,88 @@ function withLock(ch, fn) {
   _chLocks[ch] = next.catch(() => {});
   return next;
 }
+
+// ─── Cluster co-signing (N <= 8 hosts, N-to-N signature exchange; api/lib/cluster.js) ────────
+// Enabled by INTMAX_CLUSTER_SELF_URL (this relay's URL as the peers reach it) and
+// INTMAX_CLUSTER_PEERS (JSON: [{"url":"http://host:8001","slots":[1]}, ...]). This host signs the
+// slots in INTMAX_CLUSTER_SIGN_SLOTS (default: every slot its cli_state controls) with
+// `cosign-partial`, exchanges signatures with the peers over /api/cluster/*, and adopts the N-of-N
+// head with `cosign-merge`. Timings (ms, overridable for tests): INTMAX_CLUSTER_WARN_MS (60 s
+// CLOSE WARNING naming the missing slots — holders supply them), INTMAX_CLUSTER_HALT_MS (5 min →
+// channel HALTED, mutating routes answer 503), INTMAX_CLUSTER_CLOSE_MS (24 h halted → close at the
+// last fully signed state through `close` with the ACTIVE settlement binding). Unset → the
+// single-host `cosign` path, unchanged.
+const clusterSelfUrl = process.env.INTMAX_CLUSTER_SELF_URL || '';
+const clusterPeers = (() => {
+  const raw = process.env.INTMAX_CLUSTER_PEERS;
+  if (!raw) return null;
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error('INTMAX_CLUSTER_PEERS must be a JSON array');
+  return parsed.map((p) => ({ url: String(p.url), slots: (p.slots || []).map(Number) }));
+})();
+const clusterSignSlots = (process.env.INTMAX_CLUSTER_SIGN_SLOTS || '').split(',').map((t) => t.trim()).filter(Boolean).map(Number);
+const clusterMs = (name, dflt) => { const v = parseInt(process.env[name] || '', 10); return Number.isFinite(v) && v > 0 ? v : dflt; };
+
+function readCliState(ch) { return JSON.parse(fs.readFileSync(wc(ch, 'cli_state.json'), 'utf8')); }
+function readSnapshot(ch) { return JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')); }
+
+const cluster = (clusterSelfUrl && clusterPeers) ? createCluster({
+  self: { url: clusterSelfUrl, slots: clusterSignSlots },
+  peers: clusterPeers,
+  memberCount: (ch) => Number(readSnapshot(ch).record.memberCount),
+  warnMs: clusterMs('INTMAX_CLUSTER_WARN_MS', 60_000),
+  haltMs: clusterMs('INTMAX_CLUSTER_HALT_MS', 300_000),
+  closeMs: clusterMs('INTMAX_CLUSTER_CLOSE_MS', 86_400_000),
+  watchdogMs: clusterMs('INTMAX_CLUSTER_WATCHDOG_MS', 60_000),
+  // This host's slot signatures over the gated successor (head NOT advanced).
+  signPartial: (ch, payload) => withLock(ch, () => {
+    fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(payload));
+    const env = clusterSignSlots.length ? { INTMAX_CLUSTER_SIGN_SLOTS: clusterSignSlots.join(',') } : {};
+    cli(ch, ['cosign-partial', 'payload.json', 'partial_cosign.json'], env);
+    return JSON.parse(fs.readFileSync(wc(ch, 'partial_cosign.json'), 'utf8'));
+  }),
+  // Verify every pooled signature and adopt the N-of-N head; exit 3 = still incomplete.
+  merge: (ch, payload, signatures) => withLock(ch, () => {
+    fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(payload));
+    fs.writeFileSync(wc(ch, 'cluster_signatures.json'), JSON.stringify(signatures));
+    try {
+      cli(ch, ['cosign-merge', 'payload.json', 'cluster_signatures.json', 'cosigned.json']);
+    } catch (e) {
+      if (e && e.status === 3) {
+        const line = String(e.stdout || '').trim().split('\n').pop();
+        try { return JSON.parse(line); } catch (_) { /* fall through */ }
+      }
+      throw e;
+    }
+    return { complete: true, state: JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')) };
+  }),
+  post: async (url, path, body) => {
+    const r = await fetch(url.replace(/\/$/, '') + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`${path} -> ${r.status} ${text.slice(0, 300)}`);
+    return text ? JSON.parse(text) : null;
+  },
+  persistHalt: (ch, info) => {
+    const f = wc(ch, 'cluster_halt.json');
+    if (info) fs.writeFileSync(f, JSON.stringify(info)); else if (fs.existsSync(f)) fs.unlinkSync(f);
+  },
+  loadHalt: (ch) => { try { return JSON.parse(fs.readFileSync(wc(ch, 'cluster_halt.json'), 'utf8')); } catch (_) { return null; } },
+  // Node-program rule: a channel halted for 24 h is closed at its LAST fully signed state (the
+  // head every host adopted) through the ACTIVE settlement binding; never at the stalled proposal.
+  onAutoClose: (ch, info) => withLock(ch, () => {
+    const st = readCliState(ch);
+    const manager = process.env.INTMAX_CLUSTER_CLOSE_MANAGER
+      || (st.settlement_binding && st.settlement_binding.manager) || '';
+    if (!manager) throw new Error('no ACTIVE settlement binding / INTMAX_CLUSTER_CLOSE_MANAGER to close against');
+    const head = readSnapshot(ch).state;
+    console.error(`[cluster] channel ${ch}: auto-closing at v${head.balanceState.stateVersion} (halted since ${new Date(info.since).toISOString()}, missing ${JSON.stringify(info.missing)})`);
+    const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: String(head.balanceState.stateVersion) });
+    return { manager, stateVersion: head.balanceState.stateVersion, log: String(out).slice(-2000) };
+  }),
+}) : null;
+if (cluster) console.log(`[cluster] enabled: self ${clusterSelfUrl} slots ${JSON.stringify(clusterSignSlots)}, peers ${JSON.stringify(clusterPeers)}`);
 
 // ---- Ticket persistence (one JSON array per channel) ----------------------------------------
 // tickets.json     = ACTIVE tickets (+ terminal ones for a short TTL, so an in-flight UI can react).
@@ -349,6 +432,33 @@ app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
 // returns the FULLY-SIGNED snapshot for the browser to import directly (the delegate does NOT sign
 // the genesis). CREATE-OR-JOIN: the first browser creates channel N; each later browser JOINS the
 // SAME channel N as a distinct delegate. cli_state.json is reset only on relay startup.
+// While a channel is HALTED (cluster protocol), every mutating route answers 503 — except the
+// close/settle/withdraw family, which is exactly what a halted channel is allowed to do.
+const HALT_EXEMPT = new Set(['/api/close', '/api/settle', '/api/withdraw', '/api/deploy-settlement', '/api/cancel-close', '/api/claim']);
+app.use((req, res, next) => {
+  if (!cluster || req.method !== 'POST' || req.path.startsWith('/api/cluster/') || HALT_EXEMPT.has(req.path)) return next();
+  const h = cluster.halted(reqChannel(req));
+  if (h) return res.status(503).json({ error: `channel ${reqChannel(req)} is HALTED since ${new Date(h.since).toISOString()}: cosigner slots ${JSON.stringify(h.missing)} did not sign round ${h.nextDigest}`, halted: h });
+  return next();
+});
+
+// Cluster peer endpoints (bodies carry `channel`). Only meaningful with INTMAX_CLUSTER_*.
+const clusterRoute = (handler) => (req, res) => {
+  if (!cluster) return res.status(404).json({ error: 'cluster co-signing is not enabled on this relay' });
+  Promise.resolve().then(() => handler(req.body || {})).then(
+    (out) => res.json(out),
+    (e) => { console.error(e.stderr ? String(e.stderr) : (e.message || e)); res.status(e.halted ? 503 : 500).json({ error: String(e.stderr || e.message || e) }); },
+  );
+};
+app.post('/api/cluster/propose', clusterRoute((b) => cluster.onPropose(b)));
+app.post('/api/cluster/signature', clusterRoute((b) => cluster.onSignature(b)));
+app.post('/api/cluster/missing', clusterRoute((b) => cluster.onMissing(b)));
+app.post('/api/cluster/halt', clusterRoute((b) => cluster.onHalt(b)));
+app.get('/api/cluster/status', (req, res) => {
+  if (!cluster) return res.json({ enabled: false });
+  res.json({ enabled: true, ...cluster.status(reqChannel(req)), constants: cluster.constants });
+});
+
 app.post('/api/init', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
@@ -661,7 +771,9 @@ app.post('/api/add-genesis-sig', (req, res) => {
 // (409, client re-signs); a rejected batch replays sequentially so one bad tx cannot DoS its
 // window. All K waiters of a batch window receive the same fully-signed batch state.
 const BATCH_WINDOW_MS = Math.max(1, parseInt(process.env.BATCH_WINDOW_MS || '1000', 10) || 1000);
-const BATCH_WINDOW_MAX = Math.max(1, Math.min(1024, parseInt(process.env.BATCH_WINDOW_MAX || '200', 10) || 200));
+// Cluster mode co-signs one proposal per round (cosign-partial / cosign-merge have no batch form
+// yet), so the window cap is forced to 1 there.
+const BATCH_WINDOW_MAX = cluster ? 1 : Math.max(1, Math.min(1024, parseInt(process.env.BATCH_WINDOW_MAX || '200', 10) || 200));
 
 function drainCosignWindow(ch, entries) {
   return withLock(ch, () => {
@@ -680,6 +792,14 @@ function drainCosignWindow(ch, entries) {
         en.resolve(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
       } catch (e) { en.reject(e); }
     };
+    if (cluster) {
+      // The protocol takes the channel lock itself per CLI step (signPartial / merge run on every
+      // host, including this one, from peer callbacks), so the round must NOT run under this
+      // drain's lock: kick it off and return, releasing the lock at once.
+      const en = fresh[0];
+      cluster.cosign(ch, en.payload).then(en.resolve, en.reject);
+      return;
+    }
     if (fresh.length === 1) { soloOne(fresh[0]); return; }
     // K > 1: project fat→slim (§M-4), spool one file per tx, hand a §M-1 manifest to cosign-batch.
     const spoolDir = wc(ch, 'batch_spool');
@@ -1233,6 +1353,10 @@ bootstrapBacking().then(() => {
   http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
     console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
   });
+  if (cluster) {
+    for (const ch of CHANNELS) cluster.watch(ch);
+    cluster.startWatchdog();
+  }
 }).catch((e) => {
   console.error('backing bootstrap failed:', e.stderr ? String(e.stderr) : (e.message || e));
   process.exit(1);

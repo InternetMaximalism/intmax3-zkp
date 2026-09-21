@@ -9822,6 +9822,8 @@ fn main() {
         "install-exit-kit" => cmd_install_exit_kit(&args),
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
+        "cosign-partial" => cmd_cosign_partial(&args),
+        "cosign-merge" => cmd_cosign_merge(&args),
         "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
         "sign-close-funding" => cmd_sign_close_funding(&args),
@@ -9869,7 +9871,7 @@ fn main() {
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  export-close-deployment-manifest <out.json> <rpc_url>: write the public_close_publisher deployment manifest (schema 4) from the ACTIVE settlement binding, re-reading every runtime code hash and all five pinned compact-v2 adapter/core pairs at the activation checkpoint; prints the manifest SHA-256 pin\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  export-close-deployment-manifest <out.json> <rpc_url>: write the public_close_publisher deployment manifest (schema 4) from the ACTIVE settlement binding, re-reading every runtime code hash and all five pinned compact-v2 adapter/core pairs at the activation checkpoint; prints the manifest SHA-256 pin\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  cosign-partial <payload.json> <out.json>: CLUSTER: run the co-sign gate and sign with THIS host slot(s) only (INTMAX_CLUSTER_SIGN_SLOTS); head not advanced\n  cosign-merge <payload.json> <signatures.json> <out_state.json>: CLUSTER: verify pooled signatures and adopt the N-of-N head, or print complete:false + missing slots (JSON) with exit 3\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -10712,25 +10714,15 @@ fn cmd_send(args: &[String]) {
     );
 }
 
-fn cmd_cosign(args: &[String]) {
-    let in_path = args
-        .get(1)
-        .unwrap_or_else(|| die("cosign <payload_or_state.json> <out>"));
-    let out_path = args
-        .get(2)
-        .map(String::as_str)
-        .unwrap_or("cosigned_state.json");
-    let mut state = load_state();
-
-    // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
-    // re-verifies the transition before signing — never sign a bare state we did not validate.
-    let payload: SendPayload = read_json(in_path);
-    let mut next_state = payload.proposed_next_state.clone();
-
+/// The co-sign GATE shared by `cosign`, `cosign-partial` and `cosign-merge`: require a
+/// `SendPayload` that extends the current head, and re-verify the whole transition (E-1 / its
+/// decrypted twin, A11 sender signature, structural fold, recipient decryption when a controlled
+/// slot receives) BEFORE any signature is produced or accepted. Returns the proposed successor.
+fn cosign_gate(state: &CliState, payload: &SendPayload) -> ChannelState {
+    let next_state = payload.proposed_next_state.clone();
     if next_state.prev_digest != state.snapshot.state.digest {
         die("payload does not extend the current head");
     }
-
     // Verify the transition + E-1 proof once (with recipient decryption if a CLI slot receives).
     let recipient_is_cli = state
         .controlled
@@ -10748,23 +10740,218 @@ fn cmd_cosign(args: &[String]) {
     verify_send_transition(
         &state.snapshot.state,
         &state.snapshot.record,
-        &payload,
+        payload,
         LEVEL,
         sk.as_ref(),
         expected,
     )
     .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
+    next_state
+}
+
+/// Advance this CLI's head to a FULLY co-signed successor and publish it (`channel_snapshot.json`
+/// is the browsers' re-import source; without the sync the next send fails "payload does not
+/// extend the current head").
+fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path: &str) {
+    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
+        .unwrap_or_else(|e| {
+            die(format!(
+                "refusing to adopt a head that is not N-of-N signed: {e}"
+            ))
+        });
+    let signed: Vec<u8> = next_state
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
+    state.snapshot.state = next_state;
+    save_state(state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    write_json(out_path, &state.snapshot.state);
+    println!(
+        "co-signed → {out_path}. Signatures now present for slots {signed:?} (need 0..{}).",
+        state.snapshot.record.member_count
+    );
+}
+
+/// Cosigner slots this host signs for. Default: every controlled slot (the single-host
+/// deployment). `INTMAX_CLUSTER_SIGN_SLOTS=0,3` restricts signing to the listed slots — the
+/// per-host half of the cluster co-signing protocol, where each host holds and signs only its own
+/// slot(s) and receives the others' signatures over the network.
+fn cluster_sign_slots(cli: &CliState) -> Vec<u16> {
+    let all: Vec<u16> = cli.controlled.iter().map(|c| c.slot).collect();
+    match std::env::var("INTMAX_CLUSTER_SIGN_SLOTS") {
+        Ok(v) if !v.trim().is_empty() => {
+            let wanted: Vec<u16> = v
+                .split(',')
+                .map(|t| {
+                    t.trim()
+                        .parse()
+                        .unwrap_or_else(|_| die("INTMAX_CLUSTER_SIGN_SLOTS: bad slot"))
+                })
+                .collect();
+            for w in &wanted {
+                if !all.contains(w) {
+                    die(format!(
+                        "INTMAX_CLUSTER_SIGN_SLOTS names slot {w}, which this CLI does not control"
+                    ));
+                }
+            }
+            wanted
+        }
+        _ => all,
+    }
+}
+
+/// `cosign-partial <payload.json> <out_partial.json>` — the CLUSTER half-step: run the full
+/// co-sign gate, sign the successor with THIS host's slot(s) only, and emit those signatures for
+/// the other cluster hosts WITHOUT advancing the head. The anti-equivocation ledger records the
+/// signature exactly as `cosign` does, so this host can never later sign a sibling successor of
+/// the same head even if the cluster round stalls.
+fn cmd_cosign_partial(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-partial <payload.json> <out_partial.json>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("partial_cosign.json");
+    let mut state = load_state();
+    let payload: SendPayload = read_json(in_path);
+    let mut next_state = cosign_gate(&state, &payload);
+    let slots = cluster_sign_slots(&state);
+    let record = state.snapshot.record.clone();
+    let controlled: Vec<ControlledMember> = state
+        .controlled
+        .iter()
+        .filter(|c| slots.contains(&c.slot))
+        .cloned()
+        .collect();
+    let mut signatures = Vec::new();
+    for member in &controlled {
+        let signature = ledgered_state_signature(
+            &mut state,
+            &record,
+            member,
+            &next_state,
+            StateSigningPurpose::InChannelSend,
+            None,
+        )
+        .unwrap_or_else(|error| die(error));
+        add_signature(&mut next_state, signature.clone());
+        signatures.push(signature);
+    }
+    // Persist the ledger entries (NOT the head).
+    save_state(&state);
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PartialCosign {
+        prev_digest: Bytes32,
+        next_digest: Bytes32,
+        slots: Vec<u16>,
+        signatures: Vec<MemberSignature>,
+    }
+    write_json(
+        out_path,
+        &PartialCosign {
+            prev_digest: next_state.prev_digest,
+            next_digest: next_state.digest,
+            slots: slots.clone(),
+            signatures,
+        },
+    );
+    println!(
+        "partial co-sign → {out_path}: slots {slots:?} signed successor {} (head NOT advanced; need 0..{})",
+        next_state.digest.to_hex(),
+        record.member_count
+    );
+}
+
+/// `cosign-merge <payload.json> <signatures.json> <out_state.json>` — the CLUSTER assembly step:
+/// re-run the co-sign gate on the SAME payload, verify every pooled signature individually
+/// (registered pk_g at its slot, Falcon over the recomputed digest), and — only when all
+/// `member_count` slots are present — adopt the N-of-N head exactly as `cosign` would. Otherwise
+/// the head is untouched and the missing slots are reported as JSON on stdout with exit code 3,
+/// so the relay can drive the missing-signature warning without parsing free text.
+fn cmd_cosign_merge(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-merge <payload.json> <signatures.json> <out_state.json>"));
+    let sigs_path = args
+        .get(2)
+        .unwrap_or_else(|| die("cosign-merge <payload.json> <signatures.json> <out_state.json>"));
+    let out_path = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("cosigned_state.json");
+    let mut state = load_state();
+    let payload: SendPayload = read_json(in_path);
+    let mut next_state = cosign_gate(&state, &payload);
+    // Accept either a bare array of `MemberSignature`s or an object carrying `signatures`.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SigInput {
+        Bare(Vec<MemberSignature>),
+        Wrapped { signatures: Vec<MemberSignature> },
+    }
+    let signatures: Vec<MemberSignature> = match read_json::<SigInput>(sigs_path) {
+        SigInput::Bare(v) => v,
+        SigInput::Wrapped { signatures } => signatures,
+    };
+    let record = state.snapshot.record.clone();
+    for sig in signatures {
+        intmax3_zkp::wallet_core::verify_member_signature(&record, &next_state, &sig)
+            .unwrap_or_else(|e| {
+                die(format!(
+                    "rejecting pooled signature for slot {}: {e}",
+                    sig.member_slot
+                ))
+            });
+        add_signature(&mut next_state, sig);
+    }
+    let present: Vec<u8> = next_state
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
+    let missing: Vec<u8> = (0..record.member_count)
+        .filter(|slot| !present.contains(slot))
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "{}",
+            serde_json::json!({ "complete": false, "present": present, "missing": missing })
+        );
+        std::process::exit(3);
+    }
+    adopt_cosigned_head(&mut state, next_state, out_path);
+}
+
+fn cmd_cosign(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign <payload_or_state.json> <out>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("cosigned_state.json");
+    let mut state = load_state();
+
+    // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
+    // re-verifies the transition before signing — never sign a bare state we did not validate.
+    let payload: SendPayload = read_json(in_path);
+    let mut next_state = cosign_gate(&state, &payload);
 
     // CHECK-AND-SIGN (detail2 §3.1): each member signs the next state ONLY IF its settled_tx_chain
     // matches the held intmax balance backing (invariant across in-channel sends, so the genesis
     // attestation backs every in-channel state). Fail-closed — refuse otherwise.
     // SECURITY (§F-1): the deposit backing is anchored at GENESIS (create_channel co-signs only if
-    // backed). Ongoing transitions are validated just above (verify_send_transition: real E-1 +
-    // conservation), and a send legitimately ADVANCES settled_tx_chain once inter-channel transfers
-    // exist — so re-checking it against the FIXED genesis backing here is wrong (it would reject
-    // every state after the first inter-channel send). The backing holds inductively from the
-    // backed genesis through validated, conservation-preserving transitions; reconciliation
-    // against the deposit is the close/settlement step. (Same rationale as
+    // backed). Ongoing transitions are validated in `cosign_gate` (verify_send_transition: real
+    // E-1 + conservation), and a send legitimately ADVANCES settled_tx_chain once inter-channel
+    // transfers exist — so re-checking it against the FIXED genesis backing here is wrong (it
+    // would reject every state after the first inter-channel send). The backing holds inductively
+    // from the backed genesis through validated, conservation-preserving transitions;
+    // reconciliation against the deposit is the close/settlement step. (Same rationale as
     // cosign-inter-transfer.)
     ledger_sign_all_controlled(
         &mut state,
@@ -10772,28 +10959,10 @@ fn cmd_cosign(args: &[String]) {
         StateSigningPurpose::InChannelSend,
         None,
     );
-
-    let signed: Vec<u8> = next_state
-        .member_signatures
-        .iter()
-        .map(|s| s.member_slot)
-        .collect();
     // DEMO: advance this CLI member's stored head to the just-cosigned state so SEQUENTIAL sends
-    // work. Without this, cli_state stays at the genesis head and the 2nd send fails "payload does
-    // not extend the current head". The browser finalizes exactly what we cosigned in this single
-    // relay flow, so advancing optimistically is safe here; a real multi-party deployment would
-    // advance only on confirmed finalization.
-    state.snapshot.state = next_state;
-    save_state(&state);
-    // HEAD SYNC: publish the advanced head so `/api/snapshot` (the browsers' re-import source) is
-    // current — otherwise a later re-import returns the stale init snapshot and the next send fails
-    // "payload does not extend the current head".
-    write_json("channel_snapshot.json", &state.snapshot);
-    write_json(out_path, &state.snapshot.state);
-    println!(
-        "co-signed → {out_path}. Signatures now present for slots {signed:?} (need 0..{}).",
-        state.snapshot.record.member_count
-    );
+    // work (single-host deployment: this process holds every cosigner slot, so the state IS
+    // N-of-N here). The cluster deployment splits this into `cosign-partial` + `cosign-merge`.
+    adopt_cosigned_head(&mut state, next_state, out_path);
 }
 
 /// Batched co-sign (abstract2-1 §3.2b): `cosign-batch <batch_payloads.json> <out>` where the input
