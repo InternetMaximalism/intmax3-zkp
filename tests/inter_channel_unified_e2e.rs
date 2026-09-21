@@ -388,7 +388,7 @@ fn unified_inter_channel_transfer_e2e() {
     let tx_v2 = TxV2 {
         tx_class: TxClass::UserTransfer,
         transfer_tree_root: tt.get_root(),
-        nonce: 1,
+        nonce: 0,
         channel_action_root: PoseidonHashOut::default(),
     };
     let mut tv2 = TxV2Tree::init();
@@ -461,7 +461,7 @@ fn unified_inter_channel_transfer_e2e() {
         sender_delta_ct: sdelta.0.clone(),
         source_channel_id: a_id,
         token_index: 0,
-        base_nonce: 1,
+        base_nonce: 0,
         destination_base_transfer_salt: intmax3_zkp::common::salt::Salt::default(),
         destination_channel_id: dest_id,
         source_pk_g: a_keys[0].pk_g(),
