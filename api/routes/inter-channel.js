@@ -22,7 +22,8 @@ router.post('/send', (req, res) => {
     res.status(status).json(body);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
+    // A refused (uncommitted) transfer is a 409 conflict for the caller, not a server failure.
+    res.status(Number.isInteger(e && e.status) ? e.status : 500).json({ error: String(e.stderr || e.message || e) });
   });
 });
 

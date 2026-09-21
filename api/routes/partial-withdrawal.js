@@ -2,9 +2,9 @@ const { Router } = require('express');
 const fs = require('fs');
 const { cli, wc, RPC, readJson, writeJson, ensureSettlement, failRoute } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
-const { findActiveTicket, upsertTicket } = require('../lib/tickets');
+const { findActiveTicket, upsertTicket, readTickets, writeTickets } = require('../lib/tickets');
 const producer = require('../lib/block-producer');
-const { cliWithPreparedExitKit, acknowledgePreparedExitKit } = require('../lib/exit-kit');
+const { cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../lib/exit-kit');
 
 const router = Router({ mergeParams: true });
 
@@ -74,12 +74,26 @@ router.post('/burn', (req, res) => {
       // the exit kit for the exact post-burn state is proved against the staged producer block
       // BEFORE the co-signers release their signatures; `postInterChannel` then commits that
       // very block.
-      await cliWithPreparedExitKit(
-        ch,
-        ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
-        liveNonceEnv,
-        { requestId: producerRequestId },
-      );
+      try {
+        await cliWithPreparedExitKit(
+          ch,
+          ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
+          liveNonceEnv,
+          { requestId: producerRequestId },
+        );
+      } catch (e) {
+        // Refused before anything was adopted (no signed result): release the staged exit-kit
+        // block (it freezes every producer mutation), drop the pre-sign operation and the ticket,
+        // so a rebuilt burn is not answered 409 forever by a ticket that can never complete.
+        if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
+          try { await producer.liveAbandonPreparedExitKit(ch, debitRequestId(producerRequestId)); }
+          catch (abandonError) { console.error(`[burn] channel ${ch}: abandon staged exit kit: ${String(abandonError.message || abandonError).slice(0, 200)}`); }
+          for (const f of [EXIT_KIT_OPERATION_FILE, 'exit_kit_proposal.json', 'prepared_exit_kit.json']) fs.rmSync(wc(ch, f), { force: true });
+          writeTickets(ch, readTickets(ch).filter(t => t.id !== ticket.id));
+          throw Object.assign(e, { status: 409 });
+        }
+        throw e;
+      }
     }
     // The burn is an inter-channel send to BURN_CHANNEL_ID: admit it durably at the producer and
     // settle it in the live base-state authority, exactly like a normal send. The journaled
@@ -103,7 +117,7 @@ router.post('/burn', (req, res) => {
     res.json({ state: cosigned, ticket });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
+    res.status(Number.isInteger(e && e.status) ? e.status : 500).json({ error: String(e.stderr || e.message || e) });
   });
 });
 

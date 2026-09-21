@@ -1,4 +1,5 @@
 'use strict';
+const path = require('path');
 
 // Shared daemon-backed inter-channel transfer (source debit A + destination credit B, atomic).
 //
@@ -18,7 +19,7 @@ const fs = require('fs');
 const { isDeepStrictEqual } = require('node:util');
 const { cli, wc, readJson, writeJson } = require('./cli');
 const producer = require('./block-producer');
-const { cliWithPreparedExitKit, installHeadExitKit, acknowledgePreparedExitKit, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('./exit-kit');
+const { cliWithPreparedExitKit, installHeadExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('./exit-kit');
 const { flushPublishedHead } = require('./producer-head');
 
 // Only the current destination recovery copy is eligible: a source's older completed send must
@@ -198,13 +199,27 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
   const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
   // Signer-independent exit: the source debit's exit kit is proved against the staged producer
   // block before any A-side signature; B signs its pure credit against its durable head receipt.
-  await cliWithPreparedExitKit(
-    ch,
-    ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json',
-      `--producer-request-id=${producerRequestId}`],
-    liveNonceEnv,
-    { requestId: producerRequestId },
-  );
+  try {
+    await cliWithPreparedExitKit(
+      ch,
+      ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json',
+        `--producer-request-id=${producerRequestId}`],
+      liveNonceEnv,
+      { requestId: producerRequestId },
+    );
+  } catch (e) {
+    // The signing command failed. If the source leg did NOT commit (no CLI roll-forward journal for
+    // this tx and no signed result), nothing is pending: a deterministic refusal (stale head, bad
+    // proof, insufficient balance) must not leave the channel in `prepared` forever — that made
+    // every later transfer from it a 409 and re-ran the same failing command on each sweep — nor
+    // leave the staged exit-kit block freezing every producer mutation on every channel. Only a
+    // commit that did happen (journal present) stays pending for `resumePendingInterTransfer`.
+    if (!sourceLegCommitted(ch, transferDescriptor)) {
+      await abandonUncommittedTransfer(ch, producerRequestId, e);
+      throw Object.assign(e, { status: e.status || 409 });
+    }
+    throw e;
+  }
   const result = readJson(wc(ch, 'inter_transfer.json'));
   const sourceHead = result.aHead || result.sourceHead || result;
   if (!result.bFundImportState || !result.bSnapshot) {
@@ -254,6 +269,31 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
     ...operation, status: 'completed', completedAt: Date.now(), response,
   });
   return { status: 200, body: response };
+}
+
+// True once `cosign-inter-transfer` has committed the source leg: it writes its roll-forward
+// journal `<work>/.inter-transfer-journal/<txHash>.json` before anything durable changes, and the
+// signed result once both legs are applied.
+function sourceLegCommitted(ch, transferDescriptor) {
+  if (fs.existsSync(wc(ch, 'inter_transfer.json'))) return true;
+  const txHash = transferDescriptor && transferDescriptor.txHash;
+  if (typeof txHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) return false;
+  const journal = path.join(path.dirname(wc(ch, 'inter_operation.json')), '..', '.inter-transfer-journal', `${txHash.slice(2).toLowerCase()}.json`);
+  return fs.existsSync(journal);
+}
+
+// Drop a transfer whose signing was refused before the source committed: release the producer's
+// staged exit-kit block (it freezes every other mutation until committed or abandoned), clear the
+// pre-sign operation and the pending request journal. Best effort on the daemon call — a daemon
+// that is down leaves the staged block, which `livePrepareExitKit`'s own failure path or the next
+// identical retry resolves.
+async function abandonUncommittedTransfer(ch, producerRequestId, cause) {
+  try { await producer.liveAbandonPreparedExitKit(ch, debitRequestId(producerRequestId)); }
+  catch (e) { console.error(`[inter] channel ${ch}: abandon staged exit kit ${producerRequestId}: ${String(e.message || e).slice(0, 200)}`); }
+  for (const f of ['inter_operation.json', EXIT_KIT_OPERATION_FILE, 'exit_kit_proposal.json', 'prepared_exit_kit.json']) {
+    fs.rmSync(wc(ch, f), { force: true });
+  }
+  console.error(`[inter] channel ${ch}: transfer ${producerRequestId} refused before the source committed, nothing pending: ${String(cause.message || cause).split('\n').find((l) => /^error:/.test(l)) || String(cause.message || cause).slice(0, 200)}`);
 }
 
 // A PREPARED operation whose client went away — the browser closed after the debit was signed,

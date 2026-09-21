@@ -25,8 +25,10 @@ function harness() {
     wc,
     readJson,
     writeJson,
+    refuseNext: null, // set to an Error to make the next signing command fail before it commits
     cli(ch, args) {
       if (args[0] === 'recover-inter-transfers') { calls.recover = (calls.recover || 0) + 1; return; }
+      if (cliMock.refuseNext && args[0] === 'cosign-inter-transfer') { const e = cliMock.refuseNext; cliMock.refuseNext = null; calls.cli += 1; throw e; }
       assert.ok(flushed.includes(8), 'destination WAL/head recovery precedes cross-channel signing');
       assert.equal(ch, 7);
       assert.ok(args.some(a => a.startsWith('--producer-request-id=')),
@@ -54,6 +56,8 @@ function harness() {
       return {
         cliWithPreparedExitKit: async (ch, args, env) => cliMock.cli(ch, args, env),
         acknowledgePreparedExitKit: () => {},
+        debitRequestId: (id) => `${id}:exit-kit`,
+        OPERATION_FILE: 'exit_kit_operation.json',
         installHeadExitKit: async (channelId) => {
           // Source (7) after its debit settles, destination (8) after its credit lands.
           assert.ok(channelId === 7 || channelId === 8, `unexpected kit install for channel ${channelId}`);
@@ -73,6 +77,7 @@ function harness() {
         },
         syncOffchainHeads: async () => { calls.sync += 1; return { ok: true }; },
         liveSettleInterChannel: async () => { calls.settle += 1; return { baseNonce: 1 }; },
+        liveAbandonPreparedExitKit: async (_ch, requestId) => { calls.abandon = (calls.abandon || 0) + 1; calls.abandoned = requestId; },
         liveSendArtifact: async () => { calls.artifact += 1; return { proof: 'source' }; },
         liveReceiveInterChannel: async (channelId, body) => {
           calls.receive += 1;
@@ -125,7 +130,7 @@ function harness() {
     return response;
   }
 
-  return { work, calls, wc, writeJson, body, requestId, invoke, lib };
+  return { work, calls, wc, writeJson, body, requestId, invoke, lib, cliMock };
 }
 
 test('completed inter-channel HTTP retries return the journaled response without re-signing', async t => {
@@ -276,4 +281,21 @@ test('a new sender after an abandoned transfer: resume first, then the new trans
   // The landed transfer's daemon phases are replayed idempotently once more before the new one
   // (the pre-existing crash-window flush keyed by request id), then the new transfer lands.
   assert.equal(h.calls.receive, 3, 'the abandoned transfer landed, was re-flushed idempotently, and the new one landed');
+});
+
+test('a signing refusal before the source commits leaves nothing pending: staged kit abandoned, 409, the next transfer proceeds', async t => {
+  const h = harness();
+  t.after(() => fs.rmSync(h.work, { recursive: true, force: true }));
+  h.writeJson(h.wc(7, 'exit_kit_operation.json'), { schemaVersion: 1, status: 'signing' });
+  h.cliMock.refuseNext = Object.assign(new Error('Command failed\nerror: insufficient balance'), { stderr: 'error: insufficient balance' });
+  const refused = await h.invoke(h.body);
+  assert.equal(refused.statusCode, 409);
+  assert.equal(h.calls.abandon, 1, 'the staged exit-kit block is released');
+  assert.equal(h.calls.abandoned, `${h.requestId}:exit-kit`);
+  assert.equal(fs.existsSync(h.wc(7, 'inter_operation.json')), false, 'no prepared journal survives a refusal');
+  assert.equal(fs.existsSync(h.wc(7, 'exit_kit_operation.json')), false, 'no pre-sign operation survives a refusal');
+  assert.equal(h.lib.pendingInterTransfer(7), null);
+  // A different transfer from the same channel is not blocked by the refused one.
+  const ok = await h.invoke({ ...h.body, debitPayload: { proposedNextState: { digest: 'after-2' } } });
+  assert.equal(ok.statusCode, 200);
 });

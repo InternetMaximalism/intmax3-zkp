@@ -33,19 +33,23 @@ const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = r
 // A `channel_member` failure prints its real diagnosis to STDOUT and only the persistent insecure-
 // keys banner to STDERR, so reporting `e.stderr` alone hides the cause. Combine message, stdout and
 // stderr (stripping the banner noise) into one readable error string for API responses and logs.
+// The insecure-test-keys banner the CLI prints on stderr is an operator notice, not part of the
+// error: strip it from every stream, including the `Command failed:` message execFileSync builds
+// from stderr, and keep each distinct line once.
+const stripBanner = (text) => String(text)
+  .split('\n')
+  .filter((l) => l.trim() && !l.startsWith('!!') && !/INSECURE DETERMINISTIC KEYS/.test(l))
+  .join('\n');
 function fullCliError(e) {
   const parts = [];
-  if (e && e.message) parts.push(String(e.message));
+  if (e && e.message) parts.push(stripBanner(e.message));
   for (const stream of [e && e.stdout, e && e.stderr]) {
     if (!stream) continue;
-    const text = String(stream)
-      .split('\n')
-      .filter((l) => l.trim() && !l.startsWith('!!') && !/INSECURE DETERMINISTIC KEYS/.test(l))
-      .join('\n');
+    const text = stripBanner(stream);
     if (text.trim()) parts.push(text);
   }
   const seen = new Set();
-  return parts.filter((p) => (seen.has(p) ? false : seen.add(p))).join('\n') || String(e);
+  return parts.join('\n').split('\n').filter((l) => (seen.has(l) ? false : seen.add(l))).join('\n') || String(e);
 }
 const { execFileSync, spawn } = require('child_process');
 const { createBatchWindow, projectToSlim, partitionByAnchor } = require('./batch-window');
@@ -76,9 +80,21 @@ const chDir = (ch) => path.join(WORK, 'ch' + ch);
 const wc = (ch, n) => path.join(chDir(ch), n);
 // Validate the channel from the request against the known set (never trust a raw query value as a
 // path component). Defaults to the first channel.
+// `?channel=` is REQUIRED on every channel route. An unknown/missing channel used to fall back to
+// CHANNELS[0] silently, so a typo (`?channel=8x`) joined, co-signed or imported into channel 7.
 function reqChannel(req) {
-  const c = parseInt((req.query && req.query.channel) || '', 10);
-  return CHANNELS.includes(c) ? c : CHANNELS[0];
+  const raw = req.query && req.query.channel;
+  const c = /^\d+$/.test(String(raw ?? '')) ? Number(raw) : NaN;
+  if (!CHANNELS.includes(c)) {
+    throw Object.assign(new Error(`unknown channel ${JSON.stringify(raw ?? null)}; this relay serves channels ${CHANNELS.join(', ')}`), { status: 400 });
+  }
+  return c;
+}
+// Answer a route error: 400 for a bad request, 409 for a stale anchor, 500 otherwise.
+function sendRouteError(res, e) {
+  const error = fullCliError(e);
+  console.error(error);
+  res.status(e && e.status ? e.status : (e && e.staleAnchor ? 409 : 500)).json({ error });
 }
 function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
@@ -437,10 +453,12 @@ app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
 // SAME channel N as a distinct delegate. cli_state.json is reset only on relay startup.
 // While a channel is HALTED (cluster protocol), every mutating route answers 503 — except the
 // close/settle/withdraw family, which is exactly what a halted channel is allowed to do.
-const HALT_EXEMPT = new Set(['/api/close', '/api/settle', '/api/withdraw', '/api/deploy-settlement', '/api/cancel-close', '/api/claim']);
+const HALT_EXEMPT = new Set(['/api/close', '/api/settle', '/api/withdraw', '/api/deploy-settlement', '/api/cancel-close', '/api/claim', '/api/exit-kit/install']);
 app.use((req, res, next) => {
-  if (!cluster || req.method !== 'POST' || req.path.startsWith('/api/cluster/') || HALT_EXEMPT.has(req.path)) return next();
-  const h = cluster.halted(reqChannel(req));
+  if (!cluster || req.method !== 'POST' || req.path.startsWith('/api/cluster/') || HALT_EXEMPT.has(req.path) || req.path.startsWith('/api/browser-claim/')) return next();
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return next(); } // the route reports the bad channel itself
+  const h = cluster.halted(ch);
   if (h) return res.status(503).json({ error: `channel ${reqChannel(req)} is HALTED since ${new Date(h.since).toISOString()}: cosigner slots ${JSON.stringify(h.missing)} did not sign round ${h.nextDigest}`, halted: h });
   return next();
 });
@@ -680,7 +698,10 @@ app.get('/api/snapshot', (req, res) => {
   try {
     ch = reqChannel(req);
     snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-  } catch (e) { return res.status(404).json({ error: 'no channel yet' }); }
+  } catch (e) {
+    if (e && e.status) return sendRouteError(res, e); // unknown channel is a 400, not "no channel yet"
+    return res.status(404).json({ error: 'no channel yet' });
+  }
   // No `since`/`sinceDigest` -> byte-identical to the pre-delta response, so OLD CLIENTS (and every
   // non-send call site) are untouched. The head is still fingerprinted, so this snapshot can serve
   // as the base of the client's NEXT delta request.
@@ -761,12 +782,13 @@ app.get('/api/tokens', (req, res) => {
 // (Legacy member-mode genesis co-signing — unused by the delegate demo, where the browser does not
 // sign the genesis. Kept for the member-mode wallet.)
 app.post('/api/add-genesis-sig', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
     fs.writeFileSync(wc(ch, 'browser_sig.json'), JSON.stringify(req.body));
     cli(ch, ['add-genesis-sig', 'browser_sig.json', 'channel_snapshot.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // Step 3: browser sends a transfer payload → CLI co-signs (other members) → returns the
@@ -833,7 +855,19 @@ function drainCosignWindow(ch, entries) {
       // Fail-whole batch rejected (one invalid proof, §M-2): replay solo so honest txs land and
       // only the invalid tx errors. Bounded: runs only on rejection, window ≤ BATCH_WINDOW_MAX.
       console.error(`[batch] channel ${ch}: batch rejected (${String(e.stderr || e.message || e).slice(0, 200)}); replaying window solo`);
-      for (const en of fresh) if (!en.settled) soloOne(en);
+      // Sequentially: `soloOne` awaits the head flush, and each solo cosign advances the head, so a
+      // later payload that still extends the OLD head is a stale anchor (409 → the wallet re-signs)
+      // rather than a generic CLI failure. Parallel replay overwrote payload.json/cosigned.json and
+      // released this lock with flushes still in flight.
+      for (const en of fresh) {
+        if (en.settled) continue;
+        const head = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')).state.digest;
+        if (String(en.payload.proposedNextState.prevDigest).toLowerCase() !== String(head).toLowerCase()) {
+          const err = new Error('staleAnchor: payload does not extend the current head — re-sign against the latest snapshot');
+          err.staleAnchor = true; en.reject(err); continue;
+        }
+        await soloOne(en);
+      }
     } finally {
       for (const f of files) { try { fs.unlinkSync(wc(ch, f)); } catch (_) {} }
     }
@@ -883,9 +917,10 @@ function kitPendingHint(ch) {
 // the fully-signed next state for the browser to finalize. Lets a delegate send again after receiving.
 app.post('/api/refresh-cosign', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.writeFileSync(wc(ch, 'refresh_payload.json'), JSON.stringify(req.body));
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
+    await flushPublishedHead(ch); // the live balance refuses a later bind that skips this version
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8')));
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
@@ -947,6 +982,9 @@ app.post('/api/inter/send', (req, res) => {
   const ch = reqChannel(req); // = source channel A
   const descriptor = req.body && req.body.transferDescriptor;
   const destination = descriptor && Number(descriptor.destinationChannelId);
+  if (!CHANNELS.includes(destination)) {
+    return res.status(400).json({ error: `destination channel ${JSON.stringify(descriptor && descriptor.destinationChannelId)} is not served by this relay (channels ${CHANNELS.join(', ')})` });
+  }
   // The daemon-backed shared module supplies the resident base-state nonce the legacy relay used
   // to lack (hence the old 503). Any transfer left pending on this source channel is completed
   // FIRST, so an abandoned sender never blocks the next one.
@@ -958,11 +996,7 @@ app.post('/api/inter/send', (req, res) => {
   resumePendingInterTransferLocked(ch)
     .catch((e) => console.error(`[inter] channel ${ch}: pending transfer resume failed before a new send: ${String(e.stderr || e.message || e).slice(0, 300)}`))
     .then(() => withInterLocks(ch, destination, runLocked))
-    .catch((e) => {
-      const full = fullCliError(e);
-      console.error(full);
-      res.status(500).json({ error: full });
-    });
+    .catch((e) => sendRouteError(res, e));
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -975,8 +1009,9 @@ app.post('/api/inter/send', (req, res) => {
 
 // POST /api/close?channel=N  body: { manager, sv }
 app.post('/api/close', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
     const manager = req.body && req.body.manager;
     const sv = (req.body && req.body.sv) || '';
     if (!manager) throw new Error('close needs { manager }');
@@ -985,13 +1020,14 @@ app.post('/api/close', (req, res) => {
     const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: sv });
     if (ticket) { ticket.status = 'close_done'; ticket.steps.close = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/settle?channel=N  body: { manager }
 app.post('/api/settle', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
     const manager = req.body && req.body.manager;
     if (!manager) throw new Error('settle needs { manager }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
@@ -999,13 +1035,14 @@ app.post('/api/settle', (req, res) => {
     const out = cli(ch, ['settle', manager, RPC]);
     if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/withdraw?channel=N  body: { manager }  (rollup→manager via the full withdrawal pipeline)
 app.post('/api/withdraw', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
     const manager = req.body && req.body.manager;
     if (!manager) throw new Error('withdraw needs { manager }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
@@ -1013,7 +1050,7 @@ app.post('/api/withdraw', (req, res) => {
     const out = cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) });
     if (ticket) { ticket.status = 'withdraw_done'; ticket.steps.withdraw = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // Retired: this let the caller choose manager/slot/recipient and moved the Regev witness into the
@@ -1062,8 +1099,9 @@ app.get('/api/deposit-info', (req, res) => {
 // POST /api/l1-deposit?channel=N  body: { amount } (base units)
 // Fallback: sends a deposit via the relay's anvil dev key (for non-MetaMask testing).
 app.post('/api/l1-deposit', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
     const amount = req.body && req.body.amount;
     if (!amount) throw new Error('l1-deposit needs { amount }');
     const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
@@ -1083,7 +1121,7 @@ app.post('/api/l1-deposit', (req, res) => {
       depositor, amount: String(amount), txHash,
     }));
     res.json({ ok: true, txHash, depositor });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/import-deposit?channel=N  body: { recipientSlot, depositor?, amount? }
@@ -1138,7 +1176,7 @@ app.post('/api/faucet', (req, res) => {
   // Disabled ⇒ the endpoint does not exist. No hints, no partial behaviour.
   if (!FAUCET.enabled) return res.status(404).json({ error: 'faucet not available' });
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const slot = req.body && req.body.slot;
     const amount = FAUCET.dripAmount.toString();
     const localTokenSlot = faucetLocalTokenSlot(ch);
@@ -1171,6 +1209,7 @@ app.post('/api/faucet', (req, res) => {
       // `after` are spendable directly; every co-signer re-verifies the proof before signing.
       cli(ch, ['send', String(FAUCET.faucetSlot), String(slot), amount, 'faucet_payload.json', String(localTokenSlot)]);
       cli(ch, ['cosign', 'faucet_payload.json', 'faucet_cosigned.json']);
+      await flushPublishedHead(ch); // same one-version-at-a-time rule as every other cosign
     } catch (e) {
       writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'failed'));
       console.error(`[faucet] channel ${ch}: drip to slot ${slot} FAILED (reservation kept): ${String(e.stderr || e.message || e).slice(0, 200)}`);
@@ -1423,6 +1462,14 @@ async function bootstrapBacking() {
 
 const http = require('http');
 const HTTP_PORT = PORT + 1;
+
+// Sync throws inside a handler (e.g. `reqChannel` on an unknown channel) answer as JSON with the
+// error's status instead of Express's HTML 500 page.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error(err && err.message ? err.message : err);
+  res.status(err && err.status ? err.status : 500).json({ error: String((err && err.message) || err) });
+});
 
 bootstrapBacking().then(() => {
   // After backing exists (verification reads channel_backing.json's rollup).

@@ -112,7 +112,9 @@ function createCluster(opts) {
     };
     rounds[ch][nextDigest] = r;
     armWarn(r);
-    r.haltTimer = clock.setTimeout(() => halt(r), haltMs);
+    // A timer callback must never throw: an unreadable snapshot or a failed halt persist would
+    // otherwise be an uncaught exception that takes the whole relay down.
+    r.haltTimer = clock.setTimeout(() => { try { halt(r); } catch (e) { log.error(`[cluster] channel ${r.ch}: halt failed: ${e.message || e}`); } }, haltMs);
     return r;
   }
   // The CLOSE WARNING repeats every `warnMs` until the round completes or halts: a signature that
