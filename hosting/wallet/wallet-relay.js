@@ -604,8 +604,18 @@ app.get('/api/backing', (req, res) => {
 });
 
 app.get('/api/base-head', (req, res) => {
-  reqChannel(req);
-  res.status(409).json({ error: 'authoritative live base head unavailable on this legacy relay; use the daemon-backed API' });
+  const ch = reqChannel(req);
+  // Serve the daemon's LIVE base cursor (not the frozen setup-time channel_backing.json): an
+  // inter-channel/burn/withdrawal debit MUST be built at the authoritative nonce the co-sign will
+  // enforce, or it is debited-then-stranded. The relay now has daemon access, so it can. On any
+  // daemon error, 409 rather than fall back to the frozen file (that fallback is the strand bug).
+  producer.liveBaseHead(ch).then((live) => {
+    const nonce = live && live.baseNonce;
+    if (!Number.isInteger(nonce) || nonce < 0 || nonce > 0xffffffff) {
+      throw new Error('live base nonce is unavailable from the producer');
+    }
+    res.json({ schemaVersion: 1, nonce, settledTxChain: (live && live.settledTxChain) ?? null, source: 'liveBaseHead' });
+  }).catch((e) => { res.status(409).json({ error: String(e.message || e) }); });
 });
 
 // GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
