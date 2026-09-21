@@ -1,8 +1,14 @@
 'use strict';
 // OWN-TX branches (DESIGN.md §4.4/§4.5): generate ZKP locally (WASM), submit for co-signing, then
 // VERIFY the co-signed result BEFORE finalizing. A failed verify or withholding routes to exit mode
-// (the co-signer is faulty; the delegate must recover on-chain). Refresh is mandatory when
-// canSend == false.
+// (the co-signer is faulty; the delegate must recover on-chain).
+//
+// REFRESH REMOVAL: the WASM send / inter-channel / burn builders open the spent position by
+// DECRYPTION under the delegate's own Regev key (refresh-free decrypted-send proofs), so a position
+// that just received a deposit or a transfer is spendable directly. No own-tx branch refreshes
+// before sending any more; `doRefresh` stays as an explicit maintenance operation (e.g. a pure
+// receiver approaching the 64-add noise budget), and `ensureSendable`/`witnessBacks` remain the
+// witness-tracking predicates for tools that still hold an encryption witness.
 
 const { verifyCosignedStructural } = require('../verify');
 const { importPublishedState } = require('./sync');
@@ -82,12 +88,12 @@ async function doSend(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
   const { toSlot, amount, tokenSlot } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_SEND', channel: ch.id }); return; }
-  if (!(await ensureSendable(ctx, tokenSlot))) return;
+  // No pre-send refresh (see the header): the WASM decrypts the spent position itself.
   sm.signal(dsm.SIGNALS.START_PROVE);
   const prev = store.get('acceptedHead');
   const nonce = '0x' + crypto.randomBytes(32).toString('hex');
   // Multi-token (§N-3): tokenSlot (undefined = genesis) selects the moved token position; the
-  // WASM wallet signs it into the IMPA-v2 digest and refuses a witness/token mismatch.
+  // WASM wallet signs it into the IMPA-v2 digest.
   const payload = wallet.send(ctx.slot, toSlot, amount, nonce, tokenSlot);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
@@ -109,8 +115,7 @@ async function doInterChannelSend(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
   const { toChannel, toSlot, amount, destRecipient, tokenIndex, tokenSlot } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_INTER', channel: ch.id }); return; }
-  // Inter-channel ALWAYS requires a refresh first (W4) — of the position being sent (§N/TM-13).
-  await doRefresh({ source: 'api', kind: 'refresh', tokenSlot }, ctx);
+  // No pre-send refresh (see the header): the WASM opens the debited position by decryption.
   sm.signal(dsm.SIGNALS.START_PROVE);
   // Multi-token (§N-4): tokenIndex is the BASE token index (undefined = the source channel's
   // genesis registry[0]); the WASM wallet resolves it against the source registry fail-closed.
@@ -142,8 +147,8 @@ async function doBurn(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
   const { amount, l1Address, tokenIndex } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_BURN', channel: ch.id }); return; }
-  // The burn debits the LOCAL position registered for this BASE token index (§N).
-  await ensureSendable(ctx, localSlotForTokenIndex(store, tokenIndex));
+  // No pre-burn refresh (see the header): the burn debits the LOCAL position registered for this
+  // BASE token index (§N), opened by decryption inside the WASM.
   sm.signal(dsm.SIGNALS.START_PROVE);
   // Multi-token (§N): tokenIndex is the burned BASE token (undefined = genesis registry[0]);
   // the resulting L1 partial withdrawal pays out in that asset (IMPW binds tokenIndex).

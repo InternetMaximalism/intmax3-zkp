@@ -560,6 +560,11 @@ function sendableTokens(tokenListPayload, positions) {
 /**
  * Is the wallet's single held send-witness the one that authorizes spending `tokenSlot`?
  *
+ * NOTE (refresh removal): the send / inter-channel / burn flows no longer consult this — the WASM
+ * opens the spent position by DECRYPTION (refresh-free decrypted-send proofs), so no witness is
+ * needed. Kept (and still tested against the delegate's `witnessBacks`) for pages/tools that
+ * still track an encryption witness.
+ *
  * SECURITY (mirrors `witnessBacks` in node/delegate/branches/owntx.js — §N, TM-13; keep the two in
  * step): sendability is per (member, TOKEN). The wallet holds at most ONE send witness, for the
  * position named by `witnessTokenSlot`, and the report's `canSend` refers to THAT position only. A
@@ -2540,23 +2545,10 @@ async function attemptSend(to, amountBase, token) {
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  // Sendability is per (member, TOKEN): the one held witness backs a single position. If it is not
-  // the position being spent, refresh AT that position first — and if the refresh does not produce
-  // a witness for it, STOP. Never fall through to a send on an unverified witness.
-  if (!witnessBacksTokenSlot(rr, token.tokenSlot)) {
-    log('  witness does not back ' + token.label + ' (position ' + token.tokenSlot + ') -- refreshing that token first...');
-    sendPhase = 'Refreshing ' + token.label;
-    log('  re-encrypting balance...', 'zk');
-    const refreshPayload = await call('refresh', { tokenSlot: token.tokenSlot });
-    sendPhase = 'Waiting for co-sign';
-    const cosigned = await api('/api/refresh-cosign', refreshPayload);
-    rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
-    mySlot = rr.slot; showBalance(rr);
-    if (!witnessBacksTokenSlot(rr, token.tokenSlot)) {
-      throw new Error('still cannot send ' + token.label + ' after refreshing token position ' + token.tokenSlot);
-    }
-    log('  refreshed ' + token.label + ' -- ready to send', 'ok');
-  }
+  // No pre-send refresh: `wallet_send` opens the position being spent by DECRYPTION under this
+  // wallet's own Regev key (the refresh-free decrypted-send proof), so a position that just received
+  // a deposit or a transfer is spendable directly. `wallet_refresh` remains available as a manual
+  // maintenance step (e.g. a pure receiver approaching the 64-add noise budget).
   sendPhase = 'Proving';
   log('  generating ZKP (zero-knowledge proof)...', 'zk');
   const payload = await call('send', { recipientSlot: to, amount: amountBase, tokenSlot: token.tokenSlot });
@@ -2676,17 +2668,8 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  log('  syncing balance witness (refresh)...');
-  sendPhase = 'Proving';
-  log('  re-encrypting balance...', 'zk');
-  // Genesis position: `wallet_send_inter_channel` resolves an omitted token index to the source
-  // channel's registry[0], so the witness this refresh must produce is the one for position 0.
-  const refreshPayload = await call('refresh', { tokenSlot: 0 });
-  sendPhase = 'Waiting for co-sign';
-  const cosigned = await api('/api/refresh-cosign', refreshPayload);
-  rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
-  mySlot = rr.slot; showBalance(rr);
-  if (!witnessBacksTokenSlot(rr, 0)) throw new Error('could not obtain spendable balance after refresh');
+  // No pre-send refresh: `wallet_send_inter_channel` opens the debited position by decryption
+  // (refresh-free decrypted E-2 proof) — see attemptSend.
   const bSnapRaw = await fetch('/api/snapshot?channel=' + toCh).then(r => r.text());
   if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error('destination channel ' + toCh + ' not available');
   const bSnap = JSON.parse(bSnapRaw);
@@ -3006,19 +2989,8 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
     let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
     mySlot = rr.slot; showBalance(rr);
-    // The burn debits the GENESIS position (`wallet_burn_send` resolves an omitted token index to
-    // registry[0]), so the witness it needs is the one for position 0 — NOT merely "some" witness.
-    // Since the Send panel can now leave the witness on another token position, a plain `canSend`
-    // check here would skip the refresh and the wasm would refuse the burn outright.
-    if (!witnessBacksTokenSlot(rr, 0)) {
-      log('  refresh needed before burn...');
-      sendPhase = 'Refreshing';
-      log('  re-encrypting balance...', 'zk');
-      const refreshPayload = await call('refresh', { tokenSlot: 0 });
-      const cosigned = await api('/api/refresh-cosign', refreshPayload);
-      rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
-      mySlot = rr.slot; showBalance(rr);
-    }
+    // No pre-burn refresh: `wallet_burn_send` opens the debited position by decryption
+    // (refresh-free decrypted E-2 proof) — see attemptSend.
     log('burn send ' + amt + ' ETH -> ' + addr + '...');
     const baseHead = JSON.parse(await api('/api/base-head', null, 'GET'));
     if (!Number.isInteger(baseHead.nonce)) throw new Error('live base nonce is unavailable');

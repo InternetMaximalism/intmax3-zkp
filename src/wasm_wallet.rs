@@ -28,7 +28,7 @@ use crate::{
     utils::conversion::ToU64 as _,
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, WithdrawalClaimProver, add_signature,
-        build_refresh, build_send_token, decrypt_balance_token, resolve_local_token_slot,
+        build_refresh, build_send_token_decrypted, decrypt_balance_token, resolve_local_token_slot,
         sign_state, verify_exit_kit_preserving_successor, verify_send_transition, verify_snapshot,
     },
 };
@@ -374,12 +374,14 @@ struct BalanceReport {
     /// [`ser_u64_dec_string`].
     #[serde(serialize_with = "ser_u64_dec_string")]
     balance: u64,
+    /// Always `true` since the decrypted send: every position this wallet's key decrypts is
+    /// spendable directly, with or without pending homomorphic credits (kept for wire compat).
     can_send: bool,
     state_version: u64,
     /// Per-token balances over ALL active registry positions (multitoken Phase 4).
     balances: Vec<TokenBalanceEntry>,
-    /// The token position the held send-witness backs (None ⇒ cannot send any token until a
-    /// refresh). `can_send` refers to THIS position.
+    /// The token position a held encryption witness backs, if any (informational — the
+    /// decrypted send does not need one; kept for wire compat with older pages).
     witness_token_slot: Option<u8>,
 }
 
@@ -402,7 +404,7 @@ fn balance_report(
     Ok(BalanceReport {
         slot,
         balance,
-        can_send: session.balance.is_some(),
+        can_send: true,
         state_version: bs.state_version,
         balances,
         witness_token_slot: session.balance.as_ref().map(|(t, _, _)| *t),
@@ -683,11 +685,12 @@ pub fn wallet_withdrawal_claim(
 }
 
 /// Send `amount` of LOCAL token position `token_slot` (OPTIONAL — `undefined`/omitted = 0, the
-/// genesis token; multitoken §N-3) to `recipient_slot`: builds the E-1 proof, signs the
+/// genesis token; multitoken §N-3) to `recipient_slot`: builds the refresh-free decrypted-send
+/// proof (the current balance ciphertext is opened by decryption under this wallet's Regev secret
+/// key — no encryption witness, no refresh, even right after a homomorphic credit), signs the
 /// `ChannelTx` (IMPA-v2 binds the token slot) and the proposed next state, and returns the
-/// `SendPayload` for the co-signers. The held witness must back exactly this token position
-/// (fail-closed otherwise — a refresh of the position restores it). The new balance is
-/// committed only once `wallet_finalize` receives the fully-signed state.
+/// `SendPayload` for the co-signers. The new balance is committed only once `wallet_finalize`
+/// receives the fully-signed state.
 #[wasm_bindgen]
 pub fn wallet_send(
     recipient_slot: u16,
@@ -701,18 +704,6 @@ pub fn wallet_send(
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (witness_token, before_amount, before_witness) =
-            session.balance.clone().ok_or_else(|| {
-                js_err("no spendable balance witness (a refresh is required after receiving)")
-            })?;
-        // The witness backs exactly ONE (slot, token) ciphertext — never sign an E-1 statement
-        // over a position the witness does not open.
-        if witness_token != token_slot {
-            return Err(js_err(format!(
-                "held balance witness is for token position {witness_token}, not {token_slot} — \
-                 refresh token {token_slot} first"
-            )));
-        }
         let mut rng = rand010::rng();
         let mut nonce_bytes = [0u32; 8];
         for w in nonce_bytes.iter_mut() {
@@ -723,15 +714,13 @@ pub fn wallet_send(
             payload,
             new_balance_witness,
             new_balance,
-        } = build_send_token(
+        } = build_send_token_decrypted(
             &session.keys,
             &snapshot,
             slot,
             recipient_slot,
             token_slot,
             amount,
-            before_amount,
-            &before_witness,
             nonce,
             LEVEL,
             &mut rng,
@@ -798,25 +787,16 @@ pub fn wallet_send_inter_channel(
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (witness_token, before_amount, before_witness) =
-            session.balance.clone().ok_or_else(|| {
-                js_err("no spendable balance witness (a refresh is required after receiving)")
-            })?;
         let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
         let base_nonce = base_nonce.ok_or_else(|| {
             js_err(
                 "base nonce is required: read the current live base head immediately before proving",
             )
         })?;
-        // The held witness must back the LOCAL position this base token resolves to (TM-6).
+        // The LOCAL position this base token resolves to (TM-6) — the position the decrypted
+        // debit opens and re-encrypts.
         let local_slot =
             resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
-        if witness_token as usize != local_slot {
-            return Err(js_err(format!(
-                "held balance witness is for token position {witness_token}, but base token \
-                 {token_index} resolves to position {local_slot} — refresh that position first"
-            )));
-        }
         let dest: DestRecipient = serde_json::from_str(&dest_recipient_json).map_err(js_err)?;
         let dest_pk_g = Bytes32::from_hex(&dest.pk_g).map_err(js_err)?;
         let dest_channel =
@@ -834,7 +814,7 @@ pub fn wallet_send_inter_channel(
         // (rand_core 0.9), so it cannot be reused here — same idiom as wallet_core's callers.
         let destination_base_transfer_salt =
             crate::common::salt::Salt::rand(&mut rand::thread_rng());
-        let built = crate::wallet_core::build_inter_channel_send_token_at_base_nonce(
+        let built = crate::wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted(
             &session.keys,
             &snapshot,
             slot,
@@ -846,8 +826,6 @@ pub fn wallet_send_inter_channel(
             token_index,
             base_nonce,
             amount,
-            before_amount,
-            &before_witness,
             new_nullifier_root,
             LEVEL,
             &mut rng,
@@ -856,7 +834,7 @@ pub fn wallet_send_inter_channel(
         // The sender's debit commits when wallet_finalize receives channel A's co-signed state.
         session.pending_send = Some((
             built.debit_payload.proposed_next_state.digest,
-            witness_token,
+            local_slot as u8,
             built.new_balance,
             built.new_balance_witness.clone(),
         ));
@@ -896,10 +874,6 @@ pub fn wallet_burn_send(
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (witness_token, before_amount, before_witness) =
-            session.balance.clone().ok_or_else(|| {
-                js_err("no spendable balance witness (a refresh is required after receiving)")
-            })?;
         let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
         let base_nonce = base_nonce.ok_or_else(|| {
             js_err(
@@ -908,12 +882,6 @@ pub fn wallet_burn_send(
         })?;
         let local_slot =
             resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
-        if witness_token as usize != local_slot {
-            return Err(js_err(format!(
-                "held balance witness is for token position {witness_token}, but base token \
-                 {token_index} resolves to position {local_slot} — refresh that position first"
-            )));
-        }
         let address = crate::ethereum_types::address::Address::from_hex(&withdrawal_address_hex)
             .map_err(js_err)?;
         let mut rng = rand010::rng();
@@ -922,7 +890,7 @@ pub fn wallet_burn_send(
             *w = rand010::Rng::next_u32(&mut rng);
         }
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_burn_send_token_at_base_nonce(
+        let built = crate::wallet_core::build_burn_send_token_at_base_nonce_decrypted(
             &session.keys,
             &snapshot,
             slot,
@@ -930,8 +898,6 @@ pub fn wallet_burn_send(
             token_index,
             base_nonce,
             amount,
-            before_amount,
-            &before_witness,
             new_nullifier_root,
             LEVEL,
             &mut rng,
@@ -939,7 +905,7 @@ pub fn wallet_burn_send(
         .map_err(js_err)?;
         session.pending_send = Some((
             built.debit_payload.proposed_next_state.digest,
-            witness_token,
+            local_slot as u8,
             built.new_balance,
             built.new_balance_witness.clone(),
         ));

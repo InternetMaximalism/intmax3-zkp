@@ -154,6 +154,57 @@ impl RegevProofVerifier for RealRegevProofVerifier {
     }
 }
 
+/// Verify a transfer proof whose statement shape is shared by a witnessed purpose and its
+/// refresh-free decrypted twin: [`RegevStatement::ChannelTx`] ↔ `ChannelTx` /
+/// `ChannelTxDecrypted`, [`RegevStatement::ChannelUpdate`] ↔ `ChannelUpdate` /
+/// `ChannelUpdateDecrypted`. The decrypted purpose is tried FIRST (it is what the wallet now
+/// produces); the witnessed purpose is still accepted for senders that hold an encryption
+/// witness of their `before` ciphertext (CLI genesis / refresh flows).
+///
+/// SECURITY: both purposes prove the SAME conservation statement over the SAME verifier-rebuilt
+/// public ciphertexts and keys (`before = after + amount`, `after`/deltas fresh and well-formed
+/// under the bound keys); they differ only in how the sender opens `before` (encryption witness
+/// vs. decryption under the secret key behind the sender's public key). Accepting either
+/// therefore does not widen what a relying party admits. Each purpose is a distinct transcript
+/// domain and a structurally different AIR, so a proof verifies under at most one of them; a
+/// role/backend mismatch is reported immediately (it is purpose-independent).
+pub fn verify_transfer_proof_either<VR>(
+    regev_verifier: &VR,
+    envelope: &ChannelProofEnvelope,
+    statement: &RegevStatement,
+) -> Result<(), ChannelStateUpdateError>
+where
+    VR: RegevProofVerifier,
+{
+    let (decrypted, witnessed) = match statement {
+        RegevStatement::ChannelTx { .. } => (
+            RegevProofPurpose::ChannelTxDecrypted,
+            RegevProofPurpose::ChannelTx,
+        ),
+        RegevStatement::ChannelUpdate { .. } => (
+            RegevProofPurpose::ChannelUpdateDecrypted,
+            RegevProofPurpose::ChannelUpdate,
+        ),
+        _ => {
+            return Err(ChannelStateUpdateError::ProofVerification(
+                "statement shape has no decrypted twin".to_string(),
+            ));
+        }
+    };
+    match regev_verifier.verify(envelope, decrypted, statement) {
+        Ok(()) => Ok(()),
+        Err(ChannelStateUpdateError::ProofVerification(first)) => regev_verifier
+            .verify(envelope, witnessed, statement)
+            .map_err(|second| {
+                ChannelStateUpdateError::ProofVerification(format!(
+                    "neither the decrypted ({decrypted:?}) nor the witnessed ({witnessed:?}) \
+                     purpose verified: [{first}] / [{second}]"
+                ))
+            }),
+        Err(other) => Err(other),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ChannelStateUpdateError {
     #[error("invalid proof role: expected {expected:?}, got {actual:?}")]
@@ -508,8 +559,9 @@ impl InChannelTransferUpdateWitness {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        // (g) Mandatory E-1 channelTxZKP, statement rebuilt from checked data. TM-2 leg 4: E-1
-        // is handed exactly the (prev, after) ciphertexts selected by the SIGNED token_slot.
+        // (g) Mandatory channelTxZKP (E-1, or its refresh-free decrypted twin — see
+        // `verify_transfer_proof_either`), statement rebuilt from checked data. TM-2 leg 4: the
+        // proof is handed exactly the (prev, after) ciphertexts selected by the SIGNED token_slot.
         let statement = RegevStatement::ChannelTx {
             sender_pk: self.regev_pks[self.sender_index].clone(),
             recipient_pk: self.regev_pks[self.recipient_index].clone(),
@@ -519,11 +571,7 @@ impl InChannelTransferUpdateWitness {
             after: self.next_state.balance_state.enc_balances[self.sender_index][token_slot]
                 .clone(),
         };
-        regev_verifier.verify(
-            &self.channel_tx.channel_tx_zkp,
-            RegevProofPurpose::ChannelTx,
-            &statement,
-        )?;
+        verify_transfer_proof_either(regev_verifier, &self.channel_tx.channel_tx_zkp, &statement)?;
         // (h) Recipient-only decryption check.
         if let Some(sk) = &self.recipient_sk {
             let expected = self.expected_amount.ok_or_else(|| {
@@ -732,9 +780,9 @@ impl InterChannelSendUpdateWitness {
             // resolution above admitted.
             token_index: self.inter_channel_tx.token_index,
         };
-        regev_verifier.verify(
+        verify_transfer_proof_either(
+            regev_verifier,
             &self.inter_channel_tx.channel_update_zkp,
-            RegevProofPurpose::ChannelUpdate,
             &statement,
         )?;
         if self.inter_channel_tx.transport_proof != self.transport_proof.proof {
@@ -1111,9 +1159,9 @@ impl ReceiverBundleApplyUpdateWitness {
             // registry resolution admitted.
             token_index: self.inter_channel_tx.token_index,
         };
-        regev_verifier.verify(
+        verify_transfer_proof_either(
+            regev_verifier,
             &self.inter_channel_tx.channel_update_zkp,
-            RegevProofPurpose::ChannelUpdate,
             &statement,
         )?;
         // Recipient-only decryption check.

@@ -9,18 +9,31 @@ const test = require('node:test');
 // construction must never release a channel-state signature before host admission.
 const source = fs.readFileSync(path.join(__dirname, '../../src/wallet_core.rs'), 'utf8');
 
-function publicFunction(name) {
-  const start = source.indexOf(`pub fn ${name}(`);
+function functionBody(name, visibility) {
+  const start = source.indexOf(`${visibility}fn ${name}(`);
   assert.notEqual(start, -1, `missing proposal builder ${name}`);
   const end = source.indexOf('\n}\n', start);
   assert.ok(end > start, `missing top-level function end for ${name}`);
   return source.slice(start, end + 2);
 }
 
+// The public builder plus the private `*_with` body it delegates to (the witnessed and the
+// refresh-free decrypted builders share one body, selected by `BeforeLeg`): the sentinel must
+// see the code that actually constructs the proposal, not just the thin wrapper.
+function publicFunction(name) {
+  let body = functionBody(name, 'pub ');
+  const delegate = body.match(/\b(build_\w+_with)\(/);
+  if (delegate) body += functionBody(delegate[1], '');
+  return body;
+}
+
 const builders = [
   'build_send_token',
+  'build_send_token_decrypted',
   'build_refresh',
   'build_inter_channel_send_token_at_base_nonce',
+  'build_inter_channel_send_token_at_base_nonce_decrypted',
+  'build_burn_send_token_at_base_nonce_decrypted',
   'build_inter_channel_credit',
   'build_l1_deposit_import',
   'build_token_register',
@@ -36,7 +49,12 @@ for (const name of builders) {
   });
 }
 
-for (const name of ['build_send_token', 'build_inter_channel_send_token_at_base_nonce']) {
+for (const name of [
+  'build_send_token',
+  'build_send_token_decrypted',
+  'build_inter_channel_send_token_at_base_nonce',
+  'build_inter_channel_send_token_at_base_nonce_decrypted',
+]) {
   test(`${name} retains the sender's separate A11 transaction authorization`, () => {
     assert.match(publicFunction(name), /\bsign_channel_tx_sender\s*\(/);
   });
