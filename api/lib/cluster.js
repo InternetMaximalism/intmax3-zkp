@@ -130,6 +130,17 @@ function createCluster(opts) {
     if (r.warnTimer) { clock.clearTimeout(r.warnTimer); r.warnTimer = null; }
     if (r.haltTimer) { clock.clearTimeout(r.haltTimer); r.haltTimer = null; }
   }
+  // A proposal this host's own gate REFUSED is not a stalled round: nobody is missing, the
+  // successor is simply not signable. Drop it at once — no CLOSE WARNING, no HALT, no auto-close —
+  // and hand the gate's error to every waiter. (A silent or unreachable signer is the only thing
+  // the warning/halt timers are for.)
+  function abortRound(r, err) {
+    if (r.completed) return;
+    clearTimers(r);
+    if (rounds[r.ch] && rounds[r.ch][r.nextDigest] === r) delete rounds[r.ch][r.nextDigest];
+    for (const w of r.waiters) w.reject(err);
+    r.waiters = [];
+  }
   function missingSlots(r) {
     const n = memberCountOf(r.ch);
     const missing = [];
@@ -230,10 +241,16 @@ function createCluster(opts) {
     }
     const r = openRound(ch, payload);
     const done = new Promise((resolve, reject) => r.waiters.push({ resolve, reject }));
+    done.catch(() => {}); // the caller gets the rejection below; never an unhandled one
     if (r.completed) return r.state;
-    await broadcast('/api/cluster/propose', { channel: ch, payload, from: self.url });
-    await signOwn(r);
-    await tryComplete(r);
+    try {
+      await broadcast('/api/cluster/propose', { channel: ch, payload, from: self.url });
+      await signOwn(r);
+      await tryComplete(r);
+    } catch (e) {
+      abortRound(r, e);
+      throw e;
+    }
     return done;
   }
 
@@ -244,7 +261,10 @@ function createCluster(opts) {
     const r = openRound(ch, payload);
     // Acknowledge at once; sign and assemble asynchronously. The proposer's broadcast must never
     // block on a slow or silent signer — that is exactly the case the warning/halt timers cover.
-    signOwn(r).then(() => tryComplete(r)).catch((e) => log.error(`[cluster] channel ${ch}: partial sign failed: ${e.message || e}`));
+    signOwn(r).then(() => tryComplete(r)).catch((e) => {
+      log.error(`[cluster] channel ${ch}: partial sign refused, round ${r.nextDigest} dropped: ${e.message || e}`);
+      abortRound(r, e);
+    });
     return { ok: true, nextDigest: r.nextDigest, held: [...r.sigs.keys()] };
   }
 

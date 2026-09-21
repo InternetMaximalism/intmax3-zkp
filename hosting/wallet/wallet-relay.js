@@ -851,11 +851,33 @@ app.post('/api/cosign', (req, res) => {
   cosignBatcher.enqueue(ch, req.body).then(
     (result) => res.json(result),
     (e) => {
-      console.error(e.stderr ? String(e.stderr) : (e.message || e));
-      res.status(e.staleAnchor ? 409 : 500).json({ error: String(e.stderr || e.message || e) });
+      const error = fullCliError(e);
+      console.error(error);
+      // A KIT-PENDING head is a channel condition, not a relay failure: say which transition is
+      // holding the channel (an inter-channel credit still pending on its source channel).
+      const kitPending = /KIT-PENDING/.test(error) ? kitPendingHint(ch) : null;
+      res.status(e.staleAnchor || kitPending ? 409 : 500).json(kitPending ? { error, ...kitPending } : { error });
     }
   );
 });
+
+// Inter-channel transfers still pending on any source channel whose destination is `ch`: these
+// are the transitions that advanced `ch`'s signed head without an exit kit yet.
+function kitPendingHint(ch) {
+  const blocking = [];
+  for (const source of CHANNELS) {
+    let p = null;
+    try { p = pendingInterTransfer(source); } catch (e) { continue; }
+    if (p && p.destination === ch) blocking.push({ sourceChannel: source, producerRequestId: p.producerRequestId, signed: p.signed, createdAt: p.createdAt });
+  }
+  return {
+    kitPending: true,
+    hint: blocking.length
+      ? `channel ${ch} is waiting for ${blocking.length} pending inter-channel credit(s) to be accepted by the live balance service; until then it cannot sign sends`
+      : `channel ${ch}'s head has no exit-kit receipt; try POST /api/exit-kit/install?channel=${ch}`,
+    blockingTransfers: blocking,
+  };
+}
 
 // Balance-refresh: browser re-encrypts its own slot (RefreshPayload) → CLI members co-sign → returns
 // the fully-signed next state for the browser to finalize. Lets a delegate send again after receiving.

@@ -43,6 +43,14 @@ each slot on exactly one host).
    (`cli_state.settlement_binding.manager`, or `INTMAX_CLUSTER_CLOSE_MANAGER`). A failed close is
    retried on every tick; a lifted halt is never closed.
 
+7. **Refused proposal ≠ stalled round.** If a host's own gate refuses the successor (e.g. the
+   channel's durable head is KIT-PENDING because an inter-channel credit into it has not been
+   accepted by the live balance service yet), the round is dropped immediately on that host: the
+   gate error goes back to the wallet, no CLOSE WARNING, no HALT, no auto-close. The timers exist
+   only for a signer that is silent or unreachable. (Before 2026-09-22 one refused send HALTED the
+   channel after 5 min, would have auto-closed it after 24 h, and the halt crashed the relay with
+   an unhandled rejection.)
+
 Timings are `INTMAX_CLUSTER_WARN_MS` / `INTMAX_CLUSTER_HALT_MS` / `INTMAX_CLUSTER_CLOSE_MS` /
 `INTMAX_CLUSTER_WATCHDOG_MS` (defaults 60 s / 5 min / 24 h / 60 s). `GET /api/cluster/status`
 shows the pool, missing slots, warnings and halt per channel.

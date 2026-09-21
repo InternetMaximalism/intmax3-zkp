@@ -719,9 +719,21 @@ fn enforce_exit_kit_before_signature_release(
         }
 
         let receipt = cli.signer_exit_kit_receipt.as_ref().ok_or_else(|| {
-            "SIGNER-INDEPENDENT EXIT REQUIRED: the durable predecessor has no cryptographically \
-             verified signer exit-kit receipt; legacy/key-equality-only reuse is forbidden"
-                .to_string()
+            format!(
+                "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} because channel {}'s \
+                 durable head {} (state version {}, epoch {}) is KIT-PENDING: it was adopted by an \
+                 asset-moving transition (deposit import, inter-channel credit or token \
+                 registration) whose exit kit has not been installed yet, so this signer could not \
+                 exit from it and will not sign on top of it. The kit is installed \
+                 (`install-exit-kit`, relay: POST /api/exit-kit/install) once the live balance \
+                 service has ACCEPTED that transition; if the transition is still pending there \
+                 (e.g. an inter-channel credit the daemon keeps refusing), it must complete before \
+                 this channel can sign again",
+                predecessor.channel_id.as_u64(),
+                predecessor.digest,
+                predecessor.balance_state.state_version,
+                predecessor.epoch,
+            )
         })?;
         // An intra-channel, value-preserving H2=0 successor (send / batch / refresh) does NOT
         // change the L1-backed exit statement: the reuse-refusals just above pin

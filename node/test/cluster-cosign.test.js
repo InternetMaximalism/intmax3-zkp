@@ -39,7 +39,7 @@ function makeClock() {
 const settle = () => new Promise((r) => setImmediate(r));
 
 // ---- in-memory N-host fabric -------------------------------------------------------------------
-function makeFabric({ hosts, memberCount, clock, drops = new Set(), signDelay = {} }) {
+function makeFabric({ hosts, memberCount, clock, drops = new Set(), signDelay = {}, refuse = null }) {
   const registry = new Map();
   const merges = [];      // { url, ch, slots }
   const closes = [];      // { url, ch }
@@ -60,6 +60,7 @@ function makeFabric({ hosts, memberCount, clock, drops = new Set(), signDelay = 
       signPartial: async (ch, payload) => {
         if (signDelay[h.url]) await signDelay[h.url]();
         const d = payload.proposedNextState.digest;
+        if (refuse && refuse(d)) throw new Error('SIGNER-INDEPENDENT EXIT REQUIRED: head is KIT-PENDING');
         return { prevDigest: payload.proposedNextState.prevDigest, nextDigest: d, signatures: h.slots.map((s) => sig(s, d)) };
       },
       merge: async (ch, payload, signatures) => {
@@ -227,4 +228,18 @@ test('halt survives a restart through persistHalt/loadHalt', async () => {
     post: async () => {}, clock, loadHalt: () => persisted, log: { info() {}, warn() {}, error() {} },
   });
   assert.deepStrictEqual(again.halted(7), persisted);
+});
+
+test('a proposal the local gate refuses is dropped at once: error to the caller, no warning, no halt, channel stays usable', async () => {
+  const clock = makeClock();
+  const f = makeFabric({ hosts: hostsN(3), memberCount: 3, clock, refuse: (d) => d === '0xbad' });
+  await assert.rejects(f.clusters[0].cosign(7, payload('0xbad')), /KIT-PENDING/);
+  assert.strictEqual(f.clusters[0].status(7).rounds.length, 0, 'round dropped on the proposer');
+  await clock.advance(HALT + 60_000);
+  for (const c of f.clusters) {
+    assert.strictEqual(c.halted(7), null, 'a refused proposal never halts');
+    assert.strictEqual(c.status(7).rounds.length, 0, 'round dropped on every peer');
+  }
+  const s = await f.clusters[1].cosign(7, payload('0xgood'));
+  assert.deepStrictEqual(s.signed, [0, 1, 2]);
 });
