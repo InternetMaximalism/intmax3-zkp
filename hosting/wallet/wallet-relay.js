@@ -140,7 +140,7 @@ const cluster = (clusterSelfUrl && clusterPeers) ? createCluster({
     return JSON.parse(fs.readFileSync(wc(ch, 'partial_cosign.json'), 'utf8'));
   }),
   // Verify every pooled signature and adopt the N-of-N head; exit 3 = still incomplete.
-  merge: (ch, payload, signatures) => withLock(ch, () => {
+  merge: (ch, payload, signatures) => withLock(ch, async () => {
     fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(payload));
     fs.writeFileSync(wc(ch, 'cluster_signatures.json'), JSON.stringify(signatures));
     try {
@@ -152,6 +152,9 @@ const cluster = (clusterSelfUrl && clusterPeers) ? createCluster({
       }
       throw e;
     }
+    // The live balance must follow EVERY signed head one step at a time (it refuses a bind that
+    // skips a version), so bind + sync the producer head right after the N-of-N is adopted.
+    await flushPublishedHead(ch);
     return { complete: true, state: JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')) };
   }),
   post: async (url, path, body) => {
@@ -776,7 +779,7 @@ const BATCH_WINDOW_MS = Math.max(1, parseInt(process.env.BATCH_WINDOW_MS || '100
 const BATCH_WINDOW_MAX = cluster ? 1 : Math.max(1, Math.min(1024, parseInt(process.env.BATCH_WINDOW_MAX || '200', 10) || 200));
 
 function drainCosignWindow(ch, entries) {
-  return withLock(ch, () => {
+  return withLock(ch, async () => {
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     const { fresh, stale } = partitionByAnchor(entries, snap.state.digest);
     for (const en of stale) {
@@ -785,10 +788,15 @@ function drainCosignWindow(ch, entries) {
       en.reject(err);
     }
     if (fresh.length === 0) return;
-    const soloOne = (en) => {
+    // Every co-signed in-channel head is bound to the resident live balance and synced to the
+    // producer head at once (`flushPublishedHead`): the live service refuses a bind that skips a
+    // version, so two sends before the next deposit import used to leave the channel
+    // unimportable ("ordinary signed head skips, forks, rolls back, or changes close era").
+    const soloOne = async (en) => {
       try {
         fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(en.payload));
         cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
+        await flushPublishedHead(ch);
         en.resolve(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
       } catch (e) { en.reject(e); }
     };
@@ -800,7 +808,7 @@ function drainCosignWindow(ch, entries) {
       cluster.cosign(ch, en.payload).then(en.resolve, en.reject);
       return;
     }
-    if (fresh.length === 1) { soloOne(fresh[0]); return; }
+    if (fresh.length === 1) return soloOne(fresh[0]);
     // K > 1: project fat→slim (§M-4), spool one file per tx, hand a §M-1 manifest to cosign-batch.
     const spoolDir = wc(ch, 'batch_spool');
     fs.mkdirSync(spoolDir, { recursive: true });
@@ -814,6 +822,7 @@ function drainCosignWindow(ch, entries) {
       fs.writeFileSync(wc(ch, 'batch_manifest.json'), JSON.stringify({ files }));
       console.log(`[batch] channel ${ch}: window of ${fresh.length} tx → cosign-batch`);
       cli(ch, ['cosign-batch', 'batch_manifest.json', 'batch_cosigned.json']);
+      await flushPublishedHead(ch);
       const result = JSON.parse(fs.readFileSync(wc(ch, 'batch_cosigned.json'), 'utf8'));
       for (const en of fresh) en.resolve(result);
     } catch (e) {
