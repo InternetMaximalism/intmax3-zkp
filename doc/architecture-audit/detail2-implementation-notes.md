@@ -262,6 +262,25 @@ position solo, slim, cross-channel and via burn without a refresh.
 
 ---
 
+## D2c — Cluster co-signing: N-to-N signature exchange, close warning, halt, auto-close (2026-09-21)
+
+**Before:** one host held every sig-cluster key and `cosign` signed all controlled slots in a loop;
+no inter-host communication existed.
+
+**Implemented (detail2 §S, `doc/tasks/cluster-cosign-protocol.md`):** `cosign-partial` (gate +
+this host's slot signatures, ledgered, head not advanced) and `cosign-merge` (every pooled
+signature verified individually via `wallet_core::verify_member_signature`, N-of-N head adopted);
+`api/lib/cluster.js` runs the round: propose → every host signs and sends to every host → any host
+with all `member_count` signatures merges; 1-minute repeating CLOSE WARNING naming the missing
+slots, answered by any holder; 5-minute HALT (persisted, broadcast, mutating routes 503, lifted by
+a late complete set); 24-hour auto-close at the last fully signed state with retry. The relay
+wires it behind `INTMAX_CLUSTER_SELF_URL` / `INTMAX_CLUSTER_PEERS`; unset keeps the single-host
+path. Tests: `node/test/cluster-cosign.test.js` (3/8 hosts, multi-slot hosts, third-party supply,
+halt + late completion, auto-close retry/no double close, halt persistence); verified against the
+local stack as a self-only cluster. Only the in-channel send is cluster-signed today.
+
+---
+
 ## D3 — `BalanceState.pending_adds: [u32; 3]`, hashed into H1 (deviation from §C-2)
 
 **Spec (§C-2):** minimal `BalanceState` field set (`encBalances`, `settledTxChain`,

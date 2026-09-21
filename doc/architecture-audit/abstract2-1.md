@@ -396,6 +396,11 @@ BalanceState' = { encBalances = final, settledTxChain (invariant), stateVersion 
 - out: finalized `BalanceState'` (one chain link for K transfers).
 
 #### 3.2b.4 Witness invalidation (refresh interaction)
+
+> **2026-09-21 (detail2 §E-1b/§E-2b):** the sender no longer needs an encryption witness of its
+> current ciphertext — the decrypted send opens it in-circuit under the sender's secret key — so
+> witness invalidation by a mid-batch credit no longer forces a refresh before the next debit.
+> The credit-budget rule (item 8 below) is unchanged.
 A slot that was **credited** in the batch no longer holds the encryption-randomness witness for its
 new ciphertext (`final[i] ≠ mid[i]`): before that slot can debit it must refresh, exactly as in the
 single-tx flow (detail2 D2/D3; out of scope here, §5). A slot that only **debited** keeps its fresh

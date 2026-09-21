@@ -97,6 +97,31 @@ signature; parsing and reserializing the whole state through JS numbers is not l
 [`node/common/wallet.js`](../../node/common/wallet.js),
 [`wasm_wallet.rs`](../../src/wasm_wallet.rs), and the browser release ledger.
 
+### Refresh-free sends and cluster co-signing (2026-09-21)
+
+Two changes to the contract above the E-1/E-2 statements and the signing locus:
+
+- **Refresh is no longer a precondition of sending.** Every in-channel send, inter-channel
+  debit and burn opens the sender's `before` ciphertext by **decryption under the sender's own
+  Regev secret key** inside the STARK (`DecryptedDualKeyAir`, purposes `ChannelTxDecrypted`
+  "IMDS" and `ChannelUpdateDecrypted` "IMDU", §E-1b/§E-2b). A position credited homomorphically
+  (deposit import, received transfer) is spent directly; the fresh `after` re-encryption resets
+  its digits, noise and `pending_adds` exactly as a refresh would. Relying parties accept the
+  decrypted purpose or its witnessed twin for the same statement shape
+  (`state_update_verifier::verify_transfer_proof_either`); the `pending_adds != 0 ⇒ refresh
+  required` gates are retired. `RefreshAir` remains a maintenance operation (e.g. a pure receiver
+  approaching the 64-add budget of §B-3), never a send prerequisite. Author cryptographic review
+  of the new AIR is still required before production; the adversarial test battery
+  (`src/regev/transfer_stark.rs`) is a guardrail, not a soundness proof.
+- **The sig-cluster signs host-by-host.** `cosign` (one process signing every slot) is the
+  single-host deployment only. The cluster deployment splits it into `cosign-partial` (gate + this
+  host's slots, ledgered, head not advanced) and `cosign-merge` (each pooled signature verified
+  individually, N-of-N head adopted) and exchanges signatures N-to-N over
+  `/api/cluster/*` with a 1-minute close warning, a 5-minute halt and a 24-hour auto-close at the
+  last fully signed state (§S). Only the in-channel send goes through the cluster round today;
+  refresh, inter-channel, deposit import, token registration and member-set updates still sign on
+  the receiving host.
+
 ### Deposit admission and durable recovery
 
 Before an API-funded L1 deposit, resolve a rejoining contribution to its **exact original slot**
@@ -409,6 +434,11 @@ pub struct RegevCiphertext {
   the recipient themselves performs a fresh re-encryption (refresh) in the version where they next author state**.
   The validity of refresh is proved by a separate `RefreshAir` (a combined Decrypt+Encrypt AIR proving plaintext
   equality in-circuit), **not** by `channelTxZKP` with delta = 0 (see D2, `src/regev/transfer_stark.rs`).
+  > **2026-09-21:** a refresh is no longer required *before sending*. The decrypted send/update
+  > (§E-1b/§E-2b) opens the accumulated ciphertext in-circuit and the fresh `after` resets the
+  > position, so every send counts as the re-encryption this rule asks for. The 64-add budget is
+  > still enforced on the receiving side (D3); `RefreshAir` stays available for a slot that only
+  > receives.
 - Noise condition (decryption correctness): the ∞-norm of the accumulated noise must be less than `q / 2^(plain_bits+1)`.
   `MAX_HOMO_ADDS_BEFORE_REFRESH` is derived from the per-ct noise upper bound of CBD (eta=2).
   > **SECURITY (approved)**: `MAX_HOMO_ADDS_BEFORE_REFRESH = 64` is an **approved** security parameter
@@ -763,6 +793,19 @@ the `RegevPk` digests of sender / recipient. private: plaintext balance, amount,
    (**underflow is impossible via the ripple-carry constraint → updated sender balance ≥ 0 is built in**).
 3. `next_sender_ct` is well-formed as a fresh encryption to the sender `RegevPk`.
 
+### E-1b. channelTxZKP, decrypted `before` (refresh-free send, 2026-09-21)
+
+Same public statement as E-1 (`before` / `after` under the sender `RegevPk`, `enc_amount` under
+the recipient `RegevPk`, `before = after + amount` over the integers), but item (2)'s opening of
+`prev_sender_ct` is **by decryption**: the E-3 decryption core (key binding `b = a·s + e_pk`,
+decryption `v = c2 − c1·s`, digit extraction, digit→bit normalization) runs on `before` under the
+sender's secret key `s` (private witness), and its normalized bit column *is* `m_before` of the
+ripple-carry conservation chain. `after` and `enc_amount` stay fresh well-formed encryptions
+(E-1's ring identities). No encryption witness of `before` is needed, so a ciphertext that is a
+homomorphic sum (deposit import, received transfers) is spendable directly. Purpose
+`ChannelTxDecrypted`, domain "IMDS"; AIR `DecryptedDualKeyAir::send`. The noise budget is the
+one E-3 / refresh already rely on (§B-3, D1); no new cryptographic assumption.
+
 ### E-2. channelUpdateZKP (inter-channel, abstract2.md §2.3)
 
 **Proof statement** (public: `sender_delta_ct.digest()`, `receiver_delta_ct.digest()`,
@@ -772,6 +815,14 @@ the `RegevPk` digests of sender / recipient. private: plaintext balance, amount,
 3. Both deltas are correct ciphertexts to their respective `RegevPk`.
 
 `rangeProof` (abstract2.md §3.3.1) = the **verification** of this ZKP (performed by ITS = the member designated by `bp_member_slot` before handing it to the BP).
+
+### E-2b. channelUpdateZKP, decrypted `before` (refresh-free inter-channel debit / burn, 2026-09-21)
+
+E-2 with `prev_sender_ct` opened by the decryption core exactly as in §E-1b; `after`,
+`sender_delta` and `receiver_delta` remain fresh encryptions and both deltas' message evaluations
+are published and pinned to the public `amount` (F2-C) as in E-2. Purpose
+`ChannelUpdateDecrypted`, domain "IMDU"; AIR `DecryptedDualKeyAir::update`. Needed because the
+inter-channel debit and the burn are E-2 statements, not E-1.
 
 ### E-3. withdrawClaimZKP (post-close withdrawal, abstract2.md §2.4)
 
@@ -784,10 +835,12 @@ the withdrawal amount `amount` (plaintext, public), one's own `RegevPk` digest):
 
 ```rust
 pub enum RegevProofPurpose {
-    ChannelTx,        // E-1
-    ChannelUpdate,    // E-2
-    WithdrawClaim,    // E-3
-    BalanceRefresh,   // §B-3 refresh (delta = 0 special case)
+    ChannelTx,               // E-1
+    ChannelUpdate,           // E-2
+    WithdrawClaim,           // E-3
+    BalanceRefresh,          // §B-3 refresh (combined Decrypt+Encrypt AIR)
+    ChannelTxDecrypted,      // E-1b: E-1 statement, `before` opened by decryption ("IMDS")
+    ChannelUpdateDecrypted,  // E-2b: E-2 statement, `before` opened by decryption ("IMDU")
 }
 pub trait RegevProofVerifier {
     fn verify(&self, envelope: &ChannelProofEnvelope, purpose: RegevProofPurpose,
@@ -801,9 +854,13 @@ The old `LatticeBindingVerifier` / `LatticeProofPurpose::{TransferAmount, Balanc
 The external helper process (`tools/lattice-proof-helper`) is also abolished, and the Plonky3 STARK is verified in-process.
 
 > **Note (D2):** `RegevProofPurpose` is defined in `src/regev` and only re-exported by
-> `state_update_verifier.rs:14`. The four shipped AIRs that back these purposes are
+> `state_update_verifier.rs:14`. The shipped AIRs that back these purposes are
 > `DualKeyTransferAir` (E-1) / `ChannelUpdateAir` (E-2) / `DecryptionAir` (E-3) / `RefreshAir` (§B-3 refresh)
+> / `DecryptedDualKeyAir` (E-1b send shape, E-2b update shape)
 > in `src/regev/transfer_stark.rs` — refresh is a separate `RefreshAir`, not E-1 with delta = 0.
+> A decrypted purpose shares its `RegevStatement` shape with its witnessed twin but is a distinct
+> transcript domain and a structurally different AIR, so a proof verifies under at most one;
+> relying parties call `verify_transfer_proof_either` (decrypted first, witnessed fallback).
 
 ---
 
@@ -1259,8 +1316,10 @@ in every "twin" preimage so the member/delegate/padding split is fixed under the
   `build_send` self-signs the next state ONLY for a member sender (`slot < member_count`); a DELEGATE is
   send-only and adds NO state signature.
 - **Receive:** homomorphic credit to the delegate's slot, no signature (slot-agnostic).
-- **Balance refresh (detail2 §B-3):** after RECEIVING, a slot's `pending_adds` raises and it becomes
-  receive-only until a refresh (re-encrypt to clean digits, same value, `RefreshAir` proof). Wallet API:
+- **Balance refresh (detail2 §B-3):** after RECEIVING, a slot's `pending_adds` raises. *(Historical:
+  it then became receive-only until a refresh. Since 2026-09-21 the decrypted send spends such a
+  position directly — §E-1b/§E-2b — and the refresh below is optional maintenance.)* A refresh
+  re-encrypts to clean digits, same value, `RefreshAir` proof. Wallet API:
   `wallet_core::build_refresh` / `verify_refresh_transition` (+ `regev::prove_balance_refresh_witnessed`,
   which also returns the fresh `AmountWitness` so the wallet can spend again) → wasm `wallet_refresh()` →
   CLI `cosign-refresh`. Works identically for a member or a delegate slot; the members co-sign, the
@@ -2049,3 +2108,63 @@ Per-finalization pre-warming of the artifact is OPT-IN (`INTMAX_FALCON_AGG_PRECO
 detached + digest-keyed + idempotent); the default is lazy — outside the settlement paths no
 plonky2 proving happens at all. (Flipped 2026-08-24: the previous default precomputed at every
 N-of-N finalization.)
+
+---
+
+## S. Cluster co-signing protocol (2026-09-21)
+
+Implementation: `api/lib/cluster.js` (protocol, transport- and clock-agnostic),
+`hosting/wallet/wallet-relay.js` (HTTP wiring, `/api/cluster/*`), `channel_member cosign-partial`
+/ `cosign-merge`, `wallet_core::verify_member_signature`. Tests:
+`node/test/cluster-cosign.test.js`. Specification: [`doc/tasks/cluster-cosign-protocol.md`](../tasks/cluster-cosign-protocol.md).
+
+### S-1. Topology
+
+Up to `MAX_SIG_CLUSTER = 8` hosts (§R). Each cosigner slot is held by exactly one host
+(`INTMAX_CLUSTER_SIGN_SLOTS`); a host may hold several. Hosts know each other's URLs
+(`INTMAX_CLUSTER_SELF_URL`, `INTMAX_CLUSTER_PEERS`). Without this configuration the relay keeps
+the single-host `cosign` path (one process signing every slot), which is what §D and §O describe.
+
+### S-2. Round
+
+1. **Propose.** The relay receiving a wallet's `SendPayload` runs `cosign-partial`: the full
+   co-sign gate (`verify_send_transition`: E-1 or E-1b, A11 sender signature, structural fold,
+   recipient decryption) and its own slot signatures over `ChannelState::signing_digest()`,
+   recorded in the anti-equivocation `state_signing_ledger`, **head not advanced**; then
+   broadcasts the payload to every peer.
+2. **Sign and fan out (N-to-N).** Every peer acknowledges immediately, runs the same gate and
+   `cosign-partial` for its own slots, and sends its signatures to **every** host. Signatures are
+   pooled per `nextDigest`; one that arrives before its proposal waits for the payload.
+3. **Assemble.** Any host holding all `member_count` slots runs `cosign-merge`: it re-runs the
+   gate, verifies **each** pooled signature individually (`verify_member_signature`: cosigner
+   slot, registered `pk_g` at that slot, Falcon over the recomputed IMCH digest) and adopts the
+   N-of-N head. The coordinator answers the wallet with it; every host adopts independently.
+4. **Close warning (1 min, repeated every minute).** A host whose round is incomplete broadcasts
+   the missing slots (`/api/cluster/missing`). Every host holding any of them — its own signature
+   or one received from a third host — supplies them to the warner.
+5. **Halt (5 min).** Still incomplete: the channel is **HALTED** (`cluster_halt.json`, broadcast
+   via `/api/cluster/halt`). Mutating relay routes answer `503` except close/settle/withdraw. A
+   complete set arriving later still finishes the round and lifts the halt.
+6. **Auto-close (24 h, node-program rule).** A watchdog closes a channel halted for 24 hours at
+   its **last fully signed state** — the adopted head, never the stalled proposal — with `close`
+   against the ACTIVE settlement binding; a failed close is retried every tick; a lifted halt is
+   never closed.
+
+Timers: `INTMAX_CLUSTER_WARN_MS` / `HALT_MS` / `CLOSE_MS` / `WATCHDOG_MS` (60 s / 5 min / 24 h /
+60 s). Observability: `GET /api/cluster/status?channel=N`.
+
+### S-3. Security posture
+
+- Pooled signatures are never trusted: `cosign-merge` verifies each against the registered member
+  set before any head is adopted, and `cosign-partial` re-runs the transition gate before this
+  host signs. A forged or mis-slotted signature is rejected at merge; a proposal that fails the
+  gate is never signed.
+- `cosign-partial` writes the same signing ledger as `cosign`: a host that signed successor X at
+  head P can never sign a sibling successor at P, so a stalled round cannot be replaced by an
+  equivocating one — the halt/close path is the only way forward.
+- Each host adopts the N-of-N head only from signatures it verified itself; no host trusts
+  another host's claim of completion.
+- Cluster mode forces the relay batch window (§M-7) to one proposal per round; `cosign-batch`
+  has no partial/merge form yet. The other co-sign purposes (refresh, inter-channel debit and
+  credit, deposit import, token registration, member-set update) still sign every slot on the
+  receiving host — extending them is the same gate → partial → merge split.
