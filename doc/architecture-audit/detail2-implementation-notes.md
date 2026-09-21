@@ -199,6 +199,66 @@ The four shipped STARK statements (`src/regev/transfer_stark.rs`):
 | E-2 channelUpdateZKP | `ChannelUpdateAir` | before/after ciphertext transition consistency (4 ciphertexts) |
 | E-3 withdrawClaimZKP | `DecryptionAir` | ciphertext decrypts to a public amount (sk private) |
 | §B-3 refresh | `RefreshAir` | old/new ciphertexts encrypt the same hidden plaintext |
+| E-1 decrypted (`ChannelTxDecrypted`, "IMDS") | `DecryptedDualKeyAir::send` | E-1 statement with `before` opened by decryption (no witness, no refresh) |
+| E-2 decrypted (`ChannelUpdateDecrypted`, "IMDU") | `DecryptedDualKeyAir::update` | E-2 statement with `before` opened by decryption (no witness, no refresh) |
+
+---
+
+## D2b — Refresh-free sends: `before` opened by the decryption core (2026-09-21)
+
+**Problem (operational):** D2 made a refresh *possible*, but every send out of a position
+that had absorbed a homomorphic add (an L1 deposit import, an incoming transfer) still
+required a refresh round-trip first — an extra STARK, an extra N-of-N co-sign, and a
+persistent "held witness" bookkeeping burden on wallets and the CLI (`witnessTokenSlot`,
+seed-reconstructed witnesses, `pending_adds != 0 ⇒ refuse`).
+
+**Implemented:** `DecryptedDualKeyAir` (`src/regev/transfer_stark.rs`), one shape-
+parameterized AIR with two instances:
+
+- `send` — the E-1 public statement (`before`/`after` under the sender key, `enc_amount`
+  under the recipient key, `before = after + amount`), where the `before` leg is the
+  **decryption core** of E-3 / D2 run under the sender's secret key and its normalized bit
+  column *is* `m_before` of the ripple-carry conservation chain. `after` and `enc_amount`
+  stay fresh well-formed encryptions (E-1's ring identities). Purpose
+  `RegevProofPurpose::ChannelTxDecrypted`, transcript domain "IMDS".
+- `update` — the E-2 statement likewise (`after`, `sender_delta`, `receiver_delta`; both
+  deltas' `m(z)` published and pinned to the public amount exactly as in E-2, F2-C).
+  Purpose `ChannelUpdateDecrypted`, domain "IMDU". Needed because the inter-channel debit
+  and the burn are E-2, not E-1.
+
+**No new assumption:** the opening is the very core E-3 and the refresh already rely on,
+under the same `MAX_HOMO_ADDS_BEFORE_REFRESH` budget (the D1 digit/noise analysis applies
+verbatim). `after` is a fresh encryption, so every send resets the sender position's digits
+and noise exactly as a refresh would; the D3 counter of the debited position resets to 0.
+The three message columns stay `Kind::Local` (balance and amount are secret); only the
+public polynomials are published.
+
+**Verifier acceptance:** the decrypted and the witnessed purpose share a statement shape
+but are distinct transcript domains and structurally different AIRs, so a proof verifies
+under at most one. Relying parties call
+`state_update_verifier::verify_transfer_proof_either` (decrypted first, witnessed
+fallback) — the InChannel / InterChannelSend / ReceiverBundleApply witnesses,
+`verify_slim_send_tx`, and the destination-side E-2 re-verification. The
+`pending_adds != 0 ⇒ refresh required` gates are retired; the STARK's `before` binding to the
+verifier's own anchor ciphertext is the enforcement.
+
+**Producers:** `wallet_core::{build_send_token_decrypted,
+build_inter_channel_send_token_at_base_nonce_decrypted, build_burn_send_token_at_base_nonce_decrypted}`
+(`BeforeLeg::Decrypted`), used by the WASM wallet, the browser page, the node delegate and
+the `channel_member` CLI. The witnessed builders remain (`BeforeLeg::Witnessed`) for
+callers that hold an encryption witness. `refresh` stays as an explicit maintenance
+operation (e.g. a pure receiver approaching the 64-add budget) — it is no longer a
+precondition of sending.
+
+**Tests (adversarial, `transfer_stark.rs`):** roundtrips on fresh, 64-add and
+received-transfer `before`s and the canonical-zero slot; prove-side refusals; substituted
+statements; cross-purpose binding in every direction (E-1 ↔ decrypted, E-2 ↔ decrypted,
+foreign domains, dispatcher); four forged traces (conservation, decryption link, foreign
+key, forced carry); garbage proofs. Wallet-level tests spend a homomorphically credited
+position solo, slim, cross-channel and via burn without a refresh.
+
+> Author cryptographic review is still required before production: a green test suite is
+> a guardrail, not a soundness proof.
 
 ---
 

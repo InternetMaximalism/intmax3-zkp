@@ -115,7 +115,6 @@ struct ControlledMember {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 struct CliState {
     /// SECURITY: mirrors `CliState::state_schema_version`. The binary REFUSES a file whose version
     /// is newer than it understands and, below v1, refuses one that is missing any ledger key —
@@ -128,6 +127,9 @@ struct CliState {
     settlement_binding: Option<serde_json::Value>,
     /// Private binary receipt; retained losslessly so fixture rewrites cannot erase it.
     signer_exit_kit_receipt: Option<serde_json::Value>,
+    /// Mirrors `CliState::prepared_exit_kit_receipt` (a REQUIRED ledger key since schema v6: the
+    /// binary refuses a `cli_state.json` that does not name it). Retained losslessly.
+    prepared_exit_kit_receipt: Option<serde_json::Value>,
     /// SECURITY (replay ledger, B side): identities already CREDITED into this channel. Mirrors
     /// `CliState::applied_tx_identities` — keyed on the token-FREE
     /// `InterChannelTx::replay_identity()`, NEVER on the token-bearing `tx_hash`.
@@ -141,6 +143,13 @@ struct CliState {
     /// Private binary type; values are retained losslessly so read/modify/write tests cannot erase
     /// the crash-safe anti-equivocation history.
     state_signing_ledger: BTreeMap<String, serde_json::Value>,
+    /// Every other key the binary persists (`credit_safety_bounds`,
+    /// `deposit_capacity_reservations`, ... — all `#[serde(default)]` on the binary side),
+    /// retained LOSSLESSLY so read/modify/write tests never erase host evidence, and so a new
+    /// binary field does not break this mirror. The REQUIRED ledger keys stay explicit above:
+    /// absence of one of them is exactly what the binary must refuse.
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
@@ -300,7 +309,7 @@ fn write_json_file<T: Serialize>(path: &std::path::Path, v: &T) {
 }
 
 /// Must match `channel_member.rs`'s `STATE_SCHEMA_VERSION`. See the mirror field's comment.
-const STATE_SCHEMA_VERSION: u32 = 4;
+const STATE_SCHEMA_VERSION: u32 = 6;
 
 fn cli_state(fx: ChannelFixture) -> CliState {
     CliState {
@@ -309,6 +318,8 @@ fn cli_state(fx: ChannelFixture) -> CliState {
         snapshot: fx.snapshot,
         settlement_binding: None,
         signer_exit_kit_receipt: None,
+        prepared_exit_kit_receipt: None,
+        extra: BTreeMap::new(),
         applied_tx_identities: HashSet::new(),
         spent_tx_identities: HashSet::new(),
         imported_deposits: HashSet::new(),
@@ -1338,9 +1349,8 @@ fn member_update_cli_is_disabled_and_state_is_byte_identical() {
         "member-update must be disabled in the release CLI:\n{log}"
     );
     assert!(
-        log.contains("member-update is disabled in this release")
-            && log.contains("not atomically anchored"),
-        "refusal must explain the cross-layer safety reason:\n{log}"
+        log.contains("member-update is retired") && log.contains("newly registered channel"),
+        "refusal must state that MSU is retired and name the migration path:\n{log}"
     );
     assert_eq!(
         std::fs::read(ch.join("cli_state.json")).expect("state after command"),
