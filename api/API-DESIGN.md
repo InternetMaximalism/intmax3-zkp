@@ -106,7 +106,7 @@ Client-side only. Expose as `POST /api/keygen` returning the public components, 
 ```
 POST /api/v1/keys/generate
 Request:  { seed?: string }
-Response: { regev_pk: string, pk_g: string, pk_b: string }
+Response: 501 — server-side keygen is not available (`gen-contribution` derives the OPERATOR's slot keys, not a fresh identity); generate identities in the wallet WASM.
 ```
 
 ---
@@ -227,7 +227,7 @@ Client-side WASM computation. Result is passed to `cosign`.
 **Overview:** Co-sign a proposed state transition. Each of the N co-signing members verifies the transition (ZKP, version increment, chain consistency) and signs. (detail2 C-3, abstract2-1 §3.1)
 
 **Inputs:** `payload: SendPayload` (or refresh/burn payload)
-**Outputs:** Updated `ChannelSnapshot` with new signature added
+**Outputs:** the fully co-signed `ChannelState` (the new head; NOT a `ChannelSnapshot` — the browser passes it straight to `wallet_finalize`)
 
 **Current status:**
 - CLI: `cosign` — implemented
@@ -238,7 +238,7 @@ Client-side WASM computation. Result is passed to `cosign`.
 ```
 POST /api/v1/channel/{ch}/cosign
 Request:  <SendPayload JSON>
-Response: <ChannelSnapshot JSON>  (with signatures)
+Response: <ChannelState JSON>  (fully co-signed head)
 ```
 
 ---
@@ -280,7 +280,7 @@ Client-side WASM computation. Result is passed to `cosignRefresh`.
 **Overview:** Co-sign a refreshed balance state. (detail2 B-3)
 
 **Inputs:** `refresh_payload: RefreshPayload`
-**Outputs:** Updated `ChannelSnapshot`
+**Outputs:** the co-signed `ChannelState` (new head)
 
 **Current status:**
 - CLI: `cosign-refresh` — implemented
@@ -290,7 +290,7 @@ Client-side WASM computation. Result is passed to `cosignRefresh`.
 ```
 POST /api/v1/channel/{ch}/cosign-refresh
 Request:  <RefreshPayload JSON>
-Response: <ChannelSnapshot JSON>
+Response: <ChannelState JSON>
 ```
 
 ---
@@ -496,7 +496,7 @@ Internal to the co-signer. The client doesn't generate this proof — the co-sig
 **Overview:** Import an L1 deposit into the channel. Two-step state transition: (1) fund import: `channelFund += amount`, `unallocated += amount`, advance `settledTxChain` by deposit nullifier; (2) bundle apply: `encBalances[recipient] += encrypt(amount)`, `unallocated -= amount`. All N co-signers must verify via `verify_l1_deposit_import_transition()`. (abstract2-1 §3.3.2c, detail2 C-10)
 
 **Inputs:** `{ recipientSlot: u16, txHash: bytes32 }` — the deposit's amount/depositor/tokenIndex are read from the transaction's on-chain `Deposited` log, never from the body (doc/tasks/deposit-import-threat-model.md)
-**Outputs:** Updated `ChannelSnapshot`
+**Outputs:** the co-signed `ChannelState` (new head)
 
 **Preconditions:** Channel must be Active. Deposit Merkle-included in finalized `deposit_tree_root`. Nullifier unused.
 
@@ -664,7 +664,7 @@ Response: { ok: true, authDigest: string, paidOut: true }
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/close/request
-Response: { txHash: string, closeRequestedAt: number }
+Response: { ok: true, log: string }   (the CLI's `close` output; the tx hash is inside `log`)
 ```
 Separate from `submitCloseIntent` so the API caller can control timing.
 
@@ -756,8 +756,8 @@ Internally: build close proof from newer state, call `submitCloseIntent` on L1.
 **Current status:**
 - wallet_core: `CancelCloseProver` — implemented (prove, prove_mle)
 - Contract: `cancelClose(...)` — implemented (real MLE/WHIR verification)
-- CLI: NOT implemented (no `cancel-close` subcommand)
-- Relay: NOT implemented
+- CLI: `cancel-close` — implemented
+- Relay/API: `POST /api/v1/channel/{ch}/close/cancel` and relay `/api/cancel-close` — implemented
 
 **API implementation:**
 ```
@@ -765,7 +765,7 @@ POST /api/v1/channel/{ch}/close/cancel
 Request:  { manager: string }
 Response: { ok: true }
 ```
-Requires new CLI command `cancel-close` that builds the `CancelCloseProver` proof and calls the contract.
+(Implemented; the note that a new CLI command was required is historical.)
 
 ---
 
@@ -833,8 +833,8 @@ Response: { ok: true }
 Bundled with A32 in the current implementation. Could be separated:
 ```
 POST /api/v1/channel/{ch}/close/pull-credit
-Request:  { manager: string, withdrawalNullifier: string }
-Response: { ok: true, amount: string }
+Request:  { manager: string, recipient: string }   (the nullifier is derived server-side from the claim)
+Response: { ok: true, log: string }
 ```
 
 ---
@@ -859,7 +859,7 @@ POST /api/v1/channel/{ch}/close/post-close-claim
 Request:  { manager: string, lateTransferData: ... }
 Response: { ok: true }
 ```
-Requires new CLI command `post-close-claim`.
+CLI `post-close-claim` exists and the route IS wired (`api/routes/close.js`), gated to devnet; on-chain the path is DISABLED, so outside devnet it answers an on-chain revert.
 
 ---
 
@@ -954,7 +954,7 @@ Response: <ChannelSnapshot JSON>
 **Overview:** Query the L1 channel status (Active / ClosePending / Finalized) and related timing info.
 
 **Inputs:** `channel_id`
-**Outputs:** `{ status, closeRequestedAt?, challengeDeadline?, finalizedAt? }`
+**Outputs:** `{ status: "active"|"close_signed", closeFreezeNonce, stateVersion, settlement: {manager, verifier}|null, l1 }` — the LOCAL signed head's view only; the record has no L1 lifecycle fields, so L1 status must be read from the settlement manager.
 
 **Current status:**
 - NOT implemented as a relay endpoint. Contract state can be queried via `cast call`.
@@ -962,7 +962,7 @@ Response: <ChannelSnapshot JSON>
 **API implementation:**
 ```
 GET /api/v1/channel/{ch}/status
-Response: { status: "active"|"close_pending"|"finalized", closeRequestedAt?: number, challengeDeadline?: number }
+Response: { status: "active"|"close_signed", closeFreezeNonce: number, stateVersion: number, settlement: object|null, l1: string }
 ```
 
 ---
@@ -1333,7 +1333,7 @@ A27 deploySettlement
 **API (multi-step with ticket tracking):**
 ```
 POST /api/v1/channel/{ch}/full-withdrawal/deploy    → { manager, verifier }
-POST /api/v1/channel/{ch}/full-withdrawal/request    → { txHash, closeRequestedAt }
+POST /api/v1/channel/{ch}/full-withdrawal/request    → { ok, log }
 POST /api/v1/channel/{ch}/full-withdrawal/submit     → { ok: true }
 POST /api/v1/channel/{ch}/full-withdrawal/finalize   → { ok: true }
 POST /api/v1/channel/{ch}/full-withdrawal/claim      → { ok: true, slot, recipient }
@@ -1498,3 +1498,11 @@ Operations currently embedded in the co-signer that should be separated for prod
 - A35 postBlock → separate BP service
 - A36 generateValidityProof → separate prover service
 - A37 generateBalanceProof → separate prover service
+
+## Routes present in the code but not documented above (2026-09-22)
+
+- `POST /api/v1/channel/{ch}/register-token` — appends a co-signed token-registry entry (CLI `register-token`).
+- `GET /api/v1/channel/{ch}/tokens` — the channel's verified token registry.
+- `POST /api/v1/channel/{ch}/full-withdrawal/close-funding/*` (five routes) — close-funding proposal/sign/publish family.
+- Relay only: `GET /api/inter/pending`, `POST /api/exit-kit/install`, `/api/cluster/{propose,signature,missing,halt,status}`.
+- Reads that mutate: `GET /snapshot` and `GET /backing` replay pending producer/live work first, so they require the bearer token like a POST (api/lib/security.js).

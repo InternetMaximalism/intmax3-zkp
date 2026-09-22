@@ -78,15 +78,29 @@ function validChannel(ch) {
 // 512 MB so realistic channel sizes are never truncated.
 const CLI_MAX_BUFFER = 512 * 1024 * 1024;
 
+// The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
+// for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
+// it) from every stream of a failed command at the source, so no route can leak it to a browser.
+const BANNER_LINE = /^!!|INSECURE DETERMINISTIC KEYS/;
+function stripCliBanner(text) {
+  return String(text).split('\n').filter((l) => !BANNER_LINE.test(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+function sanitizeCliError(e) {
+  if (!e || typeof e !== 'object') return e;
+  for (const k of ['message', 'stderr', 'stdout']) if (typeof e[k] === 'string') e[k] = stripCliBanner(e[k]);
+  return e;
+}
 function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
-  return execFileSync(CLI, args, {
-    cwd: chDir(ch),
-    encoding: 'utf8',
-    timeout: 600_000,
-    maxBuffer: CLI_MAX_BUFFER,
-    env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
-  });
+  try {
+    return execFileSync(CLI, args, {
+      cwd: chDir(ch),
+      encoding: 'utf8',
+      timeout: 600_000,
+      maxBuffer: CLI_MAX_BUFFER,
+      env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
+    });
+  } catch (e) { throw sanitizeCliError(e); }
 }
 
 function sh(bin, args, opts) {

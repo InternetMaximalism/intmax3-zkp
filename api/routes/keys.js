@@ -7,23 +7,12 @@ const router = Router();
 // Client-side helper: generate member keys. In production the private key MUST NOT leave the client.
 // This endpoint is provided for server-side testing/tooling only.
 router.post('/generate', (req, res) => {
-  try {
-    const seed = req.body && req.body.seed;
-    const args = ['gen-contribution', '0'];
-    if (seed) args.push(seed);
-    args.push('keygen_out.json');
-    // Use channel 7 as scratch — gen-contribution is stateless
-    cli(7, args);
-    const { readJson, wc } = require('../lib/cli');
-    const out = readJson(wc(7, 'keygen_out.json'));
-    res.json({
-      regev_pk: out.regev_pk || out.regevPk,
-      pk_g: out.pk_g || out.pkG,
-      pk_b: out.pk_b || out.pkB,
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
-  }
+  // `channel_member gen-contribution 0 <seed>` does NOT generate a fresh identity: `seed` is a u64
+  // slot LABEL and the keys come from the operator's master key (`keys_for`), so this route used to
+  // hand every caller the operator's own co-signer public keys. Identity generation is client-side
+  // (WASM `wallet_keygen` / `wallet_keygen_seeded`); there is no server-side keygen to expose.
+  void cli;
+  res.status(501).json({ error: 'server-side keygen is not available: generate the member identity in the wallet (wallet_keygen / wallet_keygen_seeded); the CLI has no fresh-identity command' });
 });
 
 module.exports = router;

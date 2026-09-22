@@ -76,19 +76,25 @@ function start() {
       RUST_BACKTRACE: process.env.RUST_BACKTRACE || '0',
     },
   });
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', chunk => process.stderr.write(`[block-producer] ${chunk}`));
-  child.on('error', error => {
+  // Every handler below is bound to THIS child: a late 'exit' or a buffered response line from a
+  // previous (crashed or stopped) daemon must never reject or answer the waiters of its successor.
+  const proc = child;
+  proc.stderr.setEncoding('utf8');
+  proc.stderr.on('data', chunk => process.stderr.write(`[block-producer] ${chunk}`));
+  proc.on('error', error => {
+    if (child !== proc) return;
     failPending(error);
     child = null;
   });
-  child.on('exit', (code, signal) => {
+  proc.on('exit', (code, signal) => {
+    if (child !== proc) return;
     failPending(new Error(`block producer exited (code=${code}, signal=${signal || 'none'})`));
     child = null;
   });
 
-  const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const lines = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
+    if (child !== proc) return;
     const waiter = pending.shift();
     if (!waiter) {
       failPending(new Error('block producer emitted an unsolicited response'));
@@ -114,15 +120,31 @@ function start() {
   return child;
 }
 
+// A daemon request that never answers (hung prover, deadlocked journal) must not park a channel
+// lock forever: after INTMAX_PRODUCER_TIMEOUT_MS (default 20 min, the longest honest proving
+// round) the daemon is killed, every waiter is rejected, and the next request respawns it.
+const EXECUTE_TIMEOUT_MS = Math.max(1000, parseInt(process.env.INTMAX_PRODUCER_TIMEOUT_MS || '1200000', 10) || 1200000);
+
 function execute(command) {
   return new Promise((resolve, reject) => {
-    const process = start();
-    pending.push({ resolve, reject });
-    process.stdin.write(`${JSON.stringify(command)}\n`, error => {
+    const proc = start();
+    const waiter = { resolve: null, reject: null };
+    const timer = setTimeout(() => {
+      if (!pending.includes(waiter)) return;
+      const error = new Error(`block producer did not answer ${command.command} within ${EXECUTE_TIMEOUT_MS} ms; daemon killed`);
+      error.code = 'producer_timeout';
+      if (child === proc) { child = null; failPending(error); try { proc.kill('SIGKILL'); } catch (e) { /* gone */ } }
+      else reject(error);
+    }, EXECUTE_TIMEOUT_MS);
+    timer.unref();
+    waiter.resolve = (v) => { clearTimeout(timer); resolve(v); };
+    waiter.reject = (e) => { clearTimeout(timer); reject(e); };
+    pending.push(waiter);
+    proc.stdin.write(`${JSON.stringify(command)}\n`, error => {
       if (!error) return;
-      const index = pending.findIndex(waiter => waiter.resolve === resolve);
+      const index = pending.indexOf(waiter);
       if (index !== -1) pending.splice(index, 1);
-      reject(error);
+      waiter.reject(error);
     });
   });
 }

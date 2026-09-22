@@ -49,8 +49,8 @@ function archiveVerifiedDestinationRecovery(ch, destination, result, debitPayloa
     }
     return;
   }
-  // Called only after verified daemon receive + native kit installation, while this exact
-  // source/destination pair is locked. The CLI wrote the original signed incoming copy.
+  // Called as soon as the signed result exists, while this exact source/destination pair is
+  // locked. The CLI wrote the original signed incoming copy; the daemon phases re-verify.
   writeJson(recoveryPath, expected);
 }
 
@@ -97,6 +97,12 @@ async function flushLastProducerBlock(ch, lockedDestination) {
   // anything else, or accept a later credit as a destination). Archive the live service's kit for
   // the current source head, exactly as the destination does below.
   await installHeadExitKit(ch);
+  // The destination side is touched ONLY under the destination's lock. A previous transfer to a
+  // THIRD channel D is not replayed here (the caller holds A and B, not D): D finishes its own
+  // credit from its recovery sidecar the next time D itself is flushed (`recoverIncomingHead`).
+  if (lockedDestination !== destination) {
+    return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt: null };
+  }
   const sourceArtifact = await producer.liveSendArtifact(ch, producerRequestId);
   const destinationLiveReceipt = await producer.liveReceiveInterChannel(destination, {
     producerReceipt: blockReceipt,
@@ -108,9 +114,7 @@ async function flushLastProducerBlock(ch, lockedDestination) {
   });
   // The credited head was signed kit-pending; archive its exit kit into B's CLI state.
   await installHeadExitKit(destination);
-  if (lockedDestination === destination) {
-    archiveVerifiedDestinationRecovery(ch, destination, result, debitPayload, descriptor, producerRequestId);
-  }
+  archiveVerifiedDestinationRecovery(ch, destination, result, debitPayload, descriptor, producerRequestId);
   return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt };
 }
 
@@ -225,6 +229,11 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
   if (!result.bFundImportState || !result.bSnapshot) {
     throw new Error('cosign-inter-transfer omitted destination binding/fund-import snapshot');
   }
+  // Write B's recovery sidecar NOW, under both locks: it holds only the signed inputs, and
+  // `recoverIncomingHead` re-verifies everything against the daemon. Written only at the end, a
+  // crash between the head sync below and completion left B's public head credited with no way
+  // for B to finish its own receive (every B flush and its /snapshot failed until A resumed).
+  archiveVerifiedDestinationRecovery(ch, destination, result, debitPayload, transferDescriptor, producerRequestId);
   const blockReceipt = await producer.postInterChannel(
     sourceHead, debitPayload, transferDescriptor, producerRequestId,
   );

@@ -83,13 +83,20 @@ router.get('/status', (req, res) => {
   try {
     const ch = Number(req.params.ch);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-    const record = snapshot.record || {};
-    const status = record.status || 'active';
-    const result = { status };
-    if (record.closeRequestedAt) result.closeRequestedAt = record.closeRequestedAt;
-    if (record.challengeDeadline) result.challengeDeadline = record.challengeDeadline;
-    if (record.finalizedAt) result.finalizedAt = record.finalizedAt;
-    res.json(result);
+    // The signed record carries no L1 lifecycle fields (ChannelRecord has no status/closeRequestedAt):
+    // report what the local head actually says. A non-zero close_freeze_nonce means a close has
+    // been signed for this era; settlement.json means a settlement stack is bound. L1 finality is
+    // NOT known here — read the manager contract for that.
+    const state = snapshot.state || {};
+    const closeFreezeNonce = Number(state.closeFreezeNonce || 0);
+    const settlement = fs.existsSync(wc(ch, 'settlement.json')) ? readJson(wc(ch, 'settlement.json')) : null;
+    res.json({
+      status: closeFreezeNonce > 0 ? 'close_signed' : 'active',
+      closeFreezeNonce,
+      stateVersion: state.balanceState && state.balanceState.stateVersion,
+      settlement: settlement ? { manager: settlement.manager, verifier: settlement.verifier } : null,
+      l1: 'unknown (query the settlement manager)',
+    });
   } catch (e) {
     res.status(404).json({ error: 'no channel yet' });
   }

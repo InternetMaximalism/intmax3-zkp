@@ -27,7 +27,7 @@ const { importL1Deposit, journalBackingDeposit } = require('../../api/lib/deposi
 const { createCluster } = require('../../api/lib/cluster');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
-const { installHeadExitKit } = require('../../api/lib/exit-kit');
+const { installHeadExitKit, cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../../api/lib/exit-kit');
 const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = require('../../api/lib/inter-channel-send');
 
 // A `channel_member` failure prints its real diagnosis to STDOUT and only the persistent insecure-
@@ -96,14 +96,28 @@ function sendRouteError(res, e) {
   console.error(error);
   res.status(e && e.status ? e.status : (e && e.staleAnchor ? 409 : 500)).json({ error });
 }
+// The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
+// for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
+// it) from every stream of a failed command at the source, so no route can leak it to a browser.
+const BANNER_LINE = /^!!|INSECURE DETERMINISTIC KEYS/;
+function stripCliBanner(text) {
+  return String(text).split('\n').filter((l) => !BANNER_LINE.test(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+function sanitizeCliError(e) {
+  if (!e || typeof e !== 'object') return e;
+  for (const k of ['message', 'stderr', 'stdout']) if (typeof e[k] === 'string') e[k] = stripCliBanner(e[k]);
+  return e;
+}
 function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
-  return execFileSync(CLI, args, {
-    cwd: chDir(ch),
-    encoding: 'utf8',
-    timeout: 600_000,
-    env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
-  });
+  try {
+    return execFileSync(CLI, args, {
+      cwd: chDir(ch),
+      encoding: 'utf8',
+      timeout: 600_000,
+      env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
+    });
+  } catch (e) { throw sanitizeCliError(e); }
 }
 
 // Per-channel mutex: serialize all mutating CLI calls to prevent concurrent state corruption.
@@ -1226,33 +1240,54 @@ app.post('/api/faucet', (req, res) => {
 // Co-sign a burn send (partial withdrawal debit leg).
 app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    // Every non-terminal PW ticket owns last_burn.json; settle_pending/settle_blocked are just as
-    // unsafe to overwrite as burn_done.
+    // Every non-terminal PW ticket owns the burn artifacts; settle_pending/settle_blocked are just
+    // as unsafe to overwrite as burn_done.
     if (active) {
       res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
       return;
     }
     const { debitPayload, transferDescriptor } = req.body || {};
-    if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
-    res.status(503).json({ error: 'burn co-signing requires the daemon-backed API live base nonce' });
-    return;
+    if (!debitPayload || !transferDescriptor) throw Object.assign(new Error('cosign-burn needs { debitPayload, transferDescriptor }'), { status: 400 });
+    // Same atomic sequence as api/routes/burn.js: the burn's exit kit is proved against the staged
+    // producer block BEFORE the co-signers release signatures, then the block is admitted and the
+    // resident base nonce settled, so no other debit can be co-signed at the same cursor.
+    const producerRequestId = producer.stableRequestId('burn', { ch, debitPayload, transferDescriptor });
     fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
-    cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
+    fs.rmSync(wc(ch, 'burn_cosigned.json'), { force: true });
+    const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
+    try {
+      await cliWithPreparedExitKit(ch,
+        ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
+        liveNonceEnv, { requestId: producerRequestId });
+    } catch (e) {
+      if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
+        // Refused before anything was adopted: release the staged block, drop the pre-sign op.
+        try { await producer.liveAbandonPreparedExitKit(ch, debitRequestId(producerRequestId)); }
+        catch (abandonError) { console.error(`[burn] channel ${ch}: abandon staged exit kit: ${String(abandonError.message || abandonError).slice(0, 200)}`); }
+        for (const f of [EXIT_KIT_OPERATION_FILE, 'exit_kit_proposal.json', 'prepared_exit_kit.json']) fs.rmSync(wc(ch, f), { force: true });
+        throw Object.assign(e, { status: 409 });
+      }
+      throw e;
+    }
+    const cosignedHead = JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8'));
+    const blockReceipt = await producer.postInterChannel(cosignedHead, debitPayload, transferDescriptor, producerRequestId);
+    const liveReceipt = await producer.liveSettleInterChannel(ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor);
+    acknowledgePreparedExitKit(ch, cosignedHead);
     const ticket = upsertTicket(ch, {
-      id: 'pw_' + Date.now(),
+      id: `pw_${producerRequestId.slice('burn:'.length)}`,
       type: 'partial_withdrawal',
       status: 'burn_done',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      params: { amount: String(req.body.amount || ''), recipient: req.body.recipient || '' },
+      params: { producerRequestId, amount: String(req.body.amount || ''), recipient: req.body.recipient || '' },
       steps: { burn: { completedAt: Date.now() }, settle: null },
     });
-    const cosigned = JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8'));
-    res.json({ ...cosigned, _ticket: ticket });
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+    // The browser hands this body to `wallet_finalize`: it must be the signed ChannelState itself.
+    res.json({ ...cosignedHead, _ticket: ticket, _blockReceipt: blockReceipt, _liveReceipt: liveReceipt });
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
@@ -1293,13 +1328,20 @@ app.post('/api/pw-submit', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    const before = ticket && ticket.status;
     if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
-    if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-      cli(ch, ['deploy-settlement', RPC]);
+    try {
+      if (!fs.existsSync(wc(ch, 'settlement.json'))) {
+        cli(ch, ['deploy-settlement', RPC]);
+      }
+      const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
+      const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
+      cli(ch, ['pw-submit', RPC], extra);
+    } catch (e) {
+      // A failed submit is retryable: put the ticket back instead of leaving it settle_pending.
+      if (ticket) { ticket.status = before; upsertTicket(ch, ticket); }
+      throw e;
     }
-    const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
-    const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-    cli(ch, ['pw-submit', RPC], extra);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });

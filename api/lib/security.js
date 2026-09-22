@@ -48,7 +48,10 @@ function cors(req, res, next) {
 const API_TOKEN = process.env.INTMAX_API_TOKEN || '';
 
 function auth(req, res, next) {
-  const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+  // /snapshot and /backing replay pending producer/live work before answering (recover-inter-
+  // transfers, publish-snapshot, head sync): they mutate, so they are never "open reads".
+  const mutatingRead = /\/(snapshot|backing)$/.test(req.path);
+  const isRead = (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') && !mutatingRead;
   // Read-only requests are open by default (they can still leak info — see #13/#16);
   // set INTMAX_AUTH_READS=1 to require the token on reads too.
   if (isRead && process.env.INTMAX_AUTH_READS !== '1') return next();
