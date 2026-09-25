@@ -4,7 +4,8 @@ const { cli, wc, RPC, readJson, writeJson, ensureSettlement, failRoute } = requi
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket, readTickets, writeTickets } = require('../lib/tickets');
 const producer = require('../lib/block-producer');
-const { cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../lib/exit-kit');
+
+const burnOperations = require('../lib/burn-operation').createBurnOperations();
 
 const router = Router({ mergeParams: true });
 
@@ -13,108 +14,14 @@ const router = Router({ mergeParams: true });
 router.post('/burn', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, async () => {
-    // Restore the durable burn result before deciding to invoke the signer again.
-    cli(ch, ['recover-inter-transfers']);
-    const active = findActiveTicket(ch, 'partial_withdrawal');
-    const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
-    if (!debitPayload || !transferDescriptor) {
-      res.status(400).json({ error: 'needs { debitPayload, transferDescriptor, amount, recipient, tokenIndex? }' });
-      return;
-    }
-    // Multi-token (§N): the burned BASE token rides inside the signed descriptor
-    // (interChannelTx.tokenIndex → last_burn.json → the pw-submit Withdrawal/IMPW authDigest);
-    // an optional top-level tokenIndex is a client-intent cross-check (fail-closed on
-    // mismatch).
-    const descTok = transferDescriptor.interChannelTx && transferDescriptor.interChannelTx.tokenIndex;
-    if (tokenIndex !== undefined && tokenIndex !== null && String(tokenIndex) !== String(descTok)) {
-      res.status(400).json({ error: `tokenIndex mismatch: body says ${tokenIndex}, signed descriptor says ${descTok}` });
-      return;
-    }
-    const producerRequestId = producer.stableRequestId('burn', {
-      ch, debitPayload, transferDescriptor,
+    const state = await burnOperations.run(ch, req.body || {}, {
+      findActiveTicket, upsertTicket,
+      getTicket: (channel, id) => readTickets(channel).find(ticket => ticket.id === id),
     });
-    // `burn_pending` is a durable two-phase marker written before signing. A retry of the exact
-    // same request resumes; every other non-terminal PW state remains an exclusion lock. This
-    // prevents a crash after N-of-N signing from letting the next HTTP request overwrite the only
-    // artifacts capable of settling that already-advanced channel head.
-    let ticket = active;
-    if (active) {
-      const resumable = active.status === 'burn_pending'
-        && active.params
-        && active.params.producerRequestId === producerRequestId;
-      if (!resumable) {
-        res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
-        return;
-      }
-    } else {
-      writeJson(wc(ch, 'burn_payload.json'), debitPayload);
-      writeJson(wc(ch, 'burn_descriptor.json'), transferDescriptor);
-      fs.rmSync(wc(ch, 'burn_cosigned.json'), { force: true });
-      ticket = upsertTicket(ch, {
-        id: `pw_${producerRequestId.slice('burn:'.length)}`,
-        type: 'partial_withdrawal',
-        status: 'burn_pending',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        params: {
-          producerRequestId,
-          amount: String(req.body.amount || ''),
-          recipient: req.body.recipient || '',
-          tokenIndex: descTok !== undefined ? String(descTok) : '0',
-        },
-        steps: { burn: null, settle: null },
-      });
-    }
-    // This route owns the channel lock through cosign -> producer admission -> live settle. Bind the
-    // CLI to the daemon cursor read inside that critical section; never fall back to frozen setup
-    // state when the live authority is unavailable.
-    const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
-    if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
-      // Signer-independent exit: the burn debits the fund vector and pushes the settle chain, so
-      // the exit kit for the exact post-burn state is proved against the staged producer block
-      // BEFORE the co-signers release their signatures; `postInterChannel` then commits that
-      // very block.
-      try {
-        await cliWithPreparedExitKit(
-          ch,
-          ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
-          liveNonceEnv,
-          { requestId: producerRequestId },
-        );
-      } catch (e) {
-        // Refused before anything was adopted (no signed result): release the staged exit-kit
-        // block (it freezes every producer mutation), drop the pre-sign operation and the ticket,
-        // so a rebuilt burn is not answered 409 forever by a ticket that can never complete.
-        if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
-          try { await producer.liveAbandonPreparedExitKit(ch, debitRequestId(producerRequestId)); }
-          catch (abandonError) { console.error(`[burn] channel ${ch}: abandon staged exit kit: ${String(abandonError.message || abandonError).slice(0, 200)}`); }
-          for (const f of [EXIT_KIT_OPERATION_FILE, 'exit_kit_proposal.json', 'prepared_exit_kit.json']) fs.rmSync(wc(ch, f), { force: true });
-          writeTickets(ch, readTickets(ch).filter(t => t.id !== ticket.id));
-          throw Object.assign(e, { status: 409 });
-        }
-        throw e;
-      }
-    }
-    // The burn is an inter-channel send to BURN_CHANNEL_ID: admit it durably at the producer and
-    // settle it in the live base-state authority, exactly like a normal send. The journaled
-    // producer request id is what the payout leg later proves against.
-    const cosignedHead = readJson(wc(ch, 'burn_cosigned.json'));
-    const blockReceipt = await producer.postInterChannel(
-      cosignedHead, debitPayload, transferDescriptor, producerRequestId,
-    );
-    // Persist the public admission before the second phase. A crash here is recoverable by
-    // idempotently replaying the same post + live settle from the burn_pending ticket/artifacts.
-    writeJson(wc(ch, 'pw_producer.json'), { producerRequestId, blockReceipt, liveReceipt: null });
-    const liveReceipt = await producer.liveSettleInterChannel(
-      ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor,
-    );
-    acknowledgePreparedExitKit(ch, cosignedHead);
-    writeJson(wc(ch, 'pw_producer.json'), { producerRequestId, blockReceipt, liveReceipt });
-    ticket.status = 'burn_done';
-    ticket.steps = { ...(ticket.steps || {}), burn: { completedAt: Date.now() }, settle: null };
-    ticket = upsertTicket(ch, ticket);
-    const cosigned = readJson(wc(ch, 'burn_cosigned.json'));
-    res.json({ state: cosigned, ticket });
+    const operation = burnOperations.result(ch, req.body || {});
+    const ticket = readTickets(ch).find(ticket => ticket.params?.producerRequestId === operation.id);
+    const receipts = operation;
+    res.json({ state, ticket, blockReceipt: receipts.blockReceipt, liveReceipt: receipts.liveReceipt });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(Number.isInteger(e && e.status) ? e.status : 500).json({ error: String(e.stderr || e.message || e) });

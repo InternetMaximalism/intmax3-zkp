@@ -15,6 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const {readTicketsFile, writeTicketsFile} = require('./wallet-ticket-store');
+const sendReceipts = require('./send-receipts');
+const burnOperations = require('../../api/lib/burn-operation').createBurnOperations();
 // Signer-independent exit: any asset-moving CLI command (L1 deposit import included) refuses to
 // sign until the resident block-producer/live-balance daemon has proved an exit kit for the exact
 // successor. It lazily spawns target/release/block_producer_service on first use, against the same
@@ -130,7 +132,16 @@ const _chLocks = {};
 function withLock(ch, fn) {
   if (!_chLocks[ch]) _chLocks[ch] = Promise.resolve();
   const prev = _chLocks[ch];
-  const next = prev.then(fn, fn);
+  const run = async () => {
+    // A pending burn owns this head. Finish its exact request before any later mutation can
+    // invalidate the saved proof, including an incoming transfer targeting this channel.
+    if (burnOperations.pending(ch)) await burnOperations.run(ch, {}, {
+      findActiveTicket, upsertTicket,
+      getTicket: (channel,id) => readTickets(channel).concat(readHistory(channel)).find(t => t.id === id),
+    });
+    return fn();
+  };
+  const next = prev.then(run, run);
   _chLocks[ch] = next.catch(() => {});
   return next;
 }
@@ -864,6 +875,19 @@ const BATCH_WINDOW_MAX = cluster ? 1 : Math.max(1, Math.min(1024, parseInt(proce
 
 function drainCosignWindow(ch, entries) {
   return withLock(ch, async () => {
+    const accepted = [], rejected = new Set();
+    for (const en of entries) {
+      try {
+        const prior = sendReceipts.accepted(chDir(ch), sendReceipts.fatId(en.payload));
+        if (prior) accepted.push({en,prior});
+      } catch (error) { rejected.add(en); en.reject(error); }
+    }
+    if (accepted.length) {
+      await flushPublishedHead(ch);
+      for (const {en,prior} of accepted) en.resolve(prior);
+    }
+    entries = entries.filter(en => !rejected.has(en) && !accepted.some(x => x.en === en));
+    if (!entries.length) return;
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     // Lost-response retry of an exact solo transition. Reconcile its committed head before
     // answering; never re-sign against a later head merely because the browser retried.
@@ -1020,6 +1044,9 @@ async function resumePendingInterTransferLocked(ch) {
 const INTER_RESUME_MS = Math.max(5000, parseInt(process.env.INTMAX_INTER_RESUME_MS || '30000', 10) || 30000);
 async function sweepPendingInterTransfers() {
   for (const ch of CHANNELS) {
+    try {
+      if (burnOperations.pending(ch)) await withLock(ch, () => burnOperations.run(ch, {}, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)}));
+    } catch (error) { console.error('[burn recovery]', ch, String(error.message || error).slice(0,300)); }
     try {
       const r = await resumePendingInterTransferLocked(ch);
       if (r) console.log(`[inter] channel ${ch}: pending transfer resumed → ${r.status}`);
@@ -1294,54 +1321,7 @@ app.post('/api/faucet', (req, res) => {
 app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
-    const active = findActiveTicket(ch, 'partial_withdrawal');
-    // Every non-terminal PW ticket owns the burn artifacts; settle_pending/settle_blocked are just
-    // as unsafe to overwrite as burn_done.
-    if (active) {
-      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
-      return;
-    }
-    const { debitPayload, transferDescriptor } = req.body || {};
-    if (!debitPayload || !transferDescriptor) throw Object.assign(new Error('cosign-burn needs { debitPayload, transferDescriptor }'), { status: 400 });
-    // Same atomic sequence as api/routes/burn.js: the burn's exit kit is proved against the staged
-    // producer block BEFORE the co-signers release signatures, then the block is admitted and the
-    // resident base nonce settled, so no other debit can be co-signed at the same cursor.
-    const producerRequestId = producer.stableRequestId('burn', { ch, debitPayload, transferDescriptor });
-    fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
-    fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
-    fs.rmSync(wc(ch, 'burn_cosigned.json'), { force: true });
-    const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
-    try {
-      await cliWithPreparedExitKit(ch,
-        ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
-        liveNonceEnv, { requestId: producerRequestId });
-    } catch (e) {
-      if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
-        // Refused before anything was adopted: release the staged block, drop the pre-sign op.
-        try { await producer.liveAbandonPreparedExitKit(ch, debitRequestId(producerRequestId)); }
-        catch (abandonError) { console.error(`[burn] channel ${ch}: abandon staged exit kit: ${String(abandonError.message || abandonError).slice(0, 200)}`); }
-        for (const f of [EXIT_KIT_OPERATION_FILE, 'exit_kit_proposal.json', 'prepared_exit_kit.json']) fs.rmSync(wc(ch, f), { force: true });
-        throw Object.assign(e, { status: 409 });
-      }
-      throw e;
-    }
-    const cosignedHead = JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8'));
-    const blockReceipt = await producer.postInterChannel(cosignedHead, debitPayload, transferDescriptor, producerRequestId);
-    const liveReceipt = await producer.liveSettleInterChannel(ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor);
-    acknowledgePreparedExitKit(ch, cosignedHead);
-    const ticket = upsertTicket(ch, {
-      id: `pw_${producerRequestId.slice('burn:'.length)}`,
-      type: 'partial_withdrawal',
-      status: 'burn_done',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      params: { producerRequestId, amount: String(req.body.amount || ''), recipient: req.body.recipient || '' },
-      steps: { burn: { completedAt: Date.now() }, settle: null },
-    });
-    // The browser hands this body to `wallet_finalize`: it must be the signed ChannelState itself.
-    // Transport metadata is not part of ChannelState. WASM ignores unknown fields, but the
-    // browser's durable recovery check correctly requires the exact signed state value.
-    // The durable ticket remains available through /api/tickets.
+    const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
     res.json(cosignedHead);
   }).catch((e) => sendRouteError(res, e));
 });

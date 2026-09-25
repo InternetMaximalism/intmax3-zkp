@@ -70,7 +70,27 @@ for (const ch of CHANNELS) {
   fs.mkdirSync(chDir(ch), { recursive: true });
 }
 
+// A signed burn belongs to its durable operation even if its browser never reconnects.
+const burnRecovery = require('./lib/burn-operation').createBurnOperations();
+const burnTickets = require('./lib/tickets');
+let recoveringBurns = false;
+async function recoverBurns() {
+  if (recoveringBurns) return;
+  recoveringBurns = true;
+  try {
+    for (const ch of CHANNELS) {
+      try {
+        if (burnRecovery.pending(ch)) await require('./lib/lock').withLock(ch, () => burnRecovery.run(ch, {}, {
+          ...burnTickets, getTicket: (channel,id) => burnTickets.readTickets(channel).find(t => t.id === id),
+        }));
+      } catch (error) { console.error(`[burn recovery] channel ${ch}: ${String(error.message || error).slice(0,300)}`); }
+    }
+  } finally { recoveringBurns = false; }
+}
+
 app.listen(PORT, '0.0.0.0', () => {
+  recoverBurns();
+  setInterval(recoverBurns, 30000).unref();
   console.log(`INTMAX3 Channel API on http://localhost:${PORT}  (channels: ${CHANNELS.join(', ')})`);
   startupWarnings();
   console.log('Endpoints:');

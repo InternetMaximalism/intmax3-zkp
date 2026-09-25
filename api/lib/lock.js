@@ -11,7 +11,18 @@ function withLocks(channels, fn) {
   if (ids.length === 0) return Promise.reject(new Error('withLocks requires a channel id'));
   const previous = ids.map(id => _chLocks[id] || Promise.resolve());
   const ready = Promise.all(previous.map(promise => promise.catch(() => {})));
-  const next = ready.then(fn);
+  const next = ready.then(async () => {
+    // Hold all participant locks while reconciling a saved burn; no competing debit/credit may
+    // overtake its original proof. The recovery owner never re-enters these locks.
+    const burns = require('./burn-operation').createBurnOperations();
+    const tickets = require('./tickets');
+    for (const id of ids) {
+      if (burns.pending(id)) await burns.run(id, {}, {
+        ...tickets, getTicket: (ch,key) => tickets.readTickets(ch).find(t => t.id === key),
+      });
+    }
+    return fn();
+  });
   const tail = next.catch(() => {});
   for (const id of ids) _chLocks[id] = tail;
   return next;

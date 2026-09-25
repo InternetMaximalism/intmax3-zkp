@@ -2389,6 +2389,13 @@ function restorePartialWithdrawalControls() {
     $('btnPwSettle').disabled = true;
     return;
   }
+  if (ticket?.status === 'burn_pending') {
+    status.textContent = 'Your burn is saved. Continue with Step 1 to finish it; no new burn will be created.';
+    $('btnBurnSend').disabled = _inflight.has('burn') || _inflight.has('settle');
+    $('btnPwSettle').disabled = true;
+    $('pwAmount').disabled = true; $('pwAddress').disabled = true;
+    return;
+  }
   if (!ticket) {
     $('btnBurnSend').disabled = mySlot == null || _inflight.has('burn') || _inflight.has('settle');
     status.textContent = '';
@@ -3137,6 +3144,16 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     await fetchTickets();
     if (ticketLoadFailed) throw new Error('Cannot verify withdrawal status. Retry when the relay is available; no new burn was made.');
     const existing = ticketOfType('partial_withdrawal');
+    if (existing?.status === 'burn_pending') {
+      await api('/api/cosign-burn', '{}');
+      const snapshot = await api('/api/snapshot', null, 'GET');
+      const report = JSON.parse(await call('importChannel', {snapshotJson:snapshot}));
+      setChannelFrom(snapshot); mySlot = report.slot; showBalance(report);
+      await fetchTickets(); applyTicketState();
+      log('Saved burn completed. Continue with Step 2.', 'ok');
+      clearInterval(tick); $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
+      return;
+    }
     if (existing) {
       log('burn already complete -- settle first before burning again', 'err');
       $('btnPwSettle').disabled = false;

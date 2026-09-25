@@ -17,17 +17,11 @@ test('relay burn returns exactly the signed state while durably retaining its re
     reqChannel: () => 7,
     withLock: (_ch, fn) => Promise.resolve().then(fn),
     findActiveTicket: () => null,
-    producer: {
-      stableRequestId: () => 'burn:recovery-id',
-      authoritativeBaseNonceEnv: async () => ({}),
-      postInterChannel: async () => { events.push('post'); return { requestId: 'block' }; },
-      liveSettleInterChannel: async () => { events.push('settle'); return { baseNonce: 1 }; },
-    },
-    wc: (_ch, file) => file,
-    fs: { writeFileSync() {}, rmSync() {}, readFileSync: () => JSON.stringify(state) },
-    cliWithPreparedExitKit: async () => events.push('sign'),
-    acknowledgePreparedExitKit: () => events.push('acknowledge'),
-    upsertTicket: (_ch, value) => { ticket = value; events.push('ticket'); return value; },
+    burnOperations: {run: async (ch, input, store) => {
+      events.push('run');store.upsertTicket(ch,{status:'burn_done',params:{amount:input.amount}});return state;
+    }},
+    readTickets: () => [], readHistory: () => [],
+    upsertTicket: (_ch, value) => {ticket=value;return value;},
     sendRouteError: (_res, error) => { throw error; },
     console,
   };
@@ -39,5 +33,5 @@ test('relay burn returns exactly the signed state while durably retaining its re
     'extra response fields break the exact WASM-finalized snapshot archive check');
   assert.equal(ticket.status, 'burn_done');
   assert.equal(ticket.params.amount, '5000000000000000');
-  assert.deepEqual(events, ['sign', 'post', 'settle', 'acknowledge', 'ticket']);
+  assert.deepEqual(events, ['run']);
 });

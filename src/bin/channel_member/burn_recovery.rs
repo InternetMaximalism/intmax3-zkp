@@ -100,7 +100,8 @@ fn validate(journal: &Journal, current: &CliState) -> Result<(), String> {
     }
     validate_signing_security_state(after)?;
     verify_snapshot(&after.snapshot, None).map_err(|error| error.to_string())?;
-    if current.imported_deposits != after.imported_deposits
+    if current.accepted_send_receipts != after.accepted_send_receipts
+        || current.imported_deposits != after.imported_deposits
         || current.applied_tx_identities != after.applied_tx_identities
         || !current
             .spent_tx_identities

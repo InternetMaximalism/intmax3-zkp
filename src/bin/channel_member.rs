@@ -30,6 +30,8 @@ use std::{
 
 #[path = "channel_member/burn_recovery.rs"]
 mod burn_recovery;
+#[path = "channel_member/send_receipts.rs"]
+mod send_receipts;
 #[path = "channel_member/deposit_capacity.rs"]
 mod deposit_capacity;
 #[path = "channel_member/deposit_recovery.rs"]
@@ -866,6 +868,9 @@ struct CliState {
     /// Keep the current head and at most its two proposal steps; no per-payment history growth.
     #[serde(default)]
     credit_safety_bounds: BTreeMap<String, ChannelCreditBounds>,
+    /// Availability index only; legacy absence never authorizes signing a stale request.
+    #[serde(default)]
+    accepted_send_receipts: BTreeMap<String, Bytes32>,
     /// Capacity reserved BEFORE an L1 deposit is signed. An unrelated credit cannot consume this
     /// room while the deposit is waiting for finality/import. Legacy files predate reservations.
     #[serde(default)]
@@ -10046,6 +10051,7 @@ fn cmd_init(args: &[String]) {
         state_schema_version: STATE_SCHEMA_VERSION,
         controlled,
         snapshot,
+        accepted_send_receipts: previous.as_ref().map(|s| s.accepted_send_receipts.clone()).unwrap_or_default(),
         credit_safety_bounds: previous
             .as_ref()
             .map(|p| p.credit_safety_bounds.clone())
@@ -10799,7 +10805,7 @@ fn cosign_gate(state: &CliState, payload: &SendPayload) -> ChannelState {
 /// Advance this CLI's head to a FULLY co-signed successor and publish it (`channel_snapshot.json`
 /// is the browsers' re-import source; without the sync the next send fails "payload does not
 /// extend the current head").
-fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path: &str) {
+fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path: &str, request: &SendPayload) {
     verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
         .unwrap_or_else(|e| {
             die(format!(
@@ -10811,6 +10817,7 @@ fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path:
         .iter()
         .map(|s| s.member_slot)
         .collect();
+    send_receipts::record(state, &next_state, &[send_receipts::canonical_id(&request.to_slim())]);
     state.snapshot.state = next_state;
     save_state(state);
     write_json("channel_snapshot.json", &state.snapshot);
@@ -10971,7 +10978,7 @@ fn cmd_cosign_merge(args: &[String]) {
         );
         std::process::exit(3);
     }
-    adopt_cosigned_head(&mut state, next_state, out_path);
+    adopt_cosigned_head(&mut state, next_state, out_path, &payload);
 }
 
 fn cmd_cosign(args: &[String]) {
@@ -11009,7 +11016,7 @@ fn cmd_cosign(args: &[String]) {
     // DEMO: advance this CLI member's stored head to the just-cosigned state so SEQUENTIAL sends
     // work (single-host deployment: this process holds every cosigner slot, so the state IS
     // N-of-N here). The cluster deployment splits this into `cosign-partial` + `cosign-merge`.
-    adopt_cosigned_head(&mut state, next_state, out_path);
+    adopt_cosigned_head(&mut state, next_state, out_path, &payload);
 }
 
 /// Batched co-sign (abstract2-1 §3.2b): `cosign-batch <batch_payloads.json> <out>` where the input
@@ -11086,12 +11093,13 @@ fn cmd_cosign_batch(args: &[String]) {
     let raw = fs::read_to_string(in_path).unwrap_or_else(|e| die(format!("read {in_path}: {e}")));
     let applies: Vec<BatchTxApply>;
     let k: usize;
+    let receipt_ids: Vec<String>;
     if let Ok(manifest) = serde_json::from_str::<BatchManifest>(&raw) {
         if manifest.files.is_empty() {
             die("cosign-batch: empty batch");
         }
         k = manifest.files.len();
-        let result: Result<Vec<BatchTxApply>, String> = manifest
+        let result: Result<Vec<(BatchTxApply, Vec<String>)>, String> = manifest
             .files
             .par_iter()
             .map(|f| {
@@ -11099,11 +11107,13 @@ fn cmd_cosign_batch(args: &[String]) {
                 let slim = SlimSendPayload::from_wire_or_json(&bytes)
                     .map_err(|e| format!("{f}: parse: {e}"))?;
                 verify_one(f, &slim)?;
-                Ok(BatchTxApply::from(&slim))
+                Ok((BatchTxApply::from(&slim), vec![send_receipts::canonical_id(&slim), hex::encode(Sha256::digest(&bytes))]))
                 // the parsed SlimSendPayload (and its proofs) drops here; only the residue survives
             })
             .collect();
-        applies = result.unwrap_or_else(|e| die(format!("cosign-batch rejected: {e}")));
+        let verified = result.unwrap_or_else(|e| die(format!("cosign-batch rejected: {e}")));
+        receipt_ids = verified.iter().flat_map(|(_, ids)| ids.clone()).collect();
+        applies = verified.into_iter().map(|(apply, _)| apply).collect();
     } else {
         // LEGACY: a JSON array of fat SendPayloads.
         let payloads: Vec<SendPayload> = read_json(in_path);
@@ -11119,6 +11129,7 @@ fn cmd_cosign_batch(args: &[String]) {
         if !errors.is_empty() {
             die(format!("cosign-batch rejected: {}", errors.join("; ")));
         }
+        receipt_ids = payloads.iter().map(|p| send_receipts::canonical_id(&p.to_slim())).collect();
         applies = payloads
             .iter()
             .map(|p| BatchTxApply::from(&p.to_slim()))
@@ -11139,6 +11150,7 @@ fn cmd_cosign_batch(args: &[String]) {
     let next_version = next_state.balance_state.state_version;
 
     // Advance + republish head (same head-sync rationale as cmd_cosign).
+    send_receipts::record(&mut state, &next_state, &receipt_ids);
     state.snapshot.state = next_state;
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
@@ -19723,7 +19735,7 @@ mod partial_withdrawal_reconcile_tests {
 mod signing_ledger_tests {
     use super::*;
 
-    fn fixture() -> CliState {
+    pub(super) fn fixture() -> CliState {
         // This binary intentionally has no implicit test-key fallback. The focused unit tests opt
         // in before `keys_for` is first resolved, exactly like the process E2Es do.
         unsafe { std::env::set_var(INSECURE_KEYS_ENV, "1") };
@@ -19784,6 +19796,7 @@ mod signing_ledger_tests {
             state_schema_version: STATE_SCHEMA_VERSION,
             controlled,
             credit_safety_bounds: BTreeMap::new(),
+            accepted_send_receipts: BTreeMap::new(),
             deposit_capacity_reservations: BTreeMap::new(),
             snapshot: ChannelSnapshot {
                 record,

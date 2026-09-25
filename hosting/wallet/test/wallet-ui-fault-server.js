@@ -30,8 +30,11 @@ http.createServer(async(req,res)=>{
   return json(res,{result});
  }
  if(u.pathname==='/api/cosign-burn'){
+  const pending=tickets.find(t=>t.type==='partial_withdrawal'&&t.status==='burn_pending');
+  if(pending && !data.debitPayload){pending.status='burn_done';return json(res,snapshot().state);}
   if(tickets.some(t=>t.type==='partial_withdrawal'&&t.status!=='settle_done'))return json(res,{error:'already burned'},409);
   burns++;version++;tickets.push({id:'burn-'+burns,type:'partial_withdrawal',status:'burn_done',params:{amount:data.amount,recipient:data.recipient},steps:{}});
+  if(scenario==='interrupt-burn'){tickets[tickets.length-1].status='burn_pending';scenario='';return json(res,{error:'operator interrupted after signing'},503);}
   if(scenario==='lose-burn-response'){scenario='';return json(res,{error:'response lost after burn'},503);}
   return json(res,snapshot().state);
  }

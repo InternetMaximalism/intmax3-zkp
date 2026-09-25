@@ -9,6 +9,7 @@ const compression = require('compression');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
+const sendReceipts = require('./send-receipts');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
@@ -109,6 +110,20 @@ function drainCosigns(ch) {
       const head = headDigestOf(ch);
       const batch = [];
       for (const item of taken) {
+        try {
+          const id = item.kind === 'slim' ? item.requestId : sendReceipts.fatId(item.payload);
+          const prior = sendReceipts.accepted(chDir(ch), id);
+          if (prior) {
+            await cli(ch, ['publish-snapshot', 'channel_snapshot.json']);
+            item.resolve(JSON.stringify(item.kind === 'slim'
+              ? {ok:true,stateVersion:prior.balanceState.stateVersion,digest:prior.digest} : prior));
+            if(item.kind === 'slim') fs.rm(item.file,{force:true},()=>{});
+            continue;
+          }
+        } catch(error) {
+          if(item.kind === 'slim') fs.rm(item.file,{force:true},()=>{});
+          item.reject(error); continue;
+        }
         const anchor = entryAnchor(item);
         if (head && anchor && anchor !== head) {
           if (item.kind === 'slim') fs.rm(item.file, { force: true }, () => {});
@@ -131,13 +146,7 @@ function drainCosigns(ch) {
             if (b.kind === 'slim') { files.push(path.relative(chDir(ch), b.file)); continue; }
             // fat -> slim conversion (detail2 §M-1): keep only what the fold needs.
             const p = b.payload;
-            const slim = {
-              anchorDigest: p.proposedNextState.prevDigest,
-              senderIndex: p.senderIndex,
-              recipientIndex: p.recipientIndex,
-              channelTx: p.channelTx,
-              afterCt: p.proposedNextState.balanceState.encBalances[p.senderIndex],
-            };
+            const slim = require('./batch-window').projectToSlim(p);
             const f = spoolPath(ch);
             fs.writeFileSync(f, JSON.stringify(slim));
             spooled.push(f);
@@ -455,8 +464,9 @@ app.post('/api/cosign2', (req, res) => {
   const file = spoolPath(ch);
   const ws = fs.createWriteStream(file);
   let bytes = 0; let header = Buffer.alloc(0); let aborted = false;
+  const requestHash = require('crypto').createHash('sha256');
   req.on('data', (c) => {
-    bytes += c.length;
+    bytes += c.length; requestHash.update(c);
     if (header.length < 4096) header = Buffer.concat([header, c.subarray(0, 4096 - header.length)]);
     if (bytes > MAX_SLIM_BODY && !aborted) {
       aborted = true; ws.destroy(); fs.rm(file, { force: true }, () => {});
@@ -474,7 +484,7 @@ app.post('/api/cosign2', (req, res) => {
       fs.rm(file, { force: true }, () => {});
       return res.status(400).json({ error: e.message });
     }
-    enqueueCosign(ch, { kind: 'slim', file, anchor })
+    enqueueCosign(ch, { kind: 'slim', file, anchor, requestId: requestHash.digest('hex') })
       .then((ackJson) => res.type('application/json').send(ackJson))
       .catch((e) => {
         const msg = String(e.stderr || e.message || e);
