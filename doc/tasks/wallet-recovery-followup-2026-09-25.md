@@ -183,3 +183,13 @@ Code commit for authenticated tail: `cef88b9`. Existing user channels still use 
 verifier pins. A migration decision was requested only after the new protocol payout passed:
 retain the old stack, withdraw/redeposit with the user wallet, and separately preserve/recover
 old channel7 pending receipts. No funds were migrated and no old contract was replaced.
+
+
+Final verification after `acec00f`: the isolated relay was restarted, then `/api/pw-finalize`
+was called again for the completed authorization. It returned the same digest; both recipient
+L1 balance and operator transaction nonce stayed unchanged (`finalize-replay-verified.json`).
+The regular user relay was restarted with all recovery fixes (PID59751 at activation), using
+its original default-feature pinned binaries. All three channel digests and both L1 balances
+still match `recovery-final-before.json`. Final Node suite: 656/656. No new UI button was added.
+The third issue is solved in the new protocol test deployment, but is **not yet resolved for
+existing legacy channels**, pending migration/compatibility and the old channel7 recovery.
