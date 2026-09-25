@@ -175,6 +175,8 @@ libc = "0.2"
 
 [features]
 default = []
+# Protocol upgrade: changes balance verifier data. Existing deployments must retain legacy keys.
+authenticated-tail-receive = []
 # Diagnostic-only WASM exports that must NOT ship in the production wallet build.
 # Currently gates `wallet_feasibility_check` (a Phase-0 probe that proves at the
 # WEAK `RegevSecurityLevel::Test` level). Off by default so the shipped wallet

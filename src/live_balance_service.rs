@@ -157,7 +157,13 @@ fn ensure_receive_window_open(
     let (head_block, account) = bwg.get_account_state(channel_id, prev.block_r).map_err(|e| {
         LiveBalanceServiceError::Transition(format!("{what}: account state: {e}"))
     })?;
-    if account.channel_leaf.prev.as_u64() != 0 && status.next_send_block.is_none() {
+    if crate::circuits::balance::common::receive_window::requires_send_interval(account.channel_leaf.prev, prev.block_r) && status.next_send_block.is_none() {
+        if cfg!(feature = "authenticated-tail-receive") {
+            return Err(LiveBalanceServiceError::Transition(format!(
+                "{what}: authenticated outgoing history for channel {} has no interval after cursor {}; retain the credit and reconcile producer history",
+                channel_id.as_u64(), prev.block_r.as_u64(),
+            )));
+        }
         return Err(LiveBalanceServiceError::Transition(format!(
             "{what} into channel {} is not provable yet (receive-after-send window): the \
              channel's last base-layer send was block {} and a receive must be proved with \

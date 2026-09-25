@@ -175,7 +175,8 @@ where
             )));
         }
 
-        if self.account_state.channel_leaf.prev != BlockNumber::default() {
+        // Same authenticated interval/tail rule as ReceiveTransfer.
+        if crate::circuits::balance::common::receive_window::requires_send_interval(self.account_state.channel_leaf.prev, prev_block_r) {
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveDepositError::BlockNumberError(format!(
                     "Not account_state.send_leaf.prev <= prev_balance_pis.block_r: {:?} <= {:?}",
@@ -311,8 +312,9 @@ impl<const D: usize> ReceiveDepositTarget<D> {
         new_block_r.enforce_ge(builder, &prev_block_r);
         public_state.block_number.enforce_ge(builder, &new_block_r);
 
-        let prev_is_zero = account_state.channel_leaf.prev.is_zero(builder);
-        let has_outgoing = builder.not(prev_is_zero);
+        let has_outgoing = crate::circuits::balance::common::receive_window::requires_send_interval_target(
+            builder, &account_state.channel_leaf.prev, &prev_block_r,
+        );
         prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing);
         account_state
             .send_leaf
@@ -561,6 +563,17 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_receive_deposit_circuit() {
+        receive_deposit_case(false);
+    }
+
+    #[cfg(feature = "authenticated-tail-receive")]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_receive_deposit_after_last_send() {
+        receive_deposit_case(true);
+    }
+
+    fn receive_deposit_case(tail: bool) {
         let receiver_user_id = ChannelId::new(7).unwrap();
         let mut rng = rand::thread_rng();
         let deposit_salt = Salt::rand(&mut rng);
@@ -598,14 +611,14 @@ mod tests {
         .expect("deposit witness should be valid");
 
         let mut send_tree = SendTree::new(SEND_TREE_HEIGHT);
-        let send_leaf = SendLeaf::default();
+        let send_leaf = if tail { SendLeaf { cur: prev_block_r, ..SendLeaf::default() } } else { SendLeaf::default() };
         send_tree.push(send_leaf.clone());
         let send_leaf_index = 0u32;
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
         let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
-            prev: BlockNumber::new(0).unwrap(),
+            prev: if tail { prev_block_r } else { BlockNumber::new(0).unwrap() },
             send_tree_root: send_tree.get_root(),
             member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
@@ -721,6 +734,30 @@ mod tests {
 
         assert_eq!(proof.public_inputs, expected_fields);
         assert_eq!(expected.pis.block_r, new_block_r);
+        if tail {
+            // A prover may not claim the tail while an authenticated outgoing block is still
+            // ahead of its balance cursor. Exercise the constraints directly, bypassing the
+            // host-side witness checks, so this cannot be fixed only in native validation.
+            let mut skipped = witness.clone();
+            let mut prior = prev_full_pis.clone();
+            prior.pis.block_r = BlockNumber::new(3).unwrap();
+            let fields = prior.to_u64_vec(&balance_cd.config).to_field_vec::<F>();
+            skipped.prev_balance_proof = balance_circuit.prove(Some(&fields), None).unwrap();
+            assert!(skipped.to_public_inputs(&balance_cd).is_err());
+            let invalid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut pw = PartialWitness::<F>::new();
+                circuit.target.set_witness::<F, C, _>(&mut pw, &skipped, &expected);
+                circuit.public_inputs.set_witness(&mut pw, &expected);
+                circuit.data.prove(pw)
+            }));
+            assert!(invalid.is_err() || invalid.unwrap().is_err(), "cannot skip the last send");
+
+            // The last-send claim itself is authenticated by the account Merkle root.
+            let mut forged = witness.clone();
+            forged.account_state.channel_leaf.prev = BlockNumber::default();
+            assert!(forged.to_public_inputs(&balance_cd).is_err());
+        }
+
         // detail2 §C-6: every consumed deposit chains its nullifier (the "deposit hash").
         assert_eq!(
             expected.pis.settled_tx_chain,

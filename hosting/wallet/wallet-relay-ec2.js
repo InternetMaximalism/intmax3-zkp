@@ -169,7 +169,7 @@ function drainCosigns(ch) {
           } else b.resolve(out);
         }
       } catch (e) {
-        console.error(`batch of ${batch.length} rejected (${String(e.stderr || e.message || e).slice(0, 200)})${batch.some(b => b.kind === 'fat') ? '; falling back to solo cosigns for fat payloads' : ''}`);
+        console.error(`batch of ${batch.length} interrupted (${String(e.stderr || e.message || e).slice(0, 200)}); checking committed receipts before fallback`);
         for (const b of batch) {
           try {
             const id = b.kind === 'slim' ? b.requestId : sendReceipts.fatId(b.payload);

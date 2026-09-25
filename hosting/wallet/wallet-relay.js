@@ -943,9 +943,9 @@ function drainCosignWindow(ch, entries) {
       const result = JSON.parse(fs.readFileSync(wc(ch, 'batch_cosigned.json'), 'utf8'));
       for (const en of fresh) en.resolve(result);
     } catch (e) {
-      // Fail-whole batch rejected (one invalid proof, §M-2): replay solo so honest txs land and
-      // only the invalid tx errors. Bounded: runs only on rejection, window ≤ BATCH_WINDOW_MAX.
-      console.error(`[batch] channel ${ch}: batch rejected (${String(e.stderr || e.message || e).slice(0, 200)}); replaying window solo`);
+      // A failed call may already have committed. Resolve acceptance first; only genuinely
+      // unaccepted requests may fall back to solo signing (bounded by BATCH_WINDOW_MAX).
+      console.error(`[batch] channel ${ch}: batch processing interrupted (${String(e.stderr || e.message || e).slice(0, 200)}); checking receipts before solo fallback`);
       // Sequentially: `soloOne` awaits the head flush, and each solo cosign advances the head, so a
       // later payload that still extends the OLD head is a stale anchor (409 → the wallet re-signs)
       // rather than a generic CLI failure. Parallel replay overwrote payload.json/cosigned.json and

@@ -1,6 +1,9 @@
 # Receive-after-send recovery: design findings (2026-09-22)
 
-Status: design proposal, not implemented. Follow-up to `HANDOFF-2026-09-22.md` §3.
+Status: original queue design. A feature-gated authenticated-tail circuit implementation and
+its remaining deployment/migration requirements are recorded in
+[`wallet-recovery-followup-2026-09-25.md`](wallet-recovery-followup-2026-09-25.md).
+It is not enabled on existing channels. Follow-up to `HANDOFF-2026-09-22.md` §3.
 
 ## Verified constraints
 

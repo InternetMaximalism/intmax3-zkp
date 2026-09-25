@@ -225,8 +225,9 @@ where
             )));
         }
 
-        // if there is a previous outgoing tx check additional conditions
-        if self.account_state.channel_leaf.prev != BlockNumber::default() {
+        // Require an authenticated send interval unless this protocol version permits
+        // the authenticated tail after the last already-processed outgoing block.
+        if crate::circuits::balance::common::receive_window::requires_send_interval(self.account_state.channel_leaf.prev, prev_block_r) {
             // user_witness.send_leaf.prev <= receiver_balance_proof.block_r
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveTransferError::BlockNumberError(format!(
@@ -447,17 +448,18 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         // public_state.block_number >= new_block_r
         public_state.block_number.enforce_ge(builder, &new_block_r);
 
-        let has_no_outgoint_tx = account_state.channel_leaf.prev.is_zero(builder);
-        let has_outgoint_tx = builder.not(has_no_outgoint_tx);
+        let has_outgoing_tx = crate::circuits::balance::common::receive_window::requires_send_interval_target(
+            builder, &account_state.channel_leaf.prev, &prev_block_r,
+        );
 
-        // user_witness.send_leaf.prev <= prev_block_r if has_outgoint_tx==true
-        prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoint_tx);
+        // user_witness.send_leaf.prev <= prev_block_r if has_outgoing_tx==true
+        prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing_tx);
 
-        // new_block_r < user_witness.send_leaf.cur if has_outgoint_tx==true
+        // new_block_r < user_witness.send_leaf.cur if has_outgoing_tx==true
         account_state
             .send_leaf
             .cur
-            .conditional_gt(builder, &new_block_r, has_outgoint_tx);
+            .conditional_gt(builder, &new_block_r, has_outgoing_tx);
 
         // tx_block_number <= new_block_r so that the transfer can be received.
         let tx_block_number = tx_settlement.tx_block_number();
@@ -770,6 +772,17 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_receive_transfer_circuit() {
+        receive_transfer_case(false);
+    }
+
+    #[cfg(feature = "authenticated-tail-receive")]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_receive_transfer_after_last_send() {
+        receive_transfer_case(true);
+    }
+
+    fn receive_transfer_case(tail: bool) {
         let mut rng = rand::thread_rng();
 
         let receiver_user_id = ChannelId::new(2).unwrap();
@@ -862,7 +875,7 @@ mod tests {
 
         let send_leaf_receiver = SendLeaf {
             prev: BlockNumber::new(0).unwrap(),
-            cur: BlockNumber::new(7).unwrap(),
+            cur: BlockNumber::new(if tail { 4 } else { 7 }).unwrap(),
             tx_tree_root: tx_tree_root.into(),
         };
         let mut send_tree_receiver = SendTree::new(SEND_TREE_HEIGHT);
@@ -880,7 +893,7 @@ mod tests {
         };
         let user_leaf_receiver = ChannelLeaf {
             index: send_tree_receiver.len() as u32,
-            prev: send_leaf_receiver.prev,
+            prev: if tail { send_leaf_receiver.cur } else { send_leaf_receiver.prev },
             send_tree_root: send_tree_receiver.get_root(),
             member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };

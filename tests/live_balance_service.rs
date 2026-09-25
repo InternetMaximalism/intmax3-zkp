@@ -535,13 +535,21 @@ fn real_deposit_send_restart_next_nonce_and_corruption_fences() {
     std::thread::Builder::new()
         .name("live-balance-e2e".into())
         .stack_size(64 * 1024 * 1024)
-        .spawn(run_live_balance_e2e)
+        .spawn(|| run_live_balance_e2e(false))
         .expect("spawn large-stack prover thread")
         .join()
         .expect("live balance E2E thread");
 }
 
-fn run_live_balance_e2e() {
+#[cfg(feature = "authenticated-tail-receive")]
+#[test]
+fn receive_after_send_roundtrip_has_durable_idle_exit_kit() {
+    std::thread::Builder::new().name("tail-roundtrip".into())
+        .stack_size(64 * 1024 * 1024).spawn(|| run_live_balance_e2e(true))
+        .unwrap().join().unwrap();
+}
+
+fn run_live_balance_e2e(tail_roundtrip: bool) {
     let directory = TestDirectory::new();
     let producer_path = directory.producer();
     let balance_path = directory.balance();
@@ -1262,6 +1270,40 @@ fn run_live_balance_e2e() {
         )
         .is_err()
     );
+    if tail_roundtrip {
+        producer.sync_offchain_heads("sync:42:credit".into(), vec![
+            credit.fund_import_state.clone(), destination_credit_snapshot.state.clone(),
+        ]).expect("publish destination credit before return send");
+        let mut back = intmax3_zkp::wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted(
+            &destination_keys[1], &destination_credit_snapshot, 1, channel_id, 0,
+            keys[0].regev_pk.clone(), keys[0].pk_g(), deposit_salt, 0, 0, 2,
+            fresh_root(30), LEVEL, &mut rng,
+        ).expect("spend recently received credit");
+        back.debit_payload.proposed_next_state=sign_all(back.debit_payload.proposed_next_state.clone(),&destination_keys);
+        attach_small_block_signatures(&destination_record,&back.debit_payload.proposed_next_state,&mut back.transfer_descriptor.inter_channel_tx).unwrap();
+        back.debit_payload.inter_channel_tx=back.transfer_descriptor.inter_channel_tx.clone();
+        let back_head=back.debit_payload.proposed_next_state.clone();
+        let receipt=producer.post_inter_channel("inter:42:41:0".into(),back_head.clone(),back.debit_payload.clone(),back.transfer_descriptor.clone()).unwrap();
+        destination_live.settle_inter_channel(&producer,&receipt,&back_head,&back.debit_payload,&back.transfer_descriptor).unwrap();
+        let artifact=destination_live.inter_channel_send_artifact("inter:42:41:0").unwrap();
+        let source_snapshot=ChannelSnapshot{record:record.clone(),members:members.clone(),state:inter_state.clone(),settled_tx_accumulator:inter.settled_tx_accumulator.clone()};
+        let mut incoming=build_inter_channel_credit(&keys[0],&source_snapshot,&back.transfer_descriptor,LEVEL,&mut rng).unwrap();
+        incoming.fund_import_state=sign_all(incoming.fund_import_state,&keys);
+        incoming.bundle_apply_state=sign_all(incoming.bundle_apply_state,&keys);
+        let incoming_snapshot=ChannelSnapshot{record:record.clone(),members:members.clone(),state:incoming.bundle_apply_state.clone(),settled_tx_accumulator:incoming.settled_tx_accumulator.clone()};
+        let received=live.receive_inter_channel(&producer,&receipt,&back.debit_payload,&back.transfer_descriptor,&artifact,&incoming.fund_import_state,&incoming_snapshot,LEVEL)
+            .expect("A receives after sending, without a future A send");
+        assert_eq!(received.base_nonce,3);
+        let same=live.receive_inter_channel(&producer,&receipt,&back.debit_payload,&back.transfer_descriptor,&artifact,&incoming.fund_import_state,&incoming_snapshot,LEVEL).unwrap();
+        assert_eq!(same,received,"replay cannot credit twice");
+        let kit=live.channel_backing_artifact().unwrap().signed_head_exit_kit.expect("idle recipient exit kit");
+        assert_eq!(kit.backing_public_inputs.settled_tx_chain,incoming_snapshot.state.balance_state.settled_tx_chain);
+        drop(live);
+        let restored=LiveBalanceService::open(&balance_path,&producer).expect("restart tail recipient");
+        assert_eq!(restored.status().unwrap().signed_head_digest,Some(incoming_snapshot.state.digest));
+        assert_eq!(restored.channel_backing_artifact().unwrap().signed_head_exit_kit.unwrap().backing_public_inputs,kit.backing_public_inputs);
+        return;
+    }
     drop(destination_live);
 
     // A body mutation under an already settled request id is rejected rather than treated as a

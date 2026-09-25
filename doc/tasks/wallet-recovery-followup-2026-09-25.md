@@ -75,22 +75,29 @@ Passed real Plonky2 tests with the feature:
 
 Remaining before calling the third issue resolved for the user's stack:
 
-1. Exercise the full new BalanceProcessor/producer/exit-kit pipeline and new pinned L1 exit
-   verifier deployment on a separate Anvil instance, including receive → spend → idle close.
+1. Finish the new pinned L1 exit verifier deployment test on the separate Anvil instance.
+   The full resident BalanceProcessor/producer/exit-kit receive → spend → receive → idle-kit
+   restart test now passes; an actual L1 payout remains to be checked.
 2. Specify and execute a value-preserving migration from old channels/contracts, or implement a
    separately verified compatibility mechanism. Existing recursive proofs cannot simply be read
    under a changed verifier. Existing close-funding verifier configuration is immutable.
 3. Recover the old channel7 pending credit from its original evidence without fabricating a
    completed receipt, duplicating credit, or resetting the user's chain.
 
-The circuit tests establish the new condition and its local rejection boundary; they do not by
- themselves establish end-to-end migration or repair existing channel7. Do not describe all three
+The full resident-service test `receive_after_send_roundtrip_has_durable_idle_exit_kit` also
+passed (372.86s). It constructs the real recursive balance/producer pipeline, sends A→B, spends
+B's just-received credit back to A, receives into A after A's last send with no future send,
+replays the receipt without another credit, and reopens A with the exact signed head and exit kit.
+It uses the existing test Regev security level for member payloads, not a production-strength
+browser transcript. The separate WASM/Anvil run covers the deployed wallet path.
+
+The circuit/service tests establish the new condition and its local rejection boundary; they do not by
+themselves establish end-to-end migration or repair existing channel7. Do not describe all three
 issues as completely resolved until the remaining acceptance checks are complete.
 
 ## Compatible runtime activation
 
-Recovery commit: `fb17561`. Broad Node suite: 644/644; the later focused historical-batch test
-also passes. `cargo check --all-targets`, native receipt persistence and actual-payload JS/Rust
+Recovery commits: `fb17561`, `24fbc73`. Broad Node suite: **651/651**. `cargo check --all-targets`, native receipt persistence and actual-payload JS/Rust
 identity checks pass. Six SIGKILL boundaries pass as described above.
 
 On the dedicated existing Anvil (RPC8558), replaying the latest completed burn twice through the
@@ -106,3 +113,54 @@ returned their original signed digests and both user L1 balances were unchanged.
 binaries from experiments. Cargo integration-test builds can also rebuild top-level executable
 artifacts; feature experiments should additionally use a separate `CARGO_TARGET_DIR`.
 The separate protocol Anvil under `/tmp/intmax-tail-protocol-20260925` uses RPC8560 and relay8040/8041.
+
+## Final recovery hardening
+
+New burns are checked with native `--propose-exit-kit` before acquiring a durable owner. This
+mode releases no signatures. Invalid/stale input therefore cannot create an unrecoverable owner
+that blocks all subsequent channel mutations. Existing signed legacy burns additionally require
+exact original proof/descriptor equality, not only a caller-supplied matching digest.
+
+A batch signing call may commit and then fail to publish its output or bind its backing. Both
+local and EC2 catch paths now inspect committed acceptance before any solo fallback. An accepted
+payment can never become a `staleAnchor` instruction to create a new payment. Recovery failures
+retain the same request. Route-level tests cover both successful reconciliation and another
+publication failure, including streamed slim and fat EC2 requests. These are deterministic route
+fault tests; they do not claim an EC2 deployment was exercised.
+
+The user relay was updated again with `24fbc73` (PID58612 at activation). All three signed heads
+and both user L1 balances remained byte-for-byte equal in `recovery-final-before.json` and
+`recovery-final-after.json`. User RPC8545 and its contracts were not reset or replaced.
+
+## Real WASM / Anvil authenticated-tail acceptance
+
+`hosting/wallet/test/wallet-tail-e2e.js` passed against the isolated RPC8560 deployment at
+`/tmp/intmax-tail-protocol-20260925` (relay8040/8041). It used real WASM proofs and real deposits:
+
+1. Deposit 0.01 ETH into each of two channels.
+2. A sends 0.002 ETH to B; B spends its received balance by sending 0.001 ETH back to A.
+3. A receives without any later outgoing send, then imports an additional 0.001 ETH deposit.
+4. Replay each exact transfer; the recipient head does not advance again.
+5. Final delegate balances: A = 0.010 ETH, B = 0.011 ETH. Evidence: `roundtrip-success.json`.
+
+The full resident-service and circuit tests listed above also passed. Final
+`cargo check --all-targets --features authenticated-tail-receive` passed. The feature remains off
+for the existing user deployment because its recursive proofs and immutable verifier pins are
+for the prior circuit.
+
+For a separate L1 payout check, `/tmp/intmax-tail-configured-20260925` has an isolated contracts
+copy and newly generated feature-matching exit configurations. Build `generate_close_fixture`
+with `authenticated-tail-receive,close-fixture-bin`, run `--mle-config-only` in the isolated root,
+and use the generated close withdrawal configuration for `withdrawal_mle_config.json` too.
+Do not reuse the repository's prior circuit fixtures: although the generic
+`verificationConfigDigest` may stay equal, `preprocessedCommitmentRoot`, `circuitConfigDigest`
+and `circuitDigest` change. `CONTRACTS_DIR` now applies to JS deployment/attestation as well as
+native publication, avoiding writes to the shared test fixture directory.
+
+This new rollup is `0xc351628EB244ec633d5f21fBD6621e1a683B1181` on RPC8560, relay8042/8043.
+The explicit test preload `hosting/wallet/test/kill-after-burn-sign.cjs` killed the real relay
+immediately after the native signer returned, before the relay recorded `op.head`. The one-shot
+marker was consumed; `burn_operation.json` remained `prepared` without a head. Restart resumed
+the exact saved request, finished it as `complete`, and retained 0.005 ETH after one 0.005 ETH burn
+from a 0.01 ETH deposit. Real L1 validity publication and payout verification are in progress;
+this paragraph must be updated with the final result before claiming that payout check passed.
