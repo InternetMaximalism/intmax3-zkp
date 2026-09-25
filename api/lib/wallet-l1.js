@@ -91,7 +91,7 @@ async function attest(ch, backing) {
   ], { timeout: Math.max(1_200_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0)) });
   const settlement = cli.readJson(cli.wc(ch, 'settlement.json'));
   cli.sh('forge', ['script', 'script/WalletL1Lifecycle.s.sol', '--sig', 'attestBacking()', '--rpc-url', cli.RPC,
-    '--broadcast', '--slow', ...cli.l1SignerArgs()], { cwd: path.join(cli.REPO, 'contracts'), timeout: Math.max(1_200_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0)),
+    '--broadcast', '--slow', ...cli.l1SignerArgs()], { cwd: process.env.CONTRACTS_DIR || path.join(cli.REPO, 'contracts'), timeout: Math.max(1_200_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0)),
       env: { ...process.env, MANAGER: settlement.manager, WALLET_BACKING_PATH: path.join(dir, 'backing_mle.json') } });
 }
 module.exports = { deploymentConfig, configure, publish, attest };

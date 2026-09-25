@@ -171,6 +171,16 @@ function drainCosigns(ch) {
       } catch (e) {
         console.error(`batch of ${batch.length} rejected (${String(e.stderr || e.message || e).slice(0, 200)})${batch.some(b => b.kind === 'fat') ? '; falling back to solo cosigns for fat payloads' : ''}`);
         for (const b of batch) {
+          try {
+            const id = b.kind === 'slim' ? b.requestId : sendReceipts.fatId(b.payload);
+            const prior = sendReceipts.accepted(chDir(ch), id);
+            if (prior) {
+              await cli(ch, ['publish-snapshot', 'channel_snapshot.json']);
+              b.resolve(JSON.stringify(b.kind === 'slim'
+                ? {ok:true,stateVersion:prior.balanceState.stateVersion,digest:prior.digest} : prior));
+              continue;
+            }
+          } catch (recoveryError) { b.reject(recoveryError); continue; }
           if (b.kind !== 'fat') { b.reject(e); continue; }
           // Fat fallback: honest solo txs survive a poisoned batch (legacy behavior).
           try {

@@ -952,6 +952,16 @@ function drainCosignWindow(ch, entries) {
       // released this lock with flushes still in flight.
       for (const en of fresh) {
         if (en.settled) continue;
+        // Signing can commit before publication/backing fails. Never turn that ambiguity into
+        // staleAnchor (which authorizes the wallet to create a different payment).
+        try {
+          const committed = sendReceipts.accepted(chDir(ch), sendReceipts.fatId(en.payload));
+          if (committed) {
+            await flushPublishedHead(ch);
+            en.resolve(committed);
+            continue;
+          }
+        } catch (recoveryError) { en.reject(recoveryError); continue; }
         const head = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')).state.digest;
         if (String(en.payload.proposedNextState.prevDigest).toLowerCase() !== String(head).toLowerCase()) {
           const err = new Error('staleAnchor: payload does not extend the current head — re-sign against the latest snapshot');
@@ -1534,7 +1544,7 @@ function deployRollup() {
   // anvil in this environment (observed: it stalls forever right after the local simulation,
   // before sending anything, regardless of anvil's mining mode). Sending and confirming one
   // transaction at a time avoids it.
-  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--slow', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts'), env: { ...process.env, WALLET_VALIDITY_CONFIG: require('../../api/lib/wallet-l1').deploymentConfig() } });
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--slow', '--code-size-limit', '50000'], { cwd: process.env.CONTRACTS_DIR || path.join(REPO, 'contracts'), env: { ...process.env, WALLET_VALIDITY_CONFIG: require('../../api/lib/wallet-l1').deploymentConfig() } });
   const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
   return m[1];

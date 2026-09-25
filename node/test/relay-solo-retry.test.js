@@ -14,3 +14,18 @@ test('lost batch response resolves each original request after a newer head with
  await context.drainCosignWindow(7,['a','b'].map(id=>({payload:{id,proposedNextState:{prevDigest:'old-anchor',digest:'solo-'+id}},resolve:r=>results.push(r),reject:e=>{throw e;}})));
  assert.deepEqual(results,[older,older]);assert.equal(flushes,1);
 });
+for (const recoveryFails of [false,true]) test(`committed batch publication failure never becomes staleAnchor (recovery fails: ${recoveryFails})`,async()=>{
+ let committed=false,signs=0,flushes=0;
+ const state={channelId:7,digest:'old',h2Tag:'0x'+'00'.repeat(32)},result={channelId:7,digest:'batch'};
+ const context={console:{log(){},error(){}},cluster:null,withLock:(_,fn)=>fn(),chDir:()=>'',wc:(_,f)=>f,path,
+   fs:{mkdirSync(){},writeFileSync(){},unlinkSync(){},readFileSync:f=>JSON.stringify(f==='batch_cosigned.json'?result:{state})},
+   partitionByAnchor,projectToSlim:p=>p,sendReceipts:{fatId:p=>p.id,accepted:()=>committed?result:null},
+   cli:()=>{signs++;committed=true;state.digest='batch';},
+   flushPublishedHead:async()=>{flushes++;if(flushes===1||recoveryFails)throw Error('publication unavailable');}};
+ vm.createContext(context);vm.runInContext(fn,context);const results=[],errors=[];
+ await context.drainCosignWindow(7,['a','b'].map(id=>({payload:{id,proposedNextState:{prevDigest:'old',digest:'solo-'+id}},resolve:r=>results.push(r),reject:e=>errors.push(e)})));
+ assert.equal(signs,1);
+ assert.equal(results.length,recoveryFails?0:2);
+ assert.equal(errors.length,recoveryFails?2:0);
+ assert.ok(errors.every(e=>!e.staleAnchor&&/publication unavailable/.test(e.message)));
+});

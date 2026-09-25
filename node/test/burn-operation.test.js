@@ -15,7 +15,7 @@ function fixture(t) {
   let loseSign=false;
   const kit={cliWithPreparedExitKit:async()=>{calls.sign++;write(path.join(dir,'native-wal.json'),input.debitPayload.proposedNextState);if(loseSign)throw Error('process lost after native signature commit');write(path.join(dir,'burn_cosigned.json'),input.debitPayload.proposedNextState);},acknowledgePreparedExitKit:()=>{}};
   const tickets={findActiveTicket:()=>{try{return read(path.join(dir,'ticket.json'));}catch(e){if(e.code==='ENOENT')return null;throw e;}},upsertTicket:(_,ticket)=>write(path.join(dir,'ticket.json'),ticket),getTicket:()=>tickets.findActiveTicket()};
-  return {dir,input,calls,tickets,loseSign:()=>{loseSign=true;},create:checkpoint=>createBurnOperations({cli,bp,kit,checkpoint})};
+  return {dir,input,calls,tickets,cli,loseSign:()=>{loseSign=true;},create:checkpoint=>createBurnOperations({cli,bp,kit,checkpoint})};
 }
 for(const point of ['prepared','signed','producer','live','ticket']) test(`burn resumes from ${point} without replacing proof or duplicating debit`,async t=>{
  const f=fixture(t);await assert.rejects(f.create(async phase=>{if(phase===point)throw Error('crash');}).run(7,f.input,f.tickets),/crash/);
@@ -60,4 +60,16 @@ test('pre-journal completed burn replay preserves its terminal ticket',async t=>
  fs.rmSync(path.join(f.dir,'burn_operation.json'));fs.rmSync(path.join(f.dir,'burn_results'),{recursive:true});
  const ticket=f.tickets.findActiveTicket();ticket.status='settle_done';f.tickets.upsertTicket(7,ticket);
  await f.create().run(7,f.input,f.tickets);assert.equal(f.tickets.findActiveTicket().status,'settle_done');assert.equal(f.calls.sign,1);
+});
+test('a stale or invalid new proof is rejected before acquiring durable burn ownership',async t=>{
+ const f=fixture(t),original=f.cli.cli;
+ f.cli.cli=(_ch,args)=>{if(args.includes('--propose-exit-kit'))throw Error('stale or invalid native proof');return original(_ch,args);};
+ await assert.rejects(f.create().run(7,f.input,f.tickets),/invalid native proof/);
+ assert.equal(f.create().pending(7),null);assert.equal(f.tickets.findActiveTicket(),null);assert.equal(f.calls.sign,0);
+ f.cli.cli=original;await f.create().run(7,f.input,f.tickets);assert.equal(f.calls.sign,1);
+});
+test('an old signed digest with changed proof inputs cannot acquire a new owner',async t=>{
+ const f=fixture(t);await f.create().run(7,f.input,f.tickets);f.tickets.findActiveTicket=()=>null;
+ const changed={...f.input,transferDescriptor:{proof:'changed'}};
+ await assert.rejects(f.create().run(7,changed,f.tickets),/different proof inputs/);assert.equal(f.create().pending(7),null);assert.equal(f.calls.sign,1);
 });

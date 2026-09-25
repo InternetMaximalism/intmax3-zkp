@@ -43,6 +43,30 @@ function createBurnOperations({cli=cliModule, bp=producer, kit=exitKit, checkpoi
     }
     if(!op || op.id!==id) {
       if(!hasInput) throw Object.assign(Error('Burn needs its original proof and descriptor'),{status:400});
+      // Reject stale/invalid new proofs BEFORE they can become a durable exclusion owner.
+      // This native mode can only propose; it never releases signatures or stages a producer
+      // block. Once ownership exists, all failures retain the exact request for recovery.
+      cli.cli(ch,['recover-inter-transfers']);
+      const recovered=read(ch,'burn_cosigned.json');
+      const recoveredMatches=recovered && recovered.digest===input.debitPayload.proposedNextState?.digest && recovered.channelId===ch;
+      if(recoveredMatches && (!isDeepStrictEqual(read(ch,'burn_payload.json'),input.debitPayload)
+          || !isDeepStrictEqual(read(ch,'burn_descriptor.json'),input.transferDescriptor))) {
+        throw Object.assign(Error('Saved signed burn belongs to different proof inputs; no new burn was started'),{status:409});
+      }
+      if(!recoveredMatches) {
+        const args=['cosign-burn-send','burn_payload.json','burn_descriptor.json','burn_cosigned.json'];
+        const inputs=[{name:args[1],value:input.debitPayload},{name:args[2],value:input.transferDescriptor}];
+        const priorKit=read(ch,'exit_kit_operation.json');
+        if(priorKit && priorKit.status!=='complete') {
+          const binding=bp.stableRequestId('presign',{ch,args,inputs,requestId:id});
+          if(priorKit.binding!==binding) throw Object.assign(Error('An earlier signing operation must recover before another burn'),{status:409});
+        } else {
+          cli.writeJson(cli.wc(ch,args[1]),input.debitPayload);
+          cli.writeJson(cli.wc(ch,args[2]),input.transferDescriptor);
+          const env=await bp.authoritativeBaseNonceEnv(ch);
+          cli.cli(ch,[...args,'--propose-exit-kit'],env);
+        }
+      }
       op={schemaVersion:1,id,phase:'prepared',createdAt:Date.now(),input};
       save(ch,op);
     }
