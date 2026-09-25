@@ -124,8 +124,11 @@ router.post('/burn', (req, res) => {
 // POST /api/v1/channel/:ch/partial-withdrawal/submit (A24)
 router.post('/submit', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
+    const submitted = require('../lib/partial-withdrawal-live').resumeSubmittedAuth(ch);
+    if (submitted) return res.json({ authDigest: submitted.auth_digest });
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    const before = ticket && ticket.status;
     if (ticket) {
       ticket.status = 'settle_pending';
       upsertTicket(ch, ticket);
@@ -133,10 +136,16 @@ router.post('/submit', (req, res) => {
     // anvil: deploys the devnet stack on demand, as before. Real chain: a structured 409 naming
     // the operator task, because the real-VK deployer brings its own rollup and so must run
     // BEFORE the channel is funded (lib/cli.ensureSettlement).
-    ensureSettlement(ch);
-    const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
-    const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-    cli(ch, ['pw-submit', RPC], extra);
+    try {
+      ensureSettlement(ch);
+      const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
+      const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
+      const proofEnv = await require('../lib/partial-withdrawal-live').stageSubmitProof(ch);
+      cli(ch, ['pw-submit', RPC], { ...extra, ...proofEnv });
+    } catch (e) {
+      if (ticket) { ticket.status = before; upsertTicket(ch, ticket); }
+      throw e;
+    }
     const auth = readJson(wc(ch, 'pw_auth.json'));
     res.json({ authDigest: auth.auth_digest });
   }).catch(e => failRoute(res, e));
@@ -147,14 +156,7 @@ router.post('/submit', (req, res) => {
 // the route only ferries the result. The withdrawal prover address is the operator's L1 signer
 // (any address is sound — it is committed into the proof's public inputs).
 async function stagePayoutArtifacts(ch) {
-  const { l1SignerAddress } = require('../lib/cli');
-  const pw = readJson(wc(ch, 'pw_producer.json'));
-  const descriptor = readJson(wc(ch, 'burn_descriptor.json'));
-  const artifacts = await producer.liveBurnPayoutArtifacts(
-    ch, pw.producerRequestId, descriptor, l1SignerAddress(),
-  );
-  writeJson(wc(ch, 'pw_artifacts.json'), artifacts);
-  return artifacts;
+  return require('../lib/partial-withdrawal-live').stagePayoutArtifacts(ch);
 }
 
 // POST /api/v1/channel/:ch/partial-withdrawal/finalize (A25)
@@ -186,7 +188,10 @@ router.post('/settle', (req, res) => {
     ensureSettlement(ch);
     const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-    cli(ch, ['pw-submit', RPC], extra);
+    if (!require('../lib/partial-withdrawal-live').resumeSubmittedAuth(ch)) {
+      const proofEnv = await require('../lib/partial-withdrawal-live').stageSubmitProof(ch);
+      cli(ch, ['pw-submit', RPC], { ...extra, ...proofEnv });
+    }
     await stagePayoutArtifacts(ch);
     cli(ch, ['pw-finalize', RPC]);
     const auth = readJson(wc(ch, 'pw_auth.json'));

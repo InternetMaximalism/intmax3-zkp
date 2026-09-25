@@ -287,7 +287,7 @@ test('a signing refusal before the source commits leaves nothing pending: staged
   const h = harness();
   t.after(() => fs.rmSync(h.work, { recursive: true, force: true }));
   h.writeJson(h.wc(7, 'exit_kit_operation.json'), { schemaVersion: 1, status: 'signing' });
-  h.cliMock.refuseNext = Object.assign(new Error('Command failed\nerror: insufficient balance'), { stderr: 'error: insufficient balance' });
+  h.cliMock.refuseNext = Object.assign(new Error('Command failed\nerror: insufficient balance'), { stderr: 'error: insufficient balance', status: 1 });
   const refused = await h.invoke(h.body);
   assert.equal(refused.statusCode, 409);
   assert.equal(h.calls.abandon, 1, 'the staged exit-kit block is released');

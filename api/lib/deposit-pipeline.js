@@ -62,7 +62,7 @@ async function ensureRegistered(ch) {
   const status = await producer.status();
   const registered = (status.channelHeads || [])
     .some((head) => Number(head.channelId) === Number(ch));
-  if (!registered) await producer.register(readJson(wc(ch, 'channel_snapshot.json')));
+  if (!registered) await require('./live-registration').ensureLiveRegistration(ch, readJson(wc(ch, 'channel_snapshot.json')));
 }
 
 async function ensureLiveBackingAdopted(ch) {
@@ -222,4 +222,4 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
-module.exports = { importL1Deposit, journalBackingDeposit };
+module.exports = { importL1Deposit, journalBackingDeposit, ensureLiveBackingAdopted };

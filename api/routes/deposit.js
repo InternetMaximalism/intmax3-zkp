@@ -44,7 +44,7 @@ router.post('/import', (req, res) => {
       if (matchesPending) writeJson(pendingPath, { ...pending, status: 'imported' });
     }
     const ticket = findActiveTicket(ch, 'deposit');
-    if (ticket) {
+    if (ticket && String(ticket.params?.txHash).toLowerCase() === txHash.toLowerCase()) {
       ticket.status = 'import_done';
       ticket.steps.import = { completedAt: Date.now() };
       upsertTicket(ch, ticket);

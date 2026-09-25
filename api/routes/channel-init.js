@@ -2,7 +2,7 @@ const { Router } = require('express');
 const fs = require('fs');
 const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
-const { cliWithPreparedExitKit } = require('../lib/exit-kit');
+const { cliWithPreparedExitKit, installHeadExitKit } = require('../lib/exit-kit');
 const producer = require('../lib/block-producer');
 const preflight = require('../lib/deposit-preflight');
 const { spendDeposit, importTrackedDeposit, depositResponse, failDeposit } = require('../lib/deposit-spend');
@@ -24,7 +24,7 @@ router.post('/init', (req, res) => {
     // Idempotent across restarts — an existing snapshot returns its configured recipient.
     const live = await producer.liveInit(ch);
     await producer.liveBindSnapshot(ch, snapshot);
-    await producer.register(snapshot);
+    await require('../lib/live-registration').ensureLiveRegistration(ch, snapshot);
     res.json({ ...snapshot, liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -44,7 +44,7 @@ router.post('/join', (req, res) => {
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     const live = await producer.liveInit(ch);
     await producer.liveBindSnapshot(ch, snapshot);
-    await producer.register(snapshot);
+    await require('../lib/live-registration').ensureLiveRegistration(ch, snapshot);
     const slot = preflight.resolveContributionSlot(snapshot, contribution);
     res.json({ snapshot, slot, balance: '0', liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
@@ -78,7 +78,7 @@ router.post('/join-and-deposit', (req, res) => {
     let snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     const live = await producer.liveInit(ch);
     await producer.liveBindSnapshot(ch, snapshot);
-    await producer.register(snapshot);
+    await require('../lib/live-registration').ensureLiveRegistration(ch, snapshot);
     const slot = preflight.resolveContributionSlot(snapshot, contribution);
     let completed = null;
 
@@ -119,6 +119,7 @@ router.post('/register-token', (req, res) => {
     await cliWithPreparedExitKit(ch, ['register-token', String(tokenIndex), 'token_register_cosigned.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     await publishOffchainSnapshot(ch, snapshot.state);
+    await installHeadExitKit(ch);
     res.json(snapshot);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));

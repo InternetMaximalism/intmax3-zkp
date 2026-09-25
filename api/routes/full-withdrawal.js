@@ -1,3 +1,4 @@
+const { randomUUID } = require('node:crypto');
 const { Router } = require('express');
 const fs = require('fs');
 const {
@@ -579,7 +580,7 @@ router.post('/start', (req, res) => {
       return res.json({ ticketId: ticket.id, ticket });
     }
     ticket = upsertTicket(ch, {
-      id: 'fw_' + Date.now(),
+      id: 'fw_' + randomUUID(),
       type: 'full_withdrawal',
       status: 'started',
       createdAt: Date.now(),
@@ -637,7 +638,7 @@ router.post('/deploy', (req, res) => {
     let ticket = findActiveTicket(ch, 'full_withdrawal');
     if (!ticket) {
       ticket = {
-        id: 'fw_' + Date.now(),
+        id: 'fw_' + randomUUID(),
         type: 'full_withdrawal',
         status: 'deploy_done',
         createdAt: Date.now(),

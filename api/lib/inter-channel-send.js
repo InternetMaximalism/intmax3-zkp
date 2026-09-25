@@ -220,7 +220,7 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
     // commit that did happen (journal present) stays pending for `resumePendingInterTransfer`.
     if (!sourceLegCommitted(ch, transferDescriptor)) {
       await abandonUncommittedTransfer(ch, producerRequestId, e);
-      throw Object.assign(e, { status: e.status || 409 });
+      throw Object.assign(e, { status: Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 409 });
     }
     throw e;
   }

@@ -67,6 +67,19 @@ contract DeployWalletSettlementHarness is DeployWalletSettlement {
     }
 }
 
+contract DeployWalletSecondSettlementHarness is DeployWalletSettlement {
+    address private immutable incumbent;
+    constructor(address existing) { incumbent = existing; }
+    function _existingManager() internal view override returns (address) { return incumbent; }
+    function _read(string memory f) internal view override returns (string memory) {
+        if (keccak256(bytes(f)) == keccak256(bytes("pw_reg.json"))) {
+            return super._read("pw_reg_second_guard.json");
+        }
+        return super._read(f);
+    }
+}
+
+
 /// @notice `DeployCloseCli` driven down its ATTACH branch (`EXISTING_ROLLUP` set): the production
 ///         path, where the script binds a `CloseFundingMaterializer` to an already-live rollup and
 ///         keys the REAL `CloseAssetBacking` VK from an authenticated `public_close_prover` bundle.
@@ -696,6 +709,25 @@ contract DeployGuardsTest is Test {
     /// left as padding. That last assertion is the decisive one: it fails if the limb carries the
     /// live count, and it fails if the delegates are folded into the active slots — the two halves
     /// of what the conflated script did.
+    function test_deployWalletSettlementScript_secondChannelSharesMaterializer() public {
+        (IntmaxRollup rollup, ChannelSettlementManager first,) = _runWalletSettlement();
+        (,, ChannelSettlementManager second) = new DeployWalletSecondSettlementHarness(address(first)).run();
+        assertTrue(rollup.isRegisteredSettlementManager(address(first)));
+        assertTrue(rollup.isRegisteredSettlementManager(address(second)));
+        assertEq(uint32(second.channelId()), 12);
+        assertEq(second.closeFundingMaterializer(), first.closeFundingMaterializer());
+        CloseFundingMaterializer materializer = CloseFundingMaterializer(first.closeFundingMaterializer());
+        assertEq(materializer.managerOfChannel(11), address(first));
+        assertEq(materializer.managerOfChannel(12), address(second));
+    }
+
+    function test_deployWalletSettlementScript_rejectsUnregisteredExistingManager() public {
+        _runWalletSettlement();
+        DeployWalletSecondSettlementHarness script = new DeployWalletSecondSettlementHarness(address(0x1234));
+        vm.expectRevert(bytes("existing manager is not registered"));
+        script.run();
+    }
+
     function test_deployWalletSettlementScript_registersCosignersOnly() public {
         (IntmaxRollup rollup,, Vm.Log[] memory logs) = _runWalletSettlement();
 

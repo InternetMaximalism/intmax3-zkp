@@ -11,6 +11,7 @@ import {
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
 import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {DeployConfig} from "./DeployConfig.sol";
 import {FixtureLib} from "./FixtureLib.sol";
@@ -32,6 +33,10 @@ contract DeployWalletSettlement is Script {
     /// checked-in stand-in record (the live one is staged at run time by the Rust driver and is
     /// therefore untracked, and `foundry.toml` grants read-only fs access). File bytes only — no
     /// behaviour is stubbed.
+    function _existingManager() internal view virtual returns (address) {
+        return vm.envOr("WALLET_EXISTING_SETTLEMENT_MANAGER", address(0));
+    }
+
     function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
@@ -69,9 +74,25 @@ contract DeployWalletSettlement is Script {
         );
         // The signer-independent exit's whole-vector CloseAssetBacking adapter, pinned into the
         // materializer at construction (a DIFFERENT circuit from the close-intent adapter above).
-        (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingJson);
-        CloseFundingMaterializer materializer =
-            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)));
+        CloseFundingMaterializer materializer;
+        address existing = _existingManager();
+        if (existing == address(0)) {
+            (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingJson);
+            materializer = new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)));
+        } else {
+            require(rollup.isRegisteredSettlementManager(existing), "existing manager is not registered");
+            ChannelSettlementManager incumbent = ChannelSettlementManager(payable(existing));
+            require(address(incumbent.registry()) == rollupAddr, "existing manager uses another rollup");
+            materializer = CloseFundingMaterializer(incumbent.closeFundingMaterializer());
+            require(address(materializer.rollup()) == rollupAddr, "materializer uses another rollup");
+            IPinnedMleVerifierV2 adapter = materializer.backingMleVerifier();
+            require(adapter.allowedChainId() == block.chainid, "backing adapter chain mismatch");
+            MleVerifierV2 core = MleVerifierV2(adapter.core());
+            require(core.allowedChainId() == block.chainid, "backing core chain mismatch");
+            require(core.verificationConfigDigest() == vm.parseJsonBytes32(backingJson, ".pinnedVerifier.verificationConfigDigest"), "backing verification config mismatch");
+            require(core.circuitConfigDigest() == vm.parseJsonBytes32(backingJson, ".pinnedVerifier.circuitConfigDigest"), "backing circuit config mismatch");
+            require(core.whirParametersDigest() == vm.parseJsonBytes32(backingJson, ".pinnedVerifier.whirParametersDigest"), "backing WHIR config mismatch");
+        }
 
         // 3. Register the channel on the rollup — COSIGNERS ONLY.
         //

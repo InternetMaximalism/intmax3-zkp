@@ -23,7 +23,33 @@ const L1_ROLLUP_RUNTIME_CODE_HASH = process.env.L1_ROLLUP_RUNTIME_CODE_HASH || '
 const L1_CHAIN_ID = process.env.L1_CHAIN_ID || '';
 const L1_CONFIRMATIONS = process.env.L1_CONFIRMATIONS || '';
 
+let localValidity = null;
+let localValidityActive = false;
+let activation = null;
+function enableLocalValidity() {
+  if (!localValidity) throw new Error('local validity is not configured');
+  if (!activation) activation = (async () => {
+    while (pending.length) await new Promise(resolve => setTimeout(resolve, 20));
+    if (child) {
+      const previous = child; child = null;
+      await new Promise(resolve => { previous.once('exit', resolve); previous.kill(); });
+    }
+    localValidityActive = true;
+  })();
+  return activation;
+}
+function configureLocalValidity(config) {
+  if (child || pending.length) throw new Error('configure validity before starting the producer');
+  localValidity = config;
+}
+
 function daemonArgs() {
+  if (localValidity && localValidityActive) {
+    return ['--journal', JOURNAL, '--supported-user-counts', ARITIES, '--live-root', LIVE_ROOT,
+      '--validity-snapshot', localValidity.snapshot, '--validity-prover', localValidity.prover,
+      '--l1-rpc-url', localValidity.rpc, '--l1-chain-id', '31337', '--l1-rollup', localValidity.rollup,
+      '--l1-rollup-runtime-code-hash', localValidity.codeHash, '--l1-confirmations', '1'];
+  }
   const args = ['--journal', JOURNAL, '--supported-user-counts', ARITIES, '--live-root', LIVE_ROOT];
   if (process.env.INTMAX_REGEV_TEST_PROOFS === '1') args.push('--regev-test-proofs');
   if (VALIDITY_SNAPSHOT) {
@@ -126,16 +152,21 @@ function start() {
 const EXECUTE_TIMEOUT_MS = Math.max(1000, parseInt(process.env.INTMAX_PRODUCER_TIMEOUT_MS || '1200000', 10) || 1200000);
 
 function execute(command) {
+  if (activation) return activation.then(() => executeNow(command));
+  return executeNow(command);
+}
+function executeNow(command) {
+  const timeoutMs = localValidityActive ? Math.max(EXECUTE_TIMEOUT_MS, 3_600_000) : EXECUTE_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const proc = start();
     const waiter = { resolve: null, reject: null };
     const timer = setTimeout(() => {
       if (!pending.includes(waiter)) return;
-      const error = new Error(`block producer did not answer ${command.command} within ${EXECUTE_TIMEOUT_MS} ms; daemon killed`);
+      const error = new Error(`block producer did not answer ${command.command} within ${timeoutMs} ms; daemon killed`);
       error.code = 'producer_timeout';
       if (child === proc) { child = null; failPending(error); try { proc.kill('SIGKILL'); } catch (e) { /* gone */ } }
       else reject(error);
-    }, EXECUTE_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref();
     waiter.resolve = (v) => { clearTimeout(timer); resolve(v); };
     waiter.reject = (e) => { clearTimeout(timer); reject(e); };
@@ -365,6 +396,7 @@ function stop() {
 }
 
 module.exports = {
+  configureLocalValidity, enableLocalValidity,
   execute,
   postDeposit,
   postInterChannel,

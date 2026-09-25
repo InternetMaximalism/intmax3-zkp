@@ -30,7 +30,9 @@ contract Deploy is Script {
     /// @return rollup   the deployed IntmaxRollup (returned so tests can assert on its state)
     /// @return validityVerifier the immutable adapter for the validity circuit
     function run() external returns (IntmaxRollup rollup, PinnedMleVerifierV2 validityVerifier) {
-        string memory mleJson = FixtureLib.loadMleConfig();
+        string memory localConfig = vm.envOr("WALLET_VALIDITY_CONFIG", string(""));
+        require(bytes(localConfig).length == 0 || block.chainid == 31337, "wallet config override is local-only");
+        string memory mleJson = bytes(localConfig).length == 0 ? FixtureLib.loadMleConfig() : vm.readFile(localConfig);
         string memory blockJson = FixtureLib.loadBlock();
         // Read the withdrawal fixture BEFORE broadcasting: if it is missing, this reverts before a
         // single transaction is sent, rather than after the rollup is already live on chain.

@@ -96,7 +96,7 @@ function cli(ch, args, extraEnv) {
     return execFileSync(CLI, args, {
       cwd: chDir(ch),
       encoding: 'utf8',
-      timeout: 600_000,
+      timeout: Number(process.env.INTMAX_CLI_TIMEOUT_MS || 1_200_000),
       maxBuffer: CLI_MAX_BUFFER,
       env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
     });
@@ -115,12 +115,9 @@ function rollupOf(ch) {
 
 // ─── Settlement stack: which chain are we on, and can this deployment produce one? ───────────
 //
-// SECURITY: `channel_member deploy-settlement` picks its forge script from the chain id the RPC
-// reports. On 31337 that is `DeployWalletSettlement.s.sol`, which installs an ALWAYS-TRUE mock MLE
-// verifier — fine on anvil, catastrophic anywhere else (a vacuous close-proof check means anyone
-// can close any channel to any state). The CLI refuses to install it off-devnet; this module must
-// therefore not pretend the deploy is a routine step on a real network. It is an OPERATOR action
-// with an ordering constraint (below), so the routes surface that instead of a raw forge failure.
+// The local deployer installs pinned real MLE verifiers on the existing Anvil rollup. It is
+// still a devnet-only orchestration path. Public networks require an operator-owned deployment
+// prepared before funding; HTTP requests cannot silently replace that rollup.
 const DEVNET_CHAIN_ID = 31337;
 
 let _chainId; // cached: a fixed RPC cannot change chain id mid-process.
@@ -163,7 +160,14 @@ function ensureSettlement(ch) {
   const p = wc(ch, 'settlement.json');
   if (fs.existsSync(p)) return readJson(p);
   if (chainId() === DEVNET_CHAIN_ID) {
-    cli(ch, ['deploy-settlement', RPC]);
+    // The rollup has one immutable exit materializer shared by every channel manager.
+    const rollup = rollupOf(ch).toLowerCase();
+    const sibling = CHANNELS.filter(other => other !== ch)
+      .map(other => wc(other, 'settlement.json')).filter(file => fs.existsSync(file))
+      .map(readJson).find(binding => String(binding.rollup).toLowerCase() === rollup);
+    cli(ch, ['deploy-settlement', RPC], {
+      WALLET_EXISTING_SETTLEMENT_MANAGER: sibling ? sibling.manager : '0x0000000000000000000000000000000000000000',
+    });
     return readJson(p);
   }
   let backedRollup = '';
@@ -176,7 +180,7 @@ function ensureSettlement(ch) {
     backingRollup: backedRollup,
     detail:
       'On a real chain the settlement stack must be deployed BEFORE the channel is funded: the ' +
-      'only script with real (non-mock) settlement VKs, DeployCloseCli.s.sol, deploys its own ' +
+      'only script with pinned settlement VKs, DeployCloseCli.s.sol, deploys its own ' +
       'IntmaxRollup. Deploying it now would register the channel and its ChannelSettlementManager ' +
       'on a new rollup while the deposit stayed on ' + (backedRollup || 'the existing rollup') + '.',
     operatorAction:

@@ -24,6 +24,8 @@ const cliModule = require('../../api/lib/cli');
 const producer = require('../../api/lib/block-producer');
 const producerHead = require('../../api/lib/producer-head');
 const exitKit = require('../../api/lib/exit-kit');
+// The registration boundary itself is exercised by l1-registration tests.
+require('../../api/lib/live-registration').ensureLiveRegistration = async (_ch, snapshot) => producer.register(snapshot);
 
 const CH = 7;
 const TX = '0x' + 'ab'.repeat(32);

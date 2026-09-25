@@ -76,6 +76,7 @@
     <button class="nav-btn" id="navWithdraw">Withdraw</button>
     <button class="nav-btn" id="navHistory">History</button>
   </nav>
+  <button class="nav-btn" id="btnClear">Clear</button>
   <button class="nav-btn" id="btnWallet" style="margin-left:8px">Connect Wallet</button>
 </header>
 
@@ -83,22 +84,16 @@
 <main id="mainView">
   <section class="panel" id="panelJoin">
     <h2>Join Channel</h2>
-    <div class="row" style="margin-bottom:3px">
-      <span class="hint">channel ID</span>
-      <span class="hint">initial deposit (ETH)</span>
-    </div>
-    <div class="row">
-      <input id="joinChannel" type="number" value="7" min="1" />
-      <input id="joinDeposit" type="number" step="any" value="0.05" min="0" />
-    </div>
+    <label for="joinChannel">channel ID</label>
+    <input id="joinChannel" type="number" value="" min="1" placeholder="Loading…" />
     <!-- Testnet faucet notice. Hidden unless the relay says the faucet is enabled; the text is
          built from the relay's advertised grant under the SAME trust rules as every other token
          label (raw base units + #index unless the token metadata is chain-verified). -->
     <div class="hint hidden" id="joinFaucetNote" style="margin-top:6px"></div>
     <div class="row">
-      <button id="btnOpen" disabled>Join & Deposit</button>
-      <button id="btnClear" style="background:transparent;border:1px solid var(--border);color:var(--muted)">Clear</button>
+      <button id="btnOpen" disabled>Join</button>
     </div>
+    <p class="hint">Choose a token and amount in Deposit after joining.</p>
   </section>
 
   <section class="panel hidden" id="panelBalance">
@@ -135,17 +130,21 @@
       <select id="sendToken" style="flex:1"></select>
     </div>
     <div class="row" style="margin-bottom:3px">
-      <span class="hint">to (address, e.g. 7-0)</span>
+      <span class="hint">to (channel-slot)</span>
       <span class="hint" id="sendAmountLabel">amount (ETH)</span>
     </div>
     <div class="row">
-      <input id="toAddr" type="text" value="7-0" placeholder="channel-slot" />
+      <input id="toAddr" type="text" value="" placeholder="channel-slot" />
       <input id="amount" type="number" step="any" value="0.005" min="0" />
     </div>
     <button id="btnSend" disabled>Send</button>
   </section>
 
-  <div class="log" id="log"></div>
+  <button id="toggleLog" type="button" aria-expanded="false" aria-controls="messagePanel">Show messages</button>
+  <div id="messagePanel" class="hidden">
+    <p id="connectStatus" class="hint" role="status" aria-live="polite"></p>
+    <div class="log" id="log"></div>
+  </div>
 </main>
 
 <!-- ═══════ WITHDRAW VIEW ═══════ -->
@@ -157,6 +156,7 @@
 
   <section class="panel">
     <h2>Partial Withdrawal (burn & settle on L1)</h2>
+    <p id="pwRecoveryStatus" class="hint hidden" role="status" aria-live="polite"></p>
     <div class="row" style="margin-bottom:3px">
       <span class="hint">amount (ETH)</span>
       <span class="hint">L1 recipient address</span>
@@ -182,7 +182,10 @@
     <button id="btnFwClaim" disabled>5 -- Claim All Balances</button>
   </section>
 
-  <div class="log" id="wdLog" style="margin-top:16px"></div>
+  <button id="toggleWdLog" type="button" aria-expanded="false" aria-controls="withdrawMessagePanel" style="margin-top:16px">Show messages</button>
+  <div id="withdrawMessagePanel" class="hidden">
+    <div class="log" id="wdLog"></div>
+  </div>
 </div>
 
 <!-- ═══════ DEPOSIT MODAL ═══════ -->
@@ -240,20 +243,25 @@ function showView(name) {
   $('mainView').classList.toggle('hidden', name !== 'main');
   $('withdrawView').classList.toggle('hidden', name !== 'withdraw');
 }
-$('navWithdraw').onclick = () => showView('withdraw');
+$('navWithdraw').onclick = async () => {
+  showView('withdraw');
+  await fetchTickets();
+  applyTicketState();
+};
 $('btnBack').onclick = () => showView('main');
 
 // ---- Deposit modal -------------------------------------------------------------------------
 // (renderDepositTokens / refreshDepositInfoCache are hoisted function declarations defined with
 // the rest of the deposit flow further down.)
-$('navDeposit').onclick = async () => {
+async function openDeposit() {
   $('depositPending').classList.add('hidden');
   $('depositModal').classList.remove('hidden');
   renderDepositTokens();                       // render immediately from what we already have
   try { await loadTokenMeta(true); } catch (e) {}
   await refreshDepositInfoCache();             // so the spender can be shown before signing
   renderDepositTokens();
-};
+}
+$('navDeposit').onclick = openDeposit;
 $('depositClose').onclick = () => $('depositModal').classList.add('hidden');
 $('depositModal').onclick = (e) => { if (e.target === $('depositModal')) $('depositModal').classList.add('hidden'); };
 
@@ -309,8 +317,24 @@ $('historyClose').onclick = () => $('historyModal').classList.add('hidden');
 $('historyModal').onclick = (e) => { if (e.target === $('historyModal')) $('historyModal').classList.add('hidden'); };
 
 // ---- Log -----------------------------------------------------------------------------------
+// Messages stay collapsed until explicitly opened, including when an error arrives.
+for (const [buttonId, panelId, logId] of [
+  ['toggleLog', 'messagePanel', 'log'],
+  ['toggleWdLog', 'withdrawMessagePanel', 'wdLog'],
+]) {
+  $(buttonId).onclick = () => {
+    const open = $(buttonId).getAttribute('aria-expanded') !== 'true';
+    $(buttonId).setAttribute('aria-expanded', String(open));
+    $(panelId).classList.toggle('hidden', !open);
+    $(buttonId).textContent = open ? 'Hide messages' : 'Show messages';
+    if (open) $(logId).scrollTop = $(logId).scrollHeight;
+  };
+}
+
 function log(m, cls='') {
   const el = currentView === 'withdraw' ? $('wdLog') : $('log');
+  const toggle = currentView === 'withdraw' ? $('toggleWdLog') : $('toggleLog');
+  if (cls === 'err' && toggle.getAttribute('aria-expanded') !== 'true') toggle.textContent = 'Show messages · error';
   const span = document.createElement('span'); span.className = cls; span.textContent = m;
   el.appendChild(document.createTextNode('\n')); el.appendChild(span);
   el.scrollTop = el.scrollHeight;
@@ -1587,7 +1611,14 @@ function watchAccountChanges() {
 }
 
 async function ensureWallet() {
-  if (walletProvider && walletAccount) return;
+  if (walletProvider) {
+    // Re-read the selected account even if a provider missed its accountsChanged event.
+    const accounts = await walletProvider.request({ method: 'eth_accounts' });
+    walletAccount = accounts && accounts[0] || null;
+    updateWalletButton();
+    fillRecipientFields();
+    if (walletAccount) return;
+  }
   renderWalletList();
   $('walletModal').classList.remove('hidden');
   await new Promise((resolve, reject) => {
@@ -1995,7 +2026,7 @@ worker.onmessage = (e) => {
   if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = d.msg + ' ' + (s.dataset.elapsed||''); return; }
   // Faucet discovery is fire-and-forget and never blocks the wallet: a relay without the feature
   // simply leaves the join-panel notice and the button hidden (see loadFaucetInfo).
-  if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; loadTokenMeta(true).then(loadFaucetInfo).then(renderFaucetUi).catch(()=>{}); tryRestore(); return; }
+  if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; initializeChannelSelection().catch(e => { $('connectStatus').textContent = e.message; log(e.message, 'err'); }); return; }
   if (d.type === 'log') { return; }
   const cid = d._callId;
   if (cid && handlers[cid]) {
@@ -2022,7 +2053,12 @@ async function api(pathname, body, method='POST') {
     : pathname;
   const r = await fetch(url, opts);
   const text = await r.text();
-  if (!r.ok) throw new Error('relay '+pathname+': '+text);
+  if (!r.ok) {
+    let detail; try { detail = JSON.parse(text); } catch (_) {}
+    const error = new Error(detail && detail.error || 'relay '+pathname+': '+text);
+    error.code = detail && detail.code;
+    throw error;
+  }
   return text;
 }
 
@@ -2289,12 +2325,19 @@ async function claimFaucet(quiet) {
 
 // ---- Ticket management ---------------------------------------------------------------------
 let activeTickets = [];
+let ticketLoadFailed = false;
 const _inflight = new Set();
 
 async function fetchTickets() {
   try {
-    activeTickets = JSON.parse(await api('/api/tickets', null, 'GET'));
-  } catch (e) { activeTickets = []; }
+    const tickets = JSON.parse(await api('/api/tickets', null, 'GET'));
+    if (!Array.isArray(tickets)) throw new Error('invalid ticket response');
+    activeTickets = tickets;
+    ticketLoadFailed = false;
+  } catch (e) {
+    ticketLoadFailed = true;
+    log('Could not load pending operations: ' + e.message, 'err');
+  }
 }
 
 /**
@@ -2325,11 +2368,49 @@ function guard(key, fn) {
   return async (...args) => {
     if (_inflight.has(key)) return;
     _inflight.add(key);
-    try { await fn(...args); } finally { _inflight.delete(key); }
+    try { await fn(...args); } finally {
+      _inflight.delete(key);
+      if (key === 'burn' || key === 'settle') restorePartialWithdrawalControls();
+    }
   };
 }
 
+// Restore the withdrawal controls on BOTH automatic account restore and Withdraw navigation.
+function restorePartialWithdrawalControls() {
+  const status = $('pwRecoveryStatus');
+  const ticket = ticketOfType('partial_withdrawal');
+  status.classList.toggle('hidden', !ticket && !ticketLoadFailed);
+  if (ticketLoadFailed) {
+    status.textContent = 'Could not refresh withdrawal status. Open Withdraw again to retry.';
+    $('btnBurnSend').disabled = true;
+    $('btnPwSettle').disabled = true;
+    return;
+  }
+  if (!ticket) {
+    $('btnBurnSend').disabled = mySlot == null || _inflight.has('burn') || _inflight.has('settle');
+    status.textContent = '';
+    $('btnPwSettle').disabled = true;
+    $('pwAmount').disabled = false;
+    $('pwAddress').disabled = false;
+    return;
+  }
+  $('btnBurnSend').disabled = true;
+  $('pwAmount').disabled = true;
+  $('pwAddress').disabled = true;
+  if (ticket.params && ticket.params.recipient) $('pwAddress').value = ticket.params.recipient;
+  const resumable = ['burn_done', 'settle_pending', 'settle_blocked', 'claim_pending'].includes(ticket.status);
+  $('btnPwSettle').disabled = !resumable || _inflight.has('settle');
+  if (ticket.status === 'claim_pending') {
+    status.textContent = 'L1 settlement complete. Continue with Step 2 to receive the funds in your wallet.';
+    return;
+  }
+  status.textContent = resumable
+    ? 'Burn complete: ' + ticketAmountLabel(ticket) + '. Continue with Step 2 — Settle on L1. Do not burn again.'
+    : 'Partial withdrawal pending (' + ticket.status + '). Do not burn again.';
+}
+
 function applyTicketState() {
+  restorePartialWithdrawalControls();
   const panel = $('panelResume');
   const list = $('resumeList');
   list.innerHTML = '';
@@ -2419,41 +2500,118 @@ function applyTicketState() {
   }
 }
 
-// ---- Try restore ---------------------------------------------------------------------------
-async function tryRestore() {
-  if (!hasSavedAccount()) return false;
-  if (savedChannel()) { activeCh = savedChannel(); if ($('joinChannel')) $('joinChannel').value = activeCh; }
+// ---- Select channels served by this relay ---------------------------------------------------
+async function initializeChannelSelection() {
+  $('btnOpen').disabled = true;
+  const response = await fetch('/api/channels');
+  if (!response.ok) throw new Error('Could not load available channels. Reload to retry.');
+  const { channels } = await response.json();
+  if (!Array.isArray(channels) || !channels.length
+      || channels.some(ch => !Number.isSafeInteger(ch) || ch < 1)) {
+    throw new Error('The relay returned invalid available channels.');
+  }
+  const saved = savedChannel();
+  activeCh = channels.includes(saved) ? saved : channels[0];
+  $('joinChannel').value = activeCh;
+  // Keep the saved key and channel untouched until a successful connection or explicit Join.
+  if (saved && !channels.includes(saved)) {
+    $('connectStatus').textContent = 'Channel ' + saved + ' is preserved in the previous environment. Join channel ' + activeCh + ' to use this environment.';
+  }
+  $('btnOpen').disabled = false;
+  showBacking();
+  if (channels.includes(saved)) await guard('account', tryRestore)();
+}
+
+// ---- Connect existing account ---------------------------------------------------------------
+function accountControlsBusy(busy) {
+  for (const id of ['btnOpen', 'btnClear', 'joinChannel']) $(id).disabled = busy;
+}
+
+async function connectExistingChannel() {
+  accountControlsBusy(true);
+  $('connectStatus').textContent = '';
   try {
-    await call('keygenSeeded', { seed: channelSeed() });
+    const channel = Number($('joinChannel').value);
+    if (!Number.isSafeInteger(channel) || channel < 1) throw new Error('Enter a valid channel ID.');
+    // A connect attempt must NEVER create or replace the local channel identity.
+    const seed = localStorage.getItem(SEED_KEY);
+    if (!seed) throw new Error('No channel key is saved in this browser for this site. Open the browser and URL you used to join. MetaMask alone cannot restore an existing channel account.');
+    activeCh = channel;
+    await call('keygenSeeded', { seed });
     const snap = await api('/api/snapshot', null, 'GET');
-    setChannelFrom(snap);
+    const snapshotChannel = Number(JSON.parse(snap).record.channelId);
+    if (snapshotChannel !== channel) throw new Error('The relay returned a different channel.');
+    // WASM checks membership, signatures, roots, and decrypts our balance before we show it.
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
-    await loadTokenMeta(true); // decorate the first render; never throws, tolerates an old relay
-    mySlot = r.slot; showBalance(r);
+    setChannelFrom(snap);
+    saveChannel(channel);
+    mySlot = r.slot;
+    showBalance(r);
     showJoined();
-    await loadFaucetInfo(); renderFaucetUi(); // offer the drip to an account that never took one
-    log('restored account ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
-    await fetchTickets();
-    applyTicketState();
+    log('connected as ' + formatAddr(channel, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
+    // A metadata/ticket failure must not turn a successfully verified connection into a join.
+    try {
+      await loadTokenMeta(true);
+      showBalance(r);
+      await loadFaucetInfo(); renderFaucetUi();
+      await fetchTickets(); applyTicketState();
+    } catch (e) { log('connected; additional account information could not load: ' + e.message, 'err'); }
     return true;
   } catch (e) {
-    log('saved account present but channel not found -- click Join to create.', '');
+    const reason = String(e.message || e);
+    const message = reason.includes("this wallet's key is not a member")
+      ? 'The saved channel key does not match a member of channel ' + activeCh + '. Use the browser and URL where you joined. Connecting the same MetaMask address does not recover that key.'
+      : 'Could not connect: ' + reason;
+    $('connectStatus').textContent = message;
+    log(message, 'err');
     return false;
+  } finally {
+    accountControlsBusy(false);
   }
 }
 
+async function tryRestore() {
+  if (!hasSavedAccount()) return false;
+  if (savedChannel()) $('joinChannel').value = savedChannel();
+  return connectExistingChannel();
+}
+
+// Offer the shared multi-token deposit form only when the connected L1 wallet has funds.
+async function offerDepositAfterJoin() {
+  await loadTokenMeta(true);
+  const info = await fetchDepositInfo();
+  await ensureChain(info);
+  renderDepositTokens();
+  let failed = false;
+  for (const token of depositTokenOptions) {
+    try {
+      const amount = token.native
+        ? await walletProvider.request({ method: 'eth_getBalance', params: [walletAccount, 'latest'] })
+        : await walletProvider.request({ method: 'eth_call', params: [{ to: token.address,
+            data: '0x70a08231' + padHex(walletAccount, 32) }, 'latest'] });
+      if (BigInt(amount) > 0n) {
+        await openDeposit();
+        $('depositToken').value = String(token.tokenIndex);
+        renderDepositPreview();
+        return;
+      }
+    } catch (e) { failed = true; log('could not check ' + token.label + ' wallet balance: ' + e.message, 'err'); }
+  }
+  log(failed ? 'Wallet balance check was incomplete. You can open Deposit from the navigation.'
+    : 'No depositable funds in the connected wallet. Fund it, then open Deposit.', '');
+}
+
 // ---- JOIN ----------------------------------------------------------------------------------
-$('btnOpen').onclick = guard('join', async () => {
+$('btnOpen').onclick = guard('account', async () => {
   const t0 = Date.now();
   let tick = setInterval(() => { $('btnOpen').textContent = 'Joining... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   let joined = false;
   try {
-    $('btnOpen').disabled = true;
+    accountControlsBusy(true);
+    $('connectStatus').textContent = '';
     activeCh = parseInt($('joinChannel').value, 10) || 7;
     if (activeCh < 1) throw new Error('channel ID must be at least 1');
     saveChannel(activeCh);
-    const depositTokens = parseFloat($('joinDeposit').value);
-    if (isNaN(depositTokens) || depositTokens < 0) throw new Error('deposit must be zero or positive');
 
     log('joining channel ' + activeCh + '...');
     // B-1b: the genesis contribution binds the member's L1 exit address into the cosigner-signed
@@ -2482,53 +2640,22 @@ $('btnOpen').onclick = guard('join', async () => {
       await claimFaucet(true);
     }
 
-    if (depositTokens > 0) {
-      // The join panel's initial deposit is NATIVE ETH by construction (tokenIndex 0) — bringing
-      // your own ERC-20 in is the Deposit modal's job, once the channel exists and its token
-      // registry is known.
-      const nativeToken = { tokenIndex: NATIVE_TOKEN_INDEX, tokenSlot: null, label: 'ETH', name: null, decimals: TOKEN_DECIMALS, address: null, native: true };
-      const depositAmt = parseDepositAmount(String(depositTokens), TOKEN_DECIMALS);
-      clearInterval(tick);
-      tick = setInterval(() => { $('btnOpen').textContent = 'Depositing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
-      log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
-      const dr = await sendDepositViaWallet(depositAmt, nativeToken);
-
-      try {
-        await api('/api/ticket/deposit', JSON.stringify({ amount: depositAmt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: NATIVE_TOKEN_INDEX }));
-      } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
-      // Surface the initial deposit as a PENDING ticket now (l1_done), so it is tracked until the
-      // import below reflects it in the balance (then it moves to Processed/History). If the import
-      // fails, this pending ticket stays with a "Resume Import" button — the deposit is not lost.
-      await fetchTickets(); applyTicketState();
-
-      clearInterval(tick);
-      // While the deposit is under-confirmed the button shows the live "confirming (n/12)" count
-      // instead of an error — the import keeps retrying underneath (see
-      // importDepositAwaitingConfirmations; the confirmation depth itself is NOT relaxed).
-      let importPhase = 'Importing';
-      tick = setInterval(() => { $('btnOpen').textContent = importPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
-      log('importing deposit into channel...');
-      const snap2 = await importDepositAwaitingConfirmations(mySlot, dr.txHash, (text, prog) => {
-        importPhase = 'Confirming ' + prog.have + '/' + prog.need;
-      });
-      setChannelFrom(snap2);
-      const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
-      mySlot = r2.slot; showBalance(r2);
-      log('deposit imported -- balance ' + fmtAmt(r2.balance), 'ok');
-      await fetchTickets(); applyTicketState();
-    }
+    // Joining never spends wallet funds: the user selects an asset and confirms Deposit separately.
+    await offerDepositAfterJoin();
 
     log('ready! address ' + formatAddr(myChannel ?? activeCh, mySlot) + ' (' + Math.round((Date.now()-t0)/1000) + 's)', 'ok');
   } catch (e) {
     if (joined) {
-      log('deposit failed (channel joined with 0 balance): ' + e.message + ' -- use the Deposit button to retry.', 'err');
+      log('joined; could not open Deposit: ' + e.message + ' -- use Deposit in the navigation to retry.', 'err');
     } else {
       log('join failed: '+e.message, 'err');
+      $('connectStatus').textContent = e.message;
       $('btnOpen').disabled=false;
     }
   }
   clearInterval(tick);
-  $('btnOpen').textContent = 'Join & Deposit';
+  $('btnOpen').textContent = 'Join';
+  accountControlsBusy(false);
 });
 
 $('btnClear').onclick = () => {
@@ -3014,7 +3141,11 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     log('burn complete -- balance ' + fmtAmt(r.balance) + '. Click "Settle on L1" to finalize.', 'ok');
     $('btnPwSettle').disabled = false;
     await fetchTickets(); applyTicketState();
-  } catch (e) { log('burn send failed: '+e.message, 'err'); $('btnBurnSend').disabled = false; }
+  } catch (e) {
+    log('burn send failed: '+e.message, 'err');
+    await fetchTickets(); applyTicketState();
+    if (!ticketLoadFailed && !ticketOfType('partial_withdrawal')) $('btnBurnSend').disabled = false;
+  }
   clearInterval(tick);
   $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
 });
@@ -3035,10 +3166,44 @@ $('btnPwSettle').onclick = guard('settle', async () => {
     log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
     log('finalizing...');
     const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
-    log('partial withdrawal finalized -- authDigest ' + (fin.authDigest || '?'), 'ok');
+    if (fin.claim) {
+      const c = fin.claim;
+      const info = await fetchDepositInfo();
+      await ensureWallet(); await ensureChain(info);
+      const amount = BigInt(c.amount), token = Number(c.tokenIndex);
+      const word = n => BigInt(n).toString(16).padStart(64, '0');
+      const expected = token === 0 ? '0x2e1a7d4d' + word(amount) : '0xcf2cd298' + word(token) + word(amount);
+      if (c.to.toLowerCase() !== info.rollup.toLowerCase() || c.recipient.toLowerCase() !== recipient.toLowerCase()
+          || walletAccount.toLowerCase() !== recipient.toLowerCase() || token !== Number(submit.withdrawal_token_index)
+          || c.data.toLowerCase() !== expected || c.value !== '0x0') throw new Error('wallet payout details do not match');
+      const ticket = ticketOfType('partial_withdrawal');
+      if (!ticket || amount.toString() !== String(ticket.params.amount)) throw new Error('wallet payout amount differs from saved burn');
+      const key = 'pw-pull:' + info.chainId + ':' + c.to.toLowerCase() + ':' + ticket.id;
+      let txHash = localStorage.getItem(key);
+      if (!txHash) {
+        log('Confirm receipt of the withdrawn funds in MetaMask.');
+        const request = { from: walletAccount, to: c.to, data: expected, value: '0x0' };
+        await walletProvider.request({ method: 'eth_call', params: [request, 'latest'] });
+        txHash = await walletProvider.request({ method: 'eth_sendTransaction', params: [request] });
+        localStorage.setItem(key, txHash);
+      }
+      if (!HEX32_RE.test(String(txHash))) throw new Error('wallet returned an invalid withdrawal transaction hash');
+      try { await awaitReceipt(txHash, 'withdrawal'); }
+      catch (error) {
+        const receipt = await walletProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+        if (receipt && receipt.status === '0x0') localStorage.removeItem(key);
+        throw error;
+      }
+      await api('/api/pw-claim-confirm', JSON.stringify({ txHash }));
+      localStorage.removeItem(key);
+    }
+    log('partial withdrawal complete -- authDigest ' + (fin.authDigest || '?'), 'ok');
     $('btnBurnSend').disabled = false;
     await fetchTickets(); applyTicketState();
-  } catch (e) { log('pw-settle failed: '+e.message, 'err'); $('btnPwSettle').disabled = false; }
+  } catch (e) {
+    log('pw-settle failed: '+e.message, 'err');
+    await fetchTickets(); applyTicketState();
+  }
   clearInterval(tick);
   $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
 });
@@ -3381,7 +3546,6 @@ const _initTick = setInterval(() => {
   if (s && s.className !== 'ready' && s.dataset.base) s.textContent = s.dataset.base + ' ' + s.dataset.elapsed;
 }, 500);
 worker.postMessage({ action: 'init', threads: pickThreads() });
-showBacking();
 </script>
 </body>
 </html>

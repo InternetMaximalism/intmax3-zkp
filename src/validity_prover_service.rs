@@ -2181,6 +2181,18 @@ fn runtime_code_hash(encoded: &str, label: &str) -> Result<Bytes32, ValidityProv
         .map_err(|error| l1_rejected(&format!("construct {label} runtime-code hash: {error}")))
 }
 
+/// Derive the deployment configuration from the same circuits used by the resident prover.
+/// This is proof-free: no deposit, wallet key, or witness controls the verifier identity.
+pub fn export_wallet_validity_config(
+    supported_user_counts: &[u32],
+) -> Result<String, ValidityProverServiceError> {
+    validate_supported_user_counts(supported_user_counts)?;
+    let (circuits, _, _) = build_resident_circuits(supported_user_counts)?;
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuits.validity.data.verifier_data());
+    crate::utils::mle_prover::export_mle_v2_config_json(&wrapper.data)
+        .map_err(|e| ValidityProverServiceError::Proving(format!("export validity config: {e}")))
+}
+
 fn build_resident_circuits(
     supported_user_counts: &[u32],
 ) -> Result<(ResidentCircuits, u64, u64), ValidityProverServiceError> {

@@ -4446,17 +4446,30 @@ mod l1_signer_tests {
 
 /// Run `cast <args>` and return stdout (dies on failure; foundry `cast` must be on PATH).
 fn cast(args: &[&str]) -> String {
-    let out = Command::new("cast")
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| die(format!("cast failed to start ({e}); is foundry installed?")));
-    if !out.status.success() {
-        die(format!(
-            "cast {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    for attempt in 0..3 {
+        let out = Command::new("cast")
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| die(format!("cast failed to start ({e}); is foundry installed?")));
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).to_string();
+        }
+        let error = String::from_utf8_lossy(&out.stderr);
+        // Anvil can return this on the first historical eth_call after evm_mine + anvil_mine;
+        // its next read of the SAME checkpoint succeeds. Retry only that read-only operation,
+        // never a transaction or a different block tag, and retain all checkpoint validation.
+        if attempt < 2
+            && std::env::var("INTMAX_WALLET_ANVIL_MINE").as_deref() == Ok("1")
+            && args.first() == Some(&"call")
+            && args.contains(&"--block")
+            && error.contains("BlockOutOfRangeError")
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        die(format!("cast {args:?} failed: {error}"));
     }
-    String::from_utf8_lossy(&out.stdout).to_string()
+    unreachable!()
 }
 
 /// Owned-argument variant used for signed calls, where the wallet selector is chosen at runtime.
@@ -8283,9 +8296,14 @@ fn post_block_round(
             if journal.rounds.len() != i {
                 die("proof-DA round journal is not a contiguous 0,1,2 sequence");
             }
-            let pending_pin = cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[])
-                .trim()
-                .to_string();
+            let pending_pin = block["pending_chains_pin"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[])
+                        .trim()
+                        .to_string()
+                });
             let (raw_signed_transaction, calldata) = sign_blob_post(
                 rollup,
                 signer,
@@ -9780,7 +9798,9 @@ fn build_live_settlement_reg_record(state: &CliState) -> serde_json::Value {
         }
         pk_gs.push(member.pk_g.to_hex());
         pk_bs.push(member.pk_b.to_hex());
-        regev_digests.push(member.regev_pk.digest().to_hex());
+        // Match ProductionChannelRegistration and the validity circuit; the legacy
+        // Keccak key digest is a different identity and makes L1 history unprovable.
+        regev_digests.push(Bytes32::from(member.regev_pk.poseidon_digest()).to_hex());
         recipients.push(recipient.to_hex());
     }
     settlement_reg_json(
@@ -9872,6 +9892,21 @@ fn main() {
         "reserve-l1-deposit" => deposit_capacity::reserve(&args),
         "bind-l1-deposit-reservation" => deposit_capacity::bind(&args),
         "cosign-l1-deposit-import" => cmd_cosign_l1_deposit_import(&args),
+        "export-wallet-validity-config" => {
+            let output = args.get(1).unwrap_or_else(|| die("output path required"));
+            let arities: Vec<u32> = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("2,4,8,16")
+                .split(',')
+                .map(|s| s.parse().unwrap_or_else(|_| die("invalid validity arity")))
+                .collect();
+            let config =
+                intmax3_zkp::validity_prover_service::export_wallet_validity_config(&arities)
+                    .unwrap_or_else(|e| die(e));
+            write_private_bytes_at(Path::new(output), config.as_bytes());
+        }
+        "publish-wallet-validity" => cmd_publish_wallet_validity(&args),
         "pw-submit" => cmd_pw_submit(&args),
         "pw-finalize" => cmd_pw_finalize(&args),
         "cancel-close" => cmd_cancel_close(&args),
@@ -17305,6 +17340,177 @@ fn preflight_burn_authorization_is_matchable(
 /// (written by `cosign-burn-send`) and the settlement addresses from `settlement.json`.
 /// Usage:
 ///   channel_member pw-submit <rpc_url>
+// This helper is deliberately devnet-only; public chains use the pinned operator publisher.
+fn cmd_publish_wallet_validity(args: &[String]) {
+    use intmax3_zkp::validity_prover_service::{ValidityFinalizeArtifact, ValidityPostingArtifact};
+    let rpc = args
+        .get(1)
+        .unwrap_or_else(|| die("publish-wallet-validity <rpc> <posting.json> <finalize.json>"));
+    if rpc_chain_id(rpc) != DEVNET_CHAIN_ID {
+        die("wallet validity publisher is local-devnet only");
+    }
+    let posting: ValidityPostingArtifact =
+        read_json(args.get(2).unwrap_or_else(|| die("posting file required")));
+    let final_artifact: ValidityFinalizeArtifact =
+        read_json(args.get(3).unwrap_or_else(|| die("finalize file required")));
+    let (_, _, backing) = load_backing();
+    let rollup = backing.rollup;
+    let r = &posting.receipt;
+    let v: serde_json::Value =
+        serde_json::from_str(&final_artifact.vpis_json).unwrap_or_else(|e| die(e));
+    if r.final_block_number <= r.initial_block_number
+        || r.final_block_number - r.initial_block_number != posting.sub_blocks.len() as u64
+        || r.final_extended_state_commitment != final_artifact.final_state_root
+        || v["initial_block_number"].as_u64() != Some(r.initial_block_number)
+        || v["final_block_number"].as_u64() != Some(r.final_block_number)
+        || v["initial_ext_commitment"].as_str()
+            != Some(r.initial_extended_state_commitment.to_hex().as_str())
+        || v["final_ext_commitment"].as_str()
+            != Some(r.final_extended_state_commitment.to_hex().as_str())
+    {
+        die("wallet validity artifact receipt/public inputs mismatch");
+    }
+    let contracts = require_contracts_dir(
+        "publish-wallet-validity",
+        &["script/WalletL1Lifecycle.s.sol"],
+    );
+    let config_path = std::env::var("WALLET_VALIDITY_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| contracts.join("test/data/mle_fixture_config.json"));
+    let config = fs::read_to_string(config_path).unwrap_or_else(|e| die(e));
+    let payload = intmax3_zkp::utils::mle_prover::validate_mle_v2_full_against_config_json(
+        &final_artifact.validity_mle_json,
+        &config,
+    )
+    .unwrap_or_else(|e| die(format!("validity compact proof: {e}")));
+    let hash = format!("0x{}", hex::encode(keccak_hash::keccak(&payload).0));
+    let length = u32::try_from(payload.len()).unwrap_or_else(|_| die("proof too large"));
+    let dir = contracts
+        .parent()
+        .unwrap()
+        .join(PROOF_DA_DIR)
+        .join(format!("wallet-validity-{}", r.candidate_id.to_hex()));
+    fs::create_dir_all(&dir).unwrap_or_else(|e| die(e));
+    // The immutable producer candidate identifies one exact posting sequence across retries.
+    let manifest = serde_json::json!({"rollup":rollup,"posting":posting,"finalize":final_artifact});
+    let manifest_path = dir.join("candidate.json");
+    if manifest_path.exists() {
+        let previous: serde_json::Value = read_json(manifest_path.to_str().unwrap());
+        if previous != manifest {
+            die("wallet validity candidate changed on retry");
+        }
+    } else {
+        write_private_json_at(&manifest_path, &manifest);
+    }
+    let payload_path = dir.join("proof.bin");
+    write_private_bytes_at(&payload_path, &payload);
+    let vpis_path = dir.join("vpis.json");
+    let mle_path = dir.join("validity.json");
+    write_private_bytes_at(&vpis_path, final_artifact.vpis_json.as_bytes());
+    write_private_bytes_at(&mle_path, final_artifact.validity_mle_json.as_bytes());
+    let signer = LazyL1Signer::new(rpc);
+    let sender = signer.get().address();
+    if !same_hex_value(&sender, v["prover"].as_str().unwrap_or_default()) {
+        die("validity prover is not the configured L1 signer");
+    }
+    let journal_path = dir.join("posts.json");
+    let mut journal = load_or_create_proof_da_post_journal(
+        &journal_path,
+        DEVNET_CHAIN_ID,
+        &rollup,
+        &sender,
+        &hash,
+        length,
+        &final_artifact.final_state_root.to_hex(),
+    );
+    let blocks: Vec<serde_json::Value> = posting.sub_blocks.iter().map(|b| {
+        let pin = keccak_hash::keccak([b.deposit_hash_chain.to_bytes_be(), b.channel_reg_hash_chain.to_bytes_be()].concat());
+        serde_json::json!({"channel_id":b.channel_id,"timestamp":b.timestamp,"tx_tree_root":b.tx_tree_root,"key_ids":b.key_ids,"pending_chains_pin":format!("0x{}",hex::encode(pin.0))})
+    }).collect();
+    let lc =
+        serde_json::json!({"blocks":blocks,"final_state_root":final_artifact.final_state_root});
+    let current = cast_call(rpc, &rollup, "blockNumber()(uint64)", &[]);
+    let expected = r.initial_block_number + journal.rounds.len() as u64;
+    // The final journal round may have been signed but not mined at a crash.
+    let height = parse_u64_quantity(
+        current.split_whitespace().next().unwrap_or_default(),
+        "rollup block number",
+    );
+    if height != expected && !(journal.rounds.len() > 0 && height + 1 == expected) {
+        die("rollup head differs from saved validity posting progress");
+    }
+    let mut last = None;
+    for i in 0..posting.sub_blocks.len() {
+        last = Some(post_block_round(
+            &rollup,
+            &lc,
+            i,
+            signer.get(),
+            rpc,
+            payload_path.to_str().unwrap(),
+            &payload,
+            &hash,
+            length,
+            &journal_path,
+            &mut journal,
+        ));
+    }
+    let (sub_id, sidecars) = last.unwrap();
+    let mut forge = Command::new("forge");
+    forge
+        .current_dir(&contracts)
+        .args([
+            "script",
+            "script/WalletL1Lifecycle.s.sol",
+            "--sig",
+            "finalizeValidity()",
+            "--rpc-url",
+            rpc,
+            "--broadcast",
+            "--slow",
+        ])
+        .env("ROLLUP", &rollup)
+        .env("SUB_ID", &sub_id)
+        .env("BLOB_SIDECARS", &sidecars)
+        .env("WALLET_VPIS_PATH", &vpis_path)
+        .env("WALLET_VALIDITY_PATH", &mle_path);
+    signer.get().append_to_command(&mut forge);
+    let output = forge.output().unwrap_or_else(|e| die(e));
+    if !output.status.success() {
+        die(format!(
+            "wallet validity finalize: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let filter = serde_json::json!({"address":rollup,"fromBlock":"0x0","toBlock":"latest","topics":[format!("0x{}",hex::encode(keccak_hash::keccak(b"Finalized(uint256,bytes32)").0))]});
+    let logs: serde_json::Value = serde_json::from_str(&cast(&[
+        "rpc",
+        "eth_getLogs",
+        &filter.to_string(),
+        "--rpc-url",
+        rpc,
+    ]))
+    .unwrap_or_else(|e| die(e));
+    let found = logs
+        .as_array()
+        .unwrap_or_else(|| die("invalid Finalized logs"))
+        .iter()
+        .rev()
+        .find(|l| {
+            l["removed"].as_bool() != Some(true)
+                && l["data"]
+                    .as_str()
+                    .map(|d| same_hex_value(d, &final_artifact.final_state_root.to_hex()))
+                    .unwrap_or(false)
+        })
+        .unwrap_or_else(|| die("no canonical Finalized event for validity candidate"));
+    write_json(
+        "wallet_validity_receipt.json",
+        &serde_json::json!({"candidateId":r.candidate_id,"transactionHash":found["transactionHash"]}),
+    );
+}
+
 fn cmd_pw_submit(args: &[String]) {
     let rpc = args
         .get(1)
@@ -17479,7 +17685,13 @@ fn cmd_pw_submit(args: &[String]) {
     // Fail before the expensive Falcon/close/MLE proving if the persisted balance IVC head is
     // stale. This is expected for legacy backing files: a close proof pins this exact settle chain,
     // so silently substituting the genesis attestation would be both expensive and impossible.
-    let (balance_vd, att, _backing) = load_backing();
+    let (balance_vd, mut att, _backing) = load_backing();
+    // The daemon owns the post-burn proof. Do not overwrite the genesis attestation, which
+    // remains paired with setup-time private state for other legacy operations.
+    if let Ok(file) = std::env::var("PW_BALANCE_PROOF_FILE") {
+        att.balance_proof = fs::read(&file)
+            .unwrap_or_else(|e| die(format!("read staged live PW balance proof {file}: {e}")));
+    }
     let balance_proof =
         ProofWithPublicInputs::<BF, BC, BD>::from_bytes(att.balance_proof, &balance_vd.common)
             .unwrap_or_else(|e| die(format!("deserialize live balance proof: {e}")));
@@ -17553,7 +17765,7 @@ fn cmd_pw_submit(args: &[String]) {
         "prev_settled_tx_chain": pre_burn_chain.to_hex(),
         "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
         "withdrawal_token_index": burn_token_index,
-        "withdrawal_amount": burn_amount,
+        "withdrawal_amount": burn_amount.to_string(),
         "withdrawal_nullifier": nullifier.to_hex(),
         "withdrawal_aux_data": burn_aux_data.to_hex(),
         "withdrawal_base_nonce": tx_nonce,
@@ -17614,7 +17826,7 @@ fn cmd_pw_submit(args: &[String]) {
             "verifier": verifier,
             "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
             "withdrawal_token_index": burn_token_index,
-            "withdrawal_amount": burn_amount,
+            "withdrawal_amount": burn_amount.to_string(),
             "withdrawal_nullifier": nullifier.to_hex(),
             "withdrawal_aux_data": burn_aux_data.to_hex(),
             "burn_tx_leaf": tx_leaf.to_hex(),
@@ -18135,9 +18347,20 @@ fn build_partial_withdrawal_payout_calldata(
     mle_path: &str,
     step: &str,
 ) -> (String, Bytes32) {
+    let dry_root = std::env::temp_dir().join(format!(
+        "intmax-pw-dry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|e| die(e))
+            .as_nanos()
+    ));
+    fs::create_dir(&dry_root)
+        .unwrap_or_else(|e| die(format!("create payout dry-run directory: {e}")));
     let mut forge = Command::new("forge");
     forge
         .current_dir(contracts_dir)
+        .env("FOUNDRY_BROADCAST", &dry_root)
         .env("ROLLUP", rollup)
         .env("PW_PAYOUT_PATH", payout_path)
         .env("PW_MLE_PATH", mle_path)
@@ -18161,12 +18384,31 @@ fn build_partial_withdrawal_payout_calldata(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let dry = fs::read_to_string(format!(
-        "{contracts_dir}/broadcast/RunPartialWithdrawalPayout.s.sol/{chain_id}/dry-run/run-latest.json"
-    ))
-    .unwrap_or_else(|e| die(format!("read payout dry-run journal: {e}")));
+    let function = step
+        .strip_suffix("()")
+        .unwrap_or_else(|| die("invalid payout step"));
+    let directory = dry_root.join(format!(
+        "RunPartialWithdrawalPayout.s.sol/{chain_id}/dry-run"
+    ));
+    // Current Forge names --sig journals after the entry function; older releases used run.
+    // An invocation-specific directory prevents consuming a stale or another channel's dry run.
+    let named = directory.join(format!("{function}-latest.json"));
+    let file = if named.exists() {
+        named
+    } else {
+        directory.join("run-latest.json")
+    };
+    let dry = fs::read_to_string(&file).unwrap_or_else(|e| {
+        die(format!(
+            "read payout dry-run journal {}: {e}",
+            file.display()
+        ))
+    });
     let dry: serde_json::Value = serde_json::from_str(&dry)
         .unwrap_or_else(|e| die(format!("parse payout dry-run journal: {e}")));
+    if dry["transactions"].as_array().map(Vec::len) != Some(1) {
+        die("payout dry-run must contain exactly one transaction");
+    }
     let tx = &dry["transactions"][0]["transaction"];
     let calldata = tx["input"]
         .as_str()
@@ -18673,6 +18915,37 @@ fn read_durable_l1_checkpoint(
         die(format!(
             "L1 RPC chain id changed from {expected_chain_id} to {observed_chain_id}; refusing durable state"
         ));
+    }
+    // The explicit local wallet runner has no background block producer on Anvil.
+    // Mine real empty blocks so the RPC's actual finalized tag covers its transactions;
+    // never substitute `latest` or synthesize finalized evidence.
+    if std::env::var("INTMAX_WALLET_ANVIL_MINE").as_deref() == Ok("1") {
+        if observed_chain_id != ANVIL_CHAIN_ID {
+            die("INTMAX_WALLET_ANVIL_MINE requires chain 31337");
+        }
+        static LAST_MINED_HEAD: std::sync::Mutex<Option<(String, u64)>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_MINED_HEAD
+            .lock()
+            .unwrap_or_else(|_| die("Anvil mining lock poisoned"));
+        let latest = parse_u64_quantity(
+            cast(&["block-number", "--rpc-url", rpc]).trim(),
+            "Anvil latest block",
+        );
+        // A second read at the same head must stay stable: pinned state reads compare the
+        // before/after finalized checkpoint. Only advance after an intervening transaction.
+        if last
+            .as_ref()
+            .map(|(url, number)| url.as_str() == rpc && *number == latest)
+            != Some(true)
+        {
+            cast(&["rpc", "anvil_mine", "0x40", "--rpc-url", rpc]);
+            let mined = parse_u64_quantity(
+                cast(&["block-number", "--rpc-url", rpc]).trim(),
+                "Anvil mined block",
+            );
+            *last = Some((rpc.to_string(), mined));
+        }
     }
     let finalized = rpc_block_json(rpc, "finalized").and_then(|raw| {
         parse_l1_checkpoint_block(&raw, observed_chain_id, L1FinalitySource::RpcFinalized)
@@ -19530,6 +19803,31 @@ mod signing_ledger_tests {
             signer_exit_kit_receipt_verified: true,
             prepared_exit_kit_receipt: None,
             prepared_exit_kit_receipt_verified: false,
+        }
+    }
+
+    #[test]
+    fn live_settlement_registration_matches_producer_key_identities() {
+        let mut state = fixture();
+        for member in &state.controlled {
+            let keys = keys_for(member.keygen_seed);
+            let sig = sign_state(&keys, member.slot as u8, &state.snapshot.state).unwrap();
+            add_signature(&mut state.snapshot.state, sig);
+        }
+        let reg = build_live_settlement_reg_record(&state);
+        let producer = intmax3_zkp::block_producer::ProductionChannelRegistration::from_snapshot(
+            &state.snapshot,
+        )
+        .unwrap();
+        for slot in 0..state.snapshot.record.member_count as usize {
+            let expected = &producer.validity_record.members[slot];
+            assert_eq!(reg["member_pk_gs"][slot], expected.pk_g.to_hex());
+            assert_eq!(reg["member_pk_bs"][slot], expected.pk_b.to_hex());
+            assert_eq!(
+                reg["regev_pk_digests"][slot],
+                expected.regev_pk_digest.to_hex()
+            );
+            assert_eq!(reg["recipients"][slot], expected.recipient.to_hex());
         }
     }
 

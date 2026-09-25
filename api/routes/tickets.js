@@ -1,3 +1,4 @@
+const { randomUUID } = require('node:crypto');
 const { Router } = require('express');
 const { readTickets, upsertTicket } = require('../lib/tickets');
 
@@ -26,7 +27,7 @@ router.post('/', (req, res) => {
       return res.status(409).json({ error: 'deposit already pending', ticket: existing });
     }
     const ticket = upsertTicket(ch, {
-      id: 'dep_' + Date.now(),
+      id: 'dep_' + randomUUID(),
       type: 'deposit',
       status: 'l1_done',
       createdAt: Date.now(),

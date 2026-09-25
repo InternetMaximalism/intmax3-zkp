@@ -58,7 +58,7 @@ const { installBrowserClaimRoutes } = require('./browser-claim-routes');
 
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
-const WORK = path.join(REPO, 'wallet-live-work');
+const WORK = process.env.INTMAX_WORK_DIR || path.join(REPO, 'wallet-live-work');
 const CLI = path.join(REPO, 'target', 'release', 'channel_member');
 // Dev port. Defaults to 8000 (HTTPS) + 8001 (HTTP); override with RELAY_PORT to run a second relay
 // alongside an existing one. Validated: a malformed/out-of-range value is a hard startup error
@@ -73,7 +73,8 @@ const PORT = (() => {
   }
   return n;
 })();
-const CHANNELS = [7, 8, 9, 10];
+const CHANNELS = (process.env.INTMAX_CHANNELS || '7,8,9,10').split(',').map(Number);
+if (!CHANNELS.length || CHANNELS.some(ch => !Number.isSafeInteger(ch) || ch <= 0)) throw new Error('invalid INTMAX_CHANNELS');
 
 fs.mkdirSync(WORK, { recursive: true });
 const chDir = (ch) => path.join(WORK, 'ch' + ch);
@@ -94,7 +95,9 @@ function reqChannel(req) {
 function sendRouteError(res, e) {
   const error = fullCliError(e);
   console.error(error);
-  res.status(e && e.status ? e.status : (e && e.staleAnchor ? 409 : 500)).json({ error });
+  const status = e && Number.isInteger(e.status) && e.status >= 400 && e.status <= 599
+    ? e.status : (e && e.staleAnchor ? 409 : 500);
+  res.status(status).json({ error });
 }
 // The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
 // for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
@@ -114,7 +117,8 @@ function cli(ch, args, extraEnv) {
     return execFileSync(CLI, args, {
       cwd: chDir(ch),
       encoding: 'utf8',
-      timeout: 600_000,
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: Number(process.env.INTMAX_CLI_TIMEOUT_MS || 1_200_000),
       env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
     });
   } catch (e) { throw sanitizeCliError(e); }
@@ -458,7 +462,10 @@ app.use((req, res, next) => {
 });
 
 // Which channels the relay is serving (the browser lists/validates against this).
-app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
+app.get('/api/channels', (req, res) => res.json({
+  channels: CHANNELS,
+  availableForJoin: CHANNELS.filter(ch => !fs.existsSync(wc(ch, 'cli_state.json'))),
+}));
 
 // Step 1 (delegate demo): browser sends its DELEGATE genesis contribution → CLI builds the channel
 // with 3 co-signing members + the browser delegate, the 3 members sign the genesis, and the CLI
@@ -498,9 +505,15 @@ app.post('/api/init', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
     fs.mkdirSync(chDir(ch), { recursive: true });
+    const stateFile = wc(ch, 'cli_state.json');
+    if (fs.existsSync(stateFile)) {
+      const existing = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      require('../../node/common/wallet-join-identity').assertJoinIdentity(existing.snapshot, req.body, !!existing.settlement_binding);
+    }
     fs.writeFileSync(wc(ch, 'contribution.json'), JSON.stringify(req.body));
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    require('../../api/lib/cli').ensureSettlement(ch);
     // `init` is create OR join. A delegate JOIN advances the signed head (a new zero-balance
     // delegate at the boundary, H2=0, epoch+1) while leaving every asset cursor untouched. That
     // new head must be propagated to the daemon's THREE durable stores or the channel is left
@@ -529,15 +542,45 @@ app.post('/api/init', (req, res) => {
         if (accountSalt) await producer.liveInitWithAccountSalt(ch, accountSalt);
         else await producer.liveInit(ch);
         await producer.liveBindSnapshot(ch, snapshot);
-        await producer.register(snapshot);
+        await require('../../api/lib/live-registration').ensureLiveRegistration(ch, snapshot);
         // The empty genesis is a signed head like any other: without its signer-independent
         // exit-kit receipt the co-signer refuses the channel's FIRST inter-channel credit
         // ("destination signer exit-kit verification: ... no signer exit-kit receipt is installed").
         await installHeadExitKit(ch);
       }
     }
-    res.json(snapshot);
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+    // Optional operator-provisioned tokens use the same real exit-kit/signing pipeline as
+    // the authenticated API. Never derive registry identities from browser input or labels.
+    const initialTokens = (process.env.INTMAX_INITIAL_TOKEN_INDICES || '').split(',').filter(Boolean).map(Number);
+    if (initialTokens.some(t => !Number.isInteger(t) || t < 1 || t > 0xffffffff)) throw new Error('invalid initial token indices');
+    if (initialTokens.length) {
+      const registry = TOKEN_REGISTRIES[ch];
+      if (!registry) throw new Error('initial tokens require a chain-verified token manifest');
+      await registry.verifyAgainstChain(RPC, rollupOf(ch), { logger: console });
+      await require('../../api/lib/deposit-pipeline').ensureLiveBackingAdopted(ch);
+      await flushPublishedHead(ch);
+      await installHeadExitKit(ch);
+      for (const tokenIndex of initialTokens) {
+        if (!registry.metadataFor(tokenIndex).verified) throw new Error('initial token is not chain-verified');
+        if (channelTokens(ch).tokens.some(t => t.tokenIndex === tokenIndex)) continue;
+        await cliWithPreparedExitKit(ch, ['register-token', String(tokenIndex), 'token_register_cosigned.json']);
+        const registered = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+        await require('../../api/lib/producer-head').publishOffchainSnapshot(ch, registered.state);
+        // Replace the pre-sign envelope with the actual N-of-N signed head archive.
+        await installHeadExitKit(ch);
+      }
+    }
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
+  }).catch((e) => {
+    const detail = fullCliError(e);
+    console.error(detail);
+    // Forge traces contain thousands of lines. Keep the actual final diagnosis visible,
+    // with the complete trace retained in the operator log instead of flooding the wallet.
+    const diagnosis = detail.split('\n').filter(line => /^(?:error:|Error: script failed:)/i.test(line.trim())).pop();
+    const message = diagnosis || detail;
+    res.status(e.status === 409 ? 409 : 500).json({ code: e.code || 'JOIN_FAILED', error: message.length > 1200
+      ? message.slice(0, 1200) + '… (full details in relay log)' : message });
+  });
 });
 
 // Latest fully-signed channel snapshot — browsers re-import this before sending so they pick up any
@@ -1168,7 +1211,7 @@ app.post('/api/import-deposit', (req, res) => {
     if (!/^[0-9]{1,4}$/.test(String(slot))) throw new Error('recipientSlot must be a small decimal integer');
     await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: operatorFunded });
     const depTicket = findActiveTicket(ch, 'deposit');
-    if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
+    if (depTicket && String(depTicket.params?.txHash).toLowerCase() === txHash.toLowerCase()) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
     // A failing `channel_member` step writes its real diagnosis to STDOUT and only its persistent
@@ -1286,7 +1329,10 @@ app.post('/api/cosign-burn', (req, res) => {
       steps: { burn: { completedAt: Date.now() }, settle: null },
     });
     // The browser hands this body to `wallet_finalize`: it must be the signed ChannelState itself.
-    res.json({ ...cosignedHead, _ticket: ticket, _blockReceipt: blockReceipt, _liveReceipt: liveReceipt });
+    // Transport metadata is not part of ChannelState. WASM ignores unknown fields, but the
+    // browser's durable recovery check correctly requires the exact signed state value.
+    // The durable ticket remains available through /api/tickets.
+    res.json(cosignedHead);
   }).catch((e) => sendRouteError(res, e));
 });
 
@@ -1302,7 +1348,7 @@ app.post('/api/deploy-settlement', (req, res) => {
     const s = JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8'));
     let ticket = findActiveTicket(ch, 'full_withdrawal');
     if (!ticket) {
-      ticket = { id: 'fw_' + Date.now(), type: 'full_withdrawal', status: 'deploy_done', createdAt: Date.now(), updatedAt: Date.now(),
+      ticket = { id: 'fw_' + crypto.randomUUID(), type: 'full_withdrawal', status: 'deploy_done', createdAt: Date.now(), updatedAt: Date.now(),
         params: { manager: s.manager, verifier: s.verifier },
         steps: { deploy: { completedAt: Date.now(), manager: s.manager, verifier: s.verifier }, close: null, settle: null, withdraw: null, claim: null } };
     } else {
@@ -1326,8 +1372,13 @@ app.get('/api/settlement', (req, res) => {
 // Submit partial withdrawal intent on-chain.
 app.post('/api/pw-submit', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    if (ticket && ticket.status === 'claim_pending') {
+      return res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
+    }
+    const submitted = require('../../api/lib/partial-withdrawal-live').resumeSubmittedAuth(ch);
+    if (submitted) return res.json(submitted);
     const before = ticket && ticket.status;
     if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
     try {
@@ -1336,27 +1387,61 @@ app.post('/api/pw-submit', (req, res) => {
       }
       const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
       const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-      cli(ch, ['pw-submit', RPC], extra);
+      await require('../../api/lib/wallet-l1').publish(ch);
+      const proofEnv = await require('../../api/lib/partial-withdrawal-live').stageSubmitProof(ch);
+      await require('../../api/lib/wallet-l1').attest(ch, await producer.liveBackingArtifact(ch));
+      cli(ch, ['pw-submit', RPC], { ...extra, ...proofEnv, INTMAX_WALLET_ANVIL_MINE: '1' });
     } catch (e) {
       // A failed submit is retryable: put the ticket back instead of leaving it settle_pending.
       if (ticket) { ticket.status = before; upsertTicket(ch, ticket); }
       throw e;
     }
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // POST /api/pw-finalize?channel=N
 // Finalize partial withdrawal (advance time + finalize on-chain).
 app.post('/api/pw-finalize', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
-    cli(ch, ['pw-finalize', RPC]);
+  withLock(ch, async () => {
+    const existing = findActiveTicket(ch, 'partial_withdrawal');
+    if (existing && existing.status === 'claim_pending') {
+      const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
+      return res.json({ ok: true, authDigest: auth.auth_digest, claim: existing.params.claim });
+    }
+    await require('../../api/lib/partial-withdrawal-live').stagePayoutArtifacts(ch);
+    cli(ch, ['pw-finalize', RPC], { INTMAX_WALLET_ANVIL_MINE: '1' });
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
-    res.json({ ok: true, authDigest: auth.auth_digest });
+    let claim = ticket && ticket.params.claim || null;
+    const helper = require('../../api/lib/cli');
+    if (!claim && helper.l1SignerAddress().toLowerCase() !== auth.withdrawal_recipient.toLowerCase()) {
+      claim = require('../../node/common/partial-withdrawal-pull').pullTransaction(auth, rollupOf(ch));
+      claim.afterBlock = helper.sh('cast', ['rpc', 'eth_blockNumber', '--rpc-url', RPC]).trim().replace(/"/g, '');
+    }
+    if (ticket) { ticket.status = claim ? 'claim_pending' : 'settle_done'; ticket.params.claim = claim; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
+    res.json({ ok: true, authDigest: auth.auth_digest, claim });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+});
+
+// The receiver pulls the credited amount through MetaMask; verify that exact mined call.
+app.post('/api/pw-claim-confirm', (req, res) => {
+  const ch = reqChannel(req);
+  withLock(ch, () => {
+    const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    if (!ticket || ticket.status !== 'claim_pending' || !ticket.params.claim) throw new Error('no pending wallet payout');
+    const hash = String(req.body && req.body.txHash || '');
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error('invalid payout transaction hash');
+    const { sh } = require('../../api/lib/cli');
+    const rpc = (method, arg) => JSON.parse(sh('cast', ['rpc', method, arg, '--rpc-url', RPC]));
+    const tx = rpc('eth_getTransactionByHash', hash), receipt = rpc('eth_getTransactionReceipt', hash);
+    if (!receipt) throw new Error('wallet payout is not mined yet');
+    const block = JSON.parse(sh('cast', ['rpc', 'eth_getBlockByNumber', receipt.blockNumber, 'false', '--rpc-url', RPC]));
+    require('../../node/common/partial-withdrawal-pull').verifyPull(ticket.params.claim, tx, receipt, block);
+    ticket.status = 'settle_done'; ticket.steps.claim = { completedAt: Date.now(), txHash: hash }; upsertTicket(ch, ticket);
+    res.json({ ok: true });
+  }).catch(e => res.status(409).json({ error: e.message }));
 });
 
 // ─── Ticket endpoints ────────────────────────────────────────────────────────────────────────
@@ -1391,7 +1476,7 @@ app.post('/api/ticket/deposit', (req, res) => {
   const params = { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash };
   if (Number.isInteger(tokenIndex) && tokenIndex >= 0 && tokenIndex <= 0xffffffff) params.tokenIndex = tokenIndex;
   const ticket = upsertTicket(ch, {
-    id: 'dep_' + Date.now(),
+    id: 'dep_' + crypto.randomUUID(),
     type: 'deposit',
     status: 'l1_done',
     createdAt: Date.now(),
@@ -1432,7 +1517,7 @@ for (const ch of CHANNELS) {
 // the channel's balance proof is built from THAT deposit. Each channel gets its OWN IntmaxRollup so
 // its deposit is the first on that contract (prev hash 0). Done ONCE per channel (~40s each); the
 // cached backing persists across relay restarts, so this only runs on the very first launch.
-const RPC = 'http://127.0.0.1:8545';
+const RPC = process.env.RPC || 'http://127.0.0.1:8545';
 installBrowserClaimRoutes(app, { reqChannel, wc, rollupOf, cli, rpc: RPC });
 const ANVIL0 = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const sh = (bin, args, o) => execFileSync(bin, args, { encoding: 'utf8', ...o });
@@ -1450,7 +1535,7 @@ function deployRollup() {
   // anvil in this environment (observed: it stalls forever right after the local simulation,
   // before sending anything, regardless of anvil's mining mode). Sending and confirming one
   // transaction at a time avoids it.
-  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--slow', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts') });
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--slow', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts'), env: { ...process.env, WALLET_VALIDITY_CONFIG: require('../../api/lib/wallet-l1').deploymentConfig() } });
   const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
   return m[1];
@@ -1460,7 +1545,10 @@ const needBacking = CHANNELS.filter((ch) =>
   !['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) => fs.existsSync(wc(ch, f)))
 );
 async function bootstrapBacking() {
-  if (!needBacking.length) return;
+  if (!needBacking.length) {
+    require('../../api/lib/wallet-l1').configure(rollupOf(CHANNELS[0]));
+    return;
+  }
   console.log(`Setting up REAL on-chain deposit backing (one-time) for channels: ${needBacking.join(', ')}…`);
   ensureAnvil();
   // ONE IntmaxRollup shared by every channel. The block producer is shared too and journals ONE
@@ -1474,7 +1562,12 @@ async function bootstrapBacking() {
     const f = wc(ch, 'channel_backing.json');
     if (fs.existsSync(f)) { addr = JSON.parse(fs.readFileSync(f, 'utf8')).rollup || null; if (addr) break; }
   }
+  if (!addr) {
+    const binding = path.join(WORK, 'producer', 'wallet-l1.json');
+    if (fs.existsSync(binding)) addr = JSON.parse(fs.readFileSync(binding, 'utf8')).rollup;
+  }
   if (!addr) { console.log('  deploying the shared IntmaxRollup…'); addr = deployRollup(); }
+  require('../../api/lib/wallet-l1').configure(addr);
   // The genesis deposit must be proved with the SAME identity the block producer will journal
   // for it: `Deposit::nullifier()` hashes the deposit index and the INTMAX block number, and
   // that nullifier is the leaf pushed onto `settled_tx_chain`. Read both from the producer

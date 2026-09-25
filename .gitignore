@@ -92,6 +92,7 @@ priv
 wallet-e2e-work/
 wallet-live-work/
 wallet-live-work.*/
+wallet-live-work-*/
 cli_state.json
 .cli_state.process.lock
 # Digest-keyed, verified Falcon aggregate proofs generated beside a CLI state's runtime files.
@@ -130,3 +131,7 @@ gnark/
 
 # Local mainnet-readiness notes (not for tracking)
 mainnetblocker.md
+
+# Local dependency links are runtime-only, including symlinked worktree installs.
+api/node_modules
+node/node_modules
