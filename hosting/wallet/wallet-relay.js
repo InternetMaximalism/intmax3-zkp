@@ -1411,7 +1411,9 @@ app.post('/api/pw-finalize', (req, res) => {
       return res.json({ ok: true, authDigest: auth.auth_digest, claim: existing.params.claim });
     }
     await require('../../api/lib/partial-withdrawal-live').stagePayoutArtifacts(ch);
-    cli(ch, ['pw-finalize', RPC], { INTMAX_WALLET_ANVIL_MINE: '1' });
+    await require('../../api/lib/partial-withdrawal-live').finalizeSavedPayout(ch, {
+      rpc: RPC, run: cli, env: { INTMAX_WALLET_ANVIL_MINE: '1' },
+    });
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     let claim = ticket && ticket.params.claim || null;

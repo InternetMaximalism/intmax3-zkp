@@ -75,9 +75,9 @@ Passed real Plonky2 tests with the feature:
 
 Remaining before calling the third issue resolved for the user's stack:
 
-1. Finish the new pinned L1 exit verifier deployment test on the separate Anvil instance.
-   The full resident BalanceProcessor/producer/exit-kit receive → spend → receive → idle-kit
-   restart test now passes; an actual L1 payout remains to be checked.
+1. **Passed:** the new pinned L1 exit verifier deployment test on the separate Anvil instance,
+   including real burn-signature SIGKILL, recovery, proof submission and exact 0.005 ETH payout.
+   The resident receive → spend → receive → idle-kit restart test also passes.
 2. Specify and execute a value-preserving migration from old channels/contracts, or implement a
    separately verified compatibility mechanism. Existing recursive proofs cannot simply be read
    under a changed verifier. Existing close-funding verifier configuration is immutable.
@@ -97,7 +97,7 @@ issues as completely resolved until the remaining acceptance checks are complete
 
 ## Compatible runtime activation
 
-Recovery commits: `fb17561`, `24fbc73`. Broad Node suite: **651/651**. `cargo check --all-targets`, native receipt persistence and actual-payload JS/Rust
+Recovery commits: `fb17561`, `24fbc73`. Broad Node suite: **656/656** (including final Anvil read-lag retry cases). `cargo check --all-targets`, native receipt persistence and actual-payload JS/Rust
 identity checks pass. Six SIGKILL boundaries pass as described above.
 
 On the dedicated existing Anvil (RPC8558), replaying the latest completed burn twice through the
@@ -162,5 +162,24 @@ The explicit test preload `hosting/wallet/test/kill-after-burn-sign.cjs` killed 
 immediately after the native signer returned, before the relay recorded `op.head`. The one-shot
 marker was consumed; `burn_operation.json` remained `prepared` without a head. Restart resumed
 the exact saved request, finished it as `complete`, and retained 0.005 ETH after one 0.005 ETH burn
-from a 0.01 ETH deposit. Real L1 validity publication and payout verification are in progress;
-this paragraph must be updated with the final result before claiming that payout check passed.
+from a 0.01 ETH deposit. Real L1 validity publication, proof submission and payout verification **passed**. A repeated
+submission reused the same authorization without another transaction. The independent balance
+check in `verified-payout.json` confirms exactly 5,000,000,000,000,000 wei received, after adding
+back 134,899,240 wei in gas. The payout nullifier is consumed on L1.
+
+Authorization: `0x97e689e46f3b26f35e4e3572d0b694f4ebedf402ecc22edae6ff658e14bb1baa`.
+Payout transaction: `0x74b162f7e858b0be78528555bd12fe8896f29c410945dc9aaa07183a7b5e5c51`.
+Recipient pull: `0x454d687dc8fc004460f0c994ea028698a6036fb0f518a6455bbadf1f6bf1469e`.
+
+The first finalize attempt encountered an Anvil `BlockOutOfRangeError` at the exact finalized
+block immediately after empty-block mining. The same historical call later succeeded, and the
+same saved payout resumed successfully. This was transient state-read availability, not evidence
+of a deleted channel or a reason to use `latest`. The local relay now retries this exact class
+of Anvil historical-call failure at most twice, re-entering the journaled native payout driver
+with unchanged authorization/artifacts. Public-network, transaction and proof failures are not
+retried by that helper. Five regression cases cover the boundary.
+
+Code commit for authenticated tail: `cef88b9`. Existing user channels still use the original
+verifier pins. A migration decision was requested only after the new protocol payout passed:
+retain the old stack, withdraw/redeposit with the user wallet, and separately preserve/recover
+old channel7 pending receipts. No funds were migrated and no old contract was replaced.

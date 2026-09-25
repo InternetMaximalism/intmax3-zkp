@@ -101,4 +101,19 @@ function resumeSubmittedAuth(ch) {
       || view(rollup, 'withdrawalNullifierUsed(bytes32)(bool)', auth.withdrawal_nullifier) === 'true') return auth;
   return null;
 }
-module.exports = { prepareLiveBurn, stageSubmitProof, stagePayoutArtifacts, resumeSubmittedAuth };
+// Anvil may briefly reject a historical state immediately after mining finality blocks.
+// Re-enter ONLY the journaled payout driver, with unchanged proof files and authorization.
+// Never retry arbitrary CLI errors or downgrade the native finalized-checkpoint requirement.
+async function finalizeSavedPayout(ch, {rpc=cli.RPC, run=cli.cli, env={}, wait=ms=>new Promise(r=>setTimeout(r,ms))}={}) {
+  for (let attempt=0; ; attempt++) {
+    try { return run(ch, ['pw-finalize', rpc], env); }
+    catch (error) {
+      const detail=String(error.stderr || error.message || error);
+      if (attempt>=2 || env.INTMAX_WALLET_ANVIL_MINE!=='1'
+          || !detail.includes('BlockOutOfRangeError')
+          || !/cast \["call",[^\n]*"--block"/.test(detail)) throw error;
+      await wait(1000*(attempt+1));
+    }
+  }
+}
+module.exports = { prepareLiveBurn, stageSubmitProof, stagePayoutArtifacts, resumeSubmittedAuth, finalizeSavedPayout };
