@@ -85,7 +85,7 @@ async function attest(ch, backing) {
   const input = cli.wc(ch, 'wallet_backing.json');
   cli.writeJson(input, envelopeFor(ch, backing));
   const manifest = path.join(dir, 'public_close_manifest.json');
-  if (!fs.existsSync(manifest)) cli.sh(path.join(cli.REPO, 'target/release/public_close_prover'), [
+  if (!fs.existsSync(manifest)) cli.sh(process.env.PUBLIC_CLOSE_PROVER_BIN || path.join(cli.REPO, 'target/release/public_close_prover'), [
     '--input', input, '--output-dir', dir, '--expected-channel-id', String(ch), '--expected-chain-id', '31337',
     '--expected-rollup', cli.rollupOf(ch),
   ], { timeout: Math.max(1_200_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0)) });

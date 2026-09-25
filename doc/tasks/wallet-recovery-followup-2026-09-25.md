@@ -86,3 +86,23 @@ Remaining before calling the third issue resolved for the user's stack:
 The circuit tests establish the new condition and its local rejection boundary; they do not by
  themselves establish end-to-end migration or repair existing channel7. Do not describe all three
 issues as completely resolved until the remaining acceptance checks are complete.
+
+## Compatible runtime activation
+
+Recovery commit: `fb17561`. Broad Node suite: 644/644; the later focused historical-batch test
+also passes. `cargo check --all-targets`, native receipt persistence and actual-payload JS/Rust
+identity checks pass. Six SIGKILL boundaries pass as described above.
+
+On the dedicated existing Anvil (RPC8558), replaying the latest completed burn twice through the
+new recovery owner returned HTTP200 and the exact same signed digest. The authoritative channel
+head and terminal ticket bytes were unchanged (`audit-burn-journal-upgrade.json`).
+
+User relay was restarted with default-feature binaries pinned in
+`wallet-live-work-v2-20260924/runtime-bin`; Anvil was preserved. All three snapshot endpoints
+returned their original signed digests and both user L1 balances were unchanged. Evidence:
+`recovery-activation-before.json` and `recovery-activation-after.json` in that runtime directory.
+
+`CHANNEL_MEMBER_BIN`, `BLOCK_PRODUCER_BIN`, and `PUBLIC_CLOSE_PROVER_BIN` isolate operational
+binaries from experiments. Cargo integration-test builds can also rebuild top-level executable
+artifacts; feature experiments should additionally use a separate `CARGO_TARGET_DIR`.
+The separate protocol Anvil under `/tmp/intmax-tail-protocol-20260925` uses RPC8560 and relay8040/8041.

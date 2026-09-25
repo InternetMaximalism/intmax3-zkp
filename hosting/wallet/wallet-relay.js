@@ -62,7 +62,7 @@ const { installBrowserClaimRoutes } = require('./browser-claim-routes');
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
 const WORK = process.env.INTMAX_WORK_DIR || path.join(REPO, 'wallet-live-work');
-const CLI = path.join(REPO, 'target', 'release', 'channel_member');
+const CLI = process.env.CHANNEL_MEMBER_BIN || path.join(REPO, 'target', 'release', 'channel_member');
 // Dev port. Defaults to 8000 (HTTPS) + 8001 (HTTP); override with RELAY_PORT to run a second relay
 // alongside an existing one. Validated: a malformed/out-of-range value is a hard startup error
 // rather than a silent fall back to a port another process may already own.
