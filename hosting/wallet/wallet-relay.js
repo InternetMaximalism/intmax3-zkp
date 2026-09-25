@@ -14,6 +14,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {readTicketsFile, writeTicketsFile} = require('./wallet-ticket-store');
 // Signer-independent exit: any asset-moving CLI command (L1 deposit import included) refuses to
 // sign until the resident block-producer/live-balance daemon has proved an exit kit for the exact
 // successor. It lazily spawns target/release/block_producer_service on first use, against the same
@@ -232,15 +233,15 @@ const TERMINAL = { partial_withdrawal: 'settle_done', deposit: 'import_done', fu
 const isTerminal = (t) => TERMINAL[t.type] === t.status;
 
 function readTickets(ch) {
-  try { return JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8')); }
-  catch (e) { return []; }
+  const tickets = readTicketsFile(wc(ch, TICKET_FILE));
+  const completed = new Map(readHistory(ch).filter(isTerminal).map(t => [t.id, t]));
+  return tickets.map(t => completed.get(t.id) || t);
 }
 function writeTickets(ch, tickets) {
-  fs.writeFileSync(wc(ch, TICKET_FILE), JSON.stringify(tickets, null, 2));
+  writeTicketsFile(wc(ch, TICKET_FILE), tickets);
 }
 function readHistory(ch) {
-  try { return JSON.parse(fs.readFileSync(wc(ch, HISTORY_FILE), 'utf8')); }
-  catch (e) { return []; }
+  return readTicketsFile(wc(ch, HISTORY_FILE));
 }
 // Record a terminal ticket in the durable history (upsert by id so re-terminal writes don't dup).
 function archiveTicket(ch, ticket) {
@@ -248,7 +249,7 @@ function archiveTicket(ch, ticket) {
   const idx = hist.findIndex(t => t.id === ticket.id);
   const entry = { ...ticket, archivedAt: Date.now() };
   if (idx >= 0) hist[idx] = entry; else hist.push(entry);
-  fs.writeFileSync(wc(ch, HISTORY_FILE), JSON.stringify(hist.slice(-HISTORY_CAP), null, 2));
+  writeTicketsFile(wc(ch, HISTORY_FILE), hist.slice(-HISTORY_CAP));
 }
 function findActiveTicket(ch, type) {
   return readTickets(ch).find(t => t.type === type && t.status !== TERMINAL[type]);
@@ -260,10 +261,10 @@ function upsertTicket(ch, ticket) {
   if (idx >= 0) tickets[idx] = ticket; else tickets.push(ticket);
   const now = Date.now();
   const kept = tickets.filter(t =>
-    !Object.values(TERMINAL).includes(t.status) || (now - t.updatedAt) < TICKET_TTL
+    !isTerminal(t) || (now - t.updatedAt) < TICKET_TTL
   );
-  writeTickets(ch, kept);
-  if (isTerminal(ticket)) archiveTicket(ch, ticket); // durable "processed" record (deposits + withdrawals)
+  if (isTerminal(ticket)) archiveTicket(ch, ticket);
+  writeTickets(ch, kept); // durable "processed" record (deposits + withdrawals)
   return ticket;
 }
 
@@ -864,7 +865,16 @@ const BATCH_WINDOW_MAX = cluster ? 1 : Math.max(1, Math.min(1024, parseInt(proce
 function drainCosignWindow(ch, entries) {
   return withLock(ch, async () => {
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-    const { fresh, stale } = partitionByAnchor(entries, snap.state.digest);
+    // Lost-response retry of an exact solo transition. Reconcile its committed head before
+    // answering; never re-sign against a later head merely because the browser retried.
+    const replayed = entries.filter(en => /^0x0{64}$/i.test(String(snap.state.h2Tag))
+      && en.payload?.proposedNextState?.digest === snap.state.digest
+      && en.payload.proposedNextState.channelId === snap.state.channelId);
+    if (replayed.length) {
+      await flushPublishedHead(ch);
+      for (const en of replayed) en.resolve(snap.state);
+    }
+    const { fresh, stale } = partitionByAnchor(entries.filter(en => !replayed.includes(en)), snap.state.digest);
     for (const en of stale) {
       const err = new Error('staleAnchor: payload does not extend the current head — re-sign against the latest snapshot');
       err.staleAnchor = true;
@@ -1430,8 +1440,14 @@ app.post('/api/pw-claim-confirm', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    if (!ticket || ticket.status !== 'claim_pending' || !ticket.params.claim) throw new Error('no pending wallet payout');
     const hash = String(req.body && req.body.txHash || '');
+    // A successful confirmation can lose its response. A retry must return that same completion,
+    // even if a subsequent withdrawal has started, without modifying the new ticket.
+    const done = readTickets(ch).concat(readHistory(ch)).find(t => t.type === 'partial_withdrawal'
+      && t.status === 'settle_done' && t.steps && t.steps.claim
+      && String(t.steps.claim.txHash).toLowerCase() === hash.toLowerCase());
+    if (done && /^0x[0-9a-fA-F]{64}$/.test(hash)) return res.json({ok:true});
+    if (!ticket || ticket.status !== 'claim_pending' || !ticket.params.claim) throw new Error('no pending wallet payout');
     if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error('invalid payout transaction hash');
     const { sh } = require('../../api/lib/cli');
     const rpc = (method, arg) => JSON.parse(sh('cast', ['rpc', method, arg, '--rpc-url', RPC]));
@@ -1471,6 +1487,9 @@ app.post('/api/ticket/deposit', (req, res) => {
   const ch = reqChannel(req);
   const { amount, depositor, txHash, recipientSlot, tokenIndex } = req.body || {};
   if (!amount || !depositor || !txHash) return res.status(400).json({ error: 'needs { amount, depositor, txHash, recipientSlot }' });
+  const known = readTickets(ch).concat(readHistory(ch)).find(t => t.type === 'deposit'
+    && t.params && String(t.params.txHash).toLowerCase() === String(txHash).toLowerCase());
+  if (known) return res.json(known);
   const existing = findActiveTicket(ch, 'deposit');
   if (existing) return res.status(409).json({ error: 'deposit already pending', ticket: existing });
   const params = { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash };

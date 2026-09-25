@@ -18,6 +18,18 @@ function receiveDepositIntoLiveBalance(ch, producerReceipt, deposit) {
     : producer.liveReceiveConfiguredDeposit(ch, producerReceipt, deposit);
 }
 
+// A completed burn/inter-channel debit is already bound by its dedicated proof path. A generic
+// bind intentionally rejects H2-bearing transitions; do not try to apply it again when the live
+// authority reports this exact head as durably bound. Different heads still take full validation.
+async function bindDepositSnapshot(ch, snapshot) {
+  const status = await producer.liveStatus(ch);
+  if (!status.awaitingChannelBinding && status.signedHeadDigest
+      && String(status.signedHeadDigest).toLowerCase() === String(snapshot.state.digest).toLowerCase()) {
+    return status;
+  }
+  return producer.liveBindSnapshot(ch, snapshot);
+}
+
 async function flushLastDepositImport(ch) {
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
   if (!fs.existsSync(artifactPath)) return null;
@@ -32,7 +44,7 @@ async function flushLastDepositImport(ch) {
   const producerReceipt = await producer.postDeposit(deposit);
   const liveReceipt = await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
   const snapshot = readJson(snapshotPath);
-  const liveStatus = await producer.liveBindSnapshot(ch, snapshot);
+  const liveStatus = await bindDepositSnapshot(ch, snapshot);
   const headSyncReceipt = await producer.syncOffchainHeads([
     artifact.fundImportState,
     artifact.bundleApplyState,
@@ -102,7 +114,7 @@ async function ensureLiveBackingAdopted(ch) {
     // deposit's own bind below is a clean same-record asset advance rather than an unsupported
     // two-step (join + deposit) change that fails "channel record changed". Idempotent: if no join
     // happened, the snapshot already matches the bound head and the bind is a no-op.
-    return producer.liveBindSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
+    return bindDepositSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
   }
   if (!consumed) {
     // ORDER IS LOAD-BEARING: the producer assigns this deposit `block_number = block_number + 1`,
@@ -119,7 +131,7 @@ async function ensureLiveBackingAdopted(ch) {
   await ensureRegistered(ch);
   // Adoption is only complete once the resulting proof is bound to the signed snapshot; until
   // then the service refuses every further transition (`awaiting_channel_binding`).
-  return producer.liveBindSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
+  return bindDepositSnapshot(ch, readJson(wc(ch, 'channel_snapshot.json')));
 }
 
 // Journal a channel's backing deposit into the shared producer and fold it into the channel's
@@ -205,7 +217,7 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
     throw new Error('l1_import_cosigned.json lacks the two N-of-N signed import states');
   }
   const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-  const liveStatus = await producer.liveBindSnapshot(ch, snapshot);
+  const liveStatus = await bindDepositSnapshot(ch, snapshot);
   const headSyncReceipt = await producer.syncOffchainHeads([
     artifact.fundImportState,
     artifact.bundleApplyState,

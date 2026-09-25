@@ -63,3 +63,18 @@ test('settlement failure enables a retry without allowing another burn', async (
   assert.equal($('btnBurnSend').disabled, true);
   assert.equal($('btnPwSettle').disabled, false);
 });
+
+test('a second mutation cannot enter the worker session while another is awaiting',async()=>{
+ const $=render(null),ctx=$.context;let release,calls=0;
+ const first=ctx.guard('deposit',async()=>{await new Promise(r=>release=r);})();
+ await ctx.guard('send',async()=>calls++)();await ctx.guard('clear',async()=>calls++)();
+ assert.equal(calls,0);release();await first;
+ await ctx.guard('send',async()=>calls++)();assert.equal(calls,1);
+});
+test('full withdrawal remains pending after L1 settlement until recipient claim',()=>{
+ const start=html.indexOf('function isTerminalTicket('),end=html.indexOf('function guard(',start);
+ const context={activeTickets:[{type:'full_withdrawal',status:'settle_done'}]};vm.createContext(context);vm.runInContext(html.slice(start,end),context);
+ assert.equal(context.ticketOfType('full_withdrawal').status,'settle_done');
+ assert.equal(context.isTerminalTicket({type:'partial_withdrawal',status:'settle_done'}),true);
+ assert.equal(context.isTerminalTicket({type:'full_withdrawal',status:'claim_done'}),true);
+});

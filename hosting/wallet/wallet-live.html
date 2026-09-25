@@ -225,6 +225,8 @@
   </div>
 </div>
 
+<script src="./wallet-transactions.js"></script>
+<script src="./wallet-outbox.js"></script>
 <script type="module">
 const $ = (id) => document.getElementById(id);
 
@@ -1488,6 +1490,10 @@ function describeToken(tokenIndex) {
 }
 
 // ---- LocalStorage --------------------------------------------------------------------------
+const walletTransactions = new WalletTransactions(localStorage);
+const walletOutbox = new WalletOutbox();
+const sendOutboxKey = () => "inter:" + (myChannel ?? activeCh);
+const depositJournalKey = () => 'deposit:' + (myChannel ?? activeCh);
 const SEED_KEY = 'intmax_channel_seed';
 const CH_KEY = 'intmax_channel_id';
 function savedChannel() { return parseInt(localStorage.getItem(CH_KEY) || '', 10) || null; }
@@ -1508,6 +1514,7 @@ function clearSavedAccount() { localStorage.removeItem(SEED_KEY); localStorage.r
 let walletAccount = null;
 let walletProvider = null; // the selected EIP-1193 provider
 let walletName = '';
+let walletConnecting = false;
 const discoveredWallets = []; // { info, provider } from EIP-6963
 
 // (ZERO_B32 / DEPOSIT_SELECTOR / padHex / encodeDepositCall live in the TESTABLE region above.)
@@ -1557,6 +1564,9 @@ function renderWalletList() {
 }
 
 async function selectWallet(w) {
+  if (walletConnecting) return;
+  walletConnecting = true;
+  walletAccount = null;
   $('walletModal').classList.add('hidden');
   walletProvider = w.provider;
   walletName = w.info.name;
@@ -1570,8 +1580,9 @@ async function selectWallet(w) {
     log('connected ' + walletName + ': ' + walletAccount, 'ok');
   } catch (e) {
     walletProvider = null; walletAccount = null; walletName = '';
+    updateWalletButton();
     log('wallet connection failed: ' + e.message, 'err');
-  }
+  } finally { walletConnecting = false; }
 }
 
 function fillRecipientFields() {
@@ -1594,14 +1605,16 @@ function updateWalletButton() {
   }
 }
 
-$('btnWallet').onclick = () => { renderWalletList(); $('walletModal').classList.remove('hidden'); };
+$('btnWallet').onclick = () => { if (_inflight.size > 0) return; renderWalletList(); $('walletModal').classList.remove('hidden'); };
 $('walletClose').onclick = () => $('walletModal').classList.add('hidden');
 $('walletModal').onclick = (e) => { if (e.target === $('walletModal')) $('walletModal').classList.add('hidden'); };
 
 // Track account changes on the active provider
 function watchAccountChanges() {
   if (walletProvider && walletProvider.on) {
-    walletProvider.on('accountsChanged', (accs) => {
+    const provider = walletProvider;
+    provider.on('accountsChanged', (accs) => {
+      if (walletProvider !== provider) return;
       walletAccount = accs[0] || null;
       updateWalletButton();
       fillRecipientFields();
@@ -1611,7 +1624,7 @@ function watchAccountChanges() {
 }
 
 async function ensureWallet() {
-  if (walletProvider) {
+  if (walletProvider && !walletConnecting) {
     // Re-read the selected account even if a provider missed its accountsChanged event.
     const accounts = await walletProvider.request({ method: 'eth_accounts' });
     walletAccount = accounts && accounts[0] || null;
@@ -1623,8 +1636,8 @@ async function ensureWallet() {
   $('walletModal').classList.remove('hidden');
   await new Promise((resolve, reject) => {
     const check = setInterval(() => {
-      if (walletProvider && walletAccount) { clearInterval(check); resolve(); }
-      if ($('walletModal').classList.contains('hidden') && !walletAccount) { clearInterval(check); reject(new Error('wallet not selected')); }
+      if (!walletConnecting && walletProvider && walletAccount) { clearInterval(check); resolve(); }
+      if ($('walletModal').classList.contains('hidden') && !walletAccount && !walletConnecting) { clearInterval(check); reject(new Error('wallet not selected')); }
     }, 200);
   });
 }
@@ -1756,34 +1769,20 @@ async function sendDepositViaWallet(amountBase, token) {
   const value = token.tokenIndex === NATIVE_TOKEN_INDEX ? '0x' + BigInt(amountBase).toString(16) : '0x0';
   log('DEPOSIT: ' + shown + ' (' + amountBase + ' base units, token #' + token.tokenIndex
     + ') → rollup ' + info.rollup + ', value ' + value, 'zk');
-  let txHash;
-  try {
-    txHash = await walletProvider.request({
-      method: 'eth_sendTransaction',
-      params: [{ from: walletAccount, to: info.rollup, value, data }],
-    });
-  } catch (err) {
-    // The #1 cause of a wedged local deposit: the dev chain (anvil) was restarted, so its account
-    // nonces reset to 0, but the wallet still holds the OLD, higher nonce from the previous chain.
-    // The wallet then re-broadcasts a transaction the fresh chain already has (or a nonce it has
-    // moved past), and the node answers "transaction already imported" / "nonce too low" /
-    // "already known". No amount of retrying fixes it because the wallet keeps sending the same
-    // stale nonce. Turn that opaque RPC string into the one instruction that actually resolves it.
-    const m = String((err && (err.message || err.data && err.data.message)) || err || '').toLowerCase();
-    if (m.includes('already imported') || m.includes('already known')
-        || m.includes('nonce too low') || m.includes('replacement transaction underpriced')
-        || m.includes('tx already') || m.includes('known transaction')) {
-      throw new Error(
-        'Your wallet\'s transaction nonce is out of sync with the dev chain — this happens after '
-        + 'anvil is restarted. Reset it in your wallet: MetaMask → Settings → Advanced → '
-        + '"Clear activity tab data" (or remove & re-add the network), then deposit again. '
-        + '(underlying error: ' + (err && err.message ? err.message : String(err)) + ')');
-    }
-    throw err;
-  }
+  const context = {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()};
+  const saved = await walletTransactions.send(walletProvider, depositJournalKey(),
+    {from:walletAccount,to:info.rollup,value,data}, context,
+    {amount:amountBase,tokenIndex:token.tokenIndex,recipientSlot:mySlot,depositor:walletAccount});
+  const txHash = saved.txHash;
   log('deposit tx sent via ' + walletName + ': ' + txHash, 'ok');
   log('waiting for the deposit to be mined...');
-  const receipt = await awaitReceipt(txHash, 'deposit');
+  let receipt;
+  try { receipt = await awaitReceipt(txHash, 'deposit'); }
+  catch (error) {
+    const observed = await walletProvider.request({method:'eth_getTransactionReceipt',params:[txHash]});
+    if (observed && observed.status === '0x0') walletTransactions.clear(depositJournalKey());
+    throw error;
+  }
   const blockNumber = parseInt(receipt.blockNumber, 16);
   log('deposit mined in block ' + blockNumber, 'ok');
   return { txHash, depositor: walletAccount, blockNumber, minConfirmations: info.minConfirmations };
@@ -1815,7 +1814,7 @@ async function importDepositAwaitingConfirmations(recipientSlot, txHash, onPendi
       if (Date.now() - t0 > IMPORT_TIMEOUT_MS) {
         throw new Error('still waiting for confirmations after '
           + Math.round(IMPORT_TIMEOUT_MS / 60000) + ' min (' + prog.have + '/' + prog.need
-          + '). The deposit is safe on L1 — reopen the wallet and use "Resume Import".');
+          + '). The deposit is safe on L1 — reopen Deposit and press Deposit again.');
       }
       const text = 'confirming on L1 (' + prog.have + '/' + prog.need + ' confirmations)…';
       if (onPending) onPending(text, prog);
@@ -2204,6 +2203,7 @@ function showJoined() {
   $('panelSend').classList.remove('hidden');
   $('navBar').classList.remove('hidden');
   $('btnSend').disabled = false;
+  restoreSendControl();
   $('btnRefresh').disabled = false;
   $('btnBurnSend').disabled = false;
   const isCoSigner = mySlot < 3;
@@ -2331,7 +2331,7 @@ const _inflight = new Set();
 async function fetchTickets() {
   try {
     const tickets = JSON.parse(await api('/api/tickets', null, 'GET'));
-    if (!Array.isArray(tickets)) throw new Error('invalid ticket response');
+    if (!Array.isArray(tickets) || tickets.some(t => !t || typeof t.id !== 'string' || typeof t.type !== 'string' || typeof t.status !== 'string' || !t.params || typeof t.params !== 'object' || Array.isArray(t.params))) throw new Error('invalid ticket response');
     activeTickets = tickets;
     ticketLoadFailed = false;
   } catch (e) {
@@ -2360,13 +2360,16 @@ function ticketAmountLabel(t) {
   } catch (e) { return String(p.amount) + ' base units of #' + idx; }
 }
 
+function isTerminalTicket(ticket) {
+  return ({partial_withdrawal:'settle_done',deposit:'import_done',full_withdrawal:'claim_done'})[ticket.type] === ticket.status;
+}
 function ticketOfType(type) {
-  return activeTickets.find(t => t.type === type && !['settle_done','import_done','claim_done'].includes(t.status));
+  return activeTickets.find(t => t.type === type && !isTerminalTicket(t));
 }
 
 function guard(key, fn) {
   return async (...args) => {
-    if (_inflight.has(key)) return;
+    if (_inflight.size > 0) return;
     _inflight.add(key);
     try { await fn(...args); } finally {
       _inflight.delete(key);
@@ -2414,7 +2417,7 @@ function applyTicketState() {
   const panel = $('panelResume');
   const list = $('resumeList');
   list.innerHTML = '';
-  const pending = activeTickets.filter(t => !['settle_done','import_done','claim_done'].includes(t.status));
+  const pending = activeTickets.filter(t => !isTerminalTicket(t));
   if (pending.length === 0) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
 
@@ -2429,72 +2432,23 @@ function applyTicketState() {
       info.style.cssText = 'flex:1;font-size:13px';
       info.textContent = 'Partial withdrawal ' + amt + ' ETH -> ' + recip + ' [' + t.status + ']';
       div.appendChild(info);
-      if (t.status === 'burn_done') {
-        const btn = document.createElement('button');
-        btn.textContent = 'Resume Settle';
-        btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
-        btn.onclick = () => {
-          showView('withdraw');
-          if (t.params.recipient) $('pwAddress').value = t.params.recipient;
-          $('btnBurnSend').disabled = true;
-          $('btnPwSettle').disabled = false;
-          log('resumed: burn complete for ' + amt + ' ETH, click Settle', 'ok');
-        };
-        div.appendChild(btn);
-      }
+      info.textContent += ' — continue in Withdraw.';
     } else if (t.type === 'deposit') {
       const info = document.createElement('span');
       info.style.cssText = 'flex:1;font-size:13px';
       info.textContent = 'Deposit ' + ticketAmountLabel(t) + ' [' + t.status + ']';
       div.appendChild(info);
-      if (t.status === 'l1_done') {
-        const btn = document.createElement('button');
-        btn.textContent = 'Resume Import';
-        btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
-        btn.onclick = async () => {
-          btn.disabled = true;
-          const label = btn.textContent;
-          try {
-            log('importing deposit into channel...');
-            // The ticket carries the L1 txHash; the relay/CLI reads the deposit's economics from
-            // that transaction's on-chain Deposited log (depositor/amount/tokenIndex are not sent).
-            // Token-agnostic: an ERC-20 deposit resumes through exactly this path.
-            const snap = await importDepositAwaitingConfirmations(
-              t.params.recipientSlot || mySlot,
-              t.params.txHash,
-              (text) => { btn.textContent = text; },
-            );
-            btn.textContent = label;
-            setChannelFrom(snap);
-            await loadTokenMeta(true);
-            const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
-            mySlot = r.slot; showBalance(r);
-            log('deposit imported -- ' + ticketAmountLabel(t) + ' credited to slot ' + mySlot, 'ok');
-            await fetchTickets(); applyTicketState();
-          } catch (e) { btn.textContent = label; log('import failed: ' + e.message, 'err'); btn.disabled = false; }
-        };
-        div.appendChild(btn);
-      }
+      info.textContent += ' — reopen Deposit to continue.';
     } else if (t.type === 'full_withdrawal') {
       const info = document.createElement('span');
       info.style.cssText = 'flex:1;font-size:13px';
       info.textContent = 'Full withdrawal [' + t.status + ']';
       div.appendChild(info);
-      const btn = document.createElement('button');
-      btn.textContent = 'Resume';
-      btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
-      btn.onclick = () => {
-        showView('withdraw');
-        if (t.params && t.params.manager) {
-          fwSettlement = { manager: t.params.manager, verifier: t.params.verifier || '' };
-        }
-        const steps = ['deploy_done','close_done','settle_done','withdraw_done'];
-        const idx = steps.indexOf(t.status);
-        const btns = [$('btnFwClose'), $('btnFwSettle'), $('btnFwWithdraw'), $('btnFwClaim')];
-        for (let i = 0; i <= idx && i < btns.length; i++) btns[i].disabled = false;
-        log('resumed full withdrawal at step: ' + t.status, 'ok');
-      };
-      div.appendChild(btn);
+      info.textContent += ' — continue in Withdraw.';
+      if (t.params && t.params.manager) fwSettlement = {manager:t.params.manager,verifier:t.params.verifier || ''};
+      const idx = ({deploy_done:0,close_pending:0,close_done:1,settle_pending:1,settle_done:2,withdraw_pending:2,withdraw_done:3,claim_pending:3})[t.status];
+      const buttons = ['btnFwClose','btnFwSettle','btnFwWithdraw','btnFwClaim'];
+      for (let i=0;i<=idx;i++) $(buttons[i]).disabled = false;
     }
     list.appendChild(div);
   }
@@ -2658,12 +2612,17 @@ $('btnOpen').onclick = guard('account', async () => {
   accountControlsBusy(false);
 });
 
-$('btnClear').onclick = () => {
+$('btnClear').onclick = guard('clear', async () => {
+  try {
+    if (await walletOutbox.read(sendOutboxKey()) || walletTransactions.read(depositJournalKey())) {
+      log('Finish the saved Send or Deposit before clearing this account.', 'err'); return;
+    }
+  } catch (error) { log('Cannot check saved operations: '+error.message, 'err'); return; }
   stopBalancePolling();
   clearSavedAccount();
   log('cleared saved account -- reloading...', '');
   setTimeout(() => location.reload(), 400);
-};
+});
 
 // ---- SEND ----------------------------------------------------------------------------------
 // SECURITY: `token` MUST come from selectedSendToken() (i.e. from sendableTokens()), and
@@ -2687,27 +2646,57 @@ async function attemptSend(to, amountBase, token) {
   // so the streaming relay can reject stale work without buffering or parsing the body. Old JSON
   // spool files remain accepted by the CLI during rolling upgrades.
   const slim = await call('slimWire', { payloadJson: payload });
-  const r2 = await fetch('/api/cosign2?channel=' + activeCh, {
-    method: 'POST', headers: { 'Content-Type': 'application/vnd.intmax.slim+binary' }, body: slim,
+  const info = await fetchDepositInfo();
+  const pending = {version:1,kind:'solo',channel:myChannel ?? activeCh,chainId:info.chainId,rollup:info.rollup,
+    identity:await sha256Hex(localStorage.getItem(SEED_KEY)),payload,slim};
+  await walletOutbox.save(sendOutboxKey(),pending);
+  return resumeSoloSend(pending, true);
+}
+
+async function validateSavedSend(pending) {
+  const info = await fetchDepositInfo();
+  if (pending.version !== 1 || pending.channel !== (myChannel ?? activeCh)
+      || pending.chainId !== info.chainId || pending.rollup !== info.rollup
+      || pending.identity !== await sha256Hex(localStorage.getItem(SEED_KEY))) {
+    throw new Error('The saved send belongs to another account or deployment. Its recovery record was kept.');
+  }
+}
+
+async function resumeSoloSend(pending, fresh = false) {
+  await validateSavedSend(pending);
+  const response = await fetch('/api/cosign2?channel=' + pending.channel, {
+    method:'POST',headers:{'Content-Type':'application/vnd.intmax.slim+binary'},body:pending.slim,
   });
-  if (r2.status === 404 || r2.status === 405) {
-    // Relay without /api/cosign2 (e.g. the local dev harness): legacy fat solo path.
-    const finalState = await api('/api/cosign', payload);
-    return JSON.parse(await call('finalize', { stateJson: finalState }));
+  let accepted;
+  if (response.status === 404 || response.status === 405) {
+    accepted = JSON.parse(await api('/api/cosign',pending.payload));
+  } else {
+    const text = await response.text();
+    if (!response.ok) throw new Error('The saved send is still unresolved: ' + text);
+    accepted = JSON.parse(text);
   }
-  const ackTxt = await r2.text();
-  if (!r2.ok) throw new Error('relay /api/cosign2: ' + ackTxt);
-  const ack = JSON.parse(ackTxt);
-  if (ack.applied > 1) log('  co-signed in a batch of ' + ack.applied + ' sends (one transition, v' + ack.stateVersion + ')', 'ok');
-  // The relay republished the snapshot before ACKing, so the first fetch normally has it.
-  for (let i = 0; i < 120; i++) {
-    const head = await fetchHeadState(ack);
-    if (head && head.balanceState && head.balanceState.stateVersion >= ack.stateVersion) {
-      return JSON.parse(await call('finalize', { stateJson: JSON.stringify(head) }));
+  if (fresh) {
+    let state = accepted.balanceState ? accepted : null;
+    for (let i=0; !state && i<120; i++) {
+      const head = await fetchHeadState(accepted);
+      if (head?.balanceState?.stateVersion >= accepted.stateVersion) state = head;
+      else await new Promise(resolve => setTimeout(resolve,1000));
     }
-    await new Promise((res) => setTimeout(res, 1000));
+    if (!state) throw new Error('The accepted send is waiting for its signed snapshot. Retry Send.');
+    const report = JSON.parse(await call('finalize',{stateJson:JSON.stringify(state)}));
+    await walletOutbox.clear(sendOutboxKey());
+    return report;
   }
-  throw new Error('co-signed (v' + ack.stateVersion + ') but the snapshot did not catch up');
+  const raw = await api('/api/snapshot',null,'GET');
+  const snapshot = JSON.parse(raw);
+  const version = accepted.stateVersion ?? accepted.balanceState?.stateVersion;
+  if (!Number.isInteger(version) || snapshot.state?.balanceState?.stateVersion < version) {
+    throw new Error('The accepted send is waiting for its signed snapshot. Retry Send.');
+  }
+  const report = JSON.parse(await call('importChannel',{snapshotJson:raw}));
+  setChannelFrom(raw); mySlot = report.slot;
+  await walletOutbox.clear(sendOutboxKey());
+  return report;
 }
 
 // ---- SLIM DOWNLINK: fetch the head `state`, as a delta when possible -------------------------
@@ -2816,15 +2805,38 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   log('  ZKP generated · transfer encrypted', 'zk');
   log('  relay co-signing debit + credit atomically...');
   sendPhase = 'Waiting for co-sign';
-  const sendRes = await fetch('/api/inter/send?channel=' + (myChannel ?? activeCh), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor }),
+  const info = await fetchDepositInfo();
+  const pending = {version:1, channel:myChannel ?? activeCh, chainId:info.chainId, rollup:info.rollup,
+    identity:await sha256Hex(localStorage.getItem(SEED_KEY)),
+    body:JSON.stringify({debitPayload:built.debitPayload,transferDescriptor:built.transferDescriptor})};
+  await walletOutbox.save(sendOutboxKey(), pending);
+  return resumeInterSend(pending);
+}
+
+async function resumeInterSend(pending) {
+  await validateSavedSend(pending);
+  log('Checking the saved transfer; no new transfer will be created.');
+  const sendRes = await fetch('/api/inter/send?channel=' + pending.channel, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:pending.body,
   });
   const sendTxt = await sendRes.text();
   if (!sendRes.ok) throw new Error('inter-channel transfer failed: ' + sendTxt);
   const transfer = JSON.parse(sendTxt);
   // The relay (api/lib/inter-channel-send.js) answers with `sourceHead`; older builds said `aHead`.
-  return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.sourceHead || transfer.aHead) }));
+  if (!(transfer.sourceHead || transfer.aHead)) throw new Error('Transfer completion is incomplete; retry Send.');
+  // Reloads lose the worker's pending proof, so restore through its full signature-verified import.
+  const snapshot = await api('/api/snapshot', null, 'GET');
+  const report = JSON.parse(await call('importChannel', {snapshotJson:snapshot}));
+  setChannelFrom(snapshot); mySlot = report.slot;
+  await walletOutbox.clear(sendOutboxKey());
+  return report;
+}
+
+async function restoreSendControl() {
+  try {
+    const pending = await walletOutbox.read(sendOutboxKey());
+    if (!$('btnSend').disabled) $('btnSend').textContent = pending ? 'Send (resume)' : 'Send';
+  } catch (error) { log('Could not read the saved transfer: ' + error.message, 'err'); }
 }
 
 // ---- SEND token selector --------------------------------------------------------------------
@@ -2881,6 +2893,12 @@ $('btnSend').onclick = guard('send', async () => {
   const tick = setInterval(() => { $('btnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnSend').disabled = true;
+    const pending = await walletOutbox.read(sendOutboxKey());
+    if (pending) {
+      showBalance(await (pending.kind === 'solo' ? resumeSoloSend(pending) : resumeInterSend(pending)));
+      log('Saved transfer completed.', 'ok');
+      return;
+    }
     const dest = parseAddr($('toAddr').value);
     const token = selectedSendToken();
     if (!token) {
@@ -2907,21 +2925,17 @@ $('btnSend').onclick = guard('send', async () => {
     } else {
       if (dest.slot === mySlot) throw new Error('cannot send to yourself (' + formatAddr(myCh, mySlot) + ')');
       log('send ' + shown + ' -> ' + formatAddr(dest.channel, dest.slot) + '...');
-      try {
-        r = await attemptSend(dest.slot, amountBase, token);
-      } catch (e) {
-        if (/does not extend the current head/.test(e.message)) {
-          log('  head moved -- retrying...');
-          r = await attemptSend(dest.slot, amountBase, token);
-        } else { throw e; }
-      }
+      r = await attemptSend(dest.slot, amountBase, token);
       showBalance(r);
       log('sent ' + shown + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + sentTokenBalanceLabel(r, token), 'ok');
     }
   } catch (e) { log('send failed: '+e.message, 'err'); }
-  clearInterval(tick);
-  $('btnSend').textContent = 'Send';
-  $('btnSend').disabled = false;
+  finally {
+    clearInterval(tick);
+    $('btnSend').textContent = 'Send';
+    $('btnSend').disabled = false;
+    restoreSendControl();
+  }
 });
 
 // ---- DEPOSIT MODAL -------------------------------------------------------------------------
@@ -3004,10 +3018,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
   const pend = $('depositPending');
   try {
     $('btnDeposit').disabled = true;
-    const token = selectedDepositToken();
-    if (!token) throw new Error('select a token to deposit');
-    // Denominated with THIS token's verified decimals — never the global 18-dp toBase().
-    const amt = parseDepositAmount($('depositAmount').value, token.decimals);
+    let token, amt;
 
     // IDEMPOTENCE: if a deposit is already pending (its L1 tx landed but the import did not finish),
     // sending another L1 transaction here is exactly the double-submit that surfaces as
@@ -3016,10 +3027,13 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     // deposit's import instead of broadcasting a new one. The recovery handle is the ticket's L1
     // txHash; the import reads the deposit's economics from that transaction's on-chain log.
     await fetchTickets();
-    const pendingDeposit = (activeTickets || []).find(
-      (t) => t.type === 'deposit' && t.status === 'l1_done'
-        && t.params && String(t.params.txHash || '').length > 0,
-    );
+    if (ticketLoadFailed) throw new Error('Cannot verify pending deposits. Retry Deposit when the relay is available; no new funds were sent.');
+    const localDeposit = walletTransactions.read(depositJournalKey());
+    const pendingDeposit = ticketOfType('deposit');
+    if (pendingDeposit && (pendingDeposit.status !== 'l1_done' || !HEX32_RE.test(String(pendingDeposit.params.txHash)))) {
+      throw new Error('The pending deposit cannot yet be resumed. Its record was kept; no new funds were sent.');
+    }
+    if (pendingDeposit && localDeposit && localDeposit.txHash && pendingDeposit.params.txHash.toLowerCase() !== localDeposit.txHash.toLowerCase()) throw new Error('Another deposit is pending on this channel. The saved payment has been kept.');
     let dr;
     if (pendingDeposit) {
       log('a deposit is already on L1 and awaiting import — resuming it instead of sending a new one '
@@ -3029,24 +3043,40 @@ $('btnDeposit').onclick = guard('deposit', async () => {
         depositor: pendingDeposit.params.depositor,
         recipientSlot: pendingDeposit.params.recipientSlot,
       };
+    } else if (localDeposit) {
+      await ensureWallet();
+      const info = await fetchDepositInfo(); await ensureChain(info);
+      const saved = await walletTransactions.recover(walletProvider, depositJournalKey(),
+        {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()});
+      try { await awaitReceipt(saved.txHash, 'deposit'); }
+      catch (error) {
+        const receipt = await walletProvider.request({method:'eth_getTransactionReceipt',params:[saved.txHash]});
+        if (receipt && receipt.status === '0x0') walletTransactions.clear(depositJournalKey());
+        throw error;
+      }
+      dr = {...saved.details,txHash:saved.txHash};
+      log('Resuming the saved deposit '+saved.txHash+'; no new payment.');
     } else {
+      token = selectedDepositToken();
+      if (!token) throw new Error('select a token to deposit');
+      amt = parseDepositAmount($('depositAmount').value, token.decimals);
       log('sending L1 deposit via wallet (' + fmtUnits(amt, token.decimals) + ' ' + token.label
         + ', token #' + token.tokenIndex + ')...');
       dr = await sendDepositViaWallet(amt, token);
     }
 
     // The ticket is the recovery handle: saved BEFORE the (possibly long) import, so an
-    // interrupted/abandoned import is resumable from "Resume Import". `tokenIndex` is carried for
+    // interrupted import is resumed by the same Deposit action. `tokenIndex` is carried for
     // DISPLAY only — the import itself sends nothing but { recipientSlot, txHash }. When resuming an
     // already-pending deposit the ticket already exists, so do not re-post it (the relay would 409).
     if (!pendingDeposit) {
       try {
-        await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: token.tokenIndex }));
+        await api('/api/ticket/deposit', JSON.stringify({ amount: dr.amount || amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: dr.recipientSlot ?? mySlot, tokenIndex: dr.tokenIndex ?? (token && token.tokenIndex) }));
       } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
     }
     await fetchTickets(); applyTicketState();
 
-    const importSlot = (pendingDeposit && Number.isInteger(dr.recipientSlot)) ? dr.recipientSlot : mySlot;
+    const importSlot = Number.isInteger(dr.recipientSlot) ? dr.recipientSlot : mySlot;
     phase = 'Importing';
     log('importing deposit into channel (slot ' + importSlot + ')...');
     const snap = await importDepositAwaitingConfirmations(importSlot, dr.txHash, (text) => {
@@ -3059,8 +3089,8 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     await loadTokenMeta(true);           // the deposit may be this channel's first position for the token
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);
-    log('deposit imported -- ' + fmtUnits(amt, token.decimals) + ' ' + token.label
-      + ' credited to slot ' + mySlot, 'ok');
+    walletTransactions.clear(depositJournalKey());
+    log('deposit imported into slot ' + mySlot, 'ok');
     $('depositModal').classList.add('hidden');
     await fetchTickets(); applyTicketState();
   } catch (e) { pend.classList.add('hidden'); log('deposit failed: '+e.message, 'err'); }
@@ -3070,7 +3100,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
 });
 
 // ---- REFRESH -------------------------------------------------------------------------------
-$('btnRefresh').onclick = async () => {
+$('btnRefresh').onclick = guard('refresh', async () => {
   try {
     $('btnRefresh').disabled = true;
     const latest = await api('/api/snapshot', null, 'GET');
@@ -3081,7 +3111,7 @@ $('btnRefresh').onclick = async () => {
     log('refreshed: ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (received funds -- refresh needed before next send)'), 'ok');
   } catch (e) { log('refresh failed: '+e.message, 'err'); }
   $('btnRefresh').disabled = false;
-};
+});
 
 // ---- FAUCET (manual, for an account that joined before the faucet existed) ------------------
 $('btnFaucet').onclick = guard('faucet', async () => {
@@ -3104,8 +3134,10 @@ $('btnBurnSend').onclick = guard('burn', async () => {
   const tick = setInterval(() => { $('btnBurnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnBurnSend').disabled = true;
+    await fetchTickets();
+    if (ticketLoadFailed) throw new Error('Cannot verify withdrawal status. Retry when the relay is available; no new burn was made.');
     const existing = ticketOfType('partial_withdrawal');
-    if (existing && existing.status === 'burn_done') {
+    if (existing) {
       log('burn already complete -- settle first before burning again', 'err');
       $('btnPwSettle').disabled = false;
       clearInterval(tick); $('btnBurnSend').textContent = 'Step 1 -- Burn Send'; return;
@@ -3183,19 +3215,20 @@ $('btnPwSettle').onclick = guard('settle', async () => {
       if (!txHash) {
         log('Confirm receipt of the withdrawn funds in MetaMask.');
         const request = { from: walletAccount, to: c.to, data: expected, value: '0x0' };
-        await walletProvider.request({ method: 'eth_call', params: [request, 'latest'] });
-        txHash = await walletProvider.request({ method: 'eth_sendTransaction', params: [request] });
-        localStorage.setItem(key, txHash);
+        if (!walletTransactions.read(key)) await walletProvider.request({ method: 'eth_call', params: [request, 'latest'] });
+        const saved = await walletTransactions.send(walletProvider, key, request,
+          {chainId:info.chainId,rollup:c.to.toLowerCase(),account:walletAccount.toLowerCase()}, {ticketId:ticket.id});
+        txHash = saved.txHash;
       }
       if (!HEX32_RE.test(String(txHash))) throw new Error('wallet returned an invalid withdrawal transaction hash');
       try { await awaitReceipt(txHash, 'withdrawal'); }
       catch (error) {
         const receipt = await walletProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
-        if (receipt && receipt.status === '0x0') localStorage.removeItem(key);
+        if (receipt && receipt.status === '0x0') { localStorage.removeItem(key); walletTransactions.clear(key); }
         throw error;
       }
       await api('/api/pw-claim-confirm', JSON.stringify({ txHash }));
-      localStorage.removeItem(key);
+      localStorage.removeItem(key); walletTransactions.clear(key);
     }
     log('partial withdrawal complete -- authDigest ' + (fin.authDigest || '?'), 'ok');
     $('btnBurnSend').disabled = false;

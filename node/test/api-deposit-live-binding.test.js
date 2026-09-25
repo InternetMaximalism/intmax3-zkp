@@ -83,6 +83,7 @@ producer.liveReceiveConfiguredDeposit = async (ch, receipt, deposit) => {
   events.push('liveReceiveConfiguredDeposit');
   return { channelId: ch, producerRequestId: receipt.requestId, depositIndex: deposit.depositIndex };
 };
+producer.liveStatus = async () => ({awaitingChannelBinding:true,signedHeadDigest:null});
 producer.liveBindSnapshot = async (ch, snapshot) => {
   events.push('liveBindSnapshot');
   return { channelId: ch, signedHeadDigest: snapshot.state.digest };
