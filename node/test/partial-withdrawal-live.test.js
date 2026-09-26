@@ -29,6 +29,8 @@ test('stages the exact live proof without replacing genesis; restores producer r
   const h = fixture(7);
   const env = await live.stageSubmitProof(7);
   assert.equal(env.PW_BALANCE_PROOF_FILE, 'pw_balance_attestation.bin');
+  assert.equal(env.PW_BACKING_ARTIFACT_FILE, 'pw_live_backing.json');
+  assert.deepEqual(cli.readJson(cli.wc(7, env.PW_BACKING_ARTIFACT_FILE)), h.backing);
   assert.deepEqual([...fs.readFileSync(cli.wc(7, env.PW_BALANCE_PROOF_FILE))], [3, 4]);
   assert.deepEqual([...fs.readFileSync(cli.wc(7, 'channel_attestation.bin'))], [9]);
   assert.equal(cli.readJson(cli.wc(7, 'pw_producer.json')).liveReceipt.baseNonce, 1);
@@ -102,3 +104,110 @@ test('submit resumes the same on-chain pending, authorized or paid burn; never a
   cli.writeJson(cli.wc(ch, 'last_burn.json'), { ...burn, withdrawal_nullifier: 'new-burn' });
   reads = 0; assert.equal(live.resumeSubmittedAuth(ch), null); assert.equal(reads, 0);
 });
+
+test('settlement interruption preserves receipt and retries the identical producer request', async () => {
+  fixture(20);
+  const requests = [];
+  let fail = true;
+  producer.postInterChannel = async (_head, _payload, _descriptor, id) => {
+    requests.push(id); return { requestId: id, blockNumber: 5 };
+  };
+  producer.liveSettleInterChannel = async () => {
+    if (fail) throw new Error('injected settlement interruption');
+    return { baseNonce: 2 };
+  };
+  await assert.rejects(live.stageSubmitProof(20), /injected settlement/);
+  assert.equal(cli.readJson(cli.wc(20, 'pw_producer.json')).liveReceipt, null);
+  assert.equal(fs.existsSync(cli.wc(20, 'pw_balance_attestation.bin')), false);
+  fail = false;
+  await live.stageSubmitProof(20);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0], requests[1]);
+  assert.equal(cli.readJson(cli.wc(20, 'pw_producer.json')).liveReceipt.baseNonce, 2);
+});
+
+for (const [name, change] of [
+  ['missing exit kit', backing => { delete backing.signedHeadExitKit; }],
+  ['wrong exit channel', backing => { backing.signedHeadExitKit.backingPublicInputs.channelId++; }],
+  ['wrong exit chain', backing => { backing.signedHeadExitKit.backingPublicInputs.settledTxChain = 'other'; }],
+  ['wrong signed head', backing => { backing.signedHead = { ...backing.signedHead, digest: 'other' }; }],
+  ['wrong base channel', backing => { backing.baseHead.channelId++; }],
+]) {
+  test(`submit rejects ${name} without replacing already staged artifacts`, async () => {
+    const { backing } = fixture(21);
+    const proofPath = cli.wc(21, 'pw_balance_attestation.bin');
+    const backingPath = cli.wc(21, 'pw_live_backing.json');
+    fs.writeFileSync(proofPath, Buffer.from([91, 92]));
+    cli.writeJson(backingPath, { previous: true });
+    change(backing);
+    await assert.rejects(live.stageSubmitProof(21));
+    assert.deepEqual([...fs.readFileSync(proofPath)], [91, 92]);
+    assert.deepEqual(cli.readJson(backingPath), { previous: true });
+  });
+}
+
+test('finalized root alone is insufficient until its anchor height is finalized', async () => {
+  fixture(22);
+  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'true' : '4';
+  await assert.rejects(live.stageSubmitProof(22), error => error.status === 409);
+  assert.equal(fs.existsSync(cli.wc(22, 'pw_balance_attestation.bin')), false);
+  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'true' : '5';
+  await live.stageSubmitProof(22);
+  assert.deepEqual([...fs.readFileSync(cli.wc(22, 'pw_balance_attestation.bin'))], [3, 4]);
+});
+
+function payoutFixture(ch) {
+  fixture(ch);
+  const anchor = { blockNumber: 5, bpSigChain: 'bp', entryHash: 'entry', extendedStateCommitment: 'root', generation: 6, timestamp: 100 };
+  producer.postInterChannel = async () => ({ ...anchor });
+  cli.l1SignerAddress = () => 'operator';
+  const withdrawal = { amount: '18446744073709551615', recipient: 'recipient', tokenIndex: 55, nullifier: 'nf', auxData: 'aux' };
+  cli.writeJson(cli.wc(ch, 'pw_auth.json'), { withdrawal_amount: withdrawal.amount, withdrawal_recipient: withdrawal.recipient,
+    withdrawal_token_index: withdrawal.tokenIndex, withdrawal_nullifier: withdrawal.nullifier, withdrawal_aux_data: withdrawal.auxData });
+  return { withdrawal, producerAnchor: anchor, withdrawalProver: 'operator' };
+}
+for (const field of ['amount', 'recipient', 'tokenIndex', 'nullifier', 'auxData', 'withdrawalProver', 'entryHash', 'generation']) {
+  test(`payout rejects a regenerated artifact with changed ${field} and retains saved evidence`, async () => {
+    const correct = payoutFixture(23);
+    const file = cli.wc(23, 'pw_artifacts.json');
+    const stale = { ...structuredClone(correct), withdrawalProver: 'old-operator' };
+    cli.writeJson(file, stale);
+    const changed = structuredClone(correct);
+    if (field === 'withdrawalProver') changed.withdrawalProver = 'attacker';
+    else if (field === 'entryHash' || field === 'generation') changed.producerAnchor[field] = 'other';
+    else changed.withdrawal[field] = field === 'amount' ? '18446744073709551614' : 'other';
+    producer.liveBurnPayoutArtifacts = async () => changed;
+    await assert.rejects(live.stagePayoutArtifacts(23), /does not match/);
+    assert.deepEqual(cli.readJson(file), stale);
+    producer.liveBurnPayoutArtifacts = async () => correct;
+    assert.deepEqual(await live.stagePayoutArtifacts(23), correct);
+  });
+}
+
+test('historical-state retry is bounded and preserves calldata arguments and environment', async () => {
+  const historical = new Error('cast ["call","contract","--block","10"] BlockOutOfRangeError');
+  const calls = [], waits = [], env = { INTMAX_WALLET_ANVIL_MINE: '1', PROOF: 'unchanged' };
+  const result = await live.finalizeSavedPayout(7, { rpc: 'local-rpc', env,
+    run: (...args) => { calls.push(args); if (calls.length < 3) throw historical; return 'landed'; },
+    wait: async ms => waits.push(ms) });
+  assert.equal(result, 'landed');
+  assert.deepEqual(waits, [1000, 2000]);
+  for (const args of calls) assert.deepEqual(args, [7, ['pw-finalize', 'local-rpc'], env]);
+  let attempts = 0;
+  await assert.rejects(live.finalizeSavedPayout(7, { env,
+    run: () => { attempts++; throw historical; }, wait: async () => {} }), error => error === historical);
+  assert.equal(attempts, 3);
+});
+
+for (const [name, env, message] of [
+  ['production environment', {}, 'cast ["call","contract","--block","10"] BlockOutOfRangeError'],
+  ['unrelated failure', { INTMAX_WALLET_ANVIL_MINE: '1' }, 'transaction rejected'],
+  ['nonhistorical RPC call', { INTMAX_WALLET_ANVIL_MINE: '1' }, 'cast ["send"] BlockOutOfRangeError'],
+]) {
+  test(`payout never automatically retries ${name}`, async () => {
+    let calls = 0, waits = 0;
+    await assert.rejects(live.finalizeSavedPayout(7, { env,
+      run: () => { calls++; throw new Error(message); }, wait: async () => { waits++; } }));
+    assert.equal(calls, 1); assert.equal(waits, 0);
+  });
+}

@@ -137,7 +137,7 @@ pub struct PublicCloseProofBundle {
     /// Canonical inner proof from the signed-head exit kit. Retaining it keeps the output bundle
     /// independently re-wrappable even if the original public backing endpoint later disappears.
     pub backing_proof: Vec<u8>,
-    /// Exactly 26 raw Goldilocks limbs, in `CloseAssetBackingPublicInputs` wire order.
+    /// Exactly 34 raw Goldilocks limbs, in `CloseAssetBackingPublicInputs` wire order.
     pub backing_public_inputs: Vec<u64>,
     pub backing_mle_json: String,
     /// Proof-free wire-v3 deployment config of the wrapped CloseAssetBacking circuit: the exact
@@ -831,7 +831,7 @@ pub fn export_backing_mle_config(
 }
 
 /// Recursively wrap the already self-verified backing proof and generate the exact wire-v3 PCS
-/// artifact consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 26
+/// artifact consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 34
 /// public inputs verbatim; checking the exported JSON again prevents serialization or pipeline
 /// drift from weakening the Solidity strict-limb binding.
 ///
@@ -843,7 +843,15 @@ pub fn wrap_and_export_backing_mle(
     backing_circuit: &CloseAssetBackingCircuit<F, C, D>,
     backing_proof: &ProofWithPublicInputs<F, C, D>,
 ) -> PublicCloseResult<BackingMleArtifacts> {
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(&backing_circuit.data.verifier_data());
+    wrap_and_export_circuit_mle(&backing_circuit.data, backing_proof)
+}
+
+/// Shared pinned MLE export for backing and late-receive statements. No PI reordering.
+pub fn wrap_and_export_circuit_mle(
+    data: &plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    backing_proof: &ProofWithPublicInputs<F, C, D>,
+) -> PublicCloseResult<BackingMleArtifacts> {
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&data.verifier_data());
     let wrapped = wrapper
         .prove(backing_proof)
         .map_err(|error| PublicCloseError::Proving(format!("wrap backing proof: {error:?}")))?;
@@ -1098,6 +1106,7 @@ mod tests {
 
     fn backing_inputs() -> CloseAssetBackingPublicInputs {
         CloseAssetBackingPublicInputs {
+            balance_state_commitment: Bytes32::default(),
             channel_id: channel(7),
             settled_tx_chain: Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8])
                 .expect("settled chain"),
@@ -1155,8 +1164,8 @@ mod tests {
     #[test]
     fn backing_composition_requires_one_exact_signed_h_vector() {
         let inputs = backing_inputs();
-        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 26);
-        assert_eq!(inputs.to_u64_vec().len(), 26);
+        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 34);
+        assert_eq!(inputs.to_u64_vec().len(), 34);
         validate_signed_head_backing_composition(
             &inputs,
             inputs.channel_id,

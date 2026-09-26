@@ -304,12 +304,6 @@ contract ChannelSettlementManager {
     /// withdrawal is already prevented by the in-circuit nullifier used-sets (check-then-set CEI) at
     /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
     error LateOutgoingDebitDisabled();
-    /// Audit 2026-08-28 C-2: `submitPostCloseClaim` is DISABLED — every closeable state has already
-    /// applied the incoming delta into the receiver's slot (`CloseIntent::new` refuses a nonzero
-    /// `unallocated_confirmed_incoming`) while the tx hash remains in the settled-tx accumulator, so
-    /// the withdrawal claim and the post-close claim both succeed on ONE entitlement across two
-    /// disjoint nullifier maps. See the SECURITY block on the stub for the re-enable conditions.
-    error PostCloseClaimDisabled();
     error PartialWithdrawalNotPending();
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
@@ -844,6 +838,8 @@ contract ChannelSettlementManager {
     ///         non-authoritative accrual bound only — the AUTHORITATIVE per-token solvency cap is
     ///         `receivedChannelFunds[t]` (real value pulled from the rollup), enforced at payout.
     mapping(uint32 => uint256) public finalizedChannelFundAmount;
+    /// Additional base funds proved received after the immutable closing snapshot.
+    mapping(uint32 => uint256) public lateIncomingFundAmount;
     /// @notice Σ accepted withdrawal/post-close claim amounts per base token (accrual bound).
     mapping(uint32 => uint256) public totalWithdrawn;
 
@@ -2222,16 +2218,7 @@ contract ChannelSettlementManager {
                 compactProof
             )) revert InvalidWithdrawalClaimProof();
 
-        // Per-token accrual cap (TM-3): token-t claims accrue ONLY against token-t funds.
-        uint256 newTotalWithdrawn = totalWithdrawn[claim.tokenIndex] + claim.amount;
-        if (newTotalWithdrawn > finalizedChannelFundAmount[claim.tokenIndex]) {
-            revert WithdrawalCapExceeded();
-        }
-        totalWithdrawn[claim.tokenIndex] = newTotalWithdrawn;
-        usedWithdrawalNullifiers[claim.withdrawalNullifier] = true;
-        withdrawalCredits[claim.tokenIndex][claim.recipient] += claim.amount;
-        withdrawalPayouts[claim.withdrawalNullifier] =
-            WithdrawalPayout({recipient: claim.recipient, tokenIndex: claim.tokenIndex, amount: claim.amount});
+        _accrueWithdrawal(claim.tokenIndex, claim.amount, claim.recipient, claim.withdrawalNullifier);
 
         emit WithdrawalClaimAccepted(
             claim.closeIntentDigest,
@@ -2243,60 +2230,51 @@ contract ChannelSettlementManager {
         );
     }
 
-    /// @notice DISABLED (audit 2026-08-28 finding C-2). Permanently reverts.
-    /// @dev SECURITY: this path DOUBLE-CREDITS an inter-channel transfer that the closing state has
-    ///      ALREADY applied. Two facts, both verified against the shipped Rust, make it
-    ///      unconditionally exploitable rather than a corner case:
-    ///
-    ///        1. EVERY closeable state has all incoming deltas applied. `CloseIntent::new` refuses a
-    ///           nonzero residue outright — `src/common/channel.rs:1080-1083`
-    ///           ("close requires unallocated_confirmed_incoming = 0").
-    ///        2. The accumulator leaf SURVIVES that application. `src/wallet_core.rs:4218`
-    ///           (`let bundle_accumulator = import_accumulator.clone();`) — the receive's accounting
-    ///           leg keeps the very accumulator the import leg pushed the tx hash into, because the
-    ///           logical transfer must be inserted exactly once.
-    ///
-    ///      So in every state that can reach `finalizeClose`, the receiver's slot ciphertext already
-    ///      CONTAINS the delta and its `tx_hash` is still inside `finalizedSettledTxAccumulatorRoot`.
-    ///      `submitWithdrawalClaim` then credits the decrypted slot balance (delta included) and
-    ///      `submitPostCloseClaim` credits the same delta a second time. Nothing stops it: the two
-    ///      nullifier maps are disjoint (`usedWithdrawalNullifiers` vs `usedSharedNativeNullifiers`)
-    ///      over different keccak domains (IMW2 vs IMCK), and the post-close circuit
-    ///      (`src/circuits/channel/post_close_claim_circuit.rs`) has no "this delta is unapplied"
-    ///      gate to omit. The shared `totalWithdrawn` budget is not a defence — it is a SHARED pot,
-    ///      so the theft simply lands on whichever co-member claims last
-    ///      (`WithdrawalCapExceeded`). No collusion, repeatable per absorbed incoming transfer.
-    ///
-    ///      NOT DETECTABLE ON-CHAIN, which is why this is a disable and not a new guard: the manager
-    ///      sees an opaque per-(slot, token) amount on one path and an opaque per-(tx, receiver)
-    ///      amount on the other, with no committed value linking "this slot's claimed balance" to
-    ///      "this incoming tx". Nothing in the manager's state can decide whether the slot amount
-    ///      already contained the delta.
-    ///
-    ///      NOTHING LEGITIMATE IS LOST. The interrupted-receive scenario this path exists for leaves
-    ///      `unallocated_confirmed_incoming != 0`, and such a state cannot close at all (fact 1), so
-    ///      the entry point has no reachable honest use today.
-    ///
-    ///      TO RE-ENABLE, one of these must first exist — a guard here cannot substitute for either:
-    ///        (a) an UNAPPLIED-INCOMING value committed inside H1, which the claim proof must open,
-    ///            so the manager can require the claimed delta to be part of a residue the balance
-    ///            did not absorb. Today H1 carries no such field: the preimage is
-    ///            `src/common/balance_state.rs:501-529`, verified field-by-field, and
-    ///            `unallocated_confirmed_incoming` is absent from it — so no signed commitment
-    ///            carries the information a fix would need; or
-    ///        (b) an APPLIED / UNAPPLIED SPLIT of the settled-tx accumulator, with this claim proving
-    ///            inclusion in the unapplied side only — which requires the receive's accounting leg
-    ///            to stop reusing the import's accumulator (fact 2) and both roots to be signed.
-    ///
-    ///      Disabled the way `submitSpecialClose` and `submitLateOutgoingDebitCorrection` are: the
-    ///      signature and ABI selector are kept so callers fail closed with a clear error, and the
-    ///      verifier statement (`ChannelSettlementVerifier.verifyPostCloseClaim`), its VK, the
-    ///      `_deriveSharedNativeNullifier` recompute and the `usedSharedNativeNullifiers` map are
-    ///      left in place but unreachable, ready for whichever of (a)/(b) lands.
-    ///      NOTE: `script/RunClose.s.sol:submitPostCloseClaimStep` will now revert at run time; it
-    ///      is a manual operator step, referenced by no test.
-    function submitPostCloseClaim(PostCloseClaim calldata, bytes calldata) external pure {
-        revert PostCloseClaimDisabled();
+    /// @notice Claim an imported incoming delta not applied to the final slot balance.
+    /// @dev The version-2 proof opens an IMUI leaf in the signed final accumulator. Applying
+    ///      the delta before close consumes that leaf. All claims share the per-token fund cap.
+    function submitPostCloseClaim(PostCloseClaim calldata claim, bytes calldata compactProof)
+        external releaseRuntime
+    {
+        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
+        if (claim.closeIntentDigest != finalizedCloseIntentDigest) revert CloseIntentDigestMismatch();
+        bool registered;
+        for (uint256 i; i < finalizedTokenCount; ++i) {
+            if (finalizedTokenRegistry[i] == claim.tokenIndex) registered = true;
+        }
+        if (!registered) revert TokenRegistryMismatch();
+        bytes32 nullifier = _deriveSharedNativeNullifier(
+            claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG
+        );
+        if (usedSharedNativeNullifiers[nullifier] || usedWithdrawalNullifiers[nullifier]) revert NullifierAlreadyUsed();
+        if (!verifier.verifyPostCloseClaim(
+            channelId, claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG,
+            claim.recipient, nullifier, claim.amount, finalizedBalanceStateH1,
+            finalizedSettledTxAccumulatorRoot, claim.tokenIndex, compactProof
+        )) revert InvalidPostCloseClaimProof();
+        usedSharedNativeNullifiers[nullifier] = true;
+        _accrueWithdrawal(claim.tokenIndex, claim.amount, claim.recipient, nullifier);
+        emit PostCloseClaimAccepted(claim.closeIntentDigest, nullifier, claim.receiverPkG,
+            claim.recipient, claim.amount, claim.tokenIndex);
+    }
+
+    /// @notice Called atomically by the pinned materializer after a finalized receive proof and
+    /// Rollup escrow credit. Preserve the original close fund digest; extend only the late cap.
+    function creditLateIncoming(uint32 tokenIndex, uint64 amount, address recipient, bytes32 claimKey) external releaseRuntime {
+        if (msg.sender != closeFundingMaterializer) revert InvalidPostCloseClaimProof();
+        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
+        lateIncomingFundAmount[tokenIndex] += amount;
+        _accrueWithdrawal(tokenIndex, amount, recipient, claimKey);
+    }
+
+    function _accrueWithdrawal(uint32 tokenIndex, uint256 amount, address recipient, bytes32 nullifier) private {
+        if (usedWithdrawalNullifiers[nullifier]) revert NullifierAlreadyUsed();
+        uint256 total = totalWithdrawn[tokenIndex] + amount;
+        if (total > finalizedChannelFundAmount[tokenIndex] + lateIncomingFundAmount[tokenIndex]) revert WithdrawalCapExceeded();
+        totalWithdrawn[tokenIndex] = total;
+        usedWithdrawalNullifiers[nullifier] = true;
+        withdrawalCredits[tokenIndex][recipient] += amount;
+        withdrawalPayouts[nullifier] = WithdrawalPayout({recipient: recipient, tokenIndex: tokenIndex, amount: amount});
     }
 
     /// @notice ABI-retained fail-closed tombstone for the old terminal-child/IPW2 close path.
@@ -2311,11 +2289,13 @@ contract ChannelSettlementManager {
     /// @dev The rollup's recipient ledger is not channel-scoped, so this Manager asks it to transfer
     ///      exactly the remaining proof-bound cap. Any unrelated recipient-wide credit remains in
     ///      the Rollup ledger and cannot enter this channel's payout capacity.
-    function pullChannelFunds() external releaseRuntime nonReentrant returns (uint256 pulled) {
-        return _pullChannelFunds(0);
+    function pullChannelFunds() external returns (uint256 pulled) {
+        // Share one guarded external entry point to avoid duplicating the entire native/ERC-20
+        // pull core in optimized runtime bytecode. Both entry points are permissionless.
+        return this.pullChannelTokenFunds(0);
     }
 
-    /// @notice Pull this channel's ERC-20 funds for one base token from the rollup (multitoken
+    /// @notice Pull this channel's funds for one base token (index 0 is native ETH) from the rollup (multitoken
     ///         §N-7): the ERC-20 mirror of `pullChannelFunds`. The channel's ERC-20 settlement
     ///         arrives as `IntmaxRollup.withdrawERC20` credits (recipient == this manager); this
     ///         moves exactly the remaining cap via the rollup's amount-scoped `withdrawToken`.
@@ -2325,7 +2305,6 @@ contract ChannelSettlementManager {
     ///      The token address resolves through the rollup's SET-ONCE registry (TM-10b) — the manager
     ///      keeps no second mutable copy.
     function pullChannelTokenFunds(uint32 tokenIndex) external releaseRuntime nonReentrant returns (uint256 pulled) {
-        if (tokenIndex == 0) revert TokenIndexNotRegisteredOnRollup();
         return _pullChannelFunds(tokenIndex);
     }
 
@@ -2339,7 +2318,7 @@ contract ChannelSettlementManager {
             if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
         }
         uint256 received = receivedChannelFunds[tokenIndex];
-        uint256 cap = finalizedChannelFundAmount[tokenIndex];
+        uint256 cap = finalizedChannelFundAmount[tokenIndex] + lateIncomingFundAmount[tokenIndex];
         if (received >= cap) revert ChannelFundsAlreadyReceived(tokenIndex);
         // A recipient-wide credit is not channel authority. The rollup records the exact IMCS
         // identity only after its bound materializer has validated and atomically credited every

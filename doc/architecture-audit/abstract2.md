@@ -1,5 +1,17 @@
 # abstract2 — Current confidential-channel specification and design history
 
+> **Scope decision (2026-09-26):** Channel-change/member-set migration is not a required
+> capability and will not be implemented. Existing channel membership remains immutable;
+> the retired direct MSU opcode must not be restored. Creating an independent new channel
+> is not an authenticated migration and must not be advertised as one. Historical migration
+> TODOs below or in task documents do not expand the current product scope.
+
+> **SpecialClose scope decision (2026-09-26):** BP nonpublication penalties are outside the
+> current implementation scope. Keep `submitSpecialClose` disabled and track the optional future
+> challenge game in [the deferred TODO](../tasks/todo.md#deferred-specialclose). This is not a
+> prerequisite for ordinary close or a current release blocker.
+
+
 > **Synchronized 2026-09-06:** runtime parent `05ec7ae` (node fixes `b5bafb7`),
 > MLE submodule `6cefc6ac`, wire v3 / target 105 / inverse-rate 6.
 > The current sections here, in [abstract2-1](./abstract2-1.md), and in
@@ -285,9 +297,12 @@ Security is divided into the following 5 properties (described later in §4):
   an intmax `Transfer` that burns the channel balance, submitted at close-state finalization.
 - `withdrawClaimZKP` (new): after close, a ZKP by which each member proves on L1, without decrypting, that "the plaintext of **their own encrypted balance**
   within `finalBalanceState.encBalances` is their withdrawal amount."
-- `lateBalanceProof` : a historical/planned `balanceProof` after close (the same balance circuit).
-  It is **not stored or accepted by the current production Manager**; its post-close entry point is
-  disabled until a replacement proof/nullifier policy can rule out double credit.
+- `lateBalanceProof`: a separate continuation of the exact Balance proof materialized at close.
+  The existing ReceiveTransfer relation receives one new C2C transfer and inserts its nullifier;
+  a final-H1 recipient/decryption proof links that amount to the recipient's additional claim.
+  L1 serializes previous/next full Balance commitments, debits real Rollup escrow, and increases
+  a separate per-token late cap atomically. The final signed state and original fund digest remain
+  unchanged. See detail2’s post-close continuation amendment for key/version requirements.
 
 ### 2.5 Timeout constants
 
@@ -596,10 +611,13 @@ This shows which of the **5 properties of §0** each mechanism guards.
   backing. The current funding producer obtains a fresh N-of-N signature on a terminal child, so
   complete post-failure exit liveness is conditional on that cooperation. A retained,
   pre-authorized latest-head exit kit is still required before this can be called unilateral.
-- **Late/post-close claims are disabled**: the current Manager rejects the historical
-  `lateBalanceProof`/post-close lane because a closeable state already credits that incoming value
-  to the ordinary slot balance. This document does not claim late-fund liveness until a replacement
-  statement prevents double credit and is implemented end to end.
+- **Residual C2C claims are supported at circuit/contract level**: a version-2 proof opens an
+  IMUI-tagged imported-but-unapplied incoming entry in final H1. Applying the delta consumes that
+  tag; L1 consumes its deterministic nullifier and shares the ordinary token cap. C2C transfers
+  first received after closure use the serial `lateBalanceProof` continuation and separately
+  funded additional cap. Direct L1 deposits are outside that C2C statement. Normal
+  wallet adoption applies import and credit atomically; recovery needs the retained signed
+  import-only head and matching tree/backing artifacts. See detail2’s 2026-09-26 amendment.
 
 ### 4.5 Balance confidentiality confidentiality (newly added in v2)
 - **Regev-encrypted balances (`encBalances`)**: each person's balance is a ciphertext decryptable only with that person's `RegevPk`.

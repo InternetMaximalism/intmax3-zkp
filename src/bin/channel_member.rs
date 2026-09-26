@@ -822,6 +822,7 @@ struct SettlementRuntimeCodeHashes {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementDeploymentIntent {
+    late_incoming_verifier: String,
     chain_id: u64,
     broadcaster: String,
     start_nonce: u64,
@@ -11688,6 +11689,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         fund_import_state,
         bundle_apply_state,
         settled_tx_accumulator: b_settled_tx_accumulator,
+        ..
     } = build_inter_channel_credit(
         &builder_keys,
         &b_state.snapshot,
@@ -12698,7 +12700,7 @@ const PUBLIC_CLOSE_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
 const CLOSE_BACKING_MLE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CLOSE_BACKING_MLE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES: u64 = 64 * 1024;
-const CLOSE_BACKING_PUBLIC_INPUTS: usize = 26;
+const CLOSE_BACKING_PUBLIC_INPUTS: usize = intmax3_zkp::circuits::channel::close_asset_backing_circuit::CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN;
 /// Must equal `public_close_prover::PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION` (schema 3: wire-v3
 /// compact artifacts plus the backing deployment config).
 const CLOSE_BACKING_BUNDLE_SCHEMA_VERSION: u64 =
@@ -12809,7 +12811,7 @@ fn parse_close_backing_public_inputs(
         .enumerate()
         .map(|(index, value)| close_backing_public_input(value, index))
         .collect::<Result<Vec<_>, _>>()?;
-    if parsed[..25].iter().any(|value| *value > u32::MAX as u64) {
+    if parsed.iter().enumerate().any(|(i, value)| i != 25 && *value > u32::MAX as u64) {
         return Err(format!("{what} contains a non-canonical u32 limb"));
     }
     if parsed[25] >= (1u64 << 63) {
@@ -12847,7 +12849,7 @@ fn close_backing_v2_public_input(value: &str, index: usize) -> Result<u64, Strin
 
 /// Authenticate the CloseAssetBacking wire-v3 artifact pair exactly as the publisher and the
 /// materializer will: strict canonical full fixture, proof-free config it must match, and one
-/// canonical `.compactProof.bytes`. Returns the 26 raw public-input limbs the proof carries.
+/// canonical `.compactProof.bytes`. Returns the 34 raw public-input limbs the proof carries.
 fn validate_close_backing_mle_v2(
     mle_bytes: &[u8],
     config_bytes: &[u8],
@@ -12975,7 +12977,7 @@ fn validate_close_backing_bundle_bytes(
     if json_required_u64(&manifest, "backingPublicInputCount")?
         != CLOSE_BACKING_PUBLIC_INPUTS as u64
     {
-        return Err("manifest does not declare the exact 26-limb backing statement".to_string());
+        return Err("manifest does not declare the exact 34-limb backing statement".to_string());
     }
 
     let mle_inputs = validate_close_backing_mle_v2(mle_bytes, mle_config_bytes)?;
@@ -13214,6 +13216,10 @@ fn settlement_deployment_plan_digest(
 
     let mut preimage = Vec::new();
     preimage.extend_from_slice(SETTLEMENT_PLAN_DOMAIN);
+    let late_config_path = std::env::var("LATE_MLE_CONFIG_PATH")
+        .map_err(|_| "LATE_MLE_CONFIG_PATH is required".to_string())?;
+    let late_config = fs::read(contracts_dir.join(late_config_path)).map_err(|e| format!("late verifier config: {e}"))?;
+    append_deployment_digest_field(&mut preimage, &late_config);
     append_deployment_digest_field(&mut preimage, &chain_id.to_be_bytes());
     append_deployment_digest_field(&mut preimage, strip0x(broadcaster).as_bytes());
     append_deployment_digest_field(&mut preimage, &start_nonce.to_be_bytes());
@@ -13262,7 +13268,10 @@ fn expected_settlement_deployment_intent(
     state_digest: Bytes32,
     reg: &serde_json::Value,
 ) -> Result<SettlementDeploymentIntent, String> {
+    let late_incoming_verifier = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
+        .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?, 20, "late incoming verifier")?;
     Ok(SettlementDeploymentIntent {
+        late_incoming_verifier,
         chain_id,
         broadcaster: broadcaster.to_string(),
         start_nonce,
@@ -13489,13 +13498,15 @@ fn cast_encode_settlement_constructor(args: &[&str]) -> Result<String, String> {
 fn cast_encode_materializer_constructor(
     rollup: &str,
     backing_adapter: &str,
+    late_adapter: &str,
 ) -> Result<String, String> {
-    const SIGNATURE: &str = "constructor(address,address)";
+    const SIGNATURE: &str = "constructor(address,address,address)";
     let output = Command::new("cast")
         .arg("abi-encode")
         .arg(SIGNATURE)
         .arg(rollup)
         .arg(backing_adapter)
+        .arg(late_adapter)
         .output()
         .map_err(|e| format!("start `cast abi-encode` for close-funding materializer: {e}"))?;
     if !output.status.success() {
@@ -14138,9 +14149,10 @@ fn validate_settlement_broadcast_value(
         settlement_artifact_contract_address(&core[2], "close-funding materializer deploy")?;
     let materializer_args =
         settlement_artifact_args(&core[2], "close-funding materializer deploy")?;
-    if materializer_args.len() != 2
+    if materializer_args.len() != 3
         || !strip0x(materializer_args[0]).eq_ignore_ascii_case(&strip0x(rollup))
         || !strip0x(materializer_args[1]).eq_ignore_ascii_case(&strip0x(&backing_mle_adapter))
+        || !strip0x(materializer_args[2]).eq_ignore_ascii_case(&strip0x(&intent.late_incoming_verifier))
     {
         return Err(
             "close-funding materializer is not bound to the backing rollup and the CloseAssetBacking \
@@ -14149,7 +14161,7 @@ fn validate_settlement_broadcast_value(
         );
     }
     let encoded_materializer_constructor =
-        cast_encode_materializer_constructor(rollup, &backing_mle_adapter)?;
+        cast_encode_materializer_constructor(rollup, &backing_mle_adapter, &intent.late_incoming_verifier)?;
     let materializer_input = core[2]
         .get("transaction")
         .and_then(|value| value.get("input"))
@@ -14529,12 +14541,14 @@ mod settlement_broadcast_recovery_tests {
     ];
     const BACKING_MLE_CORE: &str = "0x0000000000000000000000000000000000000015";
     const BACKING_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000025";
+    const LATE_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000026";
     const VERIFIER: &str = "0x0000000000000000000000000000000000000031";
     const MANAGER: &str = "0x0000000000000000000000000000000000000032";
     const MATERIALIZER: &str = "0x0000000000000000000000000000000000000088";
 
     fn intent() -> SettlementDeploymentIntent {
         SettlementDeploymentIntent {
+            late_incoming_verifier: LATE_MLE_ADAPTER.to_string(),
             chain_id: CHAIN_ID,
             broadcaster: BROADCASTER.to_string(),
             start_nonce: START_NONCE,
@@ -14688,7 +14702,7 @@ mod settlement_broadcast_recovery_tests {
         let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
         let manager_input = format!("0x60006000{}", strip0x(&constructor));
         let materializer_constructor =
-            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER).unwrap();
+            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER).unwrap();
         let materializer_input = format!("0x6002{}", strip0x(&materializer_constructor));
 
         // One MleVerifierV2 core CREATE followed by its PinnedMleVerifierV2 adapter CREATE.
@@ -14752,7 +14766,7 @@ mod settlement_broadcast_recovery_tests {
             START_NONCE + 2,
             "CloseFundingMaterializer",
             MATERIALIZER,
-            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string()]),
+            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string()]),
             &materializer_input,
         ));
         for (index, pin) in pins.iter().enumerate() {
@@ -14949,7 +14963,7 @@ mod settlement_broadcast_recovery_tests {
                 &balance_vd_sha256,
             )
             .unwrap_err()
-            .contains("exactly 26"),
+            .contains("exactly 34"),
             "a close-proof-shaped MLE must never key the backing adapter"
         );
     }
@@ -15115,6 +15129,9 @@ mod settlement_broadcast_recovery_tests {
         let mut stale = expected.clone();
         stale.start_nonce -= 1;
         assert!(settlement_deploy_mode_for_intent(true, Some(&stale), &expected).is_err());
+        let mut wrong_late = expected.clone();
+        wrong_late.late_incoming_verifier = BACKING_MLE_ADAPTER.to_string();
+        assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late), &expected).is_err());
         let mut wrong_chain = expected.clone();
         wrong_chain.chain_id = 10;
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_chain), &expected).is_err());
@@ -15167,6 +15184,9 @@ mod settlement_broadcast_recovery_tests {
             .is_err(),
             "the backing adapter must bind the backing core created immediately before it"
         );
+        let mut wrong_late_adapter = artifact.clone();
+        wrong_late_adapter["transactions"][2]["arguments"][2] = serde_json::json!(BACKING_MLE_ADAPTER);
+        assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
         let mut materializer_bound_to_other_adapter = artifact.clone();
         materializer_bound_to_other_adapter["transactions"][2]["arguments"][1] =
             serde_json::json!(MLE_ADAPTERS[0]);
@@ -15999,6 +16019,20 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         STAGED_CLOSE_BACKING_MLE_CONFIG,
     )
     .unwrap_or_else(|error| die(format!("staged CloseAssetBacking MLE v2 config: {error}")));
+    let late_adapter = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
+        .unwrap_or_else(|_| die("LATE_INCOMING_VERIFIER is required")), 20, "late incoming verifier")
+        .unwrap_or_else(|e| die(e));
+    let late_config_path = std::env::var("LATE_MLE_CONFIG_PATH")
+        .unwrap_or_else(|_| die("LATE_MLE_CONFIG_PATH is required (use an absolute path)"));
+    // load_mle_v2_config_pin resolves under test/data; canonicalize the explicit path first.
+    let late_config_path = fs::canonicalize(contracts_dir.join(late_config_path))
+        .unwrap_or_else(|e| die(format!("late incoming config: {e}")));
+    let late_config_text = fs::read_to_string(&late_config_path).unwrap_or_else(|e| die(e));
+    MleVerifierV2ConfigFixture::from_canonical_json(&late_config_text).unwrap_or_else(|e| die(e));
+    let late_config_value = serde_json::from_str(&late_config_text).unwrap_or_else(|e| die(e));
+    let late_pin = parse_settlement_mle_v2_config_pin(&late_config_value, "late incoming", "LATE_MLE_CONFIG_PATH")
+        .unwrap_or_else(|e| die(e));
+    require_mle_v2_pair_pin(rpc, chain_id, &late_adapter, None, &late_pin, None);
     let data_dir = contracts_dir.join("test").join("data");
     let reg_path = data_dir.join("cli_reg_record.json");
     fs::write(
@@ -16227,6 +16261,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_mle_v2_pin,
         Some(activation_checkpoint.block_number),
     );
+    let deployed_late = cast_call_at(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[], activation_checkpoint.block_number);
+    if !strip0x(&deployed_late).eq_ignore_ascii_case(&strip0x(&deployment_intent.late_incoming_verifier)) {
+        die("materializer late incoming verifier differs from prepared deployment intent");
+    }
+    require_mle_v2_pair_pin(rpc, chain_id, &deployed_late, None, &late_pin, Some(activation_checkpoint.block_number));
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -17726,31 +17765,62 @@ fn cmd_pw_submit(args: &[String]) {
         ));
     }
 
-    eprintln!(
-        "pw-submit: building REAL close proof + MLE for post-burn state_version {} (HEAVY)…",
-        head.balance_state.state_version
-    );
-    let close_prover = CloseProver::new(&balance_vd);
-    let falcon_artifact =
-        cache_falcon_aggregate(close_prover.falcon_context(), &state.snapshot.record, head)
-            .unwrap_or_else(|e| die(format!("Falcon aggregate cache: {e}")));
-    let close_witness = close_prover
-        .build_full_witness_from_aggregate(
-            &state.snapshot.record,
-            head,
-            &falcon_artifact,
-            balance_proof,
+    // Randomized proofs must survive retry byte-for-byte once an L1 call is journaled.
+    let cache_path = "pw_submit_close_cache.json";
+    let cache_key = serde_json::json!({"head": head.digest, "auth": auth_digest,
+        "chain": rpc_chain_id(&rpc), "manager": manager});
+    let cached: Option<serde_json::Value> = fs::read(cache_path).ok().map(|bytes| {
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| die(format!("PW proof cache: {e}")))
+    });
+    let (close_pis, close_mle_json) = if let Some(cache) = cached.filter(|c| c["key"] == cache_key)
+    {
+        let mle = cache["mle"]
+            .as_str()
+            .unwrap_or_else(|| die("PW cache missing proof"))
+            .to_string();
+        let limbs = intmax3_zkp::public_close_prover::mle_v2_public_inputs(&mle)
+            .unwrap_or_else(|e| die(format!("PW cached proof: {e}")));
+        (
+            ChannelClosePublicInputs::from_u64_slice(&limbs).unwrap_or_else(|e| die(e)),
+            mle,
         )
-        .unwrap_or_else(|e| die(format!("build real PW close witness: {}", e.0)));
-    let close_proof = close_prover
-        .prove(&close_witness)
-        .unwrap_or_else(|e| die(format!("real PW close proof: {}", e.0)));
-    let close_mle_json = close_prover
-        .prove_mle(&close_proof)
-        .unwrap_or_else(|e| die(format!("real PW close MLE: {}", e.0)));
-    let close_pi_limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
-    let close_pis = ChannelClosePublicInputs::from_u64_slice(&close_pi_limbs)
-        .unwrap_or_else(|e| die(format!("decode real PW close PIs: {e:?}")));
+    } else {
+        eprintln!(
+            "pw-submit: building REAL close proof + MLE for post-burn state_version {} (HEAVY)…",
+            head.balance_state.state_version
+        );
+        let close_prover = CloseProver::new(&balance_vd);
+        let falcon_artifact =
+            cache_falcon_aggregate(close_prover.falcon_context(), &state.snapshot.record, head)
+                .unwrap_or_else(|e| die(format!("Falcon aggregate cache: {e}")));
+        let close_witness = close_prover
+            .build_full_witness_from_aggregate(
+                &state.snapshot.record,
+                head,
+                &falcon_artifact,
+                balance_proof,
+            )
+            .unwrap_or_else(|e| die(format!("build real PW close witness: {}", e.0)));
+        let close_proof = close_prover
+            .prove(&close_witness)
+            .unwrap_or_else(|e| die(format!("real PW close proof: {}", e.0)));
+        let close_mle_json = close_prover
+            .prove_mle(&close_proof)
+            .unwrap_or_else(|e| die(format!("real PW close MLE: {}", e.0)));
+        let close_pi_limbs =
+            close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
+        let close_pis = ChannelClosePublicInputs::from_u64_slice(&close_pi_limbs)
+            .unwrap_or_else(|e| die(format!("decode real PW close PIs: {e:?}")));
+
+        write_json(
+            cache_path,
+            &serde_json::json!({"key": cache_key, "mle": close_mle_json}),
+        );
+        (close_pis, close_mle_json)
+    };
+    if close_pis.final_channel_state_digest != head.digest {
+        die("PW cached close proof is not the current signed head");
+    }
 
     // Every scalar below is decoded from the proof's public inputs. The per-token vectors are the
     // exact signed-state witness whose tokenFundsDigest the proof exposes and the verifier
@@ -17783,52 +17853,17 @@ fn cmd_pw_submit(args: &[String]) {
         "withdrawal_base_nonce": tx_nonce,
         "burn_tx_leaf": tx_leaf.to_hex(),
     });
-    // Same shared resolution as the exit commands (F4).
-    let contracts_dir =
-        require_contracts_dir("pw-submit", &["script/SubmitPartialWithdrawal.s.sol"]);
-    let contracts_dir = contracts_dir.to_string_lossy().to_string();
-    let data_path = format!("{contracts_dir}/test/data/pw_submit.json");
-    fs::write(
-        &data_path,
-        serde_json::to_string_pretty(&submit).unwrap_or_else(|e| die(e)),
-    )
-    .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
-    let mle_path = format!("{contracts_dir}/test/data/{PW_CLOSE_INTENT_MLE_FILE}");
-    fs::write(&mle_path, close_mle_json).unwrap_or_else(|e| die(format!("write {mle_path}: {e}")));
-
-    let mut forge = Command::new("forge");
-    forge.current_dir(&contracts_dir).args([
-        "script",
-        "script/SubmitPartialWithdrawal.s.sol",
-        "--rpc-url",
+    submit_partial_withdrawal_live(
         &rpc,
-        "--broadcast",
-        "--code-size-limit",
-        "50000",
-    ]);
-    l1_signer.get().append_to_command(&mut forge);
-    let forge_out = forge
-        .output()
-        .unwrap_or_else(|e| die(format!("forge pw-submit failed: {e}")));
-    let out = String::from_utf8_lossy(&forge_out.stdout);
-    let err = String::from_utf8_lossy(&forge_out.stderr);
-    if !forge_out.status.success() {
-        die(format!(
-            "forge pw-submit FAILED:\nstdout: {out}\nstderr: {err}"
-        ));
-    }
-
-    let onchain_auth = out
-        .lines()
-        .chain(err.lines())
-        .skip_while(|l| !l.contains("AUTH_DIGEST:"))
-        .nth(1)
-        .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| {
-            die(format!(
-                "could not parse AUTH_DIGEST from forge output:\n{out}\n{err}"
-            ))
-        });
+        l1_signer.get(),
+        manager,
+        head,
+        &balance_vd,
+        &submit,
+        &close_mle_json,
+        auth_digest,
+    );
+    let onchain_auth = auth_digest.to_hex();
 
     write_json(
         "pw_auth.json",
@@ -17848,6 +17883,232 @@ fn cmd_pw_submit(args: &[String]) {
         "pw-submit OK: authDigest = {onchain_auth}, Rust = {}",
         auth_digest.to_hex()
     );
+}
+
+/// Keyless encoding plus the existing durable exact-call/finality engine. The E2E broadcaster
+/// is deliberately not used here: public-chain submissions use real release configuration.
+fn prepare_pw_calldata(contracts: &Path, dir: &Path, manager: &str, step: &str) -> String {
+    let output = dir.join(format!("{step}.calldata"));
+    let result = Command::new("forge")
+        .current_dir(contracts)
+        .env("PW_MANAGER", manager)
+        .env("PW_INTENT_PATH", dir.join("intent.json"))
+        .env("PW_MLE_PATH", dir.join("close_mle.json"))
+        .env("PW_BACKING_COMPACT_PATH", dir.join("backing.compact"))
+        .env("PW_CALLDATA_OUT", &output)
+        .args([
+            "script",
+            "script/PreparePartialWithdrawal.s.sol",
+            "--offline",
+            "--sig",
+            &format!("{step}()"),
+        ])
+        .output()
+        .unwrap_or_else(|e| die(format!("PW calldata encoder: {e}")));
+    if !result.status.success() {
+        die(format!(
+            "PW calldata encoder: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    let calldata = fs::read_to_string(output).unwrap_or_else(|e| die(e));
+    let bytes = hex::decode(calldata.trim().trim_start_matches("0x")).unwrap_or_else(|e| die(e));
+    if bytes.len() < 4 {
+        die("PW encoder returned empty calldata");
+    }
+    calldata.trim().to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_partial_withdrawal_live(
+    rpc: &str,
+    signer: &L1Signer,
+    manager: &str,
+    head: &ChannelState,
+    balance_vd: &plonky2::plonk::circuit_data::VerifierCircuitData<BF, BC, BD>,
+    submit: &serde_json::Value,
+    close_mle: &str,
+    auth_digest: Bytes32,
+) {
+    use intmax3_zkp::{
+        circuits::channel::close_asset_backing_circuit::{
+            CloseAssetBackingCircuit, CloseAssetBackingPublicInputs,
+        },
+        common::channel::token_funds_digest,
+        live_balance_service::LiveChannelBackingArtifact,
+        public_close_prover::wrap_and_export_backing_mle,
+    };
+    let contracts = require_contracts_dir("pw-submit", &["script/PreparePartialWithdrawal.s.sol"]);
+    let chain_id = rpc_chain_id(rpc);
+    let rollup = cast_call(rpc, manager, "registry()(address)", &[]);
+    let materializer = cast_call(rpc, manager, "closeFundingMaterializer()(address)", &[]);
+    let dir = contracts.parent().unwrap().join(PROOF_DA_DIR).join(format!(
+        "pw-submit-{chain_id}-{manager}-{}",
+        auth_digest.to_hex()
+    ));
+    fs::create_dir_all(&dir).unwrap_or_else(|e| die(e));
+    let _operation_lock = CliStateProcessLock::acquire_at(&dir);
+    let journal_path = dir.join("operation.json");
+    let key = FullWithdrawalOperationKey {
+        chain_id,
+        rollup: rollup.clone(),
+        manager: manager.into(),
+        depositor: signer.address(),
+        channel_id: head.channel_id.as_u64() as u32,
+        integrated: false,
+        deposit_amount: 0,
+        withdrawal_amount: submit["withdrawal_amount"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+        erc20_token_index: Some(submit["withdrawal_token_index"].as_u64().unwrap() as u32),
+        erc20_amount: None,
+        erc20_token: None,
+    };
+    let mut journal: FullWithdrawalOperationJournal = if journal_path.exists() {
+        serde_json::from_slice(&fs::read(&journal_path).unwrap_or_else(|e| die(e)))
+            .unwrap_or_else(|e| die(format!("PW submission journal: {e}")))
+    } else {
+        FullWithdrawalOperationJournal {
+            version: FULL_WITHDRAWAL_JOURNAL_VERSION,
+            key: key.clone(),
+            artifacts: None,
+            calls: BTreeMap::new(),
+            complete: false,
+        }
+    };
+    if journal.key != key || journal.version != FULL_WITHDRAWAL_JOURNAL_VERSION {
+        die("PW submission journal deployment/signer/economic identity changed");
+    }
+    write_private_json_at(&journal_path, &journal);
+    write_private_json_at(&dir.join("intent.json"), submit);
+    write_private_bytes_at(&dir.join("close_mle.json"), close_mle.as_bytes());
+    // A submitted exact call must be reconciled before requiring that its historical backing
+    // still be current. Otherwise a crash after mining could strand a valid pending intent.
+    if !journal.calls.contains_key("submit") {
+        let funds = token_funds_digest(
+            &head.balance_state.token_registry,
+            head.balance_state.token_count,
+            &head.channel_fund.amounts,
+        );
+        let backed = |block| {
+            cast_call_at(
+                rpc,
+                &materializer,
+                "hasSignedHeadBacking(address,uint32,bytes32,bytes32,bool)(bool)",
+                &[
+                    manager,
+                    &head.channel_id.as_u64().to_string(),
+                    &head.balance_state.settled_tx_chain.to_hex(),
+                    &funds.to_hex(),
+                    "true",
+                ],
+                block,
+            )
+            .trim()
+                == "true"
+        };
+        let checkpoint = read_durable_l1_checkpoint(rpc, chain_id);
+        let mut attestation_calldata = journal
+            .calls
+            .get("attest")
+            .map(|call| call.calldata.clone());
+        if attestation_calldata.is_none() && !backed(checkpoint.block_number) {
+            let file = std::env::var("PW_BACKING_ARTIFACT_FILE").unwrap_or_else(|_| {
+                die("PW needs its live signed-head backing artifact; set PW_BACKING_ARTIFACT_FILE")
+            });
+            let artifact: LiveChannelBackingArtifact = serde_json::from_slice(
+                &fs::read(file).unwrap_or_else(|e| die(format!("PW backing artifact: {e}"))),
+            )
+            .unwrap_or_else(|e| die(format!("PW backing artifact: {e}")));
+            if artifact.signed_head.digest != head.digest
+                || artifact.balance_verifier_data
+                    != serialize_verifier_data(balance_vd).unwrap_or_else(|e| die(e))
+            {
+                die("PW backing artifact does not match the current head/pinned Balance verifier");
+            }
+            let kit = artifact
+                .signed_head_exit_kit
+                .unwrap_or_else(|| die("PW backing exit kit missing"));
+            let circuit = CloseAssetBackingCircuit::<BF, BC, BD>::new(balance_vd);
+            let proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
+                kit.backing_proof,
+                &circuit.data.common,
+            )
+            .unwrap_or_else(|e| die(format!("PW backing proof decode: {e}")));
+            circuit
+                .data
+                .verify(proof.clone())
+                .unwrap_or_else(|e| die(format!("PW backing proof: {e}")));
+            let pis = CloseAssetBackingPublicInputs::from_u64_slice(&proof.public_inputs.to_u64_vec())
+                .unwrap_or_else(|e| die(e));
+            if pis != kit.backing_public_inputs
+                || pis.channel_id != head.channel_id
+                || pis.settled_tx_chain != head.balance_state.settled_tx_chain
+                || pis.token_funds_digest != funds
+            {
+                die("PW backing proof does not bind the post-burn channel/chain/fund vector");
+            }
+            let mle = wrap_and_export_backing_mle(&circuit, &proof).unwrap_or_else(|e| die(e));
+            write_private_bytes_at(&dir.join("backing.compact"), &mle.compact_proof);
+            attestation_calldata = Some(prepare_pw_calldata(&contracts, &dir, manager, "attest"));
+        }
+        if let Some(calldata) = attestation_calldata {
+            execute_full_withdrawal_call(
+                rpc,
+                chain_id,
+                signer,
+                &journal_path,
+                &mut journal,
+                "attest",
+                &materializer,
+                &calldata,
+                0,
+            );
+        }
+        let checkpoint = read_durable_l1_checkpoint(rpc, chain_id);
+        if !backed(checkpoint.block_number) {
+            die("PW signed-head backing is not current at finalized L1");
+        }
+        require_stable_durable_l1_checkpoint(rpc, &checkpoint);
+    }
+    let calldata = journal
+        .calls
+        .get("submit")
+        .map(|call| call.calldata.clone())
+        .unwrap_or_else(|| prepare_pw_calldata(&contracts, &dir, manager, "run"));
+    let confirmation = execute_full_withdrawal_call(
+        rpc,
+        chain_id,
+        signer,
+        &journal_path,
+        &mut journal,
+        "submit",
+        manager,
+        &calldata,
+        0,
+    );
+    let actual = cast_call_at(
+        rpc,
+        manager,
+        "pendingPartialWithdrawalAuthDigest()(bytes32)",
+        &[],
+        confirmation.block_number,
+    );
+    let pending = cast_call_at(
+        rpc,
+        manager,
+        "partialWithdrawalPending()(bool)",
+        &[],
+        confirmation.block_number,
+    );
+    if !same_hex_value(&actual, &auth_digest.to_hex()) || pending.trim() != "true" {
+        die("finalized PW submission did not record the exact pending authorization");
+    }
+    require_stable_durable_l1_checkpoint(rpc, &confirmation.finalized_checkpoint);
+    journal.complete = true;
+    write_private_json_at(&journal_path, &journal);
 }
 
 /// Finalize a partial withdrawal: advance anvil time, finalize on-chain, and check authorization.

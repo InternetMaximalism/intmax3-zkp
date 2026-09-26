@@ -339,6 +339,11 @@ pub struct L1DepositImportUpdateWitness {
 /// Receiver-side application of a confirmed inbound transfer (abstract2 §3.4 flowReceive3).
 #[derive(Clone, Debug)]
 pub struct ReceiverBundleApplyUpdateWitness {
+    /// Membership of the tagged unapplied leaf in prev, and the plain applied leaf in next.
+    pub incoming_tx_index: u64,
+    pub incoming_tx_inclusion:
+        crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof<Bytes32>,
+
     pub receiver_channel_record: ChannelRecord,
     /// The RECEIVER channel's member keys (root-checked against `receiver_channel_record`).
     pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
@@ -864,7 +869,7 @@ impl InterChannelFundImportUpdateWitness {
             .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
         require_chain_push(&self.prev_state, &self.next_state, settle_tag)?;
         // Stage 3: the fund import is a settle advancement on the RECEIVING channel — its
-        // accumulator MUST absorb the incoming `tx_hash` (this is the insertion a post-close claim
+        // accumulator MUST absorb `unapplied_incoming_leaf(tx_hash)` (the entry a post-close claim
         // against THIS closed channel proves inclusion against). The STRONG tx_hash-binding push
         // check runs in the WALLET co-signer (`build_inter_channel_credit`) with the persisted
         // tree; the witness here lacks the frontier, so it cannot verify the incremental
@@ -1091,12 +1096,15 @@ impl ReceiverBundleApplyUpdateWitness {
             ));
         }
         // The preceding fund-import step already folded this one logical incoming transfer. The
-        // bundle merely applies its ciphertext delta and must not advance either settle
-        // commitment again.
+        // bundle applies its ciphertext delta without advancing the base settle chain.
+        // Its accumulator update consumes the matching unapplied entitlement.
         require_chain_unchanged(&self.prev_state, &self.next_state)?;
-        require_accumulator_unchanged(
+        require_incoming_application(
             self.prev_state.balance_state.settled_tx_accumulator_root,
             self.next_state.balance_state.settled_tx_accumulator_root,
+            self.inter_channel_tx.tx_hash,
+            self.incoming_tx_index,
+            &self.incoming_tx_inclusion,
         )?;
         // Recipient position: public homomorphic-add recomputation; other positions and slots
         // untouched.
@@ -1717,10 +1725,10 @@ fn require_chain_push(
 // verifies the N-of-N member signatures over the final H1, so the finalized accumulator root is
 // signature-attested. The settle TRANSITION CIRCUITS do NOT change at all.
 //
-// SECURITY (leaf uniformity): the accumulator stores `tx_hash` UNIFORMLY at EVERY settle
-// advancement (even where the hash CHAIN pushes `tx_leaf`), giving the post-close claim ONE
-// canonical membership predicate (its `incoming_tx_hash`). The accumulator and `settled_tx_chain`
-// are INDEPENDENT commitments storing DIFFERENT leaves.
+// Leaf semantics: outgoing/applied entries store tx_hash. An imported but unapplied incoming
+// entry stores keccak(IMUI || tx_hash). Bundle application replaces that one leaf with tx_hash
+// using a shared Merkle path; a post-close claim requires the IMUI-tagged leaf. The accumulator
+// and the settled_tx_chain remain independent commitments.
 // ---------------------------------------------------------------------------
 
 /// Native co-signer check: `next_root` is EXACTLY the root after pushing `tx_hash` onto the prev
@@ -1749,9 +1757,29 @@ pub fn require_accumulator_push(
     Ok(())
 }
 
-/// Native co-signer check: the accumulator root is UNCHANGED across an in-channel transfer or a
-/// balance refresh (neither advances the settle history). Root-only (no tree needed): these
-/// transitions must not touch the accumulator at all.
+/// Replace exactly one authenticated unapplied incoming entry with its applied tx hash.
+/// The shared siblings authenticate that every other accumulator entry is unchanged.
+pub fn require_incoming_application(
+    prev_root: Bytes32,
+    next_root: Bytes32,
+    tx_hash: Bytes32,
+    index: u64,
+    proof: &crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof<Bytes32>,
+) -> Result<(), ChannelStateUpdateError> {
+    use crate::common::balance_state::unapplied_incoming_leaf;
+    let height = crate::wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT;
+    if index >= (1u64 << height)
+        || proof.0.siblings.len() != height
+        || Bytes32::from(proof.get_root(&unapplied_incoming_leaf(tx_hash), index)) != prev_root
+        || Bytes32::from(proof.get_root(&tx_hash, index)) != next_root
+    {
+        return Err(ChannelStateUpdateError::InvalidSettledTxChain(
+            "bundle must consume exactly one authenticated unapplied incoming leaf".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn require_accumulator_unchanged(
     prev_root: Bytes32,
     next_root: Bytes32,
@@ -3720,5 +3748,69 @@ mod tests {
         w.next_state.balance_state.state_version += 1;
         w.next_state = w.next_state.with_computed_digest();
         assert!(w.verify().is_err(), "state_version skip must be rejected");
+    }
+}
+
+#[cfg(test)]
+mod unapplied_incoming_tests {
+    use super::require_incoming_application;
+    use crate::{
+        common::balance_state::unapplied_incoming_leaf,
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+        utils::trees::incremental_merkle_tree::IncrementalMerkleTree,
+        wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
+    };
+
+    #[test]
+    fn unapplied_incoming_consumption_is_exact_and_one_shot() {
+        let tx = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let other = Bytes32::from_u32_slice(&[9, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut tree = IncrementalMerkleTree::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
+        tree.push(other);
+        tree.push(unapplied_incoming_leaf(tx));
+        let pending_root = Bytes32::from(tree.get_root());
+        let proof = tree.prove(1);
+        tree.update(1, tx);
+        let applied_root = Bytes32::from(tree.get_root());
+        assert!(require_incoming_application(pending_root, applied_root, tx, 1, &proof).is_ok());
+        // Leaving the entitlement live while crediting the slot would double-pay at close.
+        assert!(require_incoming_application(pending_root, pending_root, tx, 1, &proof).is_err());
+        // Reapplication, another tx, another position, and a wrapped index all fail.
+        assert!(require_incoming_application(applied_root, applied_root, tx, 1, &proof).is_err());
+        assert!(
+            require_incoming_application(pending_root, applied_root, other, 1, &proof).is_err()
+        );
+        assert!(require_incoming_application(pending_root, applied_root, tx, 0, &proof).is_err());
+        assert!(
+            require_incoming_application(
+                pending_root,
+                applied_root,
+                tx,
+                1 + (1u64 << SETTLED_TX_ACCUMULATOR_HEIGHT),
+                &proof
+            )
+            .is_err()
+        );
+        let mut truncated = proof.clone();
+        truncated.0.siblings.pop();
+        assert!(
+            require_incoming_application(pending_root, applied_root, tx, 1, &truncated).is_err()
+        );
+        // A pending claim's inclusion cannot be reused against the final applied root.
+        assert_ne!(
+            Bytes32::from(proof.get_root(&unapplied_incoming_leaf(tx), 1)),
+            applied_root
+        );
+        tree.update(0, tx);
+        assert!(
+            require_incoming_application(
+                pending_root,
+                Bytes32::from(tree.get_root()),
+                tx,
+                1,
+                &proof
+            )
+            .is_err()
+        );
     }
 }

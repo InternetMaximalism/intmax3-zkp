@@ -4,9 +4,9 @@ Scope: native INTMAX transactions and channel settlement. Per owner direction, K
 explicitly deferred and is not a gate in this list. “Done” means the stated acceptance test passes;
 an existing library primitive or fixture-only path does not count as production wiring.
 
-Direct in-place member-set update is retired. Its replacement is the unanimous close → new channel
-→ exact asset/commitment migration protocol tracked in `doc/tasks/channel-change-msu.md`; do not
-re-enable the historical IMMS verifier, producer, or CLI path.
+Direct in-place member-set update is retired. Channel-change migration is also out of scope
+(owner decision 2026-09-26); `doc/tasks/channel-change-msu.md` is historical context, not a
+replacement implementation requirement. Do not re-enable the historical IMMS path.
 
 ## P0 — cannot advertise as a functioning testnet
 
@@ -253,3 +253,26 @@ Comparison sites of wallet root vs registered root:
 On-chain close of a DELEGATE-bearing channel compares the close PI delegate_count limb against the
 Manager-registered counts; under B the registration emits delegate_count = 0, so that lifecycle
 needs B-2 (Solidity) — out of B-1a scope. a3 uses 0 delegates and is unaffected.
+
+<a id="deferred-specialclose"></a>
+
+## Deferred TODO — SpecialClose (outside current scope)
+
+Owner decision: **2026-09-26**. SpecialClose is an optional BP nonpublication penalty, not a
+prerequisite for ordinary close or double-spend prevention. It is excluded from the current
+implementation and release blockers. Keep `submitSpecialClose` disabled. This TODO does not
+commit to a future release or authorize re-enabling the digest-equality verifier.
+
+- [ ] If this feature is selected for future work, define and implement a bounded publication
+      challenge game: authenticate the registered BP's exact publication obligation; accept proof
+      of fulfillment in canonical finalized history; resolve unanswered challenges after a fixed
+      deadline; and enforce any penalty against an actually deposited, separately accounted BP
+      bond. Specify replay protection, bond withdrawal rules, rewards and freeze behavior.
+- [ ] Before enabling it, test forged obligations, wrong BP/channel/block, valid publication
+      responses, deadline boundaries, challenge replay, and insufficient or unfunded bonds.
+      Ordinary close must remain available independently of the penalty game.
+
+A universal ZK non-inclusion proof is not required if the authenticated obligation and response/
+timeout game establish the fault. The existing close replacement/cancellation challenge alone
+is not that game. See [detail2](../architecture-audit/detail2.md#specialclose--out-of-scope-deferred-todo)
+for the rationale and historical §H-3 specification.

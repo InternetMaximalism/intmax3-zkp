@@ -63,7 +63,7 @@ use crate::{
 
 /// `channel_id(1) | settled_tx_chain(8) | token_funds_digest(8) |
 /// finalized_extended_state_commitment(8) | anchor_block_number(1)`.
-pub const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN: usize = 2 + 3 * BYTES32_LEN;
+pub const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN: usize = 2 + 4 * BYTES32_LEN;
 
 #[derive(Debug, Error)]
 pub enum CloseAssetBackingCircuitError {
@@ -99,6 +99,8 @@ pub struct CloseAssetBackingPublicInputs {
     /// Same wire as `ExtendedPublicState.inner.block_number`; the L1 materializer uses this
     /// channel anchor to reject a close artifact older than the last channel-affecting post.
     pub anchor_block_number: BlockNumber,
+    /// Full Balance PI commitment, including private/nullifier state and pinned cyclic VD.
+    pub balance_state_commitment: Bytes32,
 }
 
 impl CloseAssetBackingPublicInputs {
@@ -109,6 +111,7 @@ impl CloseAssetBackingPublicInputs {
             self.token_funds_digest.to_u64_vec(),
             self.finalized_extended_state_commitment.to_u64_vec(),
             self.anchor_block_number.to_u64_vec(),
+            self.balance_state_commitment.to_u64_vec(),
         ]
         .concat()
     }
@@ -135,6 +138,7 @@ impl CloseAssetBackingPublicInputs {
             token_funds_digest: parse_bytes32(1 + BYTES32_LEN)?,
             finalized_extended_state_commitment: parse_bytes32(1 + 2 * BYTES32_LEN)?,
             anchor_block_number,
+            balance_state_commitment: parse_bytes32(26)?,
         })
     }
 
@@ -155,6 +159,7 @@ pub struct CloseAssetBackingPublicInputsTarget {
     pub token_funds_digest: Bytes32Target,
     pub finalized_extended_state_commitment: Bytes32Target,
     pub anchor_block_number: BlockNumberTarget,
+    pub balance_state_commitment: Bytes32Target,
 }
 
 impl CloseAssetBackingPublicInputsTarget {
@@ -171,6 +176,7 @@ impl CloseAssetBackingPublicInputsTarget {
             finalized_extended_state_commitment: Bytes32Target::from_slice(
                 &values[1 + 2 * BYTES32_LEN..1 + 3 * BYTES32_LEN],
             ),
+            balance_state_commitment: Bytes32Target::from_slice(&values[26..34]),
             anchor_block_number: BlockNumberTarget {
                 value: values[1 + 3 * BYTES32_LEN],
             },
@@ -184,6 +190,7 @@ impl CloseAssetBackingPublicInputsTarget {
             self.token_funds_digest.to_vec(),
             self.finalized_extended_state_commitment.to_vec(),
             vec![self.anchor_block_number.value],
+            self.balance_state_commitment.to_vec(),
         ]
         .concat()
     }
@@ -368,6 +375,7 @@ where
             ),
             finalized_extended_state_commitment: self.extended_public_state.commitment(),
             anchor_block_number: self.extended_public_state.inner.block_number,
+            balance_state_commitment: Bytes32::from(balance_full_pis.commitment(&balance_vd.common.config)),
         })
     }
 }
@@ -452,6 +460,8 @@ where
             &final_balance_proof.public_inputs,
             &balance_vd.common.config,
         );
+        let balance_commitment = balance_full_pis.commitment(&mut builder, &balance_vd.common.config);
+        let balance_state_commitment = Bytes32Target::from_hash_out(&mut builder, balance_commitment);
         let balance_pis = balance_full_pis.pis;
 
         let private_state = PrivateStateTarget::new(&mut builder);
@@ -572,6 +582,7 @@ where
             Bytes32Target::from_slice(&builder.keccak256::<C>(&digest_preimage));
         let finalized_extended_state_commitment = extended_public_state.commitment(&mut builder);
         let public_inputs = CloseAssetBackingPublicInputsTarget {
+            balance_state_commitment,
             channel_id: balance_pis.channel_id,
             settled_tx_chain: balance_pis.settled_tx_chain,
             token_funds_digest,
@@ -969,13 +980,14 @@ mod tests {
 
     #[test]
     fn public_inputs_roundtrip_is_fixed_width() {
-        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 26);
+        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 34);
         let inputs = CloseAssetBackingPublicInputs {
             channel_id: ChannelId::new(7).unwrap(),
             settled_tx_chain: Bytes32::from_u32_slice(&[1; 8]).unwrap(),
             token_funds_digest: Bytes32::from_u32_slice(&[2; 8]).unwrap(),
             finalized_extended_state_commitment: Bytes32::from_u32_slice(&[3; 8]).unwrap(),
             anchor_block_number: BlockNumber::new(4).unwrap(),
+            balance_state_commitment: Bytes32::from_u32_slice(&[5; 8]).unwrap(),
         };
         assert_eq!(
             inputs.to_u64_vec().len(),
@@ -987,7 +999,7 @@ mod tests {
         );
 
         let mut noncanonical_anchor = inputs.to_u64_vec();
-        noncanonical_anchor[CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN - 1] = 1 << 63;
+        noncanonical_anchor[25] = 1 << 63;
         assert!(matches!(
             CloseAssetBackingPublicInputs::from_u64_slice(&noncanonical_anchor),
             Err(CloseAssetBackingCircuitError::InvalidPublicInputs(_))
@@ -1364,6 +1376,7 @@ mod tests {
             pi.token_funds_digest.to_vec(),
             pi.finalized_extended_state_commitment.to_vec(),
             vec![ext.inner.block_number.value],
+            pi.balance_state_commitment.to_vec(),
         ]
         .concat();
         table.check(
@@ -1380,13 +1393,13 @@ mod tests {
              (the two digests are the literal gadget outputs); no re-witnessing",
         );
         table.check(
-            "registerPublicInputs 26", "close_asset_backing_circuit.rs:598", "public-inputs",
+            "registerPublicInputs 34", "close_asset_backing_circuit.rs:598", "public-inputs",
             expected_pi_order.len() == CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
-                && CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN == 26
+                && CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN == 34
                 && view.public_inputs_are(&expected_pi_order)
-                && c.data.common.num_public_inputs == 26,
-            "holds: publicWire.words.length = 26 — checked strictly stronger: the 26 registered \
-             wires are exactly the 5 fields of CloseAssetBackingPublicInputsTarget, in to_vec order",
+                && c.data.common.num_public_inputs == 34,
+            "holds: publicWire.words.length = 34 — current source extension: the 34 registered \
+             wires are exactly the 6 fields of CloseAssetBackingPublicInputsTarget, in to_vec order",
         );
         table.note(
             "buildCircuit", "close_asset_backing_circuit.rs:600", "no-gate", TRIVIAL,

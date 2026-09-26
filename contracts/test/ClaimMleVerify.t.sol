@@ -150,6 +150,8 @@ contract ClaimMleVerifyTest is Test {
         _assertPublicInputsPathFitsProductionGasEnvelope("withdrawal_claim_mle.json", 50);
     }
 
+    // Historical 57-limb artifact only. This is NOT the gas acceptance test for the new
+    // IMUI/version-2 statement; regenerate and pin its MLE export before deployment.
     function test_realPostCloseClaimPublicInputsPathFitsProductionGasEnvelope() public {
         _assertPublicInputsPathFitsProductionGasEnvelope("post_close_claim_mle.json", 57);
     }

@@ -553,6 +553,16 @@ fn build_flow() -> FlowFixture {
     };
 
     // -- step (c): fund import on channel B (confirmed incoming; balances untouched) ----------
+    let mut incoming_tree = crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree::<
+        Bytes32,
+    >::new(crate::wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT);
+    incoming_tree.push(crate::common::balance_state::unapplied_incoming_leaf(
+        inter_channel_tx.tx_hash,
+    ));
+    let incoming_proof = incoming_tree.prove(0);
+    let pending_root = Bytes32::from(incoming_tree.get_root());
+    incoming_tree.update(0, inter_channel_tx.tx_hash);
+    let applied_root = Bytes32::from(incoming_tree.get_root());
     let b1 = ChannelState {
         epoch: 2,
         small_block_number: 1,
@@ -566,6 +576,7 @@ fn build_flow() -> FlowFixture {
             // One base receive folds the same tx leaf carried in Transfer.aux_data.
             settled_tx_chain: settled_tx_chain_push(b0.balance_state.settled_tx_chain, tx_leaf),
             state_version: 1,
+            settled_tx_accumulator_root: pending_root,
             ..b0.balance_state.clone()
         },
         shared_native_nullifier_root: bytes32_word(603),
@@ -599,7 +610,7 @@ fn build_flow() -> FlowFixture {
             // base settlement.
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: b1.balance_state.settled_tx_chain,
-            settled_tx_accumulator_root: Bytes32::default(),
+            settled_tx_accumulator_root: applied_root,
             state_version: 2,
             pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
             token_registry: BalanceState::single_token_registry(0),
@@ -612,6 +623,8 @@ fn build_flow() -> FlowFixture {
     }
     .with_computed_digest();
     let bundle = ReceiverBundleApplyUpdateWitness {
+        incoming_tx_index: 0,
+        incoming_tx_inclusion: incoming_proof,
         receiver_channel_record: receiver_record.clone(),
         regev_pks: b_pks.clone(),
         source_sender_pk: a_pks[0].clone(),
@@ -1339,8 +1352,8 @@ fn bundle_apply_rejects_pending_adds_over_budget() {
     ));
 }
 
-/// The fund-import step owns the single incoming accumulator insertion. Bundle assignment may
-/// not rewrite that N-of-N-attested post-close-claim root.
+/// Bundle application may change only the authenticated incoming leaf from IMUI to raw tx hash;
+/// an arbitrary replacement root must be rejected.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "run with --release")]
 fn bundle_apply_rejects_accumulator_root_rewrite() {

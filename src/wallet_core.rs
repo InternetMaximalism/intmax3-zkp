@@ -79,8 +79,8 @@ use crate::{
 
 /// Stage 3: height of the per-channel settled-tx Merkle ACCUMULATOR (`IncrementalMerkleTree<
 /// Bytes32>`). `H = 20` ⇒ up to `2^20 ≈ 1M` settles per channel (far beyond any real channel).
-/// Native `push` asserts `len < 2^H`. Leaves are the `tx_hash` of every settle (uniformly), the
-/// same identifier the post-close claim binds via `incoming_tx_hash`.
+/// Native `push` asserts `len < 2^H`. Outgoing/applied leaves store `tx_hash`;
+/// unapplied incoming leaves store `keccak(IMUI || tx_hash)`.
 pub const SETTLED_TX_ACCUMULATOR_HEIGHT: usize = 20;
 
 /// The empty (genesis) settled-tx accumulator root: `Bytes32::from(IncrementalMerkleTree::new(H)
@@ -447,10 +447,11 @@ pub struct ChannelSnapshot {
     pub members: Vec<MemberInfo>,
     /// Stage 3: the per-channel settled-tx Merkle ACCUMULATOR (`IncrementalMerkleTree<Bytes32>`,
     /// height [`SETTLED_TX_ACCUMULATOR_HEIGHT`]). Its leaves are the `tx_hash` of every settle the
-    /// channel has absorbed (uniformly), so `Bytes32::from(tree.get_root())` MUST equal
-    /// `state.balance_state.settled_tx_accumulator_root` at all times. The wallet threads it
-    /// through every inter-channel advancement (push `tx_hash`, recompute the root); intra-channel
-    /// transfers / refreshes leave it untouched. Persisting it here is what lets the wallet later
+    /// channel has absorbed (IMUI-tagged until incoming application), so
+    /// `Bytes32::from(tree.get_root())` MUST equal `state.balance_state.
+    /// settled_tx_accumulator_root` at all times. The wallet threads it through every
+    /// inter-channel advancement (push `tx_hash`, recompute the root); intra-channel transfers
+    /// / refreshes leave it untouched. Persisting it here is what lets the wallet later
     /// generate the post-close inclusion proof (the design's "wallet persistence" follow-up). For
     /// backward compatibility on the wire, it defaults to an empty tree when absent.
     #[serde(default = "default_settled_tx_accumulator")]
@@ -2420,8 +2421,11 @@ pub struct InterChannelTransferDescriptor {
 pub struct BuiltInterChannelCredit {
     pub fund_import_state: ChannelState,
     pub bundle_apply_state: ChannelState,
+    /// Persist alongside the signed import head if closure interrupts allocation.
+    pub fund_import_accumulator:
+        crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32>,
     /// Stage 3: the per-channel settled-tx accumulator after the incoming transfer's single
-    /// `tx_hash` insertion in the fund-import step. The bundle apply leaves it unchanged. Persist
+    /// tagged insertion in the fund-import step. Bundle application consumes that tag. Persist
     /// it as the channel's new
     /// `ChannelSnapshot::settled_tx_accumulator` — its root equals
     /// `bundle_apply_state.balance_state.settled_tx_accumulator_root`, and it is what lets the
@@ -4705,16 +4709,19 @@ pub fn build_inter_channel_credit(
     let import_nullifier =
         advance_nullifier(b_prev.shared_native_nullifier_root, descriptor.tx_hash);
     // Stage 3: the fund import is a settle advancement on the RECEIVING channel — the accumulator
-    // MUST absorb the incoming `tx_hash` (uniform leaf). This is the insertion a post-close claim
+    // MUST absorb the IMUI-tagged incoming `tx_hash`. This is the entry a post-close claim
     // against THIS channel later proves inclusion against, so the receiver side advancing is
     // load-bearing for Stage 3. Insert and read off the new root BEFORE building the state so h1()
     // below folds the advanced root.
     let mut import_accumulator = b_snapshot.settled_tx_accumulator.clone();
-    import_accumulator.push(inter_channel_tx.tx_hash);
+    let incoming_tx_index = import_accumulator.len() as u64;
+    let pending_leaf =
+        crate::common::balance_state::unapplied_incoming_leaf(inter_channel_tx.tx_hash);
+    import_accumulator.push(pending_leaf);
     let import_accumulator_root = Bytes32::from(import_accumulator.get_root());
     require_accumulator_push(
         &b_snapshot.settled_tx_accumulator,
-        inter_channel_tx.tx_hash,
+        pending_leaf,
         import_accumulator_root,
     )
     .map_err(|e| WalletError(format!("fund import accumulator push: {e:?}")))?;
@@ -4788,8 +4795,10 @@ pub fn build_inter_channel_credit(
     bundle_pending[recipient_slot][token_slot] += 1;
     // The import already chained the SAME tx leaf the sender chained into A. The bundle is the
     // accounting half of that one receive and must not fold a second logical settlement.
-    let bundle_accumulator = import_accumulator.clone();
-    let bundle_accumulator_root = import_accumulator_root;
+    let incoming_tx_inclusion = import_accumulator.prove(incoming_tx_index);
+    let mut bundle_accumulator = import_accumulator.clone();
+    bundle_accumulator.update(incoming_tx_index, inter_channel_tx.tx_hash);
+    let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
     let bundle_apply_state = ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
@@ -4815,6 +4824,8 @@ pub fn build_inter_channel_credit(
     let mut bundle_for_check = bundle_apply_state.clone();
     fill_placeholder_sigs(b_record, &mut bundle_for_check);
     let bundle_witness = ReceiverBundleApplyUpdateWitness {
+        incoming_tx_index,
+        incoming_tx_inclusion,
         receiver_channel_record: b_record.clone(),
         regev_pks,
         source_sender_pk: descriptor.source_pk.clone(),
@@ -4834,6 +4845,7 @@ pub fn build_inter_channel_credit(
         .map_err(|e| WalletError(format!("receiver bundle self-check failed: {e:?}")))?;
 
     Ok(BuiltInterChannelCredit {
+        fund_import_accumulator: import_accumulator,
         fund_import_state,
         bundle_apply_state,
         settled_tx_accumulator: bundle_accumulator,
@@ -5062,8 +5074,32 @@ pub fn verify_inter_channel_credit_states(
     a_trusted_record: &ChannelRecord,
     fund_import_state: &ChannelState,
     bundle_apply_state: &ChannelState,
+    applied_accumulator: &crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<
+        Bytes32,
+    >,
     level: RegevSecurityLevel,
 ) -> WResult<()> {
+    if applied_accumulator.height() != SETTLED_TX_ACCUMULATOR_HEIGHT
+        || applied_accumulator.len() > (1usize << SETTLED_TX_ACCUMULATOR_HEIGHT)
+    {
+        return bail("incoming accumulator shape is invalid");
+    }
+    let incoming_tx_index = applied_accumulator
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| WalletError("missing incoming accumulator entry".into()))?
+        as u64;
+    let incoming_tx_inclusion = applied_accumulator.prove(incoming_tx_index);
+    if applied_accumulator.get_leaf(incoming_tx_index) != descriptor.tx_hash
+        || Bytes32::from(applied_accumulator.get_root())
+            != bundle_apply_state.balance_state.settled_tx_accumulator_root
+        || Bytes32::from(incoming_tx_inclusion.get_root(&Bytes32::default(), incoming_tx_index))
+            != b_prev.balance_state.settled_tx_accumulator_root
+    {
+        return bail(
+            "incoming import must append exactly one entry to the authenticated prior tree",
+        );
+    }
     verify_inter_channel_credit_transition(
         b_prev,
         b_trusted_record,
@@ -5123,6 +5159,8 @@ pub fn verify_inter_channel_credit_states(
     .map_err(|e| WalletError(format!("destination fund-import transition invalid: {e:?}")))?;
 
     ReceiverBundleApplyUpdateWitness {
+        incoming_tx_index,
+        incoming_tx_inclusion,
         receiver_channel_record: b_trusted_record.clone(),
         regev_pks,
         source_sender_pk: descriptor.source_pk.clone(),
@@ -6478,7 +6516,7 @@ impl SettlementProverContext {
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // A-3 P2: real (non-test) post-close-claim proving. A receiver of an inter-channel delta that
-// arrived AFTER the source channel closed claims it: the circuit recomputes the incoming tx hash
+// remains unapplied at receiver close claims it: the circuit recomputes the incoming tx hash
 // in-circuit and proves its Merkle inclusion against the CLOSED channel's finalized
 // settled-tx-accumulator root (so the tx is member-signed, not fabricated), binds the receiver's
 // Regev pk to the H1-committed slot digest, and binds the claimed amount to the in-circuit
@@ -6496,6 +6534,7 @@ use crate::{
 
 /// Process-built post-close-claim proving context. Self-contained circuit (no balance VD).
 pub struct PostCloseClaimProver {
+    late_binding: bool,
     circuit: PostCloseClaimCircuit<F, C, D>,
 }
 
@@ -6508,8 +6547,14 @@ impl Default for PostCloseClaimProver {
 impl PostCloseClaimProver {
     pub fn new() -> Self {
         Self {
+            late_binding: false,
             circuit: PostCloseClaimCircuit::<F, C, D>::new(),
         }
+    }
+
+    /// Compose this proof with LateIncomingCircuit; it alone does not authorize a payout.
+    pub fn new_late_binding() -> Self {
+        Self { late_binding: true, circuit: PostCloseClaimCircuit::<F, C, D>::new_late_binding() }
     }
 
     /// Build the post-close-claim full witness. `source_tx` is the inter-channel transfer that
@@ -6583,7 +6628,20 @@ impl PostCloseClaimProver {
                 "post-close claim: public-input build failed: {e:?}"
             ))
         })?;
-        let incoming_tx_inclusion = accumulator.prove(incoming_tx_index);
+        if !self.late_binding && (accumulator.height() != SETTLED_TX_ACCUMULATOR_HEIGHT
+            || incoming_tx_index >= accumulator.len() as u64
+            || accumulator.get_leaf(incoming_tx_index)
+                != crate::common::balance_state::unapplied_incoming_leaf(tx_hash)
+            || Bytes32::from(accumulator.get_root())
+                != final_balance_state.settled_tx_accumulator_root
+        ) {
+            return bail(
+                "post-close claim requires an unapplied incoming leaf in the final signed state",
+            );
+        }
+        let (incoming_tx_inclusion, incoming_tx_index) = if self.late_binding {
+            (crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::dummy(SETTLED_TX_ACCUMULATOR_HEIGHT), 0)
+        } else { (accumulator.prove(incoming_tx_index), incoming_tx_index) };
         // H1 Poseidon-root form: the slot tree + the receiver's inclusion proof.
         let slot_tree = final_balance_state.slot_tree();
 

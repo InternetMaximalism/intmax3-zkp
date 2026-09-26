@@ -1140,11 +1140,8 @@ impl CloseIntent {
                 final_channel_state.channel_fund.amounts[0], close_withdrawal.burn_amount
             )));
         }
-        if final_channel_state.unallocated_confirmed_incoming != U256::zero() {
-            return Err(ChannelError::InvalidCloseBinding(
-                "close requires unallocated_confirmed_incoming = 0".to_string(),
-            ));
-        }
+        // Imported but unapplied incoming funds remain backed in channel_fund. Their signed
+        // IMUI leaves authorize separate one-shot residual claims after close.
         let close_nonce = final_channel_state
             .close_freeze_nonce
             .checked_add(1)

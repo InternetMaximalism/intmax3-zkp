@@ -100,7 +100,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             == vm.parseJsonBytes32(_closeIntentJson(), ".member_set_commitment");
     }
 
-    /// @dev The 26-limb CloseAssetBacking public-input vector the backing fixture was proved over,
+    /// @dev The 34-limb CloseAssetBacking public-input vector the backing fixture was proved over,
     /// parsed from the fixture so every statement below is asserted BEFORE the on-chain call.
     function _backingPublicInputs() internal view returns (uint256[] memory pi) {
         string[] memory raw = vm.parseJsonStringArray(_backingJson(), ".proof.publicInputs");
@@ -121,7 +121,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     function _attestRealBacking() internal {
         bytes memory bproof = FixtureLib.parseCompactProofV2(_backingJson());
         uint256[] memory pi = _backingPublicInputs();
-        assertEq(pi.length, 26, "backing fixture must carry the 26-limb CloseAssetBacking PI vector");
+        assertEq(pi.length, 34, "backing fixture must carry the 34-limb CloseAssetBacking PI vector");
         assertEq(pi[0], uint256(uint32(manager.channelId())), "backing PI channel id != manager channel id");
         bytes32 backingRoot;
         for (uint256 i = 17; i < 25; ++i) {

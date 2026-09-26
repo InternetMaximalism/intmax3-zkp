@@ -13,13 +13,14 @@
 //!    receiver-delta digest, tx_tree_root, source/destination channel ids, and — TM-16 — the BASE
 //!    `token_index` in ids limb 5, which IS the `token_index` PI: a single wire, so the exposed
 //!    token is exactly the one the anchored accumulator leaf commits), connects the recomputed
-//!    `tx_hash` to the `incoming_tx_hash` PI, and proves a Merkle INCLUSION of that `tx_hash`
-//!    against the closed channel's `final_settled_tx_accumulator_root`
+//!    `tx_hash` to the `incoming_tx_hash` PI, and proves Merkle inclusion of `keccak(IMUI ||
+//!    tx_hash)` against the closed channel's `final_settled_tx_accumulator_root`
 //!    (`IncrementalMerkleProofTarget::verify`, height [`SETTLED_TX_ACCUMULATOR_HEIGHT`]). The
 //!    accumulator root rides in the SIGNED H1 (recomputed below) — so the inclusion is against a
 //!    member-signed, finalized commitment, not a fabricated tx. This closes the "vacuous inclusion"
 //!    residual: a claimant can no longer fabricate a delta that was never in a signed inter-channel
-//!    tx the closed channel received.
+//!    tx the closed channel received. Bundle application replaces this tagged leaf with raw
+//!    tx_hash, so an already-applied delta cannot satisfy this predicate. Version 2 is PI limb 57.
 //! 3. STAGE 3 RECEIVER-PK BIND (threat-model #3). The circuit recomputes the closed channel's
 //!    `h1()` Poseidon-root header from the witnessed scalars + slot-tree root (SHARED
 //!    `h1_gadget::recompute_h1`, element-identical to close + native; see
@@ -105,6 +106,7 @@ pub struct PostCloseClaimPublicInputsTarget {
     /// witness), so the exposed token is exactly the one the accumulator leaf commits.
     /// Range-checked to a canonical u32 in `new()` (TM-16 obligation 4).
     pub token_index: [Target; 1],
+    pub statement_version: Target,
 }
 
 impl PostCloseClaimPublicInputsTarget {
@@ -127,6 +129,7 @@ impl PostCloseClaimPublicInputsTarget {
             final_balance_state_h1: Bytes32Target::new(builder, true),
             final_settled_tx_accumulator_root: Bytes32Target::new(builder, true),
             token_index: [u32_limb(builder)],
+            statement_version: builder.constant(F::from_canonical_u32(2)),
         }
     }
 
@@ -146,6 +149,7 @@ impl PostCloseClaimPublicInputsTarget {
             self.final_balance_state_h1.to_vec(),
             self.final_settled_tx_accumulator_root.to_vec(),
             self.token_index.to_vec(),
+            vec![self.statement_version],
         ]
         .concat();
         debug_assert_eq!(v.len(), POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN);
@@ -210,10 +214,10 @@ pub struct PostCloseClaimFullWitness {
     /// `source_tx.source_channel_id` — inter_channel_tx_hash id mix.
     pub source_channel_id: u32,
     // --- Stage 3 accumulator inclusion proof for the recomputed tx_hash. ---
-    /// The Merkle inclusion proof of `tx_hash` at `incoming_tx_index` in the closed channel's
-    /// accumulator (`final_settled_tx_accumulator_root`).
+    /// The Merkle inclusion proof of `keccak(IMUI || tx_hash)` at `incoming_tx_index` in the
+    /// closed channel's accumulator (`final_settled_tx_accumulator_root`).
     pub incoming_tx_inclusion: IncrementalMerkleProof<Bytes32>,
-    /// The leaf index of `tx_hash` in the accumulator.
+    /// The index of the unapplied incoming leaf in the accumulator.
     pub incoming_tx_index: u64,
     // --- Stage 3 H1 recompute (closed channel final balance state; Poseidon-root form). ---
     /// The closed channel's balance-slot tree root (`BalanceState::slot_tree_root()`, committed
@@ -342,10 +346,17 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new() -> Self {
+    pub fn new() -> Self { Self::build(false) }
+
+    /// Recipient/delta binding only, for composition with a real late ReceiveTransfer proof.
+    /// Version 3 plus tx_leaf (66 PIs) cannot be submitted to the residual-claim verifier.
+    pub fn new_late_binding() -> Self { Self::build(true) }
+
+    fn build(late: bool) -> Self {
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
-        let public_inputs = PostCloseClaimPublicInputsTarget::new(&mut builder);
+        let mut public_inputs = PostCloseClaimPublicInputsTarget::new(&mut builder);
+        if late { public_inputs.statement_version = builder.constant(F::from_canonical_u32(3)); }
         let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
             let t = builder.add_virtual_target();
             builder.range_check(t, 32);
@@ -416,12 +427,16 @@ where
             .to_hash_out(&mut builder);
         // verify panics-at-build if shapes mismatch; the constraint fails to prove if the leaf is
         // not at `index` under `root`.
-        incoming_tx_inclusion.verify::<F, C, D>(
+        let pending_leaf = crate::common::balance_state::unapplied_incoming_leaf_circuit::<F, C, D>(
             &mut builder,
-            &public_inputs.incoming_tx_hash,
+            public_inputs.incoming_tx_hash,
+        );
+        if !late { incoming_tx_inclusion.verify::<F, C, D>(
+            &mut builder,
+            &pending_leaf,
             incoming_tx_index,
             accumulator_root_hash,
-        );
+        ); }
 
         // ── Stage 3: H1 header recompute (SHARED gadget; Poseidon-root form) + receiver-pk
         // slot-leaf bind. ──
@@ -576,6 +591,7 @@ where
         };
 
         builder.register_public_inputs(&public_inputs.to_vec());
+        if late { builder.register_public_inputs(&tx_leaf.to_vec()); }
         let data = builder.build::<C>();
         Self {
             data,
@@ -878,7 +894,9 @@ pub mod test_fixture {
 
         // Insert tx_hash into a real accumulator at index 0 (a few extra leaves around it).
         let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
-        accumulator.push(tx_hash);
+        accumulator.push(crate::common::balance_state::unapplied_incoming_leaf(
+            tx_hash,
+        ));
         accumulator.push(pubkey_hash(77));
         let incoming_tx_index = 0u64;
         let incoming_tx_inclusion = accumulator.prove(incoming_tx_index);
@@ -1046,7 +1064,7 @@ mod tests {
     use crate::circuits::channel::post_close_claim_pis::POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN;
 
     /// Happy path: a real post-close-claim binding proves and the exposed limbs equal the
-    /// `PostCloseClaimPublicInputs::to_u64_vec()` layout (57 limbs). TM-16: the fixture's
+    /// `PostCloseClaimPublicInputs::to_u64_vec()` layout (58 limbs). TM-16: the fixture's
     /// incoming tx moves a NON-GENESIS base token (55) and the proof exposes it at limb 56 —
     /// bound to ids limb 5 of the anchored tx_hash, never a free witness.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
@@ -1067,6 +1085,43 @@ mod tests {
         assert_eq!(expected, actual);
         // TM-16: the token PI (limb 56) is the descriptor's base token, proven from the anchor.
         assert_eq!(actual[56], FIXTURE_TOKEN_INDEX as u64);
+        assert_eq!(actual[57], 2);
+    }
+
+    /// A raw/applied entry must fail even when both final roots and the Merkle opening are
+    /// internally consistent. This isolates the IMUI predicate from ordinary hash mismatches.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn post_close_claim_circuit_rejects_applied_incoming() {
+        use crate::{
+            constants::BALANCE_STATE_DOMAIN_V2,
+            ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+            utils::poseidon_hash_out::PoseidonHashOut,
+        };
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        let header = |w: &super::PostCloseClaimFullWitness, root: Bytes32| {
+            let mut fields = vec![BALANCE_STATE_DOMAIN_V2 as u64,
+                w.public_inputs.receiver_channel_id.as_u64(), w.member_count as u64,
+                w.delegate_count as u64, w.token_count as u64];
+            fields.extend(w.token_registry.iter().map(|&x| x as u64));
+            fields.extend(w.slot_tree_root.elements);
+            fields.extend(w.settled_tx_chain.to_u32_vec().into_iter().map(u64::from));
+            fields.extend(root.to_u32_vec().into_iter().map(u64::from));
+            fields.extend([w.state_version >> 32, w.state_version & 0xffff_ffff]);
+            Bytes32::from(PoseidonHashOut::hash_inputs_u64(&fields))
+        };
+        assert_eq!(header(&witness, witness.public_inputs.final_settled_tx_accumulator_root),
+            witness.public_inputs.final_balance_state_h1);
+        let raw_root = witness.incoming_tx_inclusion.get_root(
+            &witness.public_inputs.incoming_tx_hash, witness.incoming_tx_index);
+        witness.incoming_tx_inclusion.verify(&witness.public_inputs.incoming_tx_hash,
+            witness.incoming_tx_index, raw_root).unwrap();
+        witness.public_inputs.final_settled_tx_accumulator_root = Bytes32::from(raw_root);
+        witness.public_inputs.final_balance_state_h1 = header(&witness, Bytes32::from(raw_root));
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.prove(&witness)));
+        assert!(result.is_err() || result.unwrap().is_err(),
+            "an applied/raw incoming entry must never create residual credit");
     }
 
     /// Negative (TM-16 obligation 4) — tampered token limb: a `token_index` PI different from
@@ -1519,16 +1574,18 @@ mod tests {
             ),
             "shared_native_nullifier.connect(shared_native_nullifier PI)",
         );
-        // `.register 57` — :512
-        let expected_pi_order: Vec<Target> =
+        // Version 2 adds a constant statement-version limb.
+        let mut expected_pi_order: Vec<Target> =
             groups.iter().flat_map(|(_, w, _)| w.clone()).collect();
+        expected_pi_order.push(pi.statement_version);
         table.check(
-            "register 57", "post_close_claim_circuit.rs:512 / :137-153", "public-inputs",
+            "register 58", "post_close_claim_circuit.rs:512 / :137-153", "public-inputs",
             expected_pi_order.len() == POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN
-                && POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN == 57
+                && POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN == 58
                 && view.public_inputs_are(&expected_pi_order)
-                && c.data.common.num_public_inputs == 57,
-            "the 57 registered wires are exactly the ten groups, in to_vec order",
+                && c.data.common.num_public_inputs == 58
+                && view.is_const(pi.statement_version, 2),
+            "the 58 wires are the ten groups followed by the version-2 constant",
         );
         table.note(
             "build standard_recursion_zk_config", "post_close_claim_circuit.rs:513", "no-gate",

@@ -12,3 +12,5 @@ pub mod post_close_claim_pis;
 pub mod state_update_verifier;
 pub mod withdrawal_claim_circuit;
 pub mod withdrawal_claim_pis;
+
+pub mod late_incoming_circuit;

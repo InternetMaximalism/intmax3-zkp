@@ -184,6 +184,7 @@ contract DeployGuardsTest is Test {
 
     function setUp() public {
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
+        vm.setEnv("LATE_INCOMING_VERIFIER", vm.toString(address(new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID))));
         verifier = new ChannelSettlementVerifier(
             new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
             new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
@@ -991,7 +992,7 @@ contract DeployGuardsTest is Test {
             vm.toString(bytes(backingMle).length),
             ',"backingMleSha256":"',
             vm.toString(mleSha),
-            '","backingPublicInputCount":26,"backingPublicInputsFile":"backing_public_inputs.json","backingPublicInputsSha256":"',
+            '","backingPublicInputCount":34,"backingPublicInputsFile":"backing_public_inputs.json","backingPublicInputsSha256":"',
             vm.toString(sha256(bytes(backingPis))),
             '"}'
         );

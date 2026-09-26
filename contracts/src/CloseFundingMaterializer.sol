@@ -174,14 +174,22 @@ contract CloseFundingMaterializer {
         bytes32 tokenFundsDigest;
         bytes32 backingRoot;
         uint64 anchorBlockNumber;
+        bytes32 balanceStateCommitment;
     }
 
     IntmaxRollup public immutable rollup;
     /// @notice The constructor-pinned compact-v2 adapter of the CloseAssetBacking circuit. It
-    ///         recursively checks the Balance proof and exposes only the 26 fields consumed at the
+    ///         recursively checks the Balance proof and exposes only the 34 fields consumed at the
     ///         L1 exit boundary. Like every other statement verifier of this deployment it owns its
     ///         complete immutable VK/configuration; there is no post-deploy initialization.
     IPinnedMleVerifierV2 public immutable backingMleVerifier;
+    IPinnedMleVerifierV2 public immutable lateIncomingMleVerifier;
+    mapping(uint32 => bytes32) public lateBalanceStateCommitment;
+    mapping(uint32 => uint64) public lateBalanceAnchorBlock;
+    mapping(uint32 => mapping(bytes32 => bool)) public lateReceiveNullifierUsed;
+    error InvalidLateIncoming();
+    event LateIncomingClaimed(uint32 indexed channelId, bytes32 indexed receiveNullifier,
+        address indexed recipient, uint32 tokenIndex, uint64 amount, bytes32 nextBalanceCommitment);
 
     mapping(uint32 => address) public managerOfChannel;
     mapping(uint32 => uint64) public frozenGeneration;
@@ -212,11 +220,13 @@ contract CloseFundingMaterializer {
         uint32 indexed channelId, address indexed manager, bytes32 indexed closeIntentDigest, uint8 tokenCount
     );
 
-    constructor(IntmaxRollup rollup_, IPinnedMleVerifierV2 backingMleVerifier_) {
+    constructor(IntmaxRollup rollup_, IPinnedMleVerifierV2 backingMleVerifier_, IPinnedMleVerifierV2 lateIncomingMleVerifier_) {
         if (address(rollup_).code.length == 0) revert InvalidRollup();
         rollup = rollup_;
         _requirePinnedVerifier(backingMleVerifier_);
         backingMleVerifier = backingMleVerifier_;
+        _requirePinnedVerifier(lateIncomingMleVerifier_);
+        lateIncomingMleVerifier = lateIncomingMleVerifier_;
     }
 
     /// @dev Mirrors the Rollup/Manager constructor invariant: the adapter and its linked core must
@@ -411,6 +421,57 @@ contract CloseFundingMaterializer {
                 || statement.tokenFundsDigest != manager.finalizedTokenFundsDigest()
         ) revert BackingPublicInputsMismatch();
         _materialize(manager, statement.anchorBlockNumber);
+        uint32 channelId = uint32(manager.channelId());
+        lateBalanceStateCommitment[channelId] = statement.balanceStateCommitment;
+        lateBalanceAnchorBlock[channelId] = statement.anchorBlockNumber;
+    }
+
+    /// @notice Receive one previously unreceived C2C transfer after closure. The same base
+    /// ReceiveTransfer relation consumes its nullifier. L1 accepts only the current continuation
+    /// checkpoint; stale branches cannot credit twice. All writes and escrow credits are atomic.
+    function claimLateIncoming(ChannelSettlementManager manager, bytes calldata proof) external {
+        uint32 channelId = uint32(manager.channelId());
+        if (managerOfChannel[channelId] != address(manager)) revert NotBoundManager();
+        bytes32 closeId = materializedChannelExit[channelId];
+        if (closeId == bytes32(0) || manager.channelStatus() != ChannelSettlementManager.ChannelLifecycleStatus.Closed) {
+            revert ChannelExitManagerNotClosed();
+        }
+        uint256[] memory pi = lateIncomingMleVerifier.verifyCompactPublicInputs(proof);
+        if (pi.length != 59 || pi[58] != 1) revert InvalidLateIncoming();
+        for (uint256 i; i < pi.length; ++i) {
+            if (i != 41 && pi[i] > type(uint32).max) revert InvalidLateIncoming();
+        }
+        if (pi[41] >= uint256(1) << 63) revert InvalidLateIncoming();
+        if (pi[0] != channelId || _limbsToBytes32(pi, 1) != closeId
+            || _limbsToBytes32(pi, 9) != manager.finalizedBalanceStateH1()
+            || _limbsToBytes32(pi, 17) != lateBalanceStateCommitment[channelId]
+            || !rollup.isFinalizedStateRoot(_limbsToBytes32(pi, 33))
+            || pi[41] < lateBalanceAnchorBlock[channelId]
+            || pi[41] > rollup.latestFinalizedBlockNumber()) revert InvalidLateIncoming();
+        bytes32 nullifier = _limbsToBytes32(pi, 42);
+        if (lateReceiveNullifierUsed[channelId][nullifier]) revert InvalidLateIncoming();
+        uint160 recipientWord;
+        for (uint256 i = 50; i < 55; ++i) recipientWord = (recipientWord << 32) | uint160(pi[i]);
+        address recipient = address(recipientWord);
+        uint32 tokenIndex = uint32(pi[55]);
+        bool registered;
+        for (uint256 i; i < manager.finalizedTokenCount(); ++i) {
+            if (manager.finalizedTokenRegistry(i) == tokenIndex) registered = true;
+        }
+        if (!registered) revert InvalidLateIncoming();
+        uint64 amount = uint64((pi[56] << 32) | pi[57]);
+        if (recipient == address(0) || amount == 0) revert InvalidLateIncoming();
+        bytes32 next = _limbsToBytes32(pi, 25);
+        if (next == lateBalanceStateCommitment[channelId]) revert InvalidLateIncoming();
+        lateReceiveNullifierUsed[channelId][nullifier] = true;
+        lateBalanceStateCommitment[channelId] = next;
+        lateBalanceAnchorBlock[channelId] = uint64(pi[41]);
+        // Only actual finalized base receipts debit Rollup escrow. A failure below rolls back
+        // the checkpoint, nullifier, credit and cap together; callers cannot donate fake backing.
+        rollup.creditChannelExit(address(manager), tokenIndex, amount);
+        bytes32 claimKey = keccak256(abi.encodePacked(bytes4(0x494d4c43), channelId, closeId, nullifier));
+        manager.creditLateIncoming(tokenIndex, amount, recipient, claimKey);
+        emit LateIncomingClaimed(channelId, nullifier, recipient, tokenIndex, amount, next);
     }
 
     /// @dev The pinned adapter verifies the compact proof against its immutable configuration and
@@ -466,8 +527,9 @@ contract CloseFundingMaterializer {
         emit SignedHeadExitMaterialized(channelId, manager, digest, tokenCount);
     }
 
-    /// @dev Exact PI layout (26 limbs): channelId[1] | settledTxChain[8] | TFD[8] |
-    ///      finalizedExtendedStateCommitment[8] | anchorBlockNumber[1]. The first 25 are canonical
+    /// @dev Exact PI layout (34 limbs): channelId[1] | settledTxChain[8] | TFD[8] |
+    ///      finalizedExtendedStateCommitment[8] | anchorBlockNumber[1] | balanceStateCommitment[8].
+    ///      All fields except the anchor are canonical
     ///      u32 limbs; the anchor is canonical u63. The backing ext root need not equal H's signed
     ///      channel-fund root: it is the later finalized root that actually contains this Balance
     ///      proof. Channel/settled-chain/TFD are the bridge back to H.
@@ -476,9 +538,9 @@ contract CloseFundingMaterializer {
         view
         returns (BackingStatement memory statement)
     {
-        if (pi.length != 26) revert BackingPublicInputsMismatch();
-        for (uint256 i = 0; i < 25; ++i) {
-            if (pi[i] > type(uint32).max) revert BackingPublicInputsMismatch();
+        if (pi.length != 34) revert BackingPublicInputsMismatch();
+        for (uint256 i = 0; i < pi.length; ++i) {
+            if (i != 25 && pi[i] > type(uint32).max) revert BackingPublicInputsMismatch();
         }
         if (pi[25] >= (uint256(1) << 63)) revert BackingPublicInputsMismatch();
         uint32 channelId = uint32(manager.channelId());
@@ -488,7 +550,8 @@ contract CloseFundingMaterializer {
             settledTxChain: _limbsToBytes32(pi, 1),
             tokenFundsDigest: _limbsToBytes32(pi, 9),
             backingRoot: _limbsToBytes32(pi, 17),
-            anchorBlockNumber: uint64(pi[25])
+            anchorBlockNumber: uint64(pi[25]),
+            balanceStateCommitment: _limbsToBytes32(pi, 26)
         });
         if (!rollup.isFinalizedStateRoot(statement.backingRoot)) revert BackingPublicInputsMismatch();
         // Historical exact backing remains usable for a previously signed partial-withdrawal burn

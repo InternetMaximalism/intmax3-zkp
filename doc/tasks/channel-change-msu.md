@@ -1,6 +1,9 @@
 # Channel-change MSU — unanimous close, replacement channel, full migration
 
-Status: **TODO / not a release capability**
+Status: **OUT OF SCOPE / not planned (owner decision 2026-09-26)**
+
+The owner explicitly excluded channel-change migration. The following is retained as historical
+design context, not an implementation requirement or release blocker.
 Owner decision: direct in-place member-set update (the historical `MemberSetUpdate` / `IMMS`
 prototype) is permanently retired. Production must not initialize an MSU VK, build an MSU block,
 or mutate a Manager/validity member root in place.

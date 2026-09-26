@@ -39,6 +39,7 @@ function exitPublicInputs(backing) {
     ...bytes32Limbs(inputs.tokenFundsDigest),
     ...bytes32Limbs(inputs.finalizedExtendedStateCommitment),
     inputs.anchorBlockNumber,
+    ...bytes32Limbs(inputs.balanceStateCommitment),
   ];
 }
 
@@ -93,6 +94,7 @@ function fixture(digest = DIGEST) {
         tokenFundsDigest: TOKEN_FUNDS_DIGEST,
         finalizedExtendedStateCommitment: FINALIZED_EXTENDED_STATE_COMMITMENT,
         anchorBlockNumber: ANCHOR_BLOCK_NUMBER,
+        balanceStateCommitment: DIGEST,
       },
     },
   };
@@ -190,7 +192,7 @@ test('backing validation binds chain, rollup, exact signed state/record and sett
   assert.equal(checked.digest, DIGEST);
   assert.equal(checked.signedHeadExitKitSchemaVersion, 1);
   assert.equal(checked.backingProofBytes, 4);
-  assert.equal(checked.backingPublicInputs.length, 26);
+  assert.equal(checked.backingPublicInputs.length, 34);
   assert.equal(checked.backingPublicInputs[0], 7);
   assert.deepEqual(checked.backingPublicInputs.slice(1, 9), bytes32Limbs(CHAIN));
   assert.deepEqual(checked.backingPublicInputs.slice(9, 17), bytes32Limbs(TOKEN_FUNDS_DIGEST));

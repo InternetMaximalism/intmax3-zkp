@@ -33,7 +33,7 @@ use crate::{
 // accumulator root is the dedicated PI the inclusion proof of `incoming_tx_hash` is verified
 // against (threat-model Fork B). L1 `submitPostCloseClaim` passes BOTH the finalized H1 and the
 // finalized accumulator root, and credits `withdrawalCredits[token_index]` (strict-bound limb).
-pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 57;
+pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 58;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -212,7 +212,7 @@ impl PostCloseClaimPublicInputs {
             self.final_balance_state_h1.to_u64_vec(),
             self.final_settled_tx_accumulator_root.to_u64_vec(),
             // TM-16 (Phase 5a): the base token_index, appended at limb 56.
-            vec![self.token_index as u64],
+            vec![self.token_index as u64, 2], // unapplied-entitlement statement version
         ]
         .concat()
     }
@@ -223,6 +223,9 @@ impl PostCloseClaimPublicInputs {
                 "invalid post-close-claim public input length: expected {POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN}, got {}",
                 values.len()
             ));
+        }
+        if values[57] != 2 {
+            return Err("unsupported post-close entitlement statement version".into());
         }
         Ok(Self {
             close_intent_digest: Bytes32::from_u64_slice(&values[0..8])
@@ -443,5 +446,22 @@ mod tests {
             redirected.to_public_inputs(RegevSecurityLevel::Test),
             Err(PostCloseClaimWitnessError::RecipientMismatch)
         ));
+    }
+}
+
+#[cfg(test)]
+mod unapplied_entitlement_version_tests {
+    use super::*;
+    #[test]
+    fn inclusion_only_and_unknown_claim_versions_are_rejected() {
+        assert!(PostCloseClaimPublicInputs::from_u64_slice(&[0; 57]).is_err());
+        let mut limbs = [0; POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN];
+        limbs[8] = 7;
+        limbs[57] = 2;
+        assert!(PostCloseClaimPublicInputs::from_u64_slice(&limbs).is_ok());
+        limbs[57] = 1;
+        assert!(PostCloseClaimPublicInputs::from_u64_slice(&limbs).is_err());
+        limbs[57] = 3;
+        assert!(PostCloseClaimPublicInputs::from_u64_slice(&limbs).is_err());
     }
 }

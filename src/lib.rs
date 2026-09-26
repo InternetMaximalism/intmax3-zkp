@@ -30,6 +30,8 @@ pub(crate) mod l1_signer_reservation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod live_balance_service;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod late_incoming;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod partial_withdrawal_payout;
 pub mod poseidon_sig;
 #[cfg(not(target_arch = "wasm32"))]

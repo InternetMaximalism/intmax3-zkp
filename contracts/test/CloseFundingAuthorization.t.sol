@@ -157,6 +157,7 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
     function test_materializerTerminalChildRoutesAreTombstones() external {
         CloseFundingMaterializer materializer = new CloseFundingMaterializer(
             IntmaxRollup(payable(address(registry))),
+            IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid))),
             IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid)))
         );
         ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);

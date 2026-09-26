@@ -108,9 +108,9 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("incoming_tx_1"), USER_B, bob, 40);
         bytes memory pcProof = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitPostCloseClaim(pc, pcProof);
-        assertEq(manager.totalWithdrawn(0), 40, "the disabled leg accrues nothing");
+        assertEq(manager.totalWithdrawn(0), 40, "failed residual claim accrues nothing");
 
         // The cap still binds on the leg that remains: 40 + 36 > 75 is refused, 40 + 35 == 75 fits.
         ChannelSettlementManager.WithdrawalClaim memory over = _withdrawalClaim(d, USER_B, bob, 36);

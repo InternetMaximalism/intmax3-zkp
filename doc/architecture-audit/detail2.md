@@ -1,11 +1,206 @@
 # detail2 — Current implementation reference and historical design rationale
 
+> **Scope decision (2026-09-26):** Channel-change/member-set migration is not a required
+> capability and will not be implemented. Existing channel membership remains immutable;
+> the retired direct MSU opcode must not be restored. Creating an independent new channel
+> is not an authenticated migration and must not be advertised as one. Historical migration
+> TODOs below or in task documents do not expand the current product scope.
+
+> **SpecialClose scope decision (2026-09-26):** BP nonpublication penalties are outside the
+> current implementation scope. Keep `submitSpecialClose` disabled and track the optional future
+> challenge game in [the deferred TODO](../tasks/todo.md#deferred-specialclose). This is not a
+> prerequisite for ordinary close or a current release blocker.
+
+
 > **Implementation alignment: 2026-09-06.** This reference describes runtime parent `05ec7ae`
 > (including node/admission repairs `b5bafb7`) with MLE submodule `6cefc6ac`, wire v3,
 > target 105 / inverse-rate 6. It is not a deployment approval or an unconditional asset-safety
 > proof. The earlier Lean baseline `3e2d45c` is extended by `ChannelSafetyAdmission`,
 > `ChannelSafetyRecovery` and `ChannelSafetyExit`. Their conditional results and validation
 > are recorded in [the current Lean scope](../audit/lean-current-safety.md), not release approval.
+
+## Minimal residual-claim and partial-withdrawal implementation (2026-09-26)
+
+This section supersedes the historical post-close disablement and uniform-leaf descriptions
+below. It describes source changes, not a deployment or a refreshed formal certification.
+
+### Proving that incoming value is not in the closing ciphertext
+
+A second Merkle tree is unnecessary. The existing height-20 settled-transaction tree, whose root
+is committed by the member-signed H1, now distinguishes two leaf states:
+
+| Entry | Leaf | Claimable after closure |
+| --- | --- | --- |
+| Imported C2C incoming delta, not yet applied | `keccak256(u32_be(0x494d5549) || tx_hash)` (IMUI) | Yes |
+| Applied incoming delta | `tx_hash` | No |
+| Outgoing transaction or legacy raw entry | `tx_hash` | No |
+
+The fund-import step appends the IMUI leaf, increases the channel's token fund and unallocated
+incoming amount, and leaves encrypted balances untouched. Bundle application authenticates the
+IMUI leaf at its exact index and replaces it with the raw hash using the **same Merkle siblings**.
+At the same time it adds the delta to the recipient's ciphertext and subtracts the unallocated
+amount. Changing another entry, omitting consumption, or consuming twice is rejected. The tree
+is therefore an indexed settlement-status commitment; its leaves are no longer immutable history.
+The separate `settled_tx_chain` remains the base-settlement linkage.
+
+These transition checks remain native co-signer checks in the existing honest-member trust
+model. The close circuit does not independently prove every historical encrypted transition.
+The close constructor/circuit allow nonzero unallocated incoming, authenticate it in IMCH, and
+retain full token-fund backing checks. Terminal close funding preserves the pending leaf and
+unallocated counter while moving the full backed fund to the manager; it does not force the delta
+into a ciphertext before exit. An honest signer must preserve the invariant that tagged
+entries have not contributed to the encrypted balances; merely signing an arbitrary root is not
+an independent proof of that history.
+
+The post-close circuit recomputes the destination/token-bound transaction hash, proves inclusion
+of **its IMUI leaf**, binds the receiver key and recipient to final H1, and proves the delta's
+plaintext amount. Its public inputs have **58 limbs**: the previous 57 fields followed by the
+constant statement version **2**. The Solidity binder requires that exact length/version.
+A legacy 57-limb inclusion-only proof cannot create credit through the new entry point.
+`PostCloseProver` also rejects a mismatched snapshot, absent index, or raw/applied leaf before
+expensive proving. A caller retaining an intermediate signed import head must retain the matching
+`BuiltInterChannelCredit.fund_import_accumulator`, not the tree after bundle application.
+
+`submitPostCloseClaim` requires a finalized close, its exact close digest and final H1/accumulator,
+a registered token, a valid pinned proof, and the deterministic IMCK nullifier. It consumes that
+nullifier and uses the same claim-scoped pull-payment accounting and per-token lifetime cap as
+ordinary balance claims. It never transfers ETH/ERC-20 during proof registration. Proof failure,
+over-cap claims, or replay revert atomically. An ordinary claim plus a residual claim cannot exceed
+the one finalized token cap.
+
+**Residual-lane boundary:** this lane covers a C2C delta already imported before the signed
+closing snapshot. A transfer first received afterwards uses the separate continuation below.
+L1-deposit import/application remains the existing atomic wallet operation; callers must not
+publish its intermediate import state as a supported exit head. Direct L1 deposits have no
+recipient Regev delta and are not routed through the C2C claim statement.
+
+### Post-close first receipt: ordinary ReceiveTransfer continuation (2026-09-26)
+
+The final signed channel head and its token-fund digest remain immutable. A second, serial
+Balance-proof cursor handles new C2C receipts. No receiver co-signatures, reopening, migration,
+or SpecialClose are needed. The recipient's final H1 slot fixes their key and payout address.
+
+1. **Exact starting state.** CloseAssetBacking now exposes 34 public inputs, appending the eight
+   u32 limbs of the full Balance-PI Poseidon commitment after the existing anchor at index 25.
+   This commits the private state (including the nullifier tree), public state, receive cursor,
+   settled chain, channel, and cyclic verifier data. On initial `materializeSignedHead`, L1 saves
+   this exact commitment as `lateBalanceStateCommitment[channel]` and saves the anchor height.
+2. **Actual receive and ownership.** `LateIncomingCircuit` embeds the existing
+   `ReceiveTransferTarget`: receiver/sender Balance proofs, source spend proof, finalized
+   settlement inclusion, recipient-channel opening, asset update and base-nullifier insertion.
+   All verifier keys are fixed by construction. Its additional recipient-binding proof uses
+   `PostCloseClaimCircuit::new_late_binding`: final-H1 slot/key/address opening and delta
+   decryption, without old accumulator inclusion. This 66-limb/version-3 proof exposes its
+   transaction leaf, connected to the actual base transfer's aux_data; token and u64 amount
+   are connected too. This binding proof alone is never accepted as a payment authorization.
+3. **Serial continuation.** The 59-limb/version-1 combined statement exposes the previous and
+   next full Balance commitments. L1 accepts only the current previous commitment. A transfer
+   already received before close is in the starting private nullifier tree; a receipt after
+   close updates that same tree. An explicit L1 base-nullifier map is an additional replay guard.
+   Competing branches from the same cursor cannot both succeed, and must be reproved serially.
+4. **Funding and payout.** `claimLateIncoming(manager, proof)` requires the materialized close,
+   final H1, finalized extended root, nondecreasing anchor height, registered base token, positive
+   amount and nonzero recipient. It debits actual Rollup escrow via `creditChannelExit`, extends
+   `lateIncomingFundAmount[token]`, and creates a recipient-scoped payout atomically. Any failure
+   rolls back cursor, nullifier, escrow, cap and credit. Initial token funds and their digest
+   are unchanged. Accrual and pull caps are `finalizedChannelFundAmount + lateIncomingFundAmount`;
+   actual payouts additionally cannot exceed funds already pulled from the Rollup. The payout
+   key is `keccak256(bytes4(0x494d4c43) || uint32(channelId) || closeId || baseNullifier)`.
+   Native and ERC-20 use the existing pull/claim machinery; token index 0 now also works through
+   the common `pullChannelTokenFunds(0)` entry point.
+5. **Native workflow and recovery.** `LiveBalanceService::late_incoming_checkpoint` exports the
+   exact closing private cursor only if it matches confirmed L1. `prepare_late_inter_channel`
+   consumes the same source descriptor/artifact as an ordinary receive, verifies the canonical
+   producer anchor, and calls `LateIncomingCheckpoint::prepare`. This produces the combined
+   proof, compact MLE calldata/config and the ordinary next Balance proof/private state. Write
+   the complete pending artifact with `write_private_artifact_new` before submission. This
+   immutable, mode-0600 artifact is published atomically and must remain private. Retain the old
+   confirmed checkpoint until finality; `confirmed_checkpoint` requires the L1 cursor to equal
+   this receipt's next commitment. The RPC/finality reader remains responsible for that confirmed
+   observation. A reverted transaction does not advance the local confirmed state.
+
+The 59 public-input positions are: channel[0], close ID[1..9), final H1[9..17), previous
+commitment[17..25), next commitment[25..33), extended root[33..41), U63 anchor[41], receive
+nullifier[42..50), recipient[50..55), token[55], u64 amount[56..58), version=1[58]. All positions
+except the anchor are canonical u32 limbs. Different lengths and versions fail closed.
+
+**Build/deployment boundary.** Build with `--features authenticated-tail-receive`, the existing
+protocol option for authenticated receives after the last processed outgoing block. It changes
+Balance verifier data; legacy keys cannot be silently reused. Regenerate Balance, 34-limb backing,
+residual-claim and combined-late configs/proofs as applicable. The new materializer constructor
+pins a third argument, the independent late-receive MLE adapter; existing immutable deployments
+are not upgraded in place. `export_late_incoming_config` checks the supplied Balance VD against
+this production build and emits its proof-free config. Deploy it using
+`DeployLateIncomingVerifier.s.sol` with `LATE_MLE_CONFIG_PATH`; pass `LATE_INCOMING_VERIFIER` to
+settlement deployment. The production CLI checks the adapter/config before broadcast, includes
+it in the resumable deployment identity, and verifies its binding again at confirmed activation.
+`PrepareLateIncoming.s.sol` reads `LATE_MLE_PATH` and `LATE_MANAGER`, and writes exact calldata to
+`LATE_CALLDATA_OUT`; submit that calldata to the materializer. Pull funds and claim the emitted
+receipt's deterministic payout key through the existing Manager functions.
+
+These are native service/library and contract entry points. The old HTTP residual-claim route
+continues to use the 58-limb IMUI statement; it does not silently reinterpret a late-binding proof.
+The historical formal certificates and checked-in 26-limb proof fixtures do not certify these
+new circuits; release artifacts must be regenerated from the selected feature/key set.
+
+Validation covers the 34-limb backing proof, the combined ordinary receive/recipient-binding
+proof, strict public-input parsing, deployment identity/config substitution, atomic rollback,
+serial/replayed receipts, and native/ERC-20 accounting and payout. The recursive circuit test
+uses real spend/receive/recipient-binding proofs with test-cyclic parent Balance proofs; it is
+not a production genesis-to-payout or on-chain MLE benchmark. No live deployment was performed.
+
+### Ordinary partial-withdrawal submission
+
+The API stages the exact post-burn live backing artifact alongside the Balance proof. `pw-submit`
+verifies the backing proof against the pinned Balance verifier and the post-burn channel, chain
+and full token-fund digest. It reuses an existing current backing attestation or submits the
+verified one through `CloseFundingMaterializer`. It then submits the existing
+`submitPartialWithdrawalIntent` call. Finalization and proof-based payout retain their existing
+paths and one-shot authorization semantics.
+
+`PreparePartialWithdrawal.s.sol` only encodes calldata: it does not choose a signer, broadcast,
+advance time, or change release checks. Per-operation files are under `proof-da-output/`.
+The native exact-call journal pins chain, manager, signer, calldata and nonce before submission;
+it reconciles retries against canonical finalized receipts. The randomized close proof is cached
+for the exact head/auth/deployment, so retries cannot silently send a different proof transaction.
+The API accepts success only after the native driver confirms the exact pending authorization.
+
+### SpecialClose — out of scope; deferred TODO
+
+SpecialClose appears in historical §H-3 and the extra-defense row of §C-8. It is a BP censorship
+penalty, not a prerequisite for ordinary close or double-spend prevention. The current disabled
+entry point is **not re-enabled by these changes**. Its digest-equality verifier is not evidence
+of a BP signature or nonpublication, and the constructor's bond-credit number is not a deposit.
+
+A sound minimum challenge alternative would authenticate a BP publication obligation, open a
+bounded response window, accept proof that this exact obligation was fulfilled in canonical
+finalized history, and penalize timeout using an actually funded BP bond. Timeout is the game’s
+evidence; a universal ZK proof that a block never appeared is not required. The existing close
+replacement/cancellation challenge does not itself establish this publication obligation.
+**Owner decision (2026-09-26):** exclude this penalty game from the current implementation.
+Keep the entry point disabled and retain it only as an optional future
+[TODO](../tasks/todo.md#deferred-specialclose), not an ordinary-close requirement or release blocker.
+This resolves the earlier scope question; channel-change migration remains separately excluded.
+
+### Compatibility and validation boundaries
+
+Close and post-close circuit verifier data and their MLE/WHIR exports must be regenerated and
+pinned together before deployment. Existing immutable verifier deployments are not upgraded by
+editing source. Old raw tree entries do not become claimable. Serialized receiver-application
+witnesses now require an index and inclusion proof; persisted witness producers must be updated.
+Historical Lean source models that assert zero unallocated incoming or 57 claim limbs need a new
+validation baseline; existing formal reports must not be presented as proving this revision.
+
+Validation for this source revision: `cargo check --locked --offline --tests --bin channel_member`
+passed. Targeted Rust tests passed for native/circuit IMUI parity and exact consumption (2), PI
+version rejection (1), terminal funding (4), exact-call journal recovery (6), a real residual claim
+proof (1), a real close with nonzero unallocated incoming (1), and rejection of a consistent
+applied/raw incoming opening (1). The six targeted Solidity suites passed **146 tests**, including
+the keyless encoder; API/relay tests passed **9 tests**. Manager runtime is **23,275 bytes**, below
+EIP-170's 24,576-byte limit. Solidity claim-accounting tests use mocked authenticated proof outputs;
+the Rust tests exercise the actual circuits. No live-network transaction, new pinned MLE deployment,
+or refreshed version-2 gas-envelope acceptance test was performed. The retained 57-limb gas fixture
+measures the historical circuit only.
 
 ## Current implementation contract (2026-09-06)
 
@@ -34,7 +229,7 @@ own revision: a prior manifest does not certify this runtime or its MLE cohort.
 | Homomorphic credits | Per-cell `pending_adds: u32`, maximum **64** before a verified refresh/fresh re-encryption. This digit/noise budget is separate from the u64 amount bound | [`params.rs`](../../src/regev/params.rs), [`channel_credit_safety.rs`](../../src/channel_credit_safety.rs) |
 | H1 | Height-10 balance-slot tree; **104-element** `IMS2` leaf and **37-element** `IMB2` header. The leaf commits all 10 ciphertext digests/counters plus Regev digest and **5-limb** recipient | [`balance_state.rs`](../../src/common/balance_state.rs) |
 | Fund commitment | `token_funds_digest` is the fixed **92-u32-word** IMTF preimage over the full registry, token count, and ten U256 amounts | [`channel.rs`](../../src/common/channel.rs) |
-| Close-family public inputs | Close **103**, withdrawal claim **50**, cancel-close **29**, backing **26**; historical post-close claim **57**, but its extra-credit entry point is disabled | [`close_pis.rs`](../../src/circuits/channel/close_pis.rs), [`withdrawal_claim_pis.rs`](../../src/circuits/channel/withdrawal_claim_pis.rs), [`cancel_close_pis.rs`](../../src/circuits/channel/cancel_close_pis.rs), [`close_asset_backing_circuit.rs`](../../src/circuits/channel/close_asset_backing_circuit.rs), [`post_close_claim_pis.rs`](../../src/circuits/channel/post_close_claim_pis.rs) |
+| Close-family public inputs | Close **103**, withdrawal claim **50**, cancel-close **29**, backing **26**; post-close claim **58** (IMUI residual entitlement, version 2) | [`close_pis.rs`](../../src/circuits/channel/close_pis.rs), [`withdrawal_claim_pis.rs`](../../src/circuits/channel/withdrawal_claim_pis.rs), [`cancel_close_pis.rs`](../../src/circuits/channel/cancel_close_pis.rs), [`close_asset_backing_circuit.rs`](../../src/circuits/channel/close_asset_backing_circuit.rs), [`post_close_claim_pis.rs`](../../src/circuits/channel/post_close_claim_pis.rs) |
 
 `pk_g` is the Falcon-512/Poseidon-H2P identity `Poseidon(IMFK || encode(h))`; `pk_b` is the
 separate BabyBear sender-authorization key. The close/cancel/PW producer context uses
@@ -206,8 +401,8 @@ generation or cancellation-version floor. After closure, `submitWithdrawalClaim`
 proof/nullifier-scoped per-token claim; exact backing pull and claim registration may occur in
 either order. `claimWithdrawalCredit(bytes32)` pays only that recipient/token/amount record.
 Lifetime accepted claims, live credit, recognized backing and actual payments are different counters.
-`submitPostCloseClaim`, special close, and late outgoing debit correction are disabled, not extra
-spendable credit paths. Sources:
+`submitPostCloseClaim` consumes authenticated IMUI residual entitlements within the same cap.
+Special close and late outgoing debit correction remain disabled. Sources:
 [`ChannelSettlementManager.sol`](../../contracts/src/ChannelSettlementManager.sol) and
 [`CloseFundingMaterializer.sol`](../../contracts/src/CloseFundingMaterializer.sol).
 
@@ -976,6 +1171,7 @@ vectors + flat keccak are deleted.
 | `BALANCE_STATE_HASH_DOMAIN` | `0x494d4248` | "IMBH" |
 | `TX_LEAF_DOMAIN` | `0x494d544c` | "IMTL" |
 | `SETTLED_TX_CHAIN_DOMAIN` | `0x494d5443` | "IMTC" |
+| `UNAPPLIED_INCOMING_DOMAIN` | `0x494d5549` | "IMUI" — pending C2C leaf `keccak(u32_be(domain) || tx_hash)` |
 | `REGEV_CT_DOMAIN` | `0x494d5243` | "IMRC" |
 | `CHANNEL_TX_ZKP_DOMAIN` | `0x494d435a` | "IMCZ" |
 | `CHANNEL_UPDATE_ZKP_DOMAIN` (v1, retired) | `0x494d555a` | "IMUZ" (retired in multitoken Phase 2b — superseded by "IMU2" when the E-2 public values gained `token_index`; value stays pinned in the non-collision test) |
@@ -1060,7 +1256,7 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 | §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:submitCloseIntent` :558; GRACE check :587). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
 | §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `submitCloseIntent`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
 | §3.5.4 `closeAndWithdraw` | After `finalizeCloseGuarded(bytes32,uint64)`, `submitWithdrawalClaim` records individual claims; `materializeSignedHead` verifies the exact already-attested whole-vector backing proof and backing pull funds the Manager. Claim registration and backing pull may occur in either order; `claimWithdrawalCredit(bytes32 withdrawalNullifier)` requires both. Lifetime accepted claims are capped by `totalWithdrawn + amount ≤ finalizedChannelFundAmount`; actual payments are separately capped by recognized backing. **The former fresh terminal-child requirement is retired:** the current path consumes existing N-of-N H plus its durable kit without another channel signature. | Current disposition; conditional on exact kit, finalized dependencies and the deployment/transfer assumptions above |
-| §3.5.5 `claimLateTx` | **Disabled:** `submitPostCloseClaim` reverts unconditionally because the old statement can double-credit a delta already absorbed by the closing balance. Re-enable only with an explicit unapplied-incoming commitment. | [Do not expose] |
+| §3.5.5 `claimLateTx` | **Implemented for pre-close imported C2C residuals:** `submitPostCloseClaim` requires an IMUI leaf, version-2 proof and one-shot nullifier. New post-close base deposits remain unsupported. | [Residual claims only] |
 
 ### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md)
 
@@ -1626,10 +1822,9 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
   remaining finalized cap after the terminal authorization is issued and consumed, and rejects
   a mismatched native/ERC-20 balance delta. Unrelated recipient-wide Rollup credit alone is not
   evidence that this channel's terminal proof was materialized.
-- **Historical post-close claim token binding (TM-16, Phase 5a; current entry point disabled):**
-  the following describes the retained historical circuit/PI format, not an active extra-credit
-  path. `submitPostCloseClaim` unconditionally reverts; ordinary slot-balance claims already include
-  absorbed incoming value. The inter-channel `tx_hash` fold — the
+- **Post-close claim token binding (TM-16, extended by IMUI version 2):**
+  ordinary claims include applied value; the residual lane requires an unapplied IMUI leaf.
+  The following explains the token-binding part of the statement; its current length is 58. The inter-channel `tx_hash` fold — the
   settled-tx-accumulator leaf and the only artifact of an absorbed incoming tx that the closed
   channel's signed final state anchors — gains the descriptor's BASE `token_index` as its own
   canonical limb in the IMTC ids word: `ids = [0,0,0,0,0, token_index, dest_id, src_id]`

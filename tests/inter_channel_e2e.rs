@@ -572,6 +572,17 @@ fn inter_channel_transfer_real_deposit_backed() {
 
     // ---- Fund import on B: confirmed incoming → ChannelFund grows; one base receive folds the
     // same tx leaf carried by Transfer.aux_data.
+    let mut incoming_tree =
+        intmax3_zkp::utils::trees::incremental_merkle_tree::IncrementalMerkleTree::<Bytes32>::new(
+            intmax3_zkp::wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
+        );
+    incoming_tree.push(intmax3_zkp::common::balance_state::unapplied_incoming_leaf(
+        inter_tx.tx_hash,
+    ));
+    let incoming_proof = incoming_tree.prove(0);
+    let pending_root = Bytes32::from(incoming_tree.get_root());
+    incoming_tree.update(0, inter_tx.tx_hash);
+    let applied_root = Bytes32::from(incoming_tree.get_root());
     let mut b_import = ChannelState {
         epoch: b_genesis.epoch + 1,
         small_block_number: 1,
@@ -587,6 +598,7 @@ fn inter_channel_transfer_real_deposit_backed() {
                 tx_leaf,
             ),
             state_version: 1,
+            settled_tx_accumulator_root: pending_root,
             ..b_genesis.balance_state.clone()
         },
         unallocated_confirmed_incoming: u256(AMT),
@@ -627,6 +639,7 @@ fn inter_channel_transfer_real_deposit_backed() {
             ]),
             settled_tx_chain: b_import.balance_state.settled_tx_chain,
             state_version: 2,
+            settled_tx_accumulator_root: applied_root,
             pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
             ..b_import.balance_state.clone()
         },
@@ -639,6 +652,8 @@ fn inter_channel_transfer_real_deposit_backed() {
     verify_all_signatures(&b_record, &record_members(&b_record, &b_keys), &b_bundle)
         .expect("b_bundle member-signed");
     let bundle = ReceiverBundleApplyUpdateWitness {
+        incoming_tx_index: 0,
+        incoming_tx_inclusion: incoming_proof,
         receiver_channel_record: b_record.clone(),
         regev_pks: b_pks.clone(),
         source_sender_pk: a_pks[0].clone(),

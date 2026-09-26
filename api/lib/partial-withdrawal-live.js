@@ -54,7 +54,8 @@ async function stageSubmitProof(ch) {
   }
   const file = 'pw_balance_attestation.bin';
   fs.writeFileSync(cli.wc(ch, file), Buffer.from(backing.balanceAttestation.balanceProof), { mode: 0o600 });
-  return { PW_BALANCE_PROOF_FILE: file };
+  cli.writeJson(cli.wc(ch, 'pw_live_backing.json'), backing);
+  return { PW_BALANCE_PROOF_FILE: file, PW_BACKING_ARTIFACT_FILE: 'pw_live_backing.json' };
 }
 
 async function stagePayoutArtifacts(ch) {

@@ -772,20 +772,28 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_receive_transfer_circuit() {
-        receive_transfer_case(false);
+        receive_transfer_case(false, false);
     }
 
     #[cfg(feature = "authenticated-tail-receive")]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_receive_transfer_after_last_send() {
-        receive_transfer_case(true);
+        receive_transfer_case(true, false);
     }
 
-    fn receive_transfer_case(tail: bool) {
+    #[cfg(feature = "authenticated-tail-receive")]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn late_incoming_composes_real_receive_and_recipient_binding() {
+        receive_transfer_case(true, true);
+    }
+
+    fn receive_transfer_case(tail: bool, late: bool) {
         let mut rng = rand::thread_rng();
 
-        let receiver_user_id = ChannelId::new(2).unwrap();
+        let binding_witness = crate::circuits::channel::post_close_claim_circuit::test_fixture::build_full_witness();
+        let receiver_user_id = if late { binding_witness.public_inputs.receiver_channel_id } else { ChannelId::new(2).unwrap() };
         let transfer_salt = Salt::rand(&mut rng);
         let recipient = calculate_recipient_from_user_id(receiver_user_id, transfer_salt);
 
@@ -797,9 +805,13 @@ mod tests {
 
         // Inter-channel transfers carry a nonzero aux_data (= tx leaf hash, detail2 §C-6); the
         // received transfer at index 0 uses one so the chain fold is exercised.
-        let inter_channel_aux = Bytes32::from_u32_slice(&[11, 22, 33, 44, 55, 66, 77, 88]).unwrap();
+        let inter_channel_aux = if late {
+            crate::common::balance_state::tx_leaf_hash(binding_witness.source_pk_g,
+                binding_witness.sender_delta_digest, binding_witness.public_inputs.receiver_pk_g,
+                binding_witness.receiver_delta_digest)
+        } else { Bytes32::from_u32_slice(&[11, 22, 33, 44, 55, 66, 77, 88]).unwrap() };
         for i in 0..MAX_NUM_TRANSFERS_PER_TX {
-            let amount = U256::from((i as u32) + 1);
+            let amount = if late && i == 0 { U256::from(binding_witness.public_inputs.amount) } else { U256::from((i as u32) + 1) };
             let base_balance = amount + U256::from(10u32);
             let transfer = Transfer {
                 recipient: if i == 0 {
@@ -807,7 +819,7 @@ mod tests {
                 } else {
                     Bytes32::default()
                 },
-                token_index: i as u32,
+                token_index: if late { if i == 0 { binding_witness.public_inputs.token_index } else { 1000 + i as u32 } } else { i as u32 },
                 amount,
                 aux_data: if i == 0 {
                     inter_channel_aux
@@ -815,7 +827,7 @@ mod tests {
                     Bytes32::default()
                 },
             };
-            asset_tree_initial.update(i as u64, base_balance);
+            asset_tree_initial.update(transfer.token_index as u64, base_balance);
             transfers.push(transfer);
         }
 
@@ -1068,6 +1080,78 @@ mod tests {
             transfer_salt,
             update_private_state: update_private_state.clone(),
         };
+
+        if late {
+            use crate::circuits::channel::{post_close_claim_circuit::PostCloseClaimCircuit,
+                late_incoming_circuit::{LateIncomingCircuit, LateIncomingPublicInputs}};
+            use crate::circuits::validity::block_hash_chain::ext_public_state::ExtendedPublicState;
+            use crate::utils::conversion::ToU64;
+            let binding = PostCloseClaimCircuit::<F,C,D>::new_late_binding();
+            let binding_proof = binding.prove(&binding_witness).unwrap();
+            let late_circuit = LateIncomingCircuit::new(&balance_vd, &spend_vd, &binding.data.verifier_data());
+            let ext = ExtendedPublicState { inner: witness.receiver_update_public_state.new.clone(), ..Default::default() };
+            let proof = late_circuit.prove(&witness, &binding_proof, &ext).unwrap();
+            let statement = LateIncomingPublicInputs::from_u64_slice(&proof.public_inputs.to_u64_vec()).unwrap();
+            assert_eq!(statement.amount, binding_witness.public_inputs.amount);
+            assert_eq!(statement.token_index, binding_witness.public_inputs.token_index);
+            assert_eq!(statement.recipient, binding_witness.public_inputs.recipient);
+            assert_eq!(statement.final_balance_state_h1, binding_witness.public_inputs.final_balance_state_h1);
+            assert_eq!(statement.previous_balance_commitment, late_circuit.balance_commitment(&witness.prev_balance_proof).unwrap());
+            assert_eq!(statement.receive_nullifier, witness.update_private_state.nullifier);
+            let next = witness.to_public_inputs(&balance_cd).unwrap();
+            assert_eq!(statement.next_balance_commitment, Bytes32::from(next.commitment(&balance_cd.config)));
+            assert_ne!(statement.previous_balance_commitment, statement.next_balance_commitment);
+            late_circuit.data.verify(proof.clone()).unwrap();
+            // Every economic/state field is authenticated by the outer proof, not just amount.
+            for offset in [0, 1, 9, 17, 25, 33, 41, 42, 50, 55, 56, 57, 58] {
+                let mut forged = proof.clone();
+                forged.public_inputs[offset] += <F as plonky2::field::types::Field>::ONE;
+                assert!(late_circuit.data.verify(forged).is_err(), "modified public input {offset}");
+            }
+            let mut wrong_ext = ext.clone(); wrong_ext.inner.timestamp += 1;
+            assert!(late_circuit.prove(&witness, &binding_proof, &wrong_ext).is_err());
+            for sender in [false, true] {
+                let mut invalid_parent = witness.clone();
+                let parent = if sender { &mut invalid_parent.sender_balance_proof } else { &mut invalid_parent.prev_balance_proof };
+                parent.public_inputs[0] += <F as plonky2::field::types::Field>::ONE;
+                assert!(late_circuit.prove(&invalid_parent, &binding_proof, &ext).is_err());
+            }
+            let cursor = late_circuit.balance_commitment(&witness.prev_balance_proof).unwrap();
+            let checkpoint = crate::late_incoming::LateIncomingCheckpoint::new(&late_circuit,
+                &witness.prev_balance_proof, receiver_full_state.clone(), statement.close_intent_digest,
+                statement.final_balance_state_h1, cursor).unwrap();
+            assert_eq!(checkpoint.commitment(), cursor);
+            assert!(crate::late_incoming::LateIncomingCheckpoint::new(&late_circuit,
+                &witness.prev_balance_proof, receiver_full_state.clone(), statement.close_intent_digest,
+                statement.final_balance_state_h1, statement.next_balance_commitment).is_err());
+            let mut unrelated_private_state = receiver_full_state.clone();
+            unrelated_private_state.nonce += 1;
+            assert!(crate::late_incoming::LateIncomingCheckpoint::new(&late_circuit,
+                &witness.prev_balance_proof, unrelated_private_state, statement.close_intent_digest,
+                statement.final_balance_state_h1, cursor).is_err());
+            assert!(receiver_nullifier_tree.prove_and_insert(statement.receive_nullifier).is_err(),
+                "already consumed receive nullifier cannot be inserted again");
+
+            // A second independently VALID binding proof belongs to a different transfer leaf.
+            // Signature/proof verification alone is insufficient: composition must reject it.
+            let mut unrelated = binding_witness.clone();
+            unrelated.source_pk_g = Bytes32::from_u32_slice(&[99;8]).unwrap();
+            let leaf = crate::common::balance_state::tx_leaf_hash(unrelated.source_pk_g,
+                unrelated.sender_delta_digest, unrelated.public_inputs.receiver_pk_g, unrelated.receiver_delta_digest);
+            unrelated.public_inputs.incoming_tx_hash = crate::common::channel::inter_channel_tx_hash(
+                ChannelId::new(unrelated.source_channel_id as u64).unwrap(), unrelated.public_inputs.receiver_channel_id,
+                unrelated.public_inputs.token_index, unrelated.tx_tree_root, leaf);
+            unrelated.public_inputs.shared_native_nullifier = crate::common::channel::PostCloseIncomingClaim::derive_shared_native_nullifier(
+                unrelated.public_inputs.close_intent_digest, unrelated.public_inputs.incoming_tx_hash, unrelated.public_inputs.receiver_pk_g);
+            eprintln!("late composition: proving independently valid unrelated recipient binding");
+            let unrelated_proof = binding.prove(&unrelated).unwrap();
+            binding.data.verify(unrelated_proof.clone()).unwrap();
+            let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                late_circuit.prove(&witness, &unrelated_proof, &ext)));
+            assert!(rejected.is_ok(), "a mismatched valid proof must return an error, not panic");
+            assert!(rejected.unwrap().is_err(), "valid proof for another transfer was accepted");
+            return;
+        }
 
         let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
         let proof = circuit

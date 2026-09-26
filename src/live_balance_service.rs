@@ -29,7 +29,7 @@ use crate::{
     },
     circuits::{
         balance::{
-            balance_pis::BalanceFullPublicInputs,
+            balance_pis::{BalanceFullPublicInputs, BalancePublicInputs, BALANCE_PUBLIC_INPUTS_LEN},
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id,
             spend_circuit::{SpendCircuit, SpendPublicInputs},
@@ -515,6 +515,56 @@ pub struct LiveBalanceService {
 }
 
 impl LiveBalanceService {
+    /// Export the private initial cursor for post-close receipts, bound to the materializer's
+    /// confirmed Balance commitment. The ordinary live signed-head snapshot remains unchanged.
+    pub fn late_incoming_checkpoint(
+        &self, circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F,C,D>,
+        close_intent_digest: Bytes32, final_balance_state_h1: Bytes32, confirmed_commitment: Bytes32,
+    ) -> anyhow::Result<crate::late_incoming::LateIncomingCheckpoint> {
+        let proof = ProofWithPublicInputs::from_bytes(self.disk.balance_proof.clone(), &self.balance.balance_vd().common)?;
+        crate::late_incoming::LateIncomingCheckpoint::new(circuit, &proof,
+            self.disk.full_private_state.clone(), close_intent_digest, final_balance_state_h1, confirmed_commitment)
+    }
+
+    /// Prepare a post-close C2C receipt using the same source descriptor/artifact as normal
+    /// receives. Persist the result in a private pending artifact before broadcasting. This
+    /// deliberately does not update or re-sign the final channel snapshot.
+    pub fn prepare_late_inter_channel(
+        &self,
+        checkpoint: &crate::late_incoming::LateIncomingCheckpoint,
+        circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F,C,D>,
+        producer: &BlockProducerService,
+        descriptor: &InterChannelTransferDescriptor,
+        source: &LiveInterChannelSendArtifact,
+        recipient_binding: &ProofWithPublicInputs<F,C,D>,
+    ) -> anyhow::Result<crate::late_incoming::PreparedLateIncoming> {
+        let transfer = canonical_inter_channel_base_transfer(&descriptor.inter_channel_tx, descriptor.amount)?;
+        let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(descriptor.source_channel_id, &transfer, descriptor.inter_channel_tx.base_nonce);
+        anyhow::ensure!(tx_v2 == descriptor.tx_v2 && Bytes32::from(tx_v2_tree.get_root()) == descriptor.tx_tree_root,
+            "noncanonical late incoming descriptor");
+        let sender_proof = ProofWithPublicInputs::from_bytes(source.source_backing.balance_attestation.balance_proof.clone(), &self.balance.balance_vd().common)?;
+        let spend_proof = ProofWithPublicInputs::from_bytes(source.spend_proof.clone(), &self.spend.data.common)?;
+        self.balance.balance_vd().verify(sender_proof.clone())?;
+        self.spend.data.verify(spend_proof.clone())?;
+        let sender_pis = BalancePublicInputs::from_u64(&sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN])?;
+        anyhow::ensure!(sender_pis.channel_id == descriptor.source_channel_id, "late source channel mismatch");
+        let mut transfers = TransferTree::init(); transfers.push(transfer.clone());
+        let tx = Tx {transfer_tree_root: transfers.get_root(), nonce: descriptor.inter_channel_tx.base_nonce};
+        let mut legacy = TxTree::init(); legacy.update(descriptor.source_channel_id.as_u64(), tx);
+        let incoming = ReceiveTransferData {
+            to: self.disk.channel_id, transfer, sender_proof, spend_proof,
+            tx_tree_root: descriptor.tx_tree_root, tx,
+            tx_merkle_proof: legacy.prove(descriptor.source_channel_id.as_u64()),
+            tx_v2: Some(descriptor.tx_v2), tx_v2_merkle_proof: Some(descriptor.tx_v2_merkle_proof.clone()),
+            transfer_index: 0, transfer_merkle_proof: transfers.prove(0),
+            transfer_salt: descriptor.destination_base_transfer_salt,
+        };
+        let blocks = producer.producer()?.witness_handle()?;
+        let inner = blocks.borrow().current_extended_public_state().inner;
+        let extended = producer.extended_public_state_matching(&inner)?;
+        checkpoint.prepare(&self.balance, circuit, blocks, &incoming, recipient_binding, &extended)
+    }
+
     /// Create a fresh base account. This does not require channel registration: the intended
     /// launch sequence is L1 deposit -> balance receive -> deposit-backed signed genesis ->
     /// producer registration. The first receive binds the proof to that N-of-N signed snapshot.
@@ -1979,6 +2029,7 @@ impl LiveBalanceService {
             &source.channel_record,
             fund_import_state,
             &destination_snapshot.state,
+            &destination_snapshot.settled_tx_accumulator,
             level,
         )
         .map_err(|e| {

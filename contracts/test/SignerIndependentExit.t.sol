@@ -74,6 +74,14 @@ contract ExitManagerHarness {
     bytes32 public finalizedChannelFundIntmaxStateRoot;
     bytes32 public finalizedSettledTxChain;
     bytes32 public finalizedTokenFundsDigest;
+    bytes32 public finalizedBalanceStateH1 = keccak256("final H1");
+    mapping(uint32 => mapping(address => uint256)) public lateCredits;
+    bool public rejectLate;
+    function setRejectLate(bool value) external { rejectLate = value; }
+    function creditLateIncoming(uint32 token, uint64 amount, address recipient, bytes32) external {
+        require(msg.sender == closeFundingMaterializer && !rejectLate, "late rejected");
+        lateCredits[token][recipient] += amount;
+    }
     uint8 public finalizedTokenCount;
     uint32[10] public finalizedTokenRegistry;
     mapping(uint32 => uint256) public finalizedChannelFundAmount;
@@ -137,7 +145,7 @@ contract SignerIndependentExitTest is Test {
     function setUp() external {
         rollup = new ExitRollupHarness();
         verifier = new MockPinnedMleVerifierV2(block.chainid);
-        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier);
+        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier, verifier);
         manager = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
         rollup.setRegisteredChannel(CHANNEL);
         rollup.setFinalizedRoot(SIGNED_ROOT);
@@ -151,7 +159,7 @@ contract SignerIndependentExitTest is Test {
         laterRollup.setHead(9, 9);
         laterRollup.setRegisteredChannel(CHANNEL);
         CloseFundingMaterializer later =
-            new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))), verifier);
+            new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))), verifier, verifier);
         ExitManagerHarness laterManager = new ExitManagerHarness(bytes4(CHANNEL), address(laterRollup), address(later));
         laterRollup.bind(later, address(laterManager));
         assertEq(later.lastPostedBlock(CHANNEL), 9);
@@ -570,6 +578,171 @@ contract SignerIndependentExitTest is Test {
         assertEq(materializer.managerOfChannel(channelId), address(extra));
     }
 
+    function _startLate() private {
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        _closeTwoTokens(11, 29);
+        rollup.seedEscrow(1011, TOKEN, 1029);
+        materializer.materializeSignedHead(_m(manager), proof);
+    }
+
+    function _late(bytes32 previous, bytes32 next, bytes32 nullifier, uint32 token, uint64 amount)
+        private view returns (uint256[] memory pi)
+    {
+        pi = new uint256[](59);
+        pi[0] = CHANNEL;
+        _putBytes32(pi, 1, CLOSE_DIGEST);
+        _putBytes32(pi, 9, manager.finalizedBalanceStateH1());
+        _putBytes32(pi, 17, previous);
+        _putBytes32(pi, 25, next);
+        _putBytes32(pi, 33, BACKING_ROOT);
+        _putBytes32(pi, 42, nullifier);
+        pi[54] = uint160(address(0xB0B));
+        pi[55] = token;
+        pi[56] = amount >> 32; pi[57] = uint32(amount);
+        pi[58] = 1;
+    }
+
+    function test_lateReceiveSerializesCursorAndCreditsActualNewEscrow() external {
+        _startLate();
+        bytes32 first = keccak256("first receive");
+        bytes32 second = keccak256("second receive");
+        bytes32 nf = keccak256("nullifier one");
+        bytes memory proof = abi.encode(_late(bytes32(0), first, nf, 0, 17));
+        materializer.claimLateIncoming(_m(manager), proof);
+        assertEq(materializer.lateBalanceStateCommitment(CHANNEL), first);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 28);
+        assertEq(rollup.totalEscrowed(), 983);
+        assertEq(manager.lateCredits(0, address(0xB0B)), 17);
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), proof);
+        bytes memory repeatedNullifier = abi.encode(_late(first, second, nf, TOKEN, 19));
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), repeatedNullifier);
+        materializer.claimLateIncoming(_m(manager), abi.encode(_late(first, second, keccak256("nf two"), TOKEN, 19)));
+        assertEq(rollup.escrowedByToken(TOKEN), 981);
+        assertEq(manager.lateCredits(TOKEN, address(0xB0B)), 19);
+        assertEq(materializer.lateBalanceStateCommitment(CHANNEL), second);
+        assertEq(manager.finalizedChannelFundAmount(0), 11);
+        assertEq(manager.finalizedChannelFundAmount(TOKEN), 29);
+    }
+
+    function test_lateReceiveRejectsWrongBindingsAndLegacyStatements() external {
+        _startLate();
+        uint256[] memory pi = _late(bytes32(0), keccak256("next"), keccak256("nf"), TOKEN, 19);
+        uint256[8] memory offsets = [uint256(0),1,9,17,33,41,55,58];
+        for (uint256 i; i < offsets.length; ++i) {
+            uint256 offset = offsets[i]; uint256 old = pi[offset]; pi[offset] = old + 1;
+            vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+            materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+            pi[offset] = old;
+        }
+        pi[57] = uint256(1) << 32;
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(new uint256[](58)));
+        assertEq(materializer.lateBalanceStateCommitment(CHANNEL), bytes32(0));
+    }
+
+    function test_lateReceiveManagerFailureAndInsufficientEscrowAreAtomic() external {
+        _startLate();
+        bytes32 nf = keccak256("nf");
+        bytes memory proof = abi.encode(_late(bytes32(0), keccak256("next"), nf, 0, 17));
+        manager.setRejectLate(true);
+        vm.expectRevert(bytes("late rejected"));
+        materializer.claimLateIncoming(_m(manager), proof);
+        assertEq(rollup.totalEscrowed(), 1000);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 11);
+        assertFalse(materializer.lateReceiveNullifierUsed(CHANNEL, nf));
+        assertEq(materializer.lateBalanceStateCommitment(CHANNEL), bytes32(0));
+        manager.setRejectLate(false);
+        rollup.seedEscrow(0, TOKEN, 0);
+        vm.expectRevert();
+        materializer.claimLateIncoming(_m(manager), proof);
+        assertFalse(materializer.lateReceiveNullifierUsed(CHANNEL, nf));
+        rollup.seedEscrow(17, TOKEN, 0);
+        materializer.claimLateIncoming(_m(manager), proof);
+        assertTrue(materializer.lateReceiveNullifierUsed(CHANNEL, nf));
+    }
+
+    function test_lateReceiveRequiresInitialExit() external {
+        bytes memory proof = abi.encode(_late(bytes32(0), bytes32(uint256(1)), bytes32(uint256(2)), 0, 1));
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitManagerNotClosed.selector);
+        materializer.claimLateIncoming(_m(manager), proof);
+    }
+
+    function test_lateReceiptRejectsZeroAmountZeroRecipientAndUnchangedCursor() external {
+        _startLate();
+        uint256[] memory pi = _late(bytes32(0), keccak256("next"), keccak256("nf"), 0, 1);
+        pi[57] = 0;
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi[57] = 1; pi[54] = 0;
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi[54] = 123; _putBytes32(pi, 25, bytes32(0));
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        assertEq(rollup.totalEscrowed(), 1000);
+        assertEq(materializer.lateBalanceStateCommitment(CHANNEL), bytes32(0));
+    }
+
+    function test_lateReceiptAnchorCanStayEqualOrAdvanceButCannotMoveBack() external {
+        _startLate(); rollup.setHead(8, 8);
+        bytes32 first = keccak256("first");
+        uint256[] memory pi = _late(bytes32(0), first, keccak256("one"), 0, 1);
+        pi[41] = 5;
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi = _late(first, keccak256("second"), keccak256("two"), TOKEN, 1);
+        pi[41] = 4;
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi[41] = 9;
+        vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+        materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi[41] = 5; materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        pi = _late(keccak256("second"), keccak256("third"), keccak256("three"), 0, 1);
+        pi[41] = 8; materializer.claimLateIncoming(_m(manager), abi.encode(pi));
+        assertEq(materializer.lateBalanceAnchorBlock(CHANNEL), 8);
+    }
+
+    function test_lateReceiptRejectsEveryNoncanonicalLimbWithoutStateChanges() external {
+        _startLate();
+        uint256[] memory pi = _late(bytes32(0), keccak256("next"), keccak256("nf"), TOKEN, 1);
+        for (uint256 i; i < 59; ++i) {
+            uint256 old = pi[i]; pi[i] = uint256(1) << (i == 41 ? 63 : 32);
+            vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+            materializer.claimLateIncoming(_m(manager), abi.encode(pi)); pi[i] = old;
+        }
+        assertEq(rollup.escrowedByToken(TOKEN), 1000);
+        assertFalse(materializer.lateReceiveNullifierUsed(CHANNEL, keccak256("nf")));
+    }
+
+    function test_lateReceiptRejectsAllOtherStatementShapes() external {
+        _startLate();
+        uint256[7] memory lengths = [uint256(0),26,34,57,58,60,66];
+        for (uint256 i; i < lengths.length; ++i) {
+            vm.expectRevert(CloseFundingMaterializer.InvalidLateIncoming.selector);
+            materializer.claimLateIncoming(_m(manager), abi.encode(new uint256[](lengths[i])));
+        }
+    }
+
+    function test_lateReceiptRejectsUnboundManagerBeforeVerifyingProof() external {
+        ExitManagerHarness other = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        materializer.claimLateIncoming(_m(other), hex"deadbeef");
+    }
+
+    function test_lateReceiptDecodesMaximumU64WithoutTruncation() external {
+        _startLate();
+        rollup.seedEscrow(0, TOKEN, type(uint64).max);
+        materializer.claimLateIncoming(_m(manager), abi.encode(_late(bytes32(0), keccak256("next"), keccak256("nf"), TOKEN, type(uint64).max)));
+        assertEq(manager.lateCredits(TOKEN, address(0xB0B)), type(uint64).max);
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN, address(manager)), uint256(type(uint64).max) + 29);
+        assertEq(rollup.escrowedByToken(TOKEN), 0);
+    }
+
     function _m(ExitManagerHarness h) private pure returns (ChannelSettlementManager) {
         return ChannelSettlementManager(payable(address(h)));
     }
@@ -601,7 +774,7 @@ contract SignerIndependentExitTest is Test {
         amounts[1] = tokenAmount;
     }
 
-    /// @dev Compact-proof surrogate accepted by `MockPinnedMleVerifierV2`: the exact 26-limb
+    /// @dev Compact-proof surrogate accepted by `MockPinnedMleVerifierV2`: the exact 34-limb
     ///      CloseAssetBacking public-input vector, ABI-encoded as `uint256[]`.
     function _proof(uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
@@ -624,7 +797,7 @@ contract SignerIndependentExitTest is Test {
         pure
         returns (uint256[] memory limbs)
     {
-        limbs = new uint256[](26);
+        limbs = new uint256[](34);
         limbs[0] = channelId;
         _putBytes32(limbs, 1, settled);
         _putBytes32(limbs, 9, tfd);

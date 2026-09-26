@@ -42,6 +42,7 @@ producer.liveBackingArtifact = async () => ({
       tokenFundsDigest: '0x' + '45'.repeat(32),
       finalizedExtendedStateCommitment: '0x' + '67'.repeat(32),
       anchorBlockNumber: 11,
+      balanceStateCommitment: `0x${'aa'.repeat(32)}`,
     },
   },
 });

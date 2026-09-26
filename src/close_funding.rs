@@ -137,11 +137,9 @@ pub fn build_close_funding_proposal(
             "prepare close funding only from a settled zero-H2 channel head".into(),
         ));
     }
-    if head.unallocated_confirmed_incoming != U256::zero() {
-        return Err(CloseFundingError::Invalid(
-            "unallocated confirmed incoming value must be assigned before close funding".into(),
-        ));
-    }
+    // The full base-backed fund includes imported but unapplied incoming value. Preserve its
+    // signed IMUI entitlement and move the same full fund to the manager; allocating it into a
+    // slot here would both require another receive and destroy the residual-claim exit path.
 
     let token_count = head.balance_state.token_count as usize;
     if token_count == 0 || token_count > head.balance_state.token_registry.len() {
@@ -456,6 +454,25 @@ mod tests {
             proposal.proposed_state.balance_state.settled_tx_chain,
             previous.balance_state.settled_tx_chain
         );
+    }
+
+    #[test]
+    fn residual_incoming_is_funded_without_applying_or_discarding_it() {
+        let mut previous = head();
+        previous.unallocated_confirmed_incoming = U256::from(7u32);
+        previous = previous.with_computed_digest();
+        let proposal =
+            build_close_funding_proposal(&previous, 1, address(0x11), address(0x22), 5).unwrap();
+        verify_close_funding_proposal(&previous, &proposal.proposed_state, &proposal.plan).unwrap();
+        assert_eq!(proposal.proposed_state.unallocated_confirmed_incoming, U256::from(7u32));
+        assert_eq!(proposal.proposed_state.balance_state.enc_balances, previous.balance_state.enc_balances);
+        assert_eq!(proposal.proposed_state.balance_state.settled_tx_accumulator_root,
+            previous.balance_state.settled_tx_accumulator_root);
+        for transfer in &proposal.plan.transfers {
+            let slot = previous.balance_state.token_registry.iter()
+                .position(|&token| token == transfer.token_index).unwrap();
+            assert_eq!(transfer.amount, previous.channel_fund.amounts[slot]);
+        }
     }
 
     #[test]

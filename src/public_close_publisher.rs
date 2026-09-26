@@ -1393,7 +1393,7 @@ impl MleStatement {
     fn limb_bound(self, index: usize) -> u64 {
         match self {
             Self::Close => 1u64 << 32,
-            Self::Backing if index == CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN - 1 => 1u64 << 63,
+            Self::Backing if index == 25 => 1u64 << 63,
             Self::Backing => 1u64 << 32,
         }
     }
@@ -1643,7 +1643,7 @@ fn parse_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
 /// The standalone backing PI payload is a strict JSON array of unsigned u64 numbers. It is not an
 /// alternate textual encoding surface: the prover writes `Vec<u64>`, and schema 2 binds those exact
 /// bytes. `CloseAssetBackingPublicInputs::from_u64_slice` subsequently enforces the narrower type
-/// of each of the 26 positions (25 u32 limbs followed by one U63 anchor).
+/// of each of the 34 positions (U63 anchor at index 25, otherwise u32 limbs).
 fn parse_backing_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
     let array = value
         .as_array()
@@ -8412,6 +8412,7 @@ mod tests {
         // the close parser's u32-only behavior.
         let backing_anchor_block_number = BlockNumber::new((1u64 << 40) + 9).expect("U63 anchor");
         let backing_public_inputs = CloseAssetBackingPublicInputs {
+            balance_state_commitment: Bytes32::default(),
             channel_id,
             settled_tx_chain: full.final_settled_tx_chain,
             token_funds_digest,
@@ -11085,7 +11086,7 @@ mod tests {
     }
 
     #[test]
-    fn backing_public_inputs_require_exact_typed_26_limb_vector_and_mle_equality() {
+    fn backing_public_inputs_require_exact_typed_34_limb_vector_and_mle_equality() {
         let count_fixture = fixture("backing-pi-count");
         let path = count_fixture
             .config
@@ -11106,7 +11107,7 @@ mod tests {
             &count_fixture.config.expected_final_channel_state_digest,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("required 26"));
+        assert!(error.to_string().contains("required 34"));
 
         let type_fixture = fixture("backing-pi-type");
         let path = type_fixture

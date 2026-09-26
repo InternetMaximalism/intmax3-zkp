@@ -467,6 +467,7 @@ pub(crate) struct CloseFaithfulnessProbe {
     pub recomputed_h1: Bytes32Target,
     /// the four keccak gadget outputs, :686 / :699-700 / :719-720 / :739-740.
     pub state_digest: Bytes32Target,
+    pub state_digest_inputs: Vec<Target>,
     pub close_withdrawal_digest: Bytes32Target,
     pub close_state_id: Bytes32Target,
     pub recomputed_token_funds_digest: Bytes32Target,
@@ -668,9 +669,8 @@ where
         for limb in public_inputs.burn_tx_hash.to_vec() {
             builder.connect(limb, zero);
         }
-        for limb in final_state_unallocated_confirmed_incoming.to_vec() {
-            builder.connect(limb, zero);
-        }
+        // Unallocated incoming funds may close: their IMUI leaves remain in signed H1.
+        // The aggregate is still authenticated below as part of the signed ChannelState.
 
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
         let close_tx_domain = builder.constant(F::from_canonical_u32(CLOSE_TX_DOMAIN));
@@ -953,6 +953,7 @@ where
             incremented_close_freeze_nonce,
             recomputed_h1,
             state_digest,
+            state_digest_inputs,
             close_withdrawal_digest,
             close_state_id,
             recomputed_token_funds_digest,
@@ -1526,9 +1527,8 @@ pub mod test_fixture {
     ///     `final_state_root`);
     ///   - `settled_tx_chain`: the balance proof's `settled_tx_chain` PI (after a deposit this is
     ///     `settled_tx_chain_push(0, deposit_nullifier)`, no longer the genesis 0);
-    ///   - `token_registry` / `token_count` / `amounts`: exactly the balance proof's private
-    ///     asset tree (the backing circuit rebuilds the tree from these and requires root
-    ///     equality).
+    ///   - `token_registry` / `token_count` / `amounts`: exactly the balance proof's private asset
+    ///     tree (the backing circuit rebuilds the tree from these and requires root equality).
     /// The rest of the state (epoch, small block, encrypted balances, recipients, …) keeps the
     /// `final_state_n` shape; the close circuit authenticates it only through the member
     /// signatures over its digest. `close_freeze_nonce` is 0 so the proved intent carries freeze
@@ -1999,6 +1999,24 @@ mod tests {
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
             "close PI is 103 limbs (incl. member_count + delegate_count + token_funds_digest)"
         );
+    }
+
+    /// A residual incoming entitlement must be closable, but its amount still belongs to the
+    /// exact member-authenticated IMCH state. This exercises the real recursive close proof.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_proves_nonzero_unallocated_incoming() {
+        let fx = fixture();
+        let mut witness = full_witness();
+        let mut state = witness.close.final_channel_state.clone();
+        state.unallocated_confirmed_incoming = U256::from(21u64);
+        state = state.with_computed_digest();
+        let (auth, agg) = member_auth_for_digest_n(state.digest, 0xc105e, TEST_ACTIVE_MEMBERS);
+        witness.close = close_witness_for(state);
+        witness.member_auth = auth;
+        witness.agg_proof = agg;
+        let proof = fx.close_circuit.prove(&witness).unwrap();
+        fx.close_circuit.data.verify(proof).unwrap();
     }
 
     /// M-9 negative: bypass the native `CloseIntent::new` constructor and feed self-consistent
@@ -2669,7 +2687,7 @@ mod tests {
             view.same_slices(&pi.close_nonce.to_vec(), &pi.close_freeze_nonce.to_vec()),
             "close_nonce.connect(close_freeze_nonce)",
         );
-        // .zeroSnapshot2 / .zeroBurnHash8 / .zeroUnallocated8 — :621-629
+        // Snapshot/burn remain zero; residual incoming is authenticated in IMCH.
         table.check(
             "zeroSnapshot2", "close_circuit.rs:621-623", "constant",
             view.all_zero(&pi.snapshot_medium_block_number.to_vec()),
@@ -2681,9 +2699,9 @@ mod tests {
             "every burn_tx_hash limb is connected to the constant 0",
         );
         table.check(
-            "zeroUnallocated8", "close_circuit.rs:627-629", "constant",
-            view.all_zero(&c.final_state_unallocated_confirmed_incoming.to_vec()),
-            "every unallocated_confirmed_incoming limb is connected to the constant 0",
+            "authenticatedUnallocated8", "ChannelCloseCircuit::new IMCH preimage", "connect",
+            view.same_slices(&p.state_digest_inputs[113..121], &c.final_state_unallocated_confirmed_incoming.to_vec()),
+            "unallocated incoming is signed in IMCH; the historical zero-unallocated Lean model needs revision",
         );
 
         // .recompute*AndConnect — the `connect` half of each gadget op.

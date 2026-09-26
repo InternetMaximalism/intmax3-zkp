@@ -52,6 +52,28 @@ pub const TX_LEAF_DOMAIN: u32 = 0x494d544c;
 /// Domain separator for [`settled_tx_chain_push`] ("IMTC").
 pub const SETTLED_TX_CHAIN_DOMAIN: u32 = 0x494d5443;
 
+/// Imported funds not yet reflected in a recipient ciphertext ("IMUI").
+/// An import inserts this tagged leaf; bundle application replaces it with the plain tx hash
+/// at the SAME index. Only the tagged leaf can authorize a post-close residual claim.
+pub const UNAPPLIED_INCOMING_DOMAIN: u32 = 0x494d5549;
+
+pub fn unapplied_incoming_leaf(tx_hash: Bytes32) -> Bytes32 {
+    hash_words(&[vec![UNAPPLIED_INCOMING_DOMAIN], tx_hash.to_u32_vec()].concat())
+}
+
+pub fn unapplied_incoming_leaf_circuit<F, C, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    tx_hash: Bytes32Target,
+) -> Bytes32Target
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    C::Hasher: AlgebraicHasher<F>,
+{
+    let domain = builder.constant(F::from_canonical_u32(UNAPPLIED_INCOMING_DOMAIN));
+    Bytes32Target::from_slice(&builder.keccak256::<C>(&[vec![domain], tx_hash.to_vec()].concat()))
+}
+
 /// Per-slot token-dimension row of balance ciphertexts: position `t` is the ciphertext for local
 /// token slot `t` of the channel's `token_registry` (detail2 §N-2). ALWAYS full
 /// `MAX_CHANNEL_TOKENS` width in memory and in every hash preimage; positions `t >= token_count`
@@ -1836,5 +1858,44 @@ mod tests {
             serde_json::from_value::<BalanceState>(bad).is_err(),
             "token position >= MAX_CHANNEL_TOKENS must be rejected"
         );
+    }
+}
+
+#[cfg(test)]
+mod unapplied_incoming_circuit_tests {
+    use super::*;
+    use plonky2::{
+        field::{
+            goldilocks_field::GoldilocksField,
+            types::{Field, PrimeField64},
+        },
+        iop::witness::PartialWitness,
+        plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
+    };
+
+    #[test]
+    fn unapplied_incoming_circuit_authenticates_tagged_not_applied_leaf() {
+        type F = GoldilocksField;
+        type C = PoseidonGoldilocksConfig;
+        let mut builder = CircuitBuilder::<F, 2>::new(CircuitConfig::standard_recursion_config());
+        let tx = Bytes32Target::new(&mut builder, true);
+        let leaf = unapplied_incoming_leaf_circuit::<F, C, 2>(&mut builder, tx);
+        builder.register_public_inputs(&leaf.to_vec());
+        let circuit = builder.build::<C>();
+        let value = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut witness = PartialWitness::new();
+        tx.set_witness(&mut witness, value);
+        let proof = circuit.prove(witness).unwrap();
+        let limbs: Vec<_> = proof
+            .public_inputs
+            .iter()
+            .map(|x| x.to_canonical_u64())
+            .collect();
+        assert_eq!(limbs, unapplied_incoming_leaf(value).to_u64_vec());
+        assert_ne!(limbs, value.to_u64_vec());
+        circuit.verify(proof.clone()).unwrap();
+        let mut forged = proof;
+        forged.public_inputs[0] += F::ONE;
+        assert!(circuit.verify(forged).is_err());
     }
 }

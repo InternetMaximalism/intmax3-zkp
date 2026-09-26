@@ -152,7 +152,8 @@ contract DeployClose is Script {
         // materializer at construction (a DIFFERENT circuit from the close-intent adapter above).
         (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingJson);
         CloseFundingMaterializer materializer =
-            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)));
+            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
+                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")));
 
         // registerChannel BEFORE the manager deploy (Finding E).
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));

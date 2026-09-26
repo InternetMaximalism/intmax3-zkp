@@ -597,18 +597,14 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         assertEq(manager.getPendingClose().challengeDeadline, t + CHALLENGE_PERIOD, "full window");
     }
 
-    /// REFUTED (fix holds). C-2's stub is unconditional — no status, no caller, no argument
-    /// reaches a credit. And no OTHER enabled path credits an incoming inter-channel delta:
-    /// `submitWithdrawalClaim` is the only remaining writer of `withdrawalCredits`, and it is
-    /// keyed on the `usedWithdrawalNullifiers` map, not the (now write-only)
-    /// `usedSharedNativeNullifiers`.
-    function test_REFUTED_C2_stubIsUnconditionalAndNoCreditSurvives() external {
+    /// Closed-state and version-2 guards reject premature or legacy residual claims atomically.
+    function test_C2_closedStateAndUnappliedStatementVersionAreRequired() external {
         // Before any close. (Proofs are PRECOMPUTED so `expectRevert` arms on the claim call
         // itself and not on a helper's external view call.)
         ChannelSettlementManager.PostCloseClaim memory early =
             _postCloseClaim(bytes32(0), keccak256("inc"), USER_A, alice, 1);
         bytes memory junk = CloseTestLib.proofWithLimbs(new uint256[](1));
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
         manager.submitPostCloseClaim(early, junk);
 
         bytes32 closeDigest = _finalizeDefault();
@@ -617,16 +613,19 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.PostCloseClaim memory claim =
             _postCloseClaim(closeDigest, keccak256("inc"), USER_B, bob, 1);
         bytes memory good = _postCloseClaimProof(claim);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        uint256[] memory wrongVersion = abi.decode(good, (uint256[]));
+        wrongVersion[57] = 1;
+        good = abi.encode(wrongVersion);
+        vm.expectRevert(bytes("claim limb mismatch"));
         manager.submitPostCloseClaim(claim, good);
 
-        // No credit, and the shared-native nullifier map is untouched (it now has no writer).
+        // A rejected proof creates neither credit nor a consumed nullifier.
         assertEq(manager.withdrawalCredits(TOKEN_INDEX, bob), 0, "no post-close credit exists");
         assertFalse(
             manager.usedSharedNativeNullifiers(
                 _expectedSharedNativeNullifier(closeDigest, claim.incomingTxHash, claim.receiverPkG)
             ),
-            "the IMCK nullifier map is now write-only dead state"
+            "failed verification must leave the IMCK nullifier available"
         );
     }
 

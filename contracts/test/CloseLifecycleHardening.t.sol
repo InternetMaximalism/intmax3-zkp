@@ -714,20 +714,12 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     // C-2 — the post-close claim double-credit path
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// THE C-2 fence. In every CLOSEABLE state the incoming delta is already inside the receiver's
-    /// slot ciphertext (`CloseIntent::new` refuses a nonzero `unallocated_confirmed_incoming`,
-    /// `src/common/channel.rs:1080-1083`) while its tx hash is still inside the settled-tx
-    /// accumulator (`src/wallet_core.rs:4218`). So the withdrawal claim and the post-close claim
-    /// both succeed on ONE entitlement, under disjoint nullifier maps and disjoint keccak domains
-    /// (IMW2 vs IMCK) — theft of the received amount, repeatable, no collusion.
-    ///
-    /// PINS: the `submitPostCloseClaim` disabled stub. Restore the body and this test shows bob
-    /// credited 5 on top of a slot balance that already contained it.
-    function test_C2_postCloseClaimIsDisabled_noSecondCreditForOneEntitlement() external {
+    /// The legacy inclusion-only statement cannot establish that an incoming delta was absent
+    /// from the closing ciphertext. Reject its 57 limbs before any second credit is accrued.
+    function test_C2_legacyInclusionOnlyProofCannotCreateSecondCredit() external {
         bytes32 d = _finalizeDefault(); // fund = 75
 
-        // Alice's withdrawal claim credits her decrypted slot balance — which, in any closeable
-        // state, ALREADY includes every incoming delta the channel absorbed.
+        // Alice's ordinary claim credits her decrypted final slot balance.
         ChannelSettlementManager.WithdrawalClaim memory wc = _withdrawalClaim(d, USER_A, alice, 30);
         manager.submitWithdrawalClaim(wc, _withdrawalClaimProof(wc));
         assertEq(manager.withdrawalCredits(0, alice), 30);
@@ -737,49 +729,44 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("incoming_tx"), USER_B, bob, 5);
         bytes memory pcProof = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        uint256[] memory current = abi.decode(pcProof, (uint256[]));
+        uint256[] memory legacy = new uint256[](57);
+        for (uint256 i; i < 57; ++i) legacy[i] = current[i];
+        pcProof = abi.encode(legacy);
+        vm.expectRevert(bytes("claim pi len"));
         manager.submitPostCloseClaim(pc, pcProof);
 
         assertEq(manager.withdrawalCredits(0, bob), 0, "no double credit");
-        assertEq(manager.totalWithdrawn(0), 30, "the shared budget is untouched by the dead path");
+        assertEq(manager.totalWithdrawn(0), 30, "the rejected legacy proof leaves the budget untouched");
     }
 
-    /// The disable is unconditional — not a validity check that a better-formed claim could pass.
-    /// It fires before the close-digest check, before the token-registry re-check and before the
-    /// verifier, on `pure` (no state read at all).
-    ///
-    /// PINS: the stub's `external pure` shape. A re-enable that merely adds a guard inside the old
-    /// body would let at least one of these inputs through.
-    function test_C2_postCloseClaimIsDisabledForEveryInput() external {
+    /// Residual claims enforce close/token identity, including before any zero-value accrual.
+    function test_C2_residualClaimChecksCloseAndToken() external {
         bytes32 d = _finalizeDefault();
 
         // wrong close digest
         ChannelSettlementManager.PostCloseClaim memory wrongDigest =
             _postCloseClaim(keccak256("not_the_close"), keccak256("itx"), USER_B, bob, 5);
         bytes memory p1 = _postCloseClaimProof(wrongDigest);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        vm.expectRevert(ChannelSettlementManager.CloseIntentDigestMismatch.selector);
         manager.submitPostCloseClaim(wrongDigest, p1);
 
         // unregistered token
         ChannelSettlementManager.PostCloseClaim memory badToken =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 5, 999);
         bytes memory p2 = _postCloseClaimProof(badToken);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
         manager.submitPostCloseClaim(badToken, p2);
 
         // zero amount
         ChannelSettlementManager.PostCloseClaim memory zero =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 0);
         bytes memory p3 = _postCloseClaimProof(zero);
-        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+
         manager.submitPostCloseClaim(zero, p3);
     }
 
-    /// The disable must not reach the leg that carries every member's legitimate exit. The
-    /// withdrawal claim, its nullifier replay guard, its accrual cap and its real payout all still
-    /// work end to end.
-    ///
-    /// PINS: the blast radius of the C-2 stub.
+    /// Ordinary claims still preserve their replay guard, cap and real payout.
     function test_C2_withdrawalClaimPathIsUnaffected() external {
         bytes32 d = _finalizeDefault(); // fund = 75
 

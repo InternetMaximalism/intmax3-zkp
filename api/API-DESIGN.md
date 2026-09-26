@@ -841,17 +841,24 @@ Response: { ok: true, log: string }
 
 ### A34. submitPostCloseClaim
 
-**Overview:** Claim a late inter-channel transfer received after the channel was finalized. The member provides a `lateBalanceProof` verified inside a `claim_proof`. Uses `PostCloseClaimProver`. (detail2 H-2 §3.5.5, C-8)
+**Overview:** Claim an imported C2C incoming delta that remains unapplied in the signed closing
+snapshot. A version-2 proof opens its IMUI-tagged accumulator leaf, binds the recipient/key and
+proves the delta amount. This HTTP residual route covers already-imported transfers. Transfers
+first received after finalization use `LiveBalanceService::prepare_late_inter_channel` and
+`CloseFundingMaterializer.claimLateIncoming`: an exact closing Balance cursor, ordinary receive,
+final-H1 recipient binding, atomic escrow/cap increase, and a persisted next cursor. Their
+59-limb combined proof is distinct from this route's 58-limb residual proof. See
+[the continuation specification](../doc/architecture-audit/detail2.md#post-close-first-receipt-ordinary-receivetransfer-continuation-2026-09-26).
 
-**Inputs:** `{ manager: address, late_transfer_data }`, post-close claim proof
-**Outputs:** Additional withdrawal credit
+**Inputs:** Manager, retained incoming descriptor, final signed snapshot/tree, recipient proof.
+**Outputs:** Claim-scoped withdrawal credit within the finalized token cap.
 
-**Preconditions:** `usedSharedNativeNullifiers` prevents double receipt.
-
-**Current status: DISABLED.** The active Manager entry point reverts
-`PostCloseClaimDisabled()` unconditionally because the old statement can double-credit an incoming
-delta already absorbed by the closing balance. Historical prover/fixture/CLI scaffolding is not a
-production capability and must not be exposed by the relay or browser.
+**Current status:** Circuit/contract implementation exists. `submitPostCloseClaim` consumes the
+canonical IMCK nullifier and shares the ordinary pull-payment ledger. Applying the delta before
+close consumes its IMUI leaf, preventing residual credit for that delta. The 57-limb historical
+proof format is rejected; current proofs have 58 limbs and end in constant version 2.
+No new browser/relay endpoint is implemented by this change. The route below is a design sketch,
+not an available HTTP capability. Deployment requires regenerated pinned circuit/MLE artifacts.
 
 **API implementation:**
 ```

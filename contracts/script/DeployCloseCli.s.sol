@@ -94,8 +94,8 @@ contract DeployCloseCli is Script {
             "backing MLE SHA-256 mismatch"
         );
         require(
-            vm.parseJsonUint(manifest, ".backingPublicInputCount") == 26,
-            "backing circuit must expose exactly 26 public inputs"
+            vm.parseJsonUint(manifest, ".backingPublicInputCount") == 34,
+            "backing circuit must expose exactly 34 public inputs"
         );
         require(
             keccak256(bytes(vm.parseJsonString(manifest, ".backingPublicInputsFile")))
@@ -251,7 +251,8 @@ contract DeployCloseCli is Script {
         // missing backing verifier.
         (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingConfigJson);
         CloseFundingMaterializer materializer =
-            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)));
+            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
+                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")));
 
         // 3. Deploy all four circuit-specific adapters before the parent verifier.  Distinct
         //    constructor slots make cross-statement replay and partial initialization impossible.

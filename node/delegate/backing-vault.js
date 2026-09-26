@@ -12,7 +12,7 @@ const { isDeepStrictEqual } = require('util');
 const PUBLIC_BACKING_SCHEMA_VERSION = 3;
 const LIVE_BALANCE_SNAPSHOT_VERSION = 4;
 const SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION = 1;
-const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN = 26;
+const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN = 34;
 const DEVELOPMENT_CHAIN_ID = 31_337;
 const MAX_BACKING_BYTES = 64 * 1024 * 1024;
 const MAX_BALANCE_COMPONENT_BYTES = 16 * 1024 * 1024;
@@ -119,6 +119,7 @@ function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxCh
       'tokenFundsDigest',
       'finalizedExtendedStateCommitment',
       'anchorBlockNumber',
+      'balanceStateCommitment',
     ],
     'backing.signedHeadExitKit.backingPublicInputs',
   );
@@ -154,9 +155,10 @@ function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxCh
     ...bytes32Limbs(tokenFundsDigest),
     ...bytes32Limbs(finalizedExtendedStateCommitment),
     anchorBlockNumber,
+    ...bytes32Limbs(canonicalDigest(inputs.balanceStateCommitment, 'exit backing balanceStateCommitment')),
   ];
   if (publicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
-    throw new Error('signed-head exit backing public inputs do not contain exactly 26 limbs');
+    throw new Error('signed-head exit backing public inputs do not contain exactly 34 limbs');
   }
   return {
     schemaVersion: SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
@@ -349,11 +351,11 @@ function validateVerificationReceipt(receipt, checked, authority) {
     backingPublicInputs: (() => {
       if (!Array.isArray(value.backingPublicInputs)
           || value.backingPublicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
-        throw new Error('verification receipt backing public inputs must contain exactly 26 limbs');
+        throw new Error('verification receipt backing public inputs must contain exactly 34 limbs');
       }
       return value.backingPublicInputs.map((input, index) => uint(
         input,
-        index === CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN - 1
+        index === 25
           ? Number.MAX_SAFE_INTEGER
           : 0xffffffff,
         `verification receipt backing publicInputs[${index}]`,

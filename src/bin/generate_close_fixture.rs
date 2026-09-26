@@ -35,12 +35,12 @@
 //!   3. The backing proof over the same balance proof / private state / ext state →
 //!      `close_asset_backing_mle.json` (full wire-v3 fixture, validated against
 //!      `close_asset_backing_mle_config.json`), `close_asset_backing_public_inputs.json` (the bare
-//!      26 raw limbs) and `close_asset_backing_manifest.json` (the `public_close_prover`
+//!      34 raw limbs) and `close_asset_backing_manifest.json` (the `public_close_prover`
 //!      `OutputManifest` shape `DeployCloseCli._readBackingMle` authenticates).
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from PROVED public inputs
 //! (`ChannelClosePublicInputs::from_u64_slice` over the 103 raw close limbs,
-//! `CloseAssetBackingPublicInputs::from_pis` over the 26 raw backing limbs). Nothing is hardcoded.
+//! `CloseAssetBackingPublicInputs::from_pis` over the 34 raw backing limbs). Nothing is hardcoded.
 //! The generator additionally asserts the cross-bindings the contracts enforce (state root
 //! finalized-by-this-lifecycle, anchor == last block, token_funds_digest / settled_tx_chain equal
 //! between the two proofs) so a broken co-generation fails HERE, not at `submitCloseIntent`.

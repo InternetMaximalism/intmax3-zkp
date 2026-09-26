@@ -64,7 +64,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// circuit-enforced == ids limb 5 of the anchored `incoming_tx_hash` recompute) appended at
     /// the END; it replaces the Manager's genesis-token pin.
     uint256 internal constant WITHDRAWAL_CLAIM_PI_LEN = 50;
-    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 57;
+    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 58;
     /// Phase C1: RAW Goldilocks PI limb count for the CORRECTED cancel-close circuit (mirror Rust
     /// `CANCEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/cancel_close_pis.rs). Its
     /// `WrapperCircuit` re-registers the limbs VERBATIM, so the authenticated public input is this raw
@@ -532,7 +532,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         require(c == WITHDRAWAL_CLAIM_PI_LEN, "wclaim limb count");
     }
 
-    /// @dev Build the EXPECTED 57-limb post-close-claim PI vector, in the EXACT order of the Rust
+    /// @dev Build the EXPECTED 58-limb post-close-claim PI vector, in the EXACT order of the Rust
     ///      `PostCloseClaimPublicInputs::to_u64_vec()` (pinned by
     ///      `post_close_claim_public_inputs_match_solidity_shared_vector`). Layout:
     ///        [0..8]   closeIntentDigest
@@ -548,6 +548,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///                 incoming tx moved — in-circuit it IS ids limb 5 of the `incomingTxHash`
     ///                 recompute, so the accumulator leaf commits it; never a prover/caller
     ///                 choice. The Manager credits `withdrawalCredits[tokenIndex]` with this.)
+    ///        [57]     statementVersion = 2 (unapplied IMUI entitlement)
     function _expectedPostCloseClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -574,6 +575,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putBytes32(limbs, c, finalSettledTxAccumulatorRoot);
         // TM-16: the base token limb, strict-bound like every other limb.
         limbs[c++] = uint256(tokenIndex);
+        limbs[c++] = 2; // unapplied-entitlement statement; reject historical inclusion-only proofs
         require(c == POST_CLOSE_CLAIM_PI_LEN, "pcclaim limb count");
     }
 
@@ -738,7 +740,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///         Stage 3).
     /// @dev SECURITY: the dedicated pinned v2 adapter verifies the canonical compact proof against
     ///      the post-close-claim circuit's immutable VK/configuration, then `_bindLimbsStrict`
-    ///      binds all 57 authenticated public-input limbs.
+    ///      binds all 58 authenticated public-input limbs.
     ///      HAZARD #8: `sharedNativeNullifier` is DERIVED in-circuit from
     ///      keccak(IMCK, closeIntentDigest, incomingTxHash, receiverPkG); the manager passes the
     ///      RECOMPUTED value here (not an opaque claim field), so the binding rejects a
@@ -897,7 +899,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 57-limb post-close-claim PI
+    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 58-limb post-close-claim PI
     ///         vector (Stage 3: + finalBalanceStateH1 + finalSettledTxAccumulatorRoot; TM-16:
     ///         + tokenIndex at limb 56).
     function expectedPostCloseClaimLimbs(

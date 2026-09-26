@@ -590,8 +590,8 @@ contract MockChannelRegistry is IChannelRegistry {
                     0
                 )
                 .length,
-                57,
-                "post-close-claim PI is 57 raw limbs (Stage 3 + TM-16 tokenIndex)"
+                58,
+                "post-close-claim PI has the unapplied-entitlement version"
             );
         }
 
@@ -1468,11 +1468,11 @@ contract MockChannelRegistry is IChannelRegistry {
             // Precompute the proof BEFORE expectRevert: the builder makes external view calls that
             // would otherwise consume the expectation.
             bytes memory pcProof = _postCloseClaimProof(postCloseClaim);
-            vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+
             manager.submitPostCloseClaim(postCloseClaim, pcProof);
 
             assertEq(manager.withdrawalCredits(0, alice), 30);
-            assertEq(manager.withdrawalCredits(0, bob), 0, "the double-credit path is disabled");
+            assertEq(manager.withdrawalCredits(0, bob), 5, "authenticated unapplied credit");
         }
 
         function test_participantCloseGuardedRawCannotReplayAfterCancelRestoresFreezeNonce() external {
@@ -2029,7 +2029,7 @@ contract MockChannelRegistry is IChannelRegistry {
             // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
             // call, which would otherwise be the view calls that assemble the proof.
             bytes memory proof = _postCloseClaimProof(pc);
-            vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+            vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
             manager.submitPostCloseClaim(pc, proof);
             assertEq(manager.totalWithdrawn(0), 70, "no accrual on the disabled path");
         }
@@ -2581,7 +2581,7 @@ contract MockChannelRegistry is IChannelRegistry {
             assertEq(v[49], 0xdeadbeef); // token_index (resolved base token)
         }
 
-        /// GOLDEN VECTOR mirror for post-close-claim (57 limbs; Stage 3: + finalBalanceStateH1 +
+        /// GOLDEN VECTOR mirror for post-close-claim (58 limbs; Stage 3: + finalBalanceStateH1 +
         /// finalSettledTxAccumulatorRoot appended; TM-16: + tokenIndex at limb 56).
         function test_expectedPostCloseClaimLimbs_goldenVector() external view {
             address rcp = address(
@@ -2602,7 +2602,7 @@ contract MockChannelRegistry is IChannelRegistry {
                 _b32(0x8000),
                 0xdeadbeef
             );
-            assertEq(v.length, 57);
+            assertEq(v.length, 58);
             _assertB32(v, 0, 0x1000); // close_intent_digest
             assertEq(v[8], 0x0a0b0c0d); // receiver_channel_id
             _assertB32(v, 9, 0x2000); // incoming_tx_hash
@@ -2615,6 +2615,7 @@ contract MockChannelRegistry is IChannelRegistry {
             _assertB32(v, 40, 0x7000); // final_balance_state_h1 (Stage 3)
             _assertB32(v, 48, 0x8000); // final_settled_tx_accumulator_root (Stage 3)
             assertEq(v[56], 0xdeadbeef); // token_index (TM-16, anchored base token)
+            assertEq(v[57], 2); // unapplied-entitlement statement
         }
 
         /// GOLDEN VECTOR mirror for cancel-close (29 limbs). The Rust side asserts the SAME constant in
@@ -2722,6 +2723,36 @@ contract MockChannelRegistry is IChannelRegistry {
         /// constraint: the theft did not need to reuse a post-close nullifier at all, because the FIRST
         /// post-close claim already credits a delta the withdrawal claim credited under a DIFFERENT
         /// nullifier map (IMW2 vs IMCK). The entry point is disabled, so even the first call reverts.
+        function test_lateIncomingExtendsOnlyNewFundCapAndPaysScopedRecipient() external {
+            bytes32 d = _finalizeDefault();
+            bytes32 digest = manager.finalizedTokenFundsDigest();
+            bytes32 initialKey = _submitWd(d, USER_A, alice, 75);
+            _fundAndPull(registry, manager, 75);
+            vm.prank(alice); manager.claimWithdrawalCredit(initialKey);
+            bytes32 key = keccak256("late receipt");
+            manager.creditLateIncoming(0, 19, bob, key);
+            assertEq(manager.finalizedChannelFundAmount(0), 75);
+            assertEq(manager.finalizedTokenFundsDigest(), digest);
+            assertEq(manager.lateIncomingFundAmount(0), 19);
+            assertEq(manager.totalWithdrawn(0), 94);
+            vm.expectRevert(ChannelSettlementManager.NullifierAlreadyUsed.selector);
+            manager.creditLateIncoming(0, 19, bob, key);
+            assertEq(manager.lateIncomingFundAmount(0), 19, "reverted cap increase");
+            vm.prank(alice);
+            vm.expectRevert(ChannelSettlementManager.InvalidPostCloseClaimProof.selector);
+            manager.creditLateIncoming(0, 1, alice, keccak256("fake receipt"));
+            vm.prank(bob);
+            vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+            manager.claimWithdrawalCredit(key);
+            _fundAndPull(registry, manager, 19);
+            uint256 beforeBalance = bob.balance;
+            vm.prank(bob); manager.claimWithdrawalCredit(key);
+            assertEq(bob.balance - beforeBalance, 19);
+            vm.prank(bob);
+            vm.expectRevert(ChannelSettlementManager.NoWithdrawalCredit.selector);
+            manager.claimWithdrawalCredit(key);
+        }
+
         function test_pcclaim_doubleClaim_reverts() external {
             bytes32 d = _finalizeDefault();
             ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
@@ -2733,14 +2764,14 @@ contract MockChannelRegistry is IChannelRegistry {
                 tokenIndex: 0
             });
             bytes memory proof1 = _postCloseClaimProof(pc);
-            vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+
             manager.submitPostCloseClaim(pc, proof1);
-            assertEq(manager.withdrawalCredits(0, bob), 0, "not even the FIRST post-close credit lands");
+            assertEq(manager.withdrawalCredits(0, bob), 5, "one authenticated residual credit");
 
             // And the second call is refused identically — the disable is unconditional, not a
             // once-per-nullifier guard.
             bytes memory proof2 = _postCloseClaimProof(pc);
-            vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+            vm.expectRevert(ChannelSettlementManager.NullifierAlreadyUsed.selector);
             manager.submitPostCloseClaim(pc, proof2);
         }
 
@@ -2774,7 +2805,7 @@ contract MockChannelRegistry is IChannelRegistry {
                 0
             );
             bytes memory proof = CloseTestLib.proofWithLimbs(limbs);
-            vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+            vm.expectRevert(bytes("claim limb mismatch"));
             manager.submitPostCloseClaim(pc, proof);
         }
     }
