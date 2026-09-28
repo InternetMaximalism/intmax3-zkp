@@ -16,8 +16,21 @@
       if (!record) return null;
       if (JSON.stringify(record.context) !== JSON.stringify(context)) throw new Error('A saved transaction belongs to another wallet or deployment. Switch back to resume it.');
       if (record.txHash) return record;
-      // A wallet can broadcast successfully and then lose its RPC response. Pin the nonce before
-      // asking for approval and look for that exact transaction; never send another payment here.
+      // The intent is saved BEFORE the wallet is asked to sign, so a record without a hash means
+      // either the wallet broadcast it and its response was lost, or the wallet never broadcast it
+      // at all (the signing request failed — e.g. a broken injected provider). The pinned nonce
+      // separates the two using the wallet's own account state, not its error text: while the
+      // account's pending nonce has not passed the pinned one, no transaction with that nonce
+      // exists, mined or queued, so nothing was paid. Discard the stale intent (null) so the caller
+      // sends afresh instead of waiting forever for a transaction that does not exist. A record
+      // without a pinned nonce keeps the locate-only path below (fail closed).
+      if (record.request.nonce !== undefined && record.request.nonce !== null) {
+        const pending = BigInt(await provider.request({method:'eth_getTransactionCount', params:[record.request.from,'pending']}));
+        if (pending <= BigInt(record.request.nonce)) { this.clear(key); return null; }
+      }
+      // The pinned nonce is consumed, so a transaction with it exists and may be ours: a wallet can
+      // broadcast successfully and then lose its RPC response. Look for that exact transaction;
+      // never send another payment here.
       const latest = Number(BigInt(await provider.request({method:'eth_blockNumber'})));
       const end = Math.min(latest, record.nextBlock + 63);
       for (let n = record.nextBlock; n <= end; n++) {
@@ -44,7 +57,11 @@
       return this.sendUnlocked(provider,key,request,context,details);
     }
     async sendUnlocked(provider, key, request, context, details) {
-      if (this.read(key)) return this.recover(provider, key, context);
+      if (this.read(key)) {
+        const resumed = await this.recover(provider, key, context);
+        if (resumed) return resumed;
+        // null: the saved intent was never broadcast and has been discarded — send afresh.
+      }
       const nonce = await provider.request({method:'eth_getTransactionCount', params:[request.from,'pending']});
       const block = Number(BigInt(await provider.request({method:'eth_blockNumber'})));
       const record = {version:1,context,request:{...request,nonce},details,nextBlock:block};

@@ -3055,15 +3055,22 @@ $('btnDeposit').onclick = guard('deposit', async () => {
       const info = await fetchDepositInfo(); await ensureChain(info);
       const saved = await walletTransactions.recover(walletProvider, depositJournalKey(),
         {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()});
-      try { await awaitReceipt(saved.txHash, 'deposit'); }
-      catch (error) {
-        const receipt = await walletProvider.request({method:'eth_getTransactionReceipt',params:[saved.txHash]});
-        if (receipt && receipt.status === '0x0') walletTransactions.clear(depositJournalKey());
-        throw error;
+      if (saved) {
+        try { await awaitReceipt(saved.txHash, 'deposit'); }
+        catch (error) {
+          const receipt = await walletProvider.request({method:'eth_getTransactionReceipt',params:[saved.txHash]});
+          if (receipt && receipt.status === '0x0') walletTransactions.clear(depositJournalKey());
+          throw error;
+        }
+        dr = {...saved.details,txHash:saved.txHash};
+        log('Resuming the saved deposit '+saved.txHash+'; no new payment.');
+      } else {
+        // recover() proved from the account nonce that the saved deposit was never broadcast, and
+        // discarded it. Nothing was paid, so this Deposit sends a new one below.
+        log('The previous deposit was never sent by the wallet (its nonce is unused); sending a new deposit.', '');
       }
-      dr = {...saved.details,txHash:saved.txHash};
-      log('Resuming the saved deposit '+saved.txHash+'; no new payment.');
-    } else {
+    }
+    if (!dr) {
       token = selectedDepositToken();
       if (!token) throw new Error('select a token to deposit');
       amt = parseDepositAmount($('depositAmount').value, token.decimals);
