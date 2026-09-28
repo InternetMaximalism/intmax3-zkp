@@ -70,8 +70,9 @@ O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 scp -i $PEM ${=O} signer-bin/channel_member       ${H}:relay/bin/channel_member   # if Rust changed
 scp -i $PEM ${=O} pkg/intmax3_zkp.js pkg/intmax3_zkp_bg.wasm ${H}:relay/public/pkg/ # if wasm changed
 scp -i $PEM ${=O} hosting/wallet/wallet-live.html ${H}:relay/public/index.html     # if frontend changed
-scp -i $PEM ${=O} hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs ${H}:relay/public/
-scp -i $PEM ${=O} hosting/wallet/wallet-relay-ec2.js ${H}:relay/
+scp -i $PEM ${=O} hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs \
+  hosting/wallet/wallet-outbox.js hosting/wallet/wallet-transactions.js ${H}:relay/public/  # index.html loads the last two
+scp -i $PEM ${=O} hosting/wallet/wallet-relay-ec2.js hosting/wallet/pkg-assets.js ${H}:relay/
 scp -i $PEM ${=O} node/common/token-registry.js   ${H}:relay/token-registry.js  # token metadata (§N)
 ssh -i $PEM ${=O} $H 'chmod +x ~/relay/bin/channel_member; sudo systemctl restart intmax-relay'
 ```
@@ -90,8 +91,13 @@ Notes:
   word-split option strings with `${=O}`.
 - **Membership is durable across restarts** (the cosigner is the member registry). A restart does NOT
   wipe registered delegates/slots. To deliberately start fresh: `RESET_CHANNELS=1` in the unit/env.
-- index.html / wasm are served `no-store` (frontend) / `max-age 3600` (`/pkg`); a browser hard-reload
-  picks up a new frontend. A new binary is picked up on the next `/api` call (exec'd fresh).
+- The frontend is served `no-store`. The wasm package is served content-addressed
+  (`hosting/wallet/pkg-assets.js`): `/pkg/intmax3_zkp.js` is a `no-store` redirect to
+  `/pkg/<hash>/intmax3_zkp.js`, and everything under `/pkg/<hash>/` is `immutable`. The prover
+  thread pool re-fetches the package once per thread, so this keeps start-up to one alias request on a
+  repeat visit instead of a round trip per thread (18 threads: ~21 s → ~0.04 s). A redeploy of `pkg/`
+  changes the hash, so a normal reload picks it up and no stale wasm can run; no relay restart is
+  needed for a `pkg/` change. A new binary is picked up on the next `/api` call (exec'd fresh).
 - CLI-only change → just ship the binary + restart (no wasm/frontend rebuild).
 - Update the Node public-close adapter and `public_close_publisher` binary together. The current
   adapter consumes native schema-3 completion (attestation/materialization included), and new

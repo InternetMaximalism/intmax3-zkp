@@ -17,6 +17,7 @@ const { promisify } = require('util');
 const { extractSlimAnchor } = require('./slim-wire');
 const { publicBacking } = require('./public-backing');
 const { installBrowserClaimRoutes } = require('./browser-claim-routes');
+const { pkgAssets } = require('./pkg-assets');
 const pExecFile = promisify(execFile);
 
 const ROOT = __dirname;
@@ -1103,6 +1104,9 @@ app.post('/api/ticket/deposit', (req, res) => {
   res.json(ticket);
 });
 
+// The wasm package under content-addressed, immutable URLs (see pkg-assets.js): the prover thread
+// pool re-fetches it once per thread, which must be a cache hit rather than a round trip per thread.
+app.use('/pkg', pkgAssets(path.join(PUBLIC, 'pkg'), express.static));
 // Static frontend (index.html = wallet-live.html, wallet-worker.js, /pkg/...), same origin as /api.
 app.use(express.static(PUBLIC));
 
