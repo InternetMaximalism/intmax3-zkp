@@ -1709,12 +1709,12 @@ async function awaitReceipt(txHash, what, timeoutSec = 120) {
  *     but we do not lean on that);
  *   * the exact token, amount and spender are logged BEFORE each signature request.
  */
-async function sendDepositViaWallet(amountBase, token) {
+async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDepositInfo()) {
   if (!token || !Number.isInteger(token.tokenIndex) || token.tokenIndex < 0) {
     throw new Error('no depositable token selected');
   }
   await ensureWallet();
-  const info = await fetchDepositInfo();
+  const info = await infoPromise;
   await ensureChain(info);
 
   const shown = fmtUnits(amountBase, token.decimals) + ' ' + token.label;
@@ -3033,6 +3033,11 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     // ticket store — and it risks a second on-chain deposit for the same intent. RESUME that
     // deposit's import instead of broadcasting a new one. The recovery handle is the ticket's L1
     // txHash; the import reads the deposit's economics from that transaction's on-chain log.
+    // The deposit target is read-only relay data, so fetch it alongside the tickets instead of after
+    // them: each is a round trip to the relay, and both happen before the wallet can be asked to sign.
+    // The ticket check still decides, before anything is sent, whether this is a resume.
+    const infoPromise = fetchDepositInfo();
+    infoPromise.catch(() => {}); // awaited below only on the paths that send; never an unhandled rejection
     await fetchTickets();
     if (ticketLoadFailed) throw new Error('Cannot verify pending deposits. Retry Deposit when the relay is available; no new funds were sent.');
     const localDeposit = walletTransactions.read(depositJournalKey());
@@ -3052,7 +3057,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
       };
     } else if (localDeposit) {
       await ensureWallet();
-      const info = await fetchDepositInfo(); await ensureChain(info);
+      const info = await infoPromise; await ensureChain(info);
       const saved = await walletTransactions.recover(walletProvider, depositJournalKey(),
         {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()});
       if (saved) {
@@ -3076,7 +3081,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
       amt = parseDepositAmount($('depositAmount').value, token.decimals);
       log('sending L1 deposit via wallet (' + fmtUnits(amt, token.decimals) + ' ' + token.label
         + ', token #' + token.tokenIndex + ')...');
-      dr = await sendDepositViaWallet(amt, token);
+      dr = await sendDepositViaWallet(amt, token, infoPromise);
     }
 
     // The ticket is the recovery handle: saved BEFORE the (possibly long) import, so an

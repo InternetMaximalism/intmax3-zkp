@@ -66,8 +66,13 @@
       // but MetaMask answers the `pending` tag from its own nonce tracker with the JS number 2, and
       // its eth_sendTransaction normalizes `nonce` with add0x(), which throws
       // "e.startsWith is not a function" on a number — every deposit failed before signing.
-      const nonce = '0x' + BigInt(await provider.request({method:'eth_getTransactionCount', params:[request.from,'pending']})).toString(16);
-      const block = Number(BigInt(await provider.request({method:'eth_blockNumber'})));
+      // Both reads happen before anything is sent, so they are independent: ask for them together.
+      const [pendingNonce, head] = await Promise.all([
+        provider.request({method:'eth_getTransactionCount', params:[request.from,'pending']}),
+        provider.request({method:'eth_blockNumber'}),
+      ]);
+      const nonce = '0x' + BigInt(pendingNonce).toString(16);
+      const block = Number(BigInt(head));
       const record = {version:1,context,request:{...request,nonce},details,nextBlock:block};
       this.save(key,record); // Storage failure must happen BEFORE the wallet can spend funds.
       let hash;
