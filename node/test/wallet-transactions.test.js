@@ -6,12 +6,17 @@ const from='0x'+'11'.repeat(20),to='0x'+'22'.repeat(20),hash='0x'+'ab'.repeat(32
 // nonce, a request that fails before broadcasting does not. That difference is what separates a
 // lost wallet response (must be located, never paid twice) from a request that never left the
 // wallet (safe to send afresh), so a constant nonce here would hide exactly the case under test.
-function setup(mode){
+// The default wallet is MetaMask as it really behaves: it answers eth_getTransactionCount for the
+// `pending` tag from its nonce tracker with a JS number, and eth_sendTransaction normalizes `nonce`
+// with add0x(), which calls .startsWith and so throws on anything but a string. wallet='node' is a
+// plain node that returns a hex QUANTITY.
+function setup(mode,wallet='metamask'){
  const data=new Map();let sends=0,broadcasts=0,nonce=2,tx;
  const storage={getItem:k=>data.get(k)||null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
  const provider={request:async({method,params})=>{
-  if(method==='eth_getTransactionCount')return '0x'+nonce.toString(16);if(method==='eth_blockNumber')return '0xa';
+  if(method==='eth_getTransactionCount')return wallet==='metamask'&&params[1]==='pending'?nonce:'0x'+nonce.toString(16);if(method==='eth_blockNumber')return '0xa';
   if(method==='eth_sendTransaction'){sends++;
+   if(wallet==='metamask'&&typeof params[0].nonce!=='string')throw TypeError('e.startsWith is not a function');
    if(mode==='reject')throw Object.assign(Error('rejected'),{code:4001});
    // A broken injected provider fails the signing request before anything is broadcast.
    if(mode==='nobroadcast-once'&&sends===1)throw TypeError('e.startsWith is not a function');
@@ -63,4 +68,12 @@ test('a pinned nonce consumed by another transaction is never paid again',async(
 test('a saved intent without a pinned nonce is never discarded',async()=>{
  const h=setup();h.storage.setItem('intmax-wallet-tx:d',JSON.stringify({version:1,context,request,details:{},nextBlock:10}));
  await assert.rejects(h.j.recover(h.provider,'d',context),/Waiting to locate/);assert.ok(h.j.read('d'));assert.equal(h.sends(),0);
+});
+test('MetaMask\'s numeric pending nonce is sent as a hex quantity, so the payment reaches the wallet',async()=>{
+ const h=setup();const r=await h.j.send(h.provider,'d',request,context,{});
+ assert.equal(r.request.nonce,'0x2');assert.equal(r.txHash,hash);assert.equal(h.broadcasts(),1);
+});
+test('a node that returns a hex nonce is pinned the same way',async()=>{
+ const h=setup(undefined,'node');const r=await h.j.send(h.provider,'d',request,context,{});
+ assert.equal(r.request.nonce,'0x2');assert.equal(h.broadcasts(),1);
 });

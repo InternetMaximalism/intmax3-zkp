@@ -62,7 +62,11 @@
         if (resumed) return resumed;
         // null: the saved intent was never broadcast and has been discarded — send afresh.
       }
-      const nonce = await provider.request({method:'eth_getTransactionCount', params:[request.from,'pending']});
+      // Pin the nonce as a hex QUANTITY whatever type the wallet answers with: a node returns "0x2",
+      // but MetaMask answers the `pending` tag from its own nonce tracker with the JS number 2, and
+      // its eth_sendTransaction normalizes `nonce` with add0x(), which throws
+      // "e.startsWith is not a function" on a number — every deposit failed before signing.
+      const nonce = '0x' + BigInt(await provider.request({method:'eth_getTransactionCount', params:[request.from,'pending']})).toString(16);
       const block = Number(BigInt(await provider.request({method:'eth_blockNumber'})));
       const record = {version:1,context,request:{...request,nonce},details,nextBlock:block};
       this.save(key,record); // Storage failure must happen BEFORE the wallet can spend funds.
