@@ -79,6 +79,19 @@ const PORT = (() => {
 const CHANNELS = (process.env.INTMAX_CHANNELS || '7,8,9,10').split(',').map(Number);
 if (!CHANNELS.length || CHANNELS.some(ch => !Number.isSafeInteger(ch) || ch <= 0)) throw new Error('invalid INTMAX_CHANNELS');
 
+// The relay runs against the local Anvil devnet (31337) in development and against a public chain
+// in production. The chain id is read from the configured RPC (api/lib/cli caches it) — never from
+// a label — and every Anvil-only convenience below is gated on it.
+const DEVNET_CHAIN_ID = 31337;
+const relayChainId = () => require('../../api/lib/cli').chainId();
+const isDevnet = () => relayChainId() === DEVNET_CHAIN_ID;
+// Refuse an Anvil-only route on a public chain with an explicit, non-500 answer.
+function requireDevnet(res, what) {
+  if (isDevnet()) return true;
+  res.status(501).json({ code: 'DEVNET_ONLY', error: `${what} is only available on the local devnet (chain ${DEVNET_CHAIN_ID}); this relay serves chain ${relayChainId()}.` });
+  return false;
+}
+
 fs.mkdirSync(WORK, { recursive: true });
 const chDir = (ch) => path.join(WORK, 'ch' + ch);
 const wc = (ch, n) => path.join(chDir(ch), n);
@@ -1184,6 +1197,8 @@ function minConfirmationsForDisplay(chainId) {
 // Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via
 // MetaMask (native ETH or any L1-registered ERC-20 — `rollup` is both the deposit target and the
 // ERC-20 approve spender).
+app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS }));
+
 app.get('/api/deposit-info', (req, res) => {
   try {
     const ch = reqChannel(req);
@@ -1194,8 +1209,8 @@ app.get('/api/deposit-info', (req, res) => {
       rollup: backing.rollup,
       depositRecipient: backing.deposit_recipient,
       rpc: RPC,
-      chainId: 31337,
-      minConfirmations: minConfirmationsForDisplay(31337),
+      chainId: relayChainId(),
+      minConfirmations: minConfirmationsForDisplay(relayChainId()),
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -1203,6 +1218,8 @@ app.get('/api/deposit-info', (req, res) => {
 // POST /api/l1-deposit?channel=N  body: { amount } (base units)
 // Fallback: sends a deposit via the relay's anvil dev key (for non-MetaMask testing).
 app.post('/api/l1-deposit', (req, res) => {
+  // Funded by the relay with the PUBLIC Anvil dev key: a devnet test convenience only.
+  if (!requireDevnet(res, 'The relay-funded deposit')) return;
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
   withLock(ch, () => {
@@ -1371,6 +1388,8 @@ app.get('/api/settlement', (req, res) => {
 // POST /api/pw-submit?channel=N
 // Submit partial withdrawal intent on-chain.
 app.post('/api/pw-submit', (req, res) => {
+  // api/lib/wallet-l1.js (validity publication + backing attestation) is implemented for Anvil only.
+  if (!requireDevnet(res, 'Partial withdrawal')) return;
   const ch = reqChannel(req);
   withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
@@ -1403,6 +1422,7 @@ app.post('/api/pw-submit', (req, res) => {
 // POST /api/pw-finalize?channel=N
 // Finalize partial withdrawal (advance time + finalize on-chain).
 app.post('/api/pw-finalize', (req, res) => {
+  if (!requireDevnet(res, 'Partial withdrawal')) return;
   const ch = reqChannel(req);
   withLock(ch, async () => {
     const existing = findActiveTicket(ch, 'partial_withdrawal');
@@ -1498,14 +1518,27 @@ app.post('/api/ticket/deposit', (req, res) => {
   res.json(ticket);
 });
 
-// Static wallet files: wallet-live.html + wallet-worker.js from wallet/ (ROOT), and the built
-// wasm under /pkg from the repo root (pkg/ is produced by build-wallet-wasm.sh at the repo root).
-app.use('/pkg', express.static(path.join(REPO, 'pkg')));
-app.use(express.static(ROOT));
+// Static wallet files. Development serves wallet-live.html + wallet-worker.js straight from
+// hosting/wallet (ROOT). A public-chain relay MUST serve an explicit public directory instead
+// (RELAY_PUBLIC_DIR, e.g. hosting/wallet/public with index.html): ROOT also holds server code and,
+// on a host that ran the older EC2 relay, its channel work directory — never publish those.
+const PUBLIC_DIR = process.env.RELAY_PUBLIC_DIR ? path.resolve(process.env.RELAY_PUBLIC_DIR) : null;
+if (!PUBLIC_DIR && !isDevnet()) {
+  console.error(`RELAY_PUBLIC_DIR is required on chain ${relayChainId()}: refusing to publish ${ROOT}`);
+  process.exit(1);
+}
+// The wasm package: content-addressed and immutable under /pkg/<id>/ (see pkg-assets.js), with the
+// unversioned files still served for anything that asks for them directly.
+const PKG_DIR = process.env.RELAY_PKG_DIR ? path.resolve(process.env.RELAY_PKG_DIR) : path.join(REPO, 'pkg');
+app.use('/pkg', require('./pkg-assets').pkgAssets(PKG_DIR, express.static));
+app.use('/pkg', express.static(PKG_DIR));
+app.use(express.static(PUBLIC_DIR || ROOT, { index: ['index.html', 'wallet-live.html'] }));
 
+// TLS: a deployment passes its certificate (TLS_CERT/TLS_KEY, e.g. Let's Encrypt); development falls
+// back to the repo's self-signed pair.
 const opts = {
-  key: fs.readFileSync(path.join(REPO, 'self_certs', 'key.pem')),
-  cert: fs.readFileSync(path.join(REPO, 'self_certs', 'cert.pem')),
+  key: fs.readFileSync(process.env.TLS_KEY || path.join(REPO, 'self_certs', 'key.pem')),
+  cert: fs.readFileSync(process.env.TLS_CERT || path.join(REPO, 'self_certs', 'cert.pem')),
 };
 // DURABLE membership across restarts (matches the EC2 relay): a restart does NOT wipe registered
 // delegates / their slots. Pass RESET_CHANNELS=1 to deliberately start brand-new channels.
@@ -1556,6 +1589,16 @@ const needBacking = CHANNELS.filter((ch) =>
   !['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) => fs.existsSync(wc(ch, f)))
 );
 async function bootstrapBacking() {
+  if (!isDevnet()) {
+    // A public chain never gets the devnet bootstrap: its rollup, backing and settlement are
+    // provisioned by the operator (setup-backing, then hosting/wallet/bootstrap-real-chain.js), and
+    // the L1 validity orchestration in api/lib/wallet-l1.js exists for Anvil only.
+    if (needBacking.length) {
+      throw new Error(`channels ${needBacking.join(', ')} have no deposit backing on chain ${relayChainId()}; `
+        + 'provision them with `channel_member setup-backing` and hosting/wallet/bootstrap-real-chain.js');
+    }
+    return;
+  }
   if (!needBacking.length) {
     require('../../api/lib/wallet-l1').configure(rollupOf(CHANNELS[0]));
     return;
@@ -1607,7 +1650,13 @@ async function bootstrapBacking() {
 }
 
 const http = require('http');
-const HTTP_PORT = PORT + 1;
+// Plain-HTTP API listener (cluster peers use it). RELAY_HTTP_PORT overrides it; 0 disables it.
+const HTTP_PORT = process.env.RELAY_HTTP_PORT !== undefined && process.env.RELAY_HTTP_PORT !== ''
+  ? Number(process.env.RELAY_HTTP_PORT) : PORT + 1;
+if (!Number.isInteger(HTTP_PORT) || HTTP_PORT < 0 || HTTP_PORT > 65535) throw new Error('invalid RELAY_HTTP_PORT');
+// Optional listener that only redirects to HTTPS (a public host's port 80).
+const REDIRECT_PORT = process.env.RELAY_HTTP_REDIRECT_PORT ? Number(process.env.RELAY_HTTP_REDIRECT_PORT) : 0;
+if (!Number.isInteger(REDIRECT_PORT) || REDIRECT_PORT < 0 || REDIRECT_PORT > 65535) throw new Error('invalid RELAY_HTTP_REDIRECT_PORT');
 
 // Sync throws inside a handler (e.g. `reqChannel` on an unknown channel) answer as JSON with the
 // error's status instead of Express's HTML 500 page.
@@ -1623,9 +1672,17 @@ bootstrapBacking().then(() => {
   https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
     console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);
   });
-  http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
-  });
+  if (HTTP_PORT) {
+    http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
+      console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
+    });
+  }
+  if (REDIRECT_PORT) {
+    http.createServer((req, res) => {
+      res.writeHead(301, { Location: 'https://' + String(req.headers.host || '').replace(/:\d+$/, '') + req.url });
+      res.end();
+    }).listen(REDIRECT_PORT, '0.0.0.0', () => console.log(`HTTP -> HTTPS redirect on :${REDIRECT_PORT}`));
+  }
   if (cluster) {
     for (const ch of CHANNELS) cluster.watch(ch);
     cluster.startWatchdog();

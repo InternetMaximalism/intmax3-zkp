@@ -2,10 +2,13 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const source=fs.readFileSync(path.join(__dirname,'../../hosting/wallet/wallet-relay.js'),'utf8');
 const route=source.slice(source.indexOf("app.post('/api/pw-submit'"),source.indexOf('// POST /api/pw-finalize'));
-async function fail(error){
+async function fail(error,devnet=true){
  let handler,done;
  const completed=new Promise(r=>done=r),ticket={status:'burn_done',params:{recipient:'recipient'}};
- const ctx={app:{post:(_,h)=>handler=h},reqChannel:()=>7,withLock:(_,fn)=>Promise.resolve().then(fn),
+ // The route runs only on the local devnet (api/lib/wallet-l1.js is Anvil-only); mirror the relay's
+ // guard, which answers 501 on any other chain.
+ const requireDevnet=(res,what)=>{if(devnet)return true;res.status(501).json({code:'DEVNET_ONLY',error:`${what} is only available on the local devnet`});return false;};
+ const ctx={requireDevnet,app:{post:(_,h)=>handler=h},reqChannel:()=>7,withLock:(_,fn)=>Promise.resolve().then(fn),
  findActiveTicket:()=>ticket,upsertTicket:()=>{},fs:{existsSync:()=>true},wc:()=>'',RPC:'rpc',
  require:()=>({resumeSubmittedAuth:()=>null,publish:async()=>{throw error;}}),console:{error:()=>{}},cli:()=>{throw new Error('must not reach CLI');}};
  vm.createContext(ctx);vm.runInContext(route,ctx);
@@ -30,4 +33,9 @@ test('shared relay error responder maps CLI exit codes to valid HTTP errors',()=
    let actual;const res={status(n){actual=n;return this;},json(body){assert.equal(body.error,'failure');}};
    context.sendRouteError(res,{status,message:'failure'});assert.equal(actual,expected);
  }
+});
+
+test('on a public chain partial withdrawal is refused up front with 501 and nothing is touched',async()=>{
+ const result=await fail(new Error('must not be reached'),false);
+ assert.equal(result.status,501);assert.equal(result.body.code,'DEVNET_ONLY');assert.equal(result.ticket.status,'burn_done');
 });
