@@ -37,10 +37,8 @@ struct CloseProofFields {
     /// The channel's registered ACTIVE COSIGNER count. STRICT-equality-bound to close-PI limb 93 —
     /// see `ChannelSettlementVerifier._expectedCloseLimbs` (B-2 A-6: this one is non-negotiable).
     uint8 memberCount;
-    /// Exact expected value for close-PI limb 94. The legacy ABI name is retained, but the verifier
-    /// requires `limb94 == minDelegateCount` and also checks
-    /// `memberCount + limb94 <= 1024`. Settlement activation freezes joins before deploying this
-    /// manager, so accepting a post-deployment count increase would describe an unsupported state.
+    /// Floor for close-PI limb 94: the verifier requires `limb94 >= minDelegateCount`. Delegates may join after deployment (appended, never removed),
+    /// so a larger proven count is a legitimate later state.
     /// Widened from the old packed `uint8` half so counts above 255 remain representable.
     uint32 minDelegateCount;
     /// Multi-token (§N-6): channel-local slot t → BASE token index, zero-padded past `tokenCount`.
@@ -729,19 +727,22 @@ contract ChannelSettlementManager {
     /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count` AT THAT MOMENT. Delegates do
     /// NOT co-sign and are NOT part of `memberBindings`/`memberPkGs`/the IMCM commitment.
     ///
-    /// This is the EXACT frozen delegate count for the close path. `prepare_settlement_binding`
-    /// disables join/membership mutation before the immutable manager/participant snapshot is
-    /// activated, and `ChannelSettlementVerifier` requires close-PI limb 94 to equal this value.
-    /// A state with either fewer or more delegates belongs to a different snapshot and is rejected;
-    /// post-deployment delegate joins are not supported in this release.
+    /// This is the FLOOR of the close path's delegate count: `ChannelSettlementVerifier` requires
+    /// close-PI limb 94 to be at least this value. Delegates keep joining after
+    /// deployment — they are appended by cosigner-signed states and never leave — so a state with
+    /// more delegates closes normally; one with fewer would drop registered delegates and is rejected.
+    /// Joins are refused only while a deployment is PREPARED (the deploy must match one snapshot).
     /// Deployment invariant: `activeMemberCount + activeDelegateCount <= 1024`.
     uint16 public immutable activeDelegateCount;
 
-    /// @notice Number/root of the complete, slot-ordered member+delegate identity snapshot frozen
-    /// at deployment.  Leaves are `keccak256(IMPR || uint16(slot) || pkG || recipient)`, padded by
+    /// @notice Number/root of the slot-ordered member+delegate identity snapshot taken at
+    /// deployment (a prefix of every later state: delegates only append).  Leaves are `keccak256(IMPR || uint16(slot) || pkG || recipient)`, padded by
     /// raw zero leaves to 1024; nodes are `keccak256(IMPN || left || right)`.  Only the at-most-eight
-    /// cosigners are materialized in mappings below.  Delegates prove their immutable slot binding
-    /// when requesting a close, so deploying a 1024-participant channel remains constant-storage.
+    /// cosigners are materialized in mappings below.  A participant registered at deployment proves
+    /// its slot binding against this root to request a close on its own (`requestCloseAsParticipant`),
+    /// keeping a 1024-participant deployment constant-storage. A delegate that joined later is not in
+    /// this root: it is closed like any delegate of the original design (by a registered participant
+    /// or cosigner), and it claims its balance from the H1-bound leaf exactly as registered ones do.
     uint16 public immutable activeParticipantCount;
     bytes32 public immutable participantRoot;
 

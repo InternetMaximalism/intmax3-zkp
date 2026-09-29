@@ -1,5 +1,13 @@
 # Threat model + design: the B-2 delegate-close fence (close PI limb 94)
 
+> **Owner decision 2026-09-29.** Option (d)'s one-sided bind is the rule, with the **floor only**:
+> close-PI limb 94 must be `>=` the delegate count at deployment; there is **no ceiling** at the
+> Verifier (the claim circuits bound 1024 in-circuit). Delegates join after deployment. The
+> 2026-08-30..09-03 change to exact equality and the refusal of post-deployment delegate joins was
+> never approved and has been reverted. §10.2 (keep the floor) is decided: keep it. See 
+> `doc/docs/sig-cluster-vs-delegates.md` — MSU and "fixed after deployment" concern the
+> sig-cluster only.
+
 Branch: `feat/falcon-poseidon-sig` (HEAD e3a4500). Status: **DESIGN ONLY — no code written, nothing
 committed.** Requires owner sign-off on §10 before any implementation.
 

@@ -2163,19 +2163,34 @@ contract MockChannelRegistry is IChannelRegistry {
         /// Property-style regression: every one of the 103 close limbs is mandatory. This covers
         /// the complete loop, including memberCount (93), delegateCount (94), and all eight
         /// tokenFundsDigest limbs (95..102), on the new bind-only boundary.
+        /// Every close limb is strictly bound — except limb 94 (`delegate_count`), which is bound only
+        /// as a floor because delegates join after deployment. For limb 94 pin both directions
+        /// instead: a larger count is a legitimate later state (accepted), a count below the floor
+        /// would drop a registered delegate (rejected).
         function test_bindClosePublicInputs_rejectsMutationAtEveryIndex() external view {
+            uint256 delegateCountLimb = 94; // ChannelSettlementVerifier.CLOSE_PI_DELEGATE_COUNT_INDEX
             CloseProofFields memory fields = this._validCloseFields();
+            fields.minDelegateCount = 2; // a floor with room below it
             uint256[] memory publicInputs = this._expectedCloseLimbsExt(fields, fields.minDelegateCount);
             for (uint256 i = 0; i < publicInputs.length; ++i) {
                 uint256 original = publicInputs[i];
-                publicInputs[i] = original ^ 1;
-                (bool accepted,) = address(verifier)
-                    .staticcall(
-                        abi.encodeCall(ChannelSettlementVerifier.bindCloseIntentPublicInputs, (fields, publicInputs))
-                    );
-                assertFalse(accepted, "mutated close limb accepted");
+                if (i == delegateCountLimb) {
+                    publicInputs[i] = original + 3; // later delegates joined
+                    assertTrue(_binds(fields, publicInputs), "later delegate count refused");
+                    publicInputs[i] = original - 1; // drops a registered delegate
+                    assertFalse(_binds(fields, publicInputs), "count below the floor accepted");
+                } else {
+                    publicInputs[i] = original ^ 1;
+                    assertFalse(_binds(fields, publicInputs), "mutated close limb accepted");
+                }
                 publicInputs[i] = original;
             }
+        }
+
+        function _binds(CloseProofFields memory fields, uint256[] memory publicInputs) internal view returns (bool) {
+            (bool ok, bytes memory ret) = address(verifier)
+                .staticcall(abi.encodeCall(ChannelSettlementVerifier.bindCloseIntentPublicInputs, (fields, publicInputs)));
+            return ok && abi.decode(ret, (bool));
         }
 
         // =====================================================================
@@ -2190,16 +2205,15 @@ contract MockChannelRegistry is IChannelRegistry {
         //     never out-of-bounds and never a raw arithmetic panic (A-4 / A-5).
         // =====================================================================
 
-        /// Settlement freezes joins, so a proof cannot widen the active region beyond the immutable
-        /// participant root/count.
-        function test_verifyClose_delegateCountAboveFrozenCount_reverts() external {
+        /// §8.1 POSITIVE: a close proof whose `delegateCount` limb is ABOVE the manager's registered
+        /// count is ACCEPTED — delegates join after deployment (L1 registration is cosigners-only and
+        /// there is no per-join transaction), so any later joiner makes the proof's count exceed it.
+        function test_verifyClose_delegateCountAboveFloor_accepted() external {
             CloseProofFields memory f = this._validCloseFields();
-            bytes memory one = _proofForFieldsWithDc(f, 1);
-            bytes memory five = _proofForFieldsWithDc(f, 5);
-            vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
-            verifier.verifyCloseIntent(f, one);
-            vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
-            verifier.verifyCloseIntent(f, five);
+            uint32 floor = f.minDelegateCount;
+            // 1 and 5 post-deploy joiners: both accepted.
+            assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, floor + 1)));
+            assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, floor + 5)));
         }
 
         /// §8.2 NEGATIVE (floor): `delegateCount < minDelegateCount` ⇒ `CloseDelegateCountOutOfRange`.
@@ -2220,31 +2234,15 @@ contract MockChannelRegistry is IChannelRegistry {
             assertTrue(verifier.verifyCloseIntent(f, atFloor));
         }
 
-        /// §8.3 NEGATIVE (ceiling): `memberCount + delegateCount > MAX_CHANNEL_PARTICIPANTS (1024)` ⇒
-        /// `CloseDelegateCountOutOfRange`. SECURITY: mirrors the in-circuit `active <= 1024` bound the
-        /// withdrawal-claim / post-close-claim circuits enforce, so L1 never records a close whose
-        /// participant count the claim lane could not serve. Both sides of the boundary are pinned.
-        function test_verifyClose_delegateCountAboveCeiling_reverts() external {
+        /// No ceiling at the Verifier (owner decision 2026-09-29): the balance state has a fixed
+        /// 1024-slot capacity by construction and the claim circuits bound `member_count +
+        /// delegate_count <= 1024` in-circuit, so an over-capacity count can never yield a claimable
+        /// slot. Pin that the Verifier applies only the floor (and the canonical-limb bound).
+        function test_verifyClose_noVerifierCeiling_onlyFloorAndCanonicalLimb() external {
             CloseProofFields memory f = this._validCloseFields();
             uint32 mc = uint32(f.memberCount);
-            // Builders first (they are external calls; see the note in the floor test).
-            bytes memory atCap = _proofForFieldsWithDc(f, 1024 - mc);
-            bytes memory overCap = _proofForFieldsWithDc(f, 1024 - mc + 1);
-            bytes memory huge = _proofForFieldsWithDc(f, type(uint32).max);
-            // The frozen count must match each direct-verifier case. This isolates the structural
-            // ceiling from the earlier exact-snapshot-count check.
-            f.minDelegateCount = 1024 - mc;
-            // active == 1024 exactly: accepted.
-            assertTrue(verifier.verifyCloseIntent(f, atCap));
-            // active == 1025: rejected.
-            f.minDelegateCount = 1024 - mc + 1;
-            vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
-            verifier.verifyCloseIntent(f, overCap);
-            // A huge-but-CANONICAL limb (2**32 - 1) is rejected by the ceiling, not by an overflow
-            // panic — the explicit error is the failure mode (A-5).
-            f.minDelegateCount = type(uint32).max;
-            vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
-            verifier.verifyCloseIntent(f, huge);
+            assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, 1024 - mc + 1)));
+            assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, type(uint32).max)));
         }
 
         /// §8.4 NEGATIVE (A-6, the invariant that must NEVER relax): tampering limb 93 (`memberCount`)
@@ -2297,9 +2295,10 @@ contract MockChannelRegistry is IChannelRegistry {
             verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(pis));
         }
 
-        /// Both shrinking and widening the delegate region are refused after the live identity root is
-        /// frozen. The exact count closes and the frozen delegate can still claim.
-        function test_frozenDelegateCount_requiresExactCloseAndClaims() external {
+        /// Delegates join after deployment. A close that drops the delegate registered at deployment
+        /// is refused (floor); a close carrying a delegate who joined AFTER deployment is accepted, and
+        /// both the registered and the late delegate claim their balances from the closed state.
+        function test_lateJoinedDelegate_closesAndBothDelegatesClaim() external {
             bytes32 USER_D = keccak256("delegate_d_pubkey_hash"); // registered at deployment
             bytes32 USER_E = keccak256("delegate_e_pubkey_hash"); // joined AFTER deployment
             address dave = makeAddr("b2_dave");
@@ -2344,24 +2343,27 @@ contract MockChannelRegistry is IChannelRegistry {
                 this._closeProofCd(intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 0);
             bytes memory withJoiner =
                 this._closeProofCd(intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 2);
-            bytes memory exact = this._closeProofCd(intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 1);
 
             // A close carrying delegate_count = 0 would EXCLUDE the registered delegate ⇒ refused.
             // The floor error propagates as a revert out of the manager's `_checkCloseProof`.
             vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
             m.submitCloseIntent(intent, excludesDelegate);
 
-            vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+            // USER_E joined after deployment, so the signed state carries 2 delegates: accepted.
             m.submitCloseIntent(intent, withJoiner);
-
-            m.submitCloseIntent(intent, exact);
             vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
             m.finalizeCloseGuarded(m.getPendingClose().closeIntentDigest, m.closeRequestGeneration());
             bytes32 cid = m.finalizedCloseIntentDigest();
 
             ChannelSettlementManager.WithdrawalClaim memory dClaim = _withdrawalClaim(cid, USER_D, dave, 30);
             m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
-            assertEq(m.withdrawalCredits(0, dave), 30, "frozen delegate credited");
+            assertEq(m.withdrawalCredits(0, dave), 30, "delegate registered at deployment credited");
+
+            // The late delegate is not in the deployment root, yet claims exactly like the registered
+            // one: claim membership/recipient are proof-enforced against the signed closed state.
+            ChannelSettlementManager.WithdrawalClaim memory eClaim = _withdrawalClaim(cid, USER_E, erin, 20);
+            m.submitWithdrawalClaim(eClaim, _withdrawalClaimProofFor(m, eClaim));
+            assertEq(m.withdrawalCredits(0, erin), 20, "delegate that joined after deployment credited");
         }
 
         /// The pinned adapter rejects a crypto-invalid proof before any application state can change.

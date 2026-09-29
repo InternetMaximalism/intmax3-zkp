@@ -196,28 +196,18 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     // partial withdrawals for exactly the same channels it bricked closes for. These pin that the
     // fix reaches this lane too, and that the floor still bites here (threat model §8 test 6).
 
-    /// The same frozen-count equality applies to partial withdrawals.
-    function test_partialWithdrawal_delegateCountAboveFrozenCount_reverts() public {
+    /// POSITIVE: a partial-withdrawal close proof carrying MORE delegates than the manager
+    /// registered (a browser joined after deployment) is ACCEPTED — the same floor-only rule as close.
+    function test_b2_partialWithdrawal_delegateCountAboveFloor_accepted() public {
         assertEq(uint256(manager.activeDelegateCount()), 0, "this manager registers 0 delegates");
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         bytes memory proof = _closeProofWithDelegateCount(intent, 3);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
-        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
-    }
 
-    /// NEGATIVE (ceiling): `memberCount + delegateCount > 1024` is refused on this lane as well —
-    /// the same mirror of the in-circuit claim bound.
-    function test_b2_partialWithdrawal_delegateCountAboveCeiling_reverts() public {
-        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        uint32 mc = uint32(manager.activeMemberCount());
-        // Build BEFORE arming expectRevert (the builder is itself an external call).
-        bytes memory overCap = _closeProofWithDelegateCount(intent, 1024 - mc + 1);
-        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
-
-        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
-        manager.submitPartialWithdrawalIntent(intent, overCap, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+        assertEq(manager.pendingPartialWithdrawalAuthDigest(), _expectedAuthDigest(w));
     }
 
     /// NEGATIVE (floor): on a manager that DID register a delegate, a partial-withdrawal proof that

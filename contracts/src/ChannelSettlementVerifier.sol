@@ -27,15 +27,6 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// padding slots are zero. The legacy internal name denotes this sig-cluster width, not the
     /// separate 1024-slot balance capacity.
     uint256 internal constant MAX_CHANNEL_MEMBERS = 8;
-    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the BALANCE-SLOT capacity — the total
-    /// number of active PARTICIPANTS (cosigning members + delegates) a channel's balance state can
-    /// hold. MUST equal Rust `MAX_CHANNEL_MEMBERS` (src/constants.rs:96 = 1024), which is the bound
-    /// the withdrawal-claim / post-close-claim circuits enforce IN-CIRCUIT on
-    /// `active = member_count + delegate_count` (withdrawal_claim_circuit.rs:353-371,
-    /// post_close_claim_circuit.rs:428-443). DISTINCT from `MAX_CHANNEL_MEMBERS` above, which is the
-    /// SIG-CLUSTER cap (Rust `MAX_SIG_CLUSTER` = 8) — the close circuit's signature loop is sized by
-    /// that one.
-    uint256 internal constant MAX_CHANNEL_PARTICIPANTS = 1024;
     /// B-2: close-PI limb index of `delegateCount` (see the `_expectedCloseLimbs` layout table).
     /// Named because `verifyCloseIntent` reads this limb OUT of the strict loop, before it runs.
     uint256 internal constant CLOSE_PI_DELEGATE_COUNT_INDEX = 94;
@@ -82,16 +73,16 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// in-circuit-enforced 1..=MAX_CHANNEL_TOKENS range, making the Verifier self-contained
     /// defense-in-depth (not reliant on the Manager's structural check + the transitive TFD bind).
     error TokenCountOutOfRange();
-    /// B-2: the close proof's `delegateCount` limb (94) differs from the immutable live-snapshot
-    /// count (`fields.minDelegateCount`; legacy field name) or exceeds the structural capacity when
-    /// added to `memberCount`. Settlement activation freezes joins and the complete participant
-    /// root/count, so both shrinking and widening this boundary describe a different unsupported
-    /// snapshot. DELIBERATELY distinct from the generic `"close limb mismatch"` revert so this
-    /// snapshot predicate is diagnosable on its own.
+    /// B-2: the close proof's `delegateCount` limb (94) is below the delegate count registered at
+    /// settlement activation (`fields.minDelegateCount`, the floor). Delegates join after activation (they are appended at
+    /// the delegate boundary and never leave), so a larger count is a legitimate later state; a
+    /// smaller one would exclude registered tail slots. DELIBERATELY distinct from the generic
+    /// `"close limb mismatch"` revert so this range predicate is diagnosable on its own.
     ///
     /// SECURITY SCOPE: limb 94 binds cardinality, not delegate identities. Identity/slot/recipient
-    /// protection is supplied separately by the Manager's immutable participant root and the
-    /// leaf-bound claim circuits. Exact count equality must not be described as identity binding.
+    /// protection is supplied separately by the H1-bound balance leaves the claim circuits open and,
+    /// for participants registered at activation, the Manager's participant root. The floor must not
+    /// be described as identity binding.
     error CloseDelegateCountOutOfRange();
 
     /// @notice One immutable compact-v2 adapter per independent statement circuit.
@@ -189,11 +180,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      B-2: limb 94 (`delegateCount`) is a decommitment of the cosigner-signed H1 (limbs
     ///      17..24): the close circuit `connect`s the recomputed H1 to that PI
     ///      (close_circuit.rs:609-620), so a prover cannot move it without a Poseidon collision or
-    ///      the N-of-N Falcon signatures. Settlement activation also freezes the authenticated live
-    ///      participant root/count and disables later joins. The Manager supplies that immutable
-    ///      snapshot count in `fields.minDelegateCount` (legacy ABI name), and this verifier requires
-    ///      EXACT equality before writing the value into the expected vector. Thus all 103 limbs
-    ///      remain accounted for and neither a narrower nor wider post-activation boundary passes.
+    ///      the N-of-N Falcon signatures. The Manager supplies the delegate count registered at
+    ///      settlement activation in `fields.minDelegateCount`, and this verifier requires the proof's
+    ///      count to be at least that floor before writing the PROOF's value into
+    ///      the expected vector. Thus all 103 limbs remain accounted for; delegates that joined after
+    ///      activation are closable, and no registered delegate can be dropped from the boundary.
     function verifyCloseIntent(CloseProofFields calldata fields, bytes calldata compactProof)
         external
         view
@@ -235,21 +226,17 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // `_bindCloseLimbsStrict` re-checks this limb (and all others) — the duplication is
         // deliberate: the loop stays a self-contained, inspectable "every limb is canonical" pass.
         require(delegateCount < LIMB_BOUND, "close limb range");
-        // SECURITY (B-2, immutable snapshot): settlement activation freezes the authenticated live
-        // participant root/count and durably disables later joins. The close must therefore open
-        // the SAME delegate boundary. A smaller value excludes frozen tail slots; a larger value
-        // names slots absent from the immutable identity snapshot. `minDelegateCount` is retained
-        // only as a legacy ABI field name; this predicate is exact equality, not a lower bound.
-        if (delegateCount != fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
-        // SECURITY (B-2 §4d, ceiling): mirror of the IN-CIRCUIT bound the claim circuits enforce on
-        // `active = member_count + delegate_count` (`active <= MAX_CHANNEL_MEMBERS = 1024`,
-        // withdrawal_claim_circuit.rs:353-371). `fields.memberCount` is itself strict-equality-bound
-        // to limb 93 by the loop below, so this is a bound on the PROOF's own participant count, not
-        // on a caller-chosen number. No arithmetic overflow is possible: memberCount is uint8 and
-        // delegateCount was just bounded by 2**32.
-        if (uint256(fields.memberCount) + delegateCount > MAX_CHANNEL_PARTICIPANTS) {
-            revert CloseDelegateCountOutOfRange();
-        }
+        // SECURITY (B-2 §4d, floor): delegates join AFTER settlement activation — appended at the
+        // delegate boundary by a cosigner-signed state, never removed (there is no delegate-leave
+        // path) — so the count only grows. A value below the floor would exclude registered tail
+        // slots from the close (a freeze-out); a larger value is a later, legitimately signed state.
+        // This is the one-sided range the B-2 design recommended; delegates are not cosigners and
+        // this bound says nothing about the cosigner set, which limb 93 binds strictly below.
+        if (delegateCount < fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
+        // No upper bound here (owner decision 2026-09-29): the balance state has a fixed 1024-slot
+        // capacity by construction and the claim circuits enforce `member_count + delegate_count <=
+        // 1024` in-circuit (withdrawal_claim_circuit.rs:353-371), so a count above it can never
+        // produce a claimable slot.
         // SECURITY (B-2 A-6): the VALIDATED delegate count is passed in explicitly, and limb 93
         // (`memberCount`) keeps its STRICT equality against the channel's registered
         // `activeMemberCount`. Limb 93 must NEVER get the same pass-through treatment: a state with a

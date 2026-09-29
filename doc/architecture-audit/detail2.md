@@ -1440,8 +1440,15 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
 > Historical enrollment/account evolution. Current counts are u8 members (2..8) and u16 delegates
 > (total at most 1024). The registered eight-leaf sig-cluster root differs from the live 1024-leaf
 > wallet root. Current delegate payout authority is the signed balance-slot recipient/Regev leaf,
-> not the old constructor-supplied delegate map in L-5. Settlement activation freezes its live
-> participant snapshot; the Manager's exact delegate-count binding is not a mutable join registry.
+> not the old constructor-supplied delegate map in L-5. Delegates join at any time, including after
+> settlement deployment: a join appends at the delegate boundary by a cosigner-signed state and no
+> delegate is ever removed. The Manager records the participant snapshot taken at deployment; L1
+> binds the delegate count only as a FLOOR (close-PI limb 94 >= that count), and the deployment
+> snapshot authenticates only its own participants for `requestCloseAsParticipant`. Joins pause only
+> while a settlement deployment is PREPARED. (Corrected 2026-09-29 by owner decision: an earlier note
+> here said settlement "freezes" the participant snapshot — that conflated the delegate set with the
+> sig-cluster, which is the only set that cannot change after deployment. See
+> `doc/docs/sig-cluster-vs-delegates.md`.)
 
 A **delegate account** is a channel participant that has a lattice (Regev) balance and SENDs / RECEIVEs /
 WITHDRAWs with the **identical proofs** a co-signing member uses, but does **NOT** participate in the

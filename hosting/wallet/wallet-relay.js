@@ -520,7 +520,7 @@ app.post('/api/init', (req, res) => {
     const stateFile = wc(ch, 'cli_state.json');
     if (fs.existsSync(stateFile)) {
       const existing = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      require('../../node/common/wallet-join-identity').assertJoinIdentity(existing.snapshot, req.body, !!existing.settlement_binding);
+      require('../../node/common/wallet-join-identity').assertJoinIdentity(existing.snapshot, req.body, !!(existing.settlement_binding && existing.settlement_binding.status === 'prepared'));
     }
     fs.writeFileSync(wc(ch, 'contribution.json'), JSON.stringify(req.body));
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);

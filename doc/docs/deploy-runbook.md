@@ -227,9 +227,11 @@ is preserved only as incident and infrastructure history.
 contains no `applyMemberSetUpdate` selector, and the production CLI/producer/service reject the
 retired wire action before any state mutation. Legacy calldata therefore reaches no fallback and
 reverts without entering an ABI decoder. Do not copy an MSU VK or initializer from an older
-deployment. Changing participants requires closing the old channel by unanimous consent and
-migrating all assets and commitments to a separately registered channel; the design and acceptance
-work are tracked in `doc/tasks/channel-change-msu.md`.
+deployment. Member-set update concerns the **sig-cluster (co-signers) only**: changing the
+co-signer set requires closing the old channel by unanimous consent and migrating all assets and
+commitments to a separately registered channel; the design and acceptance work are tracked in
+`doc/tasks/channel-change-msu.md`. **Delegates are a different set and are not affected**: they join
+at any time, including after settlement deployment (see `doc/docs/sig-cluster-vs-delegates.md`).
 
 Read back only the four live latches:
 

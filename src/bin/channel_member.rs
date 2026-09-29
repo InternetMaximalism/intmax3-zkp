@@ -2728,8 +2728,8 @@ fn load_state() -> CliState {
     if !obj.contains_key(SETTLEMENT_BINDING_KEY) {
         die(format!(
             "REFUSING to load {STATE_FILE}: `{SETTLEMENT_BINDING_KEY}` is ABSENT. Treating an \
-             unknown settlement state as unfrozen would let a new delegate join after the L1 \
-             participant root was fixed. Run `channel_member migrate-state` in the original \
+             unknown settlement state as absent would drop a deployed manager (the channel's \
+             exit path) or a deployment in flight. Run `channel_member migrate-state` in the original \
              channel directory; migration refuses if settlement.json already records a deploy."
         ));
     }
@@ -2837,16 +2837,42 @@ fn require_active_settlement_binding(
         ));
     }
 
-    // Member-set updates are fail-closed in this release. Therefore the deployed participant
-    // root/count must still equal the live signed snapshot on every use; any accidental local
-    // mutation after deployment is detected before it can construct an L1 proof/call.
+    // The deployed participant snapshot must be an exact PREFIX of the live signed snapshot.
+    // Two different sets, two different rules — do not conflate them:
+    //   * the sig-cluster (cosigners, slots 0..member_count) cannot change after deployment
+    //     (member-set update is retired for the cluster);
+    //   * delegates keep joining after deployment, appended at the delegate boundary and never
+    //     removed, so the live count may only be LARGER.
+    // Hence: the first `participant_count` leaves (every cosigner plus every delegate registered at
+    // deployment) must reproduce the deployed root, and nothing registered may be changed or dropped.
+    // Any other local mutation is still detected before it can construct an L1 proof/call.
     let reg = build_live_settlement_reg_record(&state);
-    let (participant_root, participant_count) = staged_settlement_identity(&reg);
+    let strings = |key: &str| -> Vec<String> {
+        reg[key]
+            .as_array()
+            .unwrap_or_else(|| die(format!("live settlement record has no `{key}` array")))
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| die(format!("live settlement record `{key}` is not a string array")))
+            })
+            .collect()
+    };
+    let pk_gs = strings("member_pk_gs");
+    let recipients = strings("recipients");
     if binding.channel_id != channel_id_env()
-        || binding.participant_root != participant_root
-        || binding.participant_count != participant_count
+        || !deployed_participants_are_prefix(
+            binding.participant_root,
+            binding.participant_count,
+            &pk_gs,
+            &recipients,
+        )
     {
-        die("live signed participant identity differs from the durable ACTIVE settlement binding");
+        die(
+            "live signed participant set does not extend the durable ACTIVE settlement snapshot: a \
+             participant registered at deployment was changed or dropped",
+        );
     }
 
     let chain_id = rpc_chain_id(rpc);
@@ -3352,8 +3378,8 @@ fn cmd_migrate_state(args: &[String]) {
         if Path::new("settlement.json").exists() {
             die(format!(
                 "REFUSING to migrate {STATE_FILE}: `{SETTLEMENT_BINDING_KEY}` is absent while \
-                 settlement.json exists. The channel may already have an immutable L1 participant \
-                 root; writing null would reopen delegate joins. Reconstruct the binding from the \
+                 settlement.json exists. The channel may already have a deployed manager; writing \
+                 null would drop its exit path and allow a second deployment. Reconstruct the binding from the \
                  deployed manager instead."
             ));
         }
@@ -9988,17 +10014,24 @@ fn cmd_init(args: &[String]) {
             );
             return;
         }
+        // Delegates join after settlement deployment (appended at the delegate boundary; the
+        // deployed participant snapshot stays a prefix of every later state — see
+        // `require_active_settlement_binding`). The only window that refuses a NEW pk_g is a
+        // deployment in flight: a PREPARED binding pins the exact snapshot being deployed, and a
+        // join then would make the resumed deployment register a different participant set.
+        // This concerns delegates only; the sig-cluster (cosigners) never changes after deployment.
         if let Some(binding) = &prev.settlement_binding {
-            die(format!(
-                "delegate join is frozen: settlement {:?} ({:?}) already committed participant \
-                 root {} for {} active slots at state {}. Re-running init with an EXISTING pk_g \
-                 remains idempotent, but a new pk_g can never be added after settlement.",
-                binding.manager,
-                binding.status,
-                binding.participant_root,
-                binding.participant_count,
-                binding.snapshot_state_digest,
-            ));
+            if binding.status == SettlementBindingStatus::Prepared {
+                die(format!(
+                    "delegate join is paused while settlement {:?} is being deployed (PREPARED for \
+                     participant root {} / {} slots at state {}). Retry after deploy-settlement \
+                     completes; re-running init with an EXISTING pk_g remains idempotent.",
+                    binding.manager,
+                    binding.participant_root,
+                    binding.participant_count,
+                    binding.snapshot_state_digest,
+                ));
+            }
         }
     }
 
@@ -10065,7 +10098,9 @@ fn cmd_init(args: &[String]) {
         spent_tx_identities: prior_spent,
         imported_deposits: prior_imported,
         state_signing_ledger: prior_signing_ledger,
-        settlement_binding: None,
+        // A join after deployment must keep the ACTIVE binding: it names the deployed manager, and
+        // dropping it would lose the channel's exit path and re-allow a second deployment.
+        settlement_binding: previous.as_ref().and_then(|s| s.settlement_binding.clone()),
         // A delegate join changes the authenticated channel record. Even though its balance row
         // opens at zero, do not carry an archive verified against the older record: the new head
         // must be exported, verified and installed before any subsequent signature is released.
@@ -12439,6 +12474,22 @@ fn cmd_deploy_settlement(args: &[String]) {
 /// (`member_count..member_count + active_delegate_count`). `RegRecordLib.sol` — the single reader
 /// on the Solidity side — hands `registerChannel` the leading cosigner slice with a CONSTANT zero
 /// delegate count, and hands the manager the whole set with `active_delegate_count`.
+/// Whether the participant snapshot registered at settlement deployment is an exact PREFIX of the
+/// live participant list (members first, then delegates). Delegates are appended after deployment
+/// and never removed; the sig-cluster never changes. So every deployed leaf must still be present,
+/// unchanged, in its slot, and the live list may only be longer.
+fn deployed_participants_are_prefix(
+    deployed_root: Bytes32,
+    deployed_count: u16,
+    pk_gs: &[String],
+    recipients: &[String],
+) -> bool {
+    let deployed = usize::from(deployed_count);
+    recipients.len() == pk_gs.len()
+        && pk_gs.len() >= deployed
+        && settlement_participant_root(&pk_gs[..deployed], &recipients[..deployed]) == deployed_root
+}
+
 fn settlement_participant_root(pk_gs: &[String], recipients: &[String]) -> Bytes32 {
     const LEAF_DOMAIN: [u8; 4] = *b"IMPR";
     const NODE_DOMAIN: [u8; 4] = *b"IMPN";
@@ -12523,6 +12574,75 @@ fn settlement_reg_json(
 /// deploy scripts, and until now ONE `delegate_count` field fed both the L1 registration and the
 /// settlement manager. Each direction of that conflation is a distinct defect, so there is one test
 /// per direction — a single test asserting "the two agree" would pass for either broken value.
+#[cfg(test)]
+mod deployed_participant_prefix_tests {
+    //! Delegates join after settlement deployment (appended, never removed); the sig-cluster does
+    //! not change. The ACTIVE-binding check therefore accepts exactly the lists whose first
+    //! `deployed_count` leaves reproduce the deployed root.
+    use super::*;
+
+    fn pk(i: u8) -> String {
+        format!("0x{}", format!("{i:02x}").repeat(32))
+    }
+    fn recipient(i: u8) -> String {
+        format!("0x{}", format!("{i:02x}").repeat(20))
+    }
+    fn participants(n: u8) -> (Vec<String>, Vec<String>) {
+        ((1..=n).map(pk).collect(), (1..=n).map(recipient).collect())
+    }
+    /// Deployed with 3 cosigners + 1 delegate.
+    fn deployed() -> (Bytes32, u16) {
+        let (pks, rs) = participants(4);
+        (settlement_participant_root(&pks, &rs), 4)
+    }
+
+    #[test]
+    fn the_unchanged_deployed_set_is_accepted() {
+        let (root, count) = deployed();
+        let (pks, rs) = participants(4);
+        assert!(deployed_participants_are_prefix(root, count, &pks, &rs));
+    }
+
+    #[test]
+    fn delegates_that_joined_after_deployment_are_accepted() {
+        let (root, count) = deployed();
+        for live in [5u8, 9, 40] {
+            let (pks, rs) = participants(live);
+            assert!(deployed_participants_are_prefix(root, count, &pks, &rs), "{live} participants");
+        }
+    }
+
+    #[test]
+    fn a_changed_deployed_participant_is_rejected() {
+        let (root, count) = deployed();
+        let (mut pks, rs) = participants(6);
+        pks[3] = pk(0xee); // the delegate registered at deployment swapped its key
+        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs));
+        let (pks, mut rs) = participants(6);
+        rs[0] = recipient(0xee); // a cosigner's exit recipient redirected
+        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs));
+    }
+
+    #[test]
+    fn a_dropped_or_reordered_deployed_participant_is_rejected() {
+        let (root, count) = deployed();
+        let (pks, rs) = participants(3);
+        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs), "dropped");
+        let (mut pks, mut rs) = participants(5);
+        pks.swap(2, 4);
+        rs.swap(2, 4);
+        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs), "reordered");
+    }
+
+    #[test]
+    fn mismatched_key_and_recipient_lists_are_rejected() {
+        let (root, count) = deployed();
+        let (pks, _) = participants(5);
+        let (_, rs) = participants(4);
+        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs));
+    }
+}
+
 #[cfg(test)]
 mod settlement_reg_record_tests {
     use super::*;
@@ -12621,9 +12741,11 @@ fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u16) {
     (root, count)
 }
 
-/// Phase 1: persist the irreversible delegate-join freeze BEFORE any deployment broadcast.  A
-/// failed or interrupted deployment conservatively leaves the channel frozen.  A retry may resume
-/// only this exact snapshot/root/count/rollup identity; it can never deploy a newer join set.
+/// Phase 1: persist the PREPARED deployment identity BEFORE any deployment broadcast.  While it is
+/// PREPARED, delegate joins pause (the deployment registers exactly this participant snapshot); a
+/// failed or interrupted deployment keeps them paused until it is resumed and ACTIVE.  A retry may
+/// resume only this exact snapshot/root/count/rollup identity; it can never deploy a newer join set.
+/// After ACTIVE, delegates join again (the deployed set stays a prefix); the cosigner set does not.
 fn prepare_settlement_binding(state: &mut CliState, reg: &serde_json::Value, rollup: &str) {
     let (participant_root, participant_count) = staged_settlement_identity(reg);
     let expected_digest = state.snapshot.state.digest;
@@ -13312,7 +13434,7 @@ fn settlement_deploy_mode_for_intent(
 }
 
 /// Production phase 1.  The nonce/chain/signer/artifact identity is included in the SAME fsynced
-/// write that freezes joins, so there is no state in which transactions may have started but a
+/// write that pauses delegate joins for the deployment, so there is no state in which transactions may have started but a
 /// retry is still allowed to invent a new Foundry run.
 fn prepare_real_settlement_binding(
     rpc: &str,
@@ -16048,7 +16170,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         backing_rollup_hex
     );
 
-    // The PREPARED write below is the point of no return for participant joins.  It includes the
+    // The PREPARED write below pauses delegate joins until this deployment is ACTIVE.  It includes the
     // exact chain/signer/start nonce and local-input digest, and is fsynced before Forge can send
     // transaction zero.  An existing PREPARED binding always selects --resume; it never starts a
     // fresh script run with shifted nonces and orphan CREATE addresses.
