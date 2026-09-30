@@ -2,7 +2,7 @@ const fs = require('fs');
 const { cli, wc, RPC, readJson } = require('./cli');
 const producer = require('./block-producer');
 const { flushPublishedHead } = require('./producer-head');
-const { cliWithPreparedExitKit, acknowledgePreparedExitKit, installHeadExitKit } = require('./exit-kit');
+const { cliWithPreparedExitKit, acknowledgePreparedExitKit, installHeadExitKit, PROPOSE_FLAG } = require('./exit-kit');
 
 // Fold a journaled L1 deposit into the live balance proof. Which receive is correct depends on who
 // owns the deposit recipient: when `channel_backing.json` records a deposit salt, `setup-backing`
@@ -179,10 +179,6 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
   cli(ch, inspectArgs);
   const deposit = readJson(wc(ch, 'producer_deposit.json'));
   const producerReceipt = await producer.postDeposit(deposit);
-  // Phase 1 is durable before the N-of-N channel import. This consumes the exact journaled L1
-  // leaf into the resident balance proof, but deliberately withholds public head adoption until
-  // the resulting proof is bound to the signed channel snapshot below.
-  const liveReceipt = await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
 
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
   let artifact = null;
@@ -195,18 +191,30 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
       artifact = existing;
     }
   }
+  const args = [
+    'cosign-l1-deposit-import',
+    String(recipientSlot),
+    String(txHash),
+    RPC,
+    'l1_import_cosigned.json',
+    `--intmax-block-number=${producerReceipt.blockNumber}`,
+  ];
+  if (allowUnboundDepositor) args.push('--allow-unbound-depositor');
+  if (depositReservation) args.push('--deposit-reservation', depositReservation);
+  if (!artifact) {
+    // Validate the exact import BEFORE the live balance consumes the deposit. Receiving it first
+    // and only then having the co-signers refuse (an unbound depositor, a misdirected slot, a
+    // credit-safety bound) left the live balance ahead of every signed head: the channel could
+    // take no further deposit or transfer. The proposal run performs every check the signing run
+    // does and exits before any signature or state write.
+    cli(ch, [...args, PROPOSE_FLAG]);
+  }
+  // Phase 1 is durable before the N-of-N channel import. This consumes the exact journaled L1
+  // leaf into the resident balance proof, but deliberately withholds public head adoption until
+  // the resulting proof is bound to the signed channel snapshot below.
+  const liveReceipt = await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
 
   if (!artifact) {
-    const args = [
-      'cosign-l1-deposit-import',
-      String(recipientSlot),
-      String(txHash),
-      RPC,
-      'l1_import_cosigned.json',
-      `--intmax-block-number=${producerReceipt.blockNumber}`,
-    ];
-    if (allowUnboundDepositor) args.push('--allow-unbound-depositor');
-    if (depositReservation) args.push('--deposit-reservation', depositReservation);
     // Signer-independent exit: the deposit moves the channel's fund vector and settle chain, so
     // the co-signers' exit kit for the exact import state is proved BEFORE they sign it.
     await cliWithPreparedExitKit(ch, args);

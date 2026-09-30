@@ -117,6 +117,10 @@ test('deposit head is never published before durable live receive and N-of-N bin
     'flushPublishedHead',
     'inspect-l1-deposit',
     'postDeposit',
+    // The co-signers validate the exact import (a proposal run: no signature, no state write)
+    // BEFORE the live balance consumes the deposit, so a refusal cannot strand it ahead of every
+    // signed head.
+    'cosign-l1-deposit-import --propose-exit-kit',
     'liveReceiveConfiguredDeposit',
     // Signer-independent exit: propose -> prove the pre-sign kit -> sign with it bound.
     'cosign-l1-deposit-import --propose-exit-kit',

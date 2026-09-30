@@ -30,6 +30,7 @@ const { importL1Deposit, journalBackingDeposit } = require('../../api/lib/deposi
 const { createCluster } = require('../../api/lib/cluster');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
+const depositSequencer = require('../../api/lib/deposit-sequencer');
 const { installHeadExitKit, cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../../api/lib/exit-kit');
 const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = require('../../api/lib/inter-channel-send');
 
@@ -541,11 +542,26 @@ async function followJoinedHead(ch, snapshot) {
   if (!st.signedHeadDigest || st.awaitingChannelBinding) return false;
   const bound = String(st.signedHeadDigest).toLowerCase() === String(snapshot.state.digest).toLowerCase();
   // An idempotent re-join of the bound head only completes a propagation a crash interrupted.
-  if (bound && JSON.parse(fs.readFileSync(wc(ch, 'cli_state.json'), 'utf8')).signer_exit_kit_receipt) return false;
+  if (bound && JSON.parse(fs.readFileSync(wc(ch, 'cli_state.json'), 'utf8')).signer_exit_kit_receipt
+      && !(await registeredRecordBehind(ch, snapshot))) return false;
   if (!bound) await producer.liveBindSnapshot(ch, snapshot); // live balance follows (delegate-add gate)
   await flushPublishedHead(ch);                              // producer public head follows
+  await adoptJoinedRecord(ch, snapshot);                     // producer registered record follows
   await installHeadExitKit(ch);                              // exit-kit receipt for the new head
   return true;
+}
+
+// The producer verifies every block of a channel against its REGISTERED record, and an
+// inter-channel debit must carry exactly that record. A delegate join changes the record, so the
+// registered one must follow the committed joined head, or the channel can never send across
+// channels again ("debit payload record differs from the producer's registered channel record").
+async function registeredRecordBehind(ch, snapshot) {
+  const status = await producer.status();
+  const registered = (status.registeredRecords || []).find(r => Number(r.channelId) === Number(ch));
+  return !!registered && Number(registered.delegateCount) < Number(snapshot.record.delegateCount);
+}
+async function adoptJoinedRecord(ch, snapshot) {
+  if (await registeredRecordBehind(ch, snapshot)) await producer.adoptDelegateJoin(snapshot.record, snapshot.state);
 }
 
 app.post('/api/init', (req, res) => {
@@ -1262,6 +1278,7 @@ app.post('/api/l1-deposit', (req, res) => {
 // them from the on-chain `Deposited` log. See doc/tasks/deposit-import-threat-model.md.
 app.post('/api/import-deposit', (req, res) => {
   const ch = reqChannel(req);
+  if (!isDevnet()) return importViaSequencer(ch, req, res);
   withLock(ch, async () => {
     const b = req.body || {};
     if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
@@ -1293,6 +1310,32 @@ app.post('/api/import-deposit', (req, res) => {
     // failed instead of an opaque warning.
   }).catch((e) => { const full = fullCliError(e); console.error(full); res.status(500).json({ error: full }); });
 });
+
+// On a public chain every deposit is consumed by the deposit sequencer, in the rollup's deposit
+// order, whoever is online (api/lib/deposit-sequencer.js). The browser's import runs the
+// sequencer through its own deposit and reports the outcome; the credited slot is the one bound
+// to the depositing wallet, as the CLI's B-1b rule requires. No channel lock is held here: the
+// sequencer takes each channel's lock itself, in deposit order.
+function importViaSequencer(ch, req, res) {
+  (async () => {
+    const b = req.body || {};
+    if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
+      throw new Error('import-deposit no longer accepts { depositor, amount, tokenIndex }: they are read from the on-chain Deposited log. Send { recipientSlot, txHash }.');
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(b.txHash))) throw new Error('txHash must be 0x + 64 hex chars');
+    const outcome = await depositSequencer.importThrough(ch, b.txHash, withLock);
+    await withLock(ch, async () => {
+      const depTicket = findActiveTicket(ch, 'deposit');
+      if (depTicket && String(depTicket.params?.txHash).toLowerCase() === String(b.txHash).toLowerCase()) {
+        depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket);
+      }
+    });
+    if (b.recipientSlot !== undefined && outcome.slot !== undefined && Number(b.recipientSlot) !== outcome.slot) {
+      console.error(`import-deposit: ${b.txHash} credited slot ${outcome.slot} (its depositor's), not the requested ${b.recipientSlot}`);
+    }
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
+  })().catch((e) => { const full = fullCliError(e); console.error(full); res.status(/confirmation\(s\), need|queued behind/.test(full) ? 409 : 500).json({ error: full }); });
+}
 
 // ─── Testnet $ITX faucet ───────────────────────────────────────────────────────────────────
 // GET  /api/faucet            → { enabled } (+ tokenIndex/amount/cooldownMs when enabled).
@@ -1532,6 +1575,8 @@ app.post('/api/ticket/deposit', (req, res) => {
 // (RELAY_PUBLIC_DIR, e.g. hosting/wallet/public with index.html): ROOT also holds server code and,
 // on a host that ran the older EC2 relay, its channel work directory — never publish those.
 const PUBLIC_DIR = process.env.RELAY_PUBLIC_DIR ? path.resolve(process.env.RELAY_PUBLIC_DIR) : null;
+// A deployment's public directory serves the wallet as its index page; the dev tree serves the file.
+const ENTRY_PAGE = PUBLIC_DIR ? '/' : '/wallet-live.html';
 if (!PUBLIC_DIR && !isDevnet()) {
   console.error(`RELAY_PUBLIC_DIR is required on chain ${relayChainId()}: refusing to publish ${ROOT}`);
   process.exit(1);
@@ -1679,11 +1724,11 @@ bootstrapBacking().then(() => {
   // After backing exists (verification reads channel_backing.json's rollup).
   loadTokenManifests(RPC);
   https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
-    console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);
+    console.log(`wallet relay on https://localhost:${PORT}${ENTRY_PAGE}  (channels ${CHANNELS.join(', ')})`);
   });
   if (HTTP_PORT) {
     http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
-      console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
+      console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}${ENTRY_PAGE}`);
     });
   }
   if (REDIRECT_PORT) {
@@ -1709,8 +1754,20 @@ bootstrapBacking().then(() => {
       if (!producer.liveSnapshotExists(ch)) continue;
       await producer.liveStatus(ch);
       console.log(`channel ${ch} live balance ready (${seconds()}s)`);
+      // A channel whose joins predate the producer's record adoption catches up here, under its
+      // lock, from its committed head.
+      await withLock(ch, async () => {
+        const snapshot = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+        if (await registeredRecordBehind(ch, snapshot)) {
+          await flushPublishedHead(ch);
+          await producer.adoptDelegateJoin(snapshot.record, snapshot.state);
+          console.log(`channel ${ch}: the producer's registered record now includes ${snapshot.record.delegateCount} delegates`);
+        }
+      }).catch(e => console.error(`channel ${ch}: registered record catch-up failed:`, e && e.message ? e.message : e));
     }
   })().catch((e) => console.error('block producer warm-up failed:', e && e.message ? e.message : e));
+  // Public chain: consume the rollup's deposits in order from now on, whoever is online.
+  if (!isDevnet()) depositSequencer.start(withLock);
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());
 }).catch((e) => {

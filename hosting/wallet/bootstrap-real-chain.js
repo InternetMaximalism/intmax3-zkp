@@ -54,6 +54,7 @@ const HEX20 = /^0x[0-9a-fA-F]{40}$/;
 const OPERATOR_DELEGATE_LABEL = ch => String(900000 + ch);
 const FINALITY_RETRY_MS = 60 * 1000;
 const FINALITY_RETRIES = 60;
+const RETRYABLE_FINALITY = /not finalized yet|retry after the finalized head advances|durable L1 head advanced during the pinned state read/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function step(ch, name, message) { console.log(`[ch${ch}] ${name}: ${message}`); }
@@ -118,9 +119,11 @@ async function settlement(ch, bundleDir) {
   const previous = process.env.INTMAX_CLI_TIMEOUT_MS;
   process.env.INTMAX_CLI_TIMEOUT_MS = String(3 * 3600 * 1000);
   try {
-    // The CLI activates the binding only from FINALIZED reads and exits, journal intact, while its
-    // transactions are still above the finalized head (~13 min on Sepolia after the broadcast).
-    // That one refusal is a wait, not a failure: retry the same command until finality catches up.
+    // The CLI activates the binding only from FINALIZED reads and exits, journal intact, in two
+    // transient states it asks the caller to retry: its transactions are still above the finalized
+    // head (~13 min on Sepolia after the broadcast), or finality advanced while it read the stack
+    // back at one pinned head (Sepolia finalizes an epoch at a time, so a readback can straddle
+    // one). Both are waits, not failures: retry the same command, which resumes from its journal.
     for (let attempt = 1; ; attempt++) {
       try {
         cli(ch, ['deploy-settlement', RPC], {
@@ -130,7 +133,7 @@ async function settlement(ch, bundleDir) {
         break;
       } catch (e) {
         const text = String((e && (e.stderr || e.message)) || e);
-        if (!/not finalized yet|retry after the finalized head advances/.test(text) || attempt >= FINALITY_RETRIES) throw e;
+        if (!RETRYABLE_FINALITY.test(text) || attempt >= FINALITY_RETRIES) throw e;
         step(ch, 'settlement', `waiting for L1 finality (attempt ${attempt})`);
         await sleep(FINALITY_RETRY_MS);
       }

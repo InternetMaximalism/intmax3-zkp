@@ -15,7 +15,7 @@ function channel(ch, settlement) {
 }
 // A chain whose RPC refuses any eth_getLogs range wider than 1000 blocks, with the rollup deployed
 // at `deployedAt` and the channel's registration log at `registeredAt`.
-function chain({ head, deployedAt, registeredAt }) {
+function chain({ head, deployedAt, registeredAt, cap = 1000 }) {
   const calls = [];
   cli.sh = (_bin, args) => {
     const method = args[1]; calls.push(method);
@@ -23,7 +23,7 @@ function chain({ head, deployedAt, registeredAt }) {
     if (method === 'eth_getCode') return JSON.stringify(parseInt(args[3], 16) >= deployedAt ? '0x60' : '0x');
     if (method === 'eth_getLogs') {
       const f = JSON.parse(args[2]), from = parseInt(f.fromBlock, 16), to = parseInt(f.toBlock, 16);
-      if (to - from + 1 > 1000) throw new Error('exceed maximum block range: 1000');
+      if (to - from + 1 > cap) throw Object.assign(new Error('Command failed: cast rpc'), { stderr: `Error: server returned an error response: error code -32701: exceed maximum block range: ${cap}` });
       return JSON.stringify(registeredAt !== null && registeredAt >= from && registeredAt <= to ? [{ blockNumber: registeredAt }] : []);
     }
     throw new Error(method);
@@ -41,6 +41,17 @@ test('stops at the rollup deployment instead of scanning to genesis when nothing
   const calls = chain({ head: 9_000_000, deployedAt: 8_997_500, registeredAt: null });
   assert.deepEqual(registrationLogs(8), []);
   assert.equal(calls.filter(m => m === 'eth_getLogs').length, 3);
+});
+test('a provider with a smaller range cap than the configured window is paged by halving', () => {
+  channel(11, { activation_checkpoint: { blockNumber: 9_000_000, chainId: 11155111 } });
+  const calls = chain({ head: 9_000_000, deployedAt: 8_990_000, registeredAt: 8_996_000, cap: 300 });
+  assert.deepEqual(registrationLogs(11), [{ blockNumber: 8_996_000 }]);
+  assert.ok(calls.filter(m => m === 'eth_getLogs').length < 40, 'halving converges instead of scanning block by block');
+});
+test('an RPC error that is not a range refusal is not retried', () => {
+  channel(12, { activation_checkpoint: { blockNumber: 9_000_000, chainId: 11155111 } });
+  cli.sh = () => { throw Object.assign(new Error('Command failed'), { stderr: 'error code -32000: header not found' }); };
+  assert.throws(() => registrationLogs(12), /Command failed/);
 });
 test('a settlement.json without a readable activation block fails instead of scanning nothing', () => {
   channel(10, { activation_checkpoint: { block_number: 9_000_000 } });

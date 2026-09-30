@@ -1709,13 +1709,30 @@ async function awaitReceipt(txHash, what, timeoutSec = 120) {
  *     but we do not lean on that);
  *   * the exact token, amount and spender are logged BEFORE each signature request.
  */
+// B-1b: a deposit is credited to the slot whose bound exit address is the DEPOSITING account, and
+// that address is the wallet connected at Join. A deposit from any other account belongs to no
+// slot; the relay holds it with the channel operator for a refund instead of crediting this slot.
+async function boundRecipientOfMySlot() {
+  const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
+  const recipients = snap && snap.state && snap.state.balanceState && snap.state.balanceState.recipients;
+  return Array.isArray(recipients) && recipients[mySlot] ? String(recipients[mySlot]).toLowerCase() : null;
+}
+
 async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDepositInfo()) {
   if (!token || !Number.isInteger(token.tokenIndex) || token.tokenIndex < 0) {
     throw new Error('no depositable token selected');
   }
+  const boundPromise = boundRecipientOfMySlot();
+  boundPromise.catch(() => {});
   await ensureWallet();
   const info = await infoPromise;
   await ensureChain(info);
+  const bound = await boundPromise;
+  if (bound && bound !== walletAccount.toLowerCase()) {
+    throw new Error('this account joined with ' + bound + ', but the wallet is on ' + walletAccount
+      + '. Switch the wallet back to ' + bound + ' before depositing: a deposit from another address'
+      + ' is not credited to your slot.');
+  }
 
   const shown = fmtUnits(amountBase, token.decimals) + ' ' + token.label;
 
@@ -1809,6 +1826,14 @@ async function importDepositAwaitingConfirmations(recipientSlot, txHash, onPendi
       // The ONLY fields the import accepts: the economics are read from the on-chain Deposited log.
       return await api('/api/import-deposit', JSON.stringify({ recipientSlot, txHash }));
     } catch (e) {
+      // The relay consumes deposits in the rollup's order; one still queued behind earlier
+      // deposits is pending, not failed.
+      if (/queued behind earlier deposits/.test(e.message)) {
+        if (onPending) onPending('queued behind earlier deposits…', null);
+        if (Date.now() - t0 > IMPORT_TIMEOUT_MS) throw e;
+        await new Promise((r) => setTimeout(r, IMPORT_RETRY_MS));
+        continue;
+      }
       const prog = parseConfirmationProgress(e.message);
       if (!prog) throw e;                       // a real failure — surface it, do not hide it
       if (Date.now() - t0 > IMPORT_TIMEOUT_MS) {

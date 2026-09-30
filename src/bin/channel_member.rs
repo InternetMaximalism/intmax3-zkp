@@ -11503,6 +11503,29 @@ fn guard_outgoing_base_nonce(backing: &ChannelBacking, descriptor_base_nonce: u3
 ///
 /// Writes `{ "aHead": <A's co-signed new state>, "bSnapshot": <B's credited snapshot> }` to
 /// out.json.
+/// The SOURCE channel's settled-tx accumulator after its own debit (an inter-channel send or a
+/// burn). The debit pushes its `tx_hash` into the source channel's accumulator and the co-signed
+/// head carries the new root, so the stored tree must advance with it. It did not: only the
+/// destination's tree was stored, so a channel that had sent could take no later credit, deposit
+/// or send ("incoming import must append exactly one entry to the authenticated prior tree"),
+/// found on the public-chain rehearsal. Computed and checked BEFORE the commit writes anything.
+fn source_accumulator_after_debit(
+    state: &CliState,
+    tx_hash: Bytes32,
+    head: &ChannelState,
+) -> intmax3_zkp::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32> {
+    let mut advanced = state.snapshot.settled_tx_accumulator.clone();
+    advanced.push(tx_hash);
+    if Bytes32::from(advanced.get_root()) != head.balance_state.settled_tx_accumulator_root {
+        die(format!(
+            "the debited head's settled-tx accumulator root is not this channel's accumulator with \
+             tx {} appended — refusing to commit",
+            tx_hash.to_hex()
+        ));
+    }
+    advanced
+}
+
 fn cmd_cosign_inter_transfer(args: &[String]) {
     recover_pending_inter_transfers();
     let request_ids: Vec<_> = args
@@ -11638,6 +11661,8 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // credit leg will ever see — built here, never from a request body.
     verify_all_signatures(&a_state.snapshot.record, &a_state.snapshot.members, &a_head)
         .unwrap_or_else(|e| die(format!("inter-debit a_head not N-of-N co-signed: {e}")));
+    let a_settled_tx_accumulator =
+        source_accumulator_after_debit(&a_state, descriptor.tx_hash, &a_head);
 
     // CONSERVATION (A side, full u64 precision, per token — TM-6): A's fund decreased by
     // EXACTLY descriptor.amount at the LOCAL slot A's registry resolves for the descriptor's
@@ -11801,6 +11826,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // moves. A crash after one replacement is recovered by `recover-inter-transfers`; no later API
     // mutation can run first because its producer-head preflight invokes that command.
     adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
+    a_state.snapshot.settled_tx_accumulator = a_settled_tx_accumulator;
     a_state.spent_tx_identities.insert(replay_identity);
     adopt_head_with_exit_kit_receipts(&mut b_state, b_head.clone());
     b_state.snapshot.settled_tx_accumulator = b_settled_tx_accumulator;
@@ -11990,7 +12016,10 @@ fn cmd_cosign_burn_send(args: &[String]) {
     }
 
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
+    let a_settled_tx_accumulator =
+        source_accumulator_after_debit(&a_state, descriptor.tx_hash, &a_head);
     adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
+    a_state.snapshot.settled_tx_accumulator = a_settled_tx_accumulator;
     a_state.spent_tx_identities.insert(burn_replay_identity);
 
     // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
@@ -17193,7 +17222,110 @@ fn fetch_onchain_deposit(
 /// Read one canonical on-chain `Deposited` log and emit the exact request accepted by the
 /// keyless production block producer. This keeps receipt parsing in one hardened Rust path; the
 /// API never reinterprets ABI words in JavaScript.
+/// `inspect-l1-deposit <tx> <rpc> <out> --journal-only <deposit_index>`: the exact producer request
+/// for ONE rollup deposit, whatever its recipient, WITHOUT any channel binding. The producer
+/// consumes the rollup's deposits strictly in index order across all channels, so a deposit this
+/// channel cannot credit (another recipient, several deposits in one transaction, an amount above
+/// the channel's u64 range) must still be journaled or every later deposit stalls. The output is
+/// only ever posted to the producer; nothing is credited from it. Selection is by the log's
+/// indexed deposit index, so a transaction carrying several deposits is never ambiguous; the
+/// transaction must be successful, from this channel's rollup, and reorg-safe as for an import.
+fn inspect_l1_deposit_journal_only(args: &[String]) {
+    const USAGE: &str = "inspect-l1-deposit <tx_hash> <rpc_url> <out.json> --journal-only <deposit_index>";
+    let position = args.iter().position(|a| a == "--journal-only").unwrap_or_else(|| die(USAGE));
+    let wanted: u64 = args
+        .get(position + 1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| die(USAGE));
+    let rest: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != position && *i != position + 1)
+        .map(|(_, a)| a)
+        .collect();
+    if rest.len() != 4 {
+        die(USAGE);
+    }
+    let (tx_hash, rpc, out_path) = (rest[1].as_str(), rest[2].as_str(), rest[3].as_str());
+    let (_, _, backing) = load_backing();
+    let tx = format!("0x{}", hex_body(tx_hash, 64, "tx_hash"));
+    let rollup_body = hex_body(&backing.rollup, 40, "rollup address from channel_backing.json");
+    let receipt_raw = cast(&["receipt", &tx, "--rpc-url", rpc, "--json", "--async"]);
+    let receipt: serde_json::Value = serde_json::from_str(&receipt_raw)
+        .unwrap_or_else(|e| die(format!("parse `cast receipt` JSON: {e}\n{receipt_raw}")));
+    if receipt["status"].as_str() != Some("0x1") {
+        die(format!("deposit tx {tx} did not succeed — refusing to journal it"));
+    }
+    let tx_block = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or_else(|| die(format!("deposit tx {tx} is not mined yet (no blockNumber)")));
+    let chain_id: u64 = cast(&["chain-id", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse chain-id: {e}")));
+    let head: u64 = cast(&["block-number", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse block-number: {e}")));
+    let min_conf = min_confirmations_for(chain_id, None);
+    let confirmations = head.saturating_sub(tx_block) + 1;
+    if confirmations < min_conf {
+        die(format!(
+            "deposit tx {tx} has {confirmations} confirmation(s), need {min_conf} on chain \
+             {chain_id} (reorg safety) — refusing"
+        ));
+    }
+    let logs = receipt["logs"]
+        .as_array()
+        .unwrap_or_else(|| die(format!("deposit tx {tx} receipt has no logs array")));
+    let matching: Vec<&serde_json::Value> = logs
+        .iter()
+        .filter(|log| {
+            let topics = log["topics"].as_array().cloned().unwrap_or_default();
+            log["address"].as_str().unwrap_or("").eq_ignore_ascii_case(&format!("0x{rollup_body}"))
+                && topics.first().and_then(|t| t.as_str()).unwrap_or("").eq_ignore_ascii_case(DEPOSITED_TOPIC0)
+                && topics.get(1).and_then(|t| t.as_str()).map(|t| abi_word_u64(t, "Deposited.depositIndex")) == Some(wanted)
+        })
+        .collect();
+    if matching.len() != 1 {
+        die(format!(
+            "tx {tx} has {} `Deposited` logs of rollup 0x{rollup_body} with deposit index {wanted}; \
+             expected exactly one",
+            matching.len()
+        ));
+    }
+    let data = matching[0]["data"].as_str().unwrap_or("");
+    let body = data.strip_prefix("0x").unwrap_or(data);
+    if body.len() < 64 * 6 {
+        die(format!("malformed Deposited log data in tx {tx}"));
+    }
+    let word = |i: usize, what: &str| {
+        Bytes32::from_hex(&format!("0x{}", abi_word(body, i)))
+            .unwrap_or_else(|e| die(format!("parse Deposited.{what}: {e:?}")))
+    };
+    let request = ProductionDepositRequest {
+        deposit_index: wanted,
+        depositor: Address::from_hex(&format!("0x{}", &abi_word(body, 0)[24..]))
+            .unwrap_or_else(|e| die(format!("parse Deposited.depositor: {e:?}"))),
+        recipient: word(1, "recipient"),
+        token_index: u32::try_from(abi_word_u64(abi_word(body, 2), "Deposited.tokenIndex"))
+            .unwrap_or_else(|_| die("Deposited.tokenIndex exceeds u32")),
+        // The full uint256: nothing is credited from a journal-only request, so the channel's u64
+        // import range does not apply.
+        amount: U256::from_hex(&format!("0x{}", abi_word(body, 3)))
+            .unwrap_or_else(|e| die(format!("parse Deposited.amount: {e:?}"))),
+        aux_data: word(4, "auxData"),
+        expected_deposit_hash_chain: word(5, "newDepositHashChain"),
+    };
+    write_json(out_path, &request);
+    println!("{}", serde_json::to_string(&request).unwrap_or_else(|e| die(e)));
+}
+
 fn cmd_inspect_l1_deposit(args: &[String]) {
+    if args.iter().any(|a| a == "--journal-only") {
+        return inspect_l1_deposit_journal_only(args);
+    }
     let (normalized, reservation_id) =
         deposit_capacity::split_reservation_option(args).unwrap_or_else(|error| die(error));
     let args = normalized.as_slice();
@@ -20796,8 +20928,10 @@ mod signing_ledger_tests {
             |_| panic!("missing-receipt refusal must happen before signing"),
         )
         .unwrap_err();
+        // b0317f3 (2026-09-22) renamed this refusal to name the KIT-PENDING head plainly; the
+        // property is unchanged: no verified receipt, no signature.
         assert!(
-            refusal.contains("no cryptographically verified signer exit-kit receipt"),
+            refusal.contains("SIGNER-INDEPENDENT EXIT REQUIRED") && refusal.contains("KIT-PENDING"),
             "key equality must not become a vacuous receipt: {refusal}"
         );
         assert!(cli.state_signing_ledger.is_empty());

@@ -205,6 +205,50 @@ pub struct ProductionChannelHead {
     pub state_version: u64,
 }
 
+/// Is `new` exactly `old` with one or more delegates appended at the left-packed boundary, and
+/// nothing else changed? The co-signer set (`member_count`, `member_pk_gs[0..member_count]`,
+/// `set_version`), the record status and BP slot, and every existing slot must be byte-identical;
+/// the appended identities must be nonzero and distinct from every other slot; nothing may
+/// follow them. This is `live_balance_service::is_single_delegate_add` for several joins at once
+/// (a producer may adopt a head that is more than one join ahead of its registered record).
+pub(crate) fn verify_delegates_appended(old: &ChannelRecord, new: &ChannelRecord) -> Result<(), String> {
+    if new.channel_id != old.channel_id {
+        return Err("delegate join: channel id changed".into());
+    }
+    if new.member_count != old.member_count || new.set_version != old.set_version {
+        return Err("delegate join: the co-signer set changed (not a delegate join)".into());
+    }
+    if new.status != old.status || new.bp_member_slot != old.bp_member_slot {
+        return Err("delegate join: record status or BP slot changed".into());
+    }
+    if new.delegate_count <= old.delegate_count {
+        return Err("delegate join: delegate_count did not grow".into());
+    }
+    let old_boundary = old.member_count as usize + old.delegate_count as usize;
+    let new_boundary = new.member_count as usize + new.delegate_count as usize;
+    if new_boundary > MAX_CHANNEL_MEMBERS {
+        return Err("delegate join: more participants than the channel holds".into());
+    }
+    for slot in 0..MAX_CHANNEL_MEMBERS {
+        let (was, is) = (old.member_pk_gs[slot], new.member_pk_gs[slot]);
+        if slot < old_boundary {
+            if is != was {
+                return Err(format!("delegate join: existing slot {slot} changed"));
+            }
+        } else if slot < new_boundary {
+            if was != Bytes32::default() || is == Bytes32::default() {
+                return Err(format!("delegate join: slot {slot} is not a new nonzero identity"));
+            }
+            if (0..new_boundary).any(|other| other != slot && new.member_pk_gs[other] == is) {
+                return Err(format!("delegate join: slot {slot} duplicates another identity"));
+            }
+        } else if is != Bytes32::default() || was != Bytes32::default() {
+            return Err(format!("delegate join: slot {slot} beyond the participants is not empty"));
+        }
+    }
+    Ok(())
+}
+
 /// Public fields copied from one canonical L1 `Deposited` event. The producer assigns the
 /// monotone deposit index and containing block number itself; accepting either from a caller would
 /// let an API request fork the deposit hash chain from the journaled head.
@@ -1129,6 +1173,65 @@ impl ProductionBlockProducer {
         self.channel_records.len()
     }
 
+    /// `(channel, member_count, delegate_count)` of every registered record, for status reports.
+    pub fn registered_record_counts(&self) -> Vec<(ChannelId, u8, u16)> {
+        let mut counts: Vec<_> = self
+            .channel_records
+            .iter()
+            .map(|(&channel, record)| (channel, record.member_count, record.delegate_count))
+            .collect();
+        counts.sort_by_key(|(channel, _, _)| channel.as_u64());
+        counts
+    }
+
+    /// Follow delegate joins on a registered channel. The producer verifies every channel block
+    /// against its registered record, and an inter-channel debit must carry that exact record; a
+    /// delegate join changes the record (one more delegate at the left-packed boundary), so
+    /// without this every channel that took a join after registration could never send across
+    /// channels again ("debit payload record differs from the producer's registered channel
+    /// record"). The sig-cluster is invariant (delegates join after deployment, appended, never
+    /// removed; see doc/docs/sig-cluster-vs-delegates.md), so the SAME co-signers that authorize
+    /// every block authorize this one:
+    ///   * `new_record` is the registered record with >= 1 delegates appended at the boundary and
+    ///     nothing else changed (co-signer set, set version, status, BP slot, existing slots);
+    ///   * `signed_state` is exactly this channel's committed head (already synchronized), it
+    ///     carries the new record's counts, and it is N-of-N signed under the new record.
+    /// Adopting the record already registered is a no-op.
+    pub fn adopt_delegate_join(
+        &mut self,
+        new_record: &ChannelRecord,
+        signed_state: &ChannelState,
+    ) -> Result<(), ProductionBlockProducerError> {
+        let auth = |m: String| ProductionBlockProducerError::WalletAuthorization(m);
+        let channel = new_record.channel_id;
+        let old = self.channel_records.get(&channel).ok_or_else(|| {
+            auth(format!("channel {} is not registered in this producer", channel.as_u64()))
+        })?;
+        if old.signing_digest() == new_record.signing_digest() {
+            return Ok(());
+        }
+        verify_delegates_appended(old, new_record).map_err(auth)?;
+        let head = self.channel_heads.get(&channel).ok_or_else(|| {
+            auth(format!("channel {} has no committed head", channel.as_u64()))
+        })?;
+        if signed_state.channel_id != channel || signed_state.digest != head.digest {
+            return Err(auth(
+                "a delegate join is adopted only with the channel's committed head".to_string(),
+            ));
+        }
+        if signed_state.balance_state.member_count != new_record.member_count
+            || signed_state.balance_state.delegate_count != new_record.delegate_count
+        {
+            return Err(auth(
+                "the committed head does not carry the joined record's participant counts".to_string(),
+            ));
+        }
+        verify_all_signatures(new_record, &[], signed_state)
+            .map_err(|e| auth(format!("committed head is not N-of-N signed under the joined record: {e}")))?;
+        self.channel_records.insert(channel, new_record.clone());
+        Ok(())
+    }
+
     pub fn channel_heads(&self) -> Vec<ProductionChannelHead> {
         let mut heads: Vec<_> = self
             .channel_heads
@@ -1219,3 +1322,78 @@ impl ProductionBlockProducer {
 // Compile-time guard against accidentally shrinking the public member array assumptions used by
 // `from_snapshot` while the wallet record remains wider for delegates.
 const _: () = assert!(MAX_CHANNEL_MEMBERS >= MAX_SIG_CLUSTER);
+
+#[cfg(test)]
+mod delegate_join_adoption_tests {
+    //! The producer follows delegate joins (appended at the boundary, never removed) and nothing
+    //! else: the sig-cluster that authorizes every block is invariant.
+    use super::*;
+    use crate::{common::channel::ChannelStatus, ethereum_types::u32limb_trait::U32LimbTrait as _};
+
+    fn identity(slot: usize) -> Bytes32 {
+        Bytes32::from_u32_slice(&[slot as u32 + 1, 0, 0, 0, 0, 0, 0, 7]).unwrap()
+    }
+
+    fn record(members: u8, delegates: u16) -> ChannelRecord {
+        let mut member_pk_gs = [Bytes32::default(); MAX_CHANNEL_MEMBERS];
+        for (slot, pk) in member_pk_gs.iter_mut().enumerate().take(members as usize + delegates as usize) {
+            *pk = identity(slot);
+        }
+        ChannelRecord {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: members,
+            delegate_count: delegates,
+            member_pk_gs,
+            member_pubkeys_root: Bytes32::default(),
+            set_version: 1,
+            bp_member_slot: 0,
+            special_close_penalty: U256::default(),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: Bytes32::default(),
+        }
+    }
+
+    #[test]
+    fn accepts_one_or_several_delegates_appended_at_the_boundary() {
+        assert!(verify_delegates_appended(&record(3, 1), &record(3, 2)).is_ok());
+        assert!(verify_delegates_appended(&record(3, 1), &record(3, 4)).is_ok());
+        assert!(verify_delegates_appended(&record(3, 0), &record(3, 1)).is_ok());
+    }
+
+    #[test]
+    fn rejects_no_growth_and_removal() {
+        assert!(verify_delegates_appended(&record(3, 2), &record(3, 2)).is_err());
+        assert!(verify_delegates_appended(&record(3, 2), &record(3, 1)).is_err());
+    }
+
+    #[test]
+    fn rejects_any_sig_cluster_change() {
+        assert!(verify_delegates_appended(&record(3, 1), &record(4, 1)).is_err());
+        let mut rotated = record(3, 2);
+        rotated.member_pk_gs[1] = identity(99);
+        assert!(verify_delegates_appended(&record(3, 1), &rotated).is_err());
+        let mut bumped = record(3, 2);
+        bumped.set_version = 2;
+        assert!(verify_delegates_appended(&record(3, 1), &bumped).is_err());
+        let mut moved_bp = record(3, 2);
+        moved_bp.bp_member_slot = 1;
+        assert!(verify_delegates_appended(&record(3, 1), &moved_bp).is_err());
+    }
+
+    #[test]
+    fn rejects_a_changed_existing_delegate_or_a_malformed_append() {
+        let mut replaced = record(3, 2);
+        replaced.member_pk_gs[3] = identity(99); // the existing delegate at slot 3
+        assert!(verify_delegates_appended(&record(3, 1), &replaced).is_err());
+        let mut empty = record(3, 2);
+        empty.member_pk_gs[4] = Bytes32::default();
+        assert!(verify_delegates_appended(&record(3, 1), &empty).is_err());
+        let mut duplicate = record(3, 2);
+        duplicate.member_pk_gs[4] = identity(0);
+        assert!(verify_delegates_appended(&record(3, 1), &duplicate).is_err());
+        let mut trailing = record(3, 2);
+        trailing.member_pk_gs[6] = identity(6);
+        assert!(verify_delegates_appended(&record(3, 1), &trailing).is_err());
+    }
+}

@@ -123,6 +123,13 @@ enum ProductionJournalAction {
         descriptor: InterChannelTransferDescriptor,
         timestamp: u64,
     },
+    /// A delegate join on a registered channel: the registered record follows the committed head
+    /// (see `ProductionBlockProducer::adopt_delegate_join`). No block is produced.
+    AdoptDelegateJoin {
+        record: ChannelRecord,
+        signed_state: ChannelState,
+        timestamp: u64,
+    },
     /// detail2 §Q-3: one member-set-update block (rotate / add on the registered cluster).
     PostMemberSetUpdate {
         signed_state: ChannelState,
@@ -142,6 +149,7 @@ impl ProductionJournalAction {
             | Self::PostInterChannel { timestamp, .. }
             | Self::PostCloseFunding { timestamp, .. }
             | Self::StagedInterChannelExitKit { timestamp, .. }
+            | Self::AdoptDelegateJoin { timestamp, .. }
             | Self::PostMemberSetUpdate { timestamp, .. } => *timestamp,
         }
     }
@@ -303,6 +311,18 @@ pub struct BlockProducerServiceStatus {
     /// this is the exact identity a deposit will get, which a genesis prover must use so both
     /// sides hash the same `Deposit` into the same nullifier and the same settle chain.
     pub next_deposit_index: u64,
+    /// The registered record's participant counts per channel. A record behind the channel's
+    /// signed head (a delegate join not yet adopted) is visible here.
+    #[serde(default)]
+    pub registered_records: Vec<RegisteredRecordStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredRecordStatus {
+    pub channel_id: u64,
+    pub member_count: u8,
+    pub delegate_count: u16,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -362,6 +382,11 @@ pub enum BlockProducerCommand {
     },
     AbandonPreparedInterChannelExitKit {
         request_id: String,
+    },
+    AdoptDelegateJoin {
+        request_id: String,
+        record: serde_json::Value,
+        signed_state: serde_json::Value,
     },
     PostMemberSetUpdate {
         request_id: String,
@@ -450,6 +475,16 @@ impl BlockProducerService {
             channel_heads: head.channel_heads,
             holds_local_signing_keys: self.producer.holds_any_local_signing_keys(),
             next_deposit_index: self.producer.next_deposit_index(),
+            registered_records: self
+                .producer
+                .registered_record_counts()
+                .into_iter()
+                .map(|(channel, member_count, delegate_count)| RegisteredRecordStatus {
+                    channel_id: channel.as_u64(),
+                    member_count,
+                    delegate_count,
+                })
+                .collect(),
         })
     }
 
@@ -509,6 +544,18 @@ fn command_payload<T: serde::de::DeserializeOwned>(
                     Self::command_payload("inter-channel descriptor", descriptor)?;
                 Ok(BlockProducerCommandResult::Receipt(
                     self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
+                ))
+            }
+            BlockProducerCommand::AdoptDelegateJoin {
+                request_id,
+                record,
+                signed_state,
+            } => {
+                let record: ChannelRecord = Self::command_payload("joined channel record", record)?;
+                let signed_state: ChannelState =
+                    Self::command_payload("joined committed head", signed_state)?;
+                Ok(BlockProducerCommandResult::Receipt(
+                    self.adopt_delegate_join(request_id, record, signed_state)?,
                 ))
             }
             BlockProducerCommand::PostCloseFunding {
@@ -1027,6 +1074,36 @@ fn command_payload<T: serde::de::DeserializeOwned>(
             fingerprint,
             ProductionJournalAction::SyncOffchainHeads {
                 signed_states,
+                timestamp,
+            },
+        )
+    }
+
+    /// Journal a delegate join on a registered channel (see
+    /// `ProductionBlockProducer::adopt_delegate_join`, which performs every check). Replayed from
+    /// the journal like every other action.
+    pub fn adopt_delegate_join(
+        &mut self,
+        request_id: String,
+        record: ChannelRecord,
+        signed_state: ChannelState,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        self.ensure_no_prepared()?;
+        validate_request_id(&request_id)?;
+        let fingerprint = request_fingerprint("adoptDelegateJoin", &(&record, &signed_state))?;
+        if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
+            return Ok(receipt);
+        }
+        // Check on a scratch copy first, so a refused join never reaches the journal.
+        self.producer.clone().adopt_delegate_join(&record, &signed_state)?;
+        let timestamp = self.next_timestamp()?;
+        self.apply_and_persist(
+            request_id,
+            fingerprint,
+            ProductionJournalAction::AdoptDelegateJoin {
+                record,
+                signed_state,
                 timestamp,
             },
         )
@@ -1752,6 +1829,13 @@ fn apply_action(
                 *timestamp,
             )?;
         }
+        ProductionJournalAction::AdoptDelegateJoin {
+            record,
+            signed_state,
+            ..
+        } => {
+            producer.adopt_delegate_join(record, signed_state)?;
+        }
         ProductionJournalAction::PostMemberSetUpdate { .. } => {
             return Err(BlockProducerServiceError::InvalidRequest(
                 MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
@@ -2047,6 +2131,11 @@ fn fingerprint_for_action(
             descriptor,
             ..
         } => staged_exit_kit_fingerprint(proposed_state, debit_payload, descriptor),
+        ProductionJournalAction::AdoptDelegateJoin {
+            record,
+            signed_state,
+            ..
+        } => request_fingerprint("adoptDelegateJoin", &(record, signed_state)),
         ProductionJournalAction::PostMemberSetUpdate {
             signed_state,
             old_members,

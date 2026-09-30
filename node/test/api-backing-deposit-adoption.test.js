@@ -48,10 +48,14 @@ let liveSettled = '';
 // at require time, so a later assignment would not be seen (same reason the existing
 // api-deposit-live-binding test re-requires the module).
 cliModule.chainId = () => 31337;
+// When set, the co-signers refuse the import at its validation (proposal) run.
+let refuseImport = false;
 cliModule.cli = (ch, args) => {
   events.push(args[0] === 'inspect-l1-deposit' ? `inspect:${args[1]}` : args[0]);
   if (args[0] === 'inspect-l1-deposit') write(ch, args[3], { depositIndex: 1, tx: args[1] });
   if (args[0] === 'cosign-l1-deposit-import') {
+    events.push(args.includes('--propose-exit-kit') ? 'propose' : 'sign');
+    if (refuseImport) throw new Error('REFUSING: the on-chain depositor is not the bound (B-1b) recipient');
     write(ch, 'l1_import_cosigned.json', {
       txHash: TX, intmaxBlockNumber: 11,
       fundImportState: { digest: 'fund' }, bundleApplyState: { digest: 'bundle' },
@@ -297,4 +301,29 @@ test('a daemon receive failure during a fresh adoption propagates', async () => 
     /live balance poisoned/,
   );
   producer.liveReceiveBackingDeposit = realReceive;
+});
+
+// The co-signers validate the exact import BEFORE the live balance consumes the deposit. When they
+// refuse (here: a depositor bound to no slot), the live balance must be untouched, or it stays
+// ahead of every signed head and the channel can take no further deposit or transfer.
+test('a refused import is refused before the live balance receives the deposit', async () => {
+  reset({ rollup: '0x' + '44'.repeat(20) });
+  refuseImport = true;
+  try {
+    await assert.rejects(importL1Deposit(CH, 3, TX, { allowUnboundDepositor: false }), /REFUSING/);
+  } finally {
+    refuseImport = false;
+  }
+  assert.ok(events.includes('postDeposit:user'), 'the deposit is journaled (the sequence goes on)');
+  assert.ok(events.indexOf('propose') > events.indexOf('postDeposit:user'));
+  assert.ok(!events.some(e => e === 'liveReceive:user' || e === 'liveReceiveConfiguredDeposit'),
+    `the live balance must not receive it; saw ${events.join(' -> ')}`);
+});
+
+test('an accepted import is validated first, then received, then signed', async () => {
+  reset({ rollup: '0x' + '44'.repeat(20) });
+  await importL1Deposit(CH, 3, TX, { allowUnboundDepositor: false });
+  // An unfunded genesis receives through the live service's configured recipient.
+  const order = ['postDeposit:user', 'propose', 'liveReceiveConfiguredDeposit', 'sign'].map(e => events.indexOf(e));
+  assert.ok(order.every(i => i >= 0) && order.every((v, i) => i === 0 || v > order[i - 1]), `saw ${events.join(' -> ')}`);
 });

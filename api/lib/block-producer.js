@@ -251,6 +251,18 @@ function syncOffchainHeads(signedStates, requestId) {
   });
 }
 
+// A delegate join changed the channel's record; the producer's registered record follows it once
+// the joined head is committed (the producer verifies the join is delegates appended at the
+// boundary with the sig-cluster unchanged, and the head is N-of-N signed under the new record).
+function adoptDelegateJoin(record, signedState, requestId) {
+  return execute({
+    command: 'adoptDelegateJoin',
+    requestId: requestId || stableRequestId('delegate-join', { record, signedState }),
+    record,
+    signedState,
+  });
+}
+
 // ---- validity (exposed per the handoff: the launcher passes config, the API can drive it) ----
 
 function validityStatus() {
@@ -407,6 +419,7 @@ module.exports = {
   canonicalJson,
   status,
   syncOffchainHeads,
+  adoptDelegateJoin,
   validityStatus,
   proveValidity,
   validityArtifact,
