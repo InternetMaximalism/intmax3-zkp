@@ -9,7 +9,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::{
-    cell::OnceCell,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::{
@@ -17,6 +16,7 @@ use std::{
         unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     },
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 
 use plonky2::plonk::proof::ProofWithPublicInputs;
@@ -503,15 +503,50 @@ impl From<LiveBalanceSnapshotV3> for LiveBalanceSnapshot {
     }
 }
 
-/// A live service owns one snapshot lock and one in-memory circuit set for its whole lifetime.
+/// A live service owns one snapshot lock for its whole lifetime and uses the process-wide circuit
+/// set (`live_circuits`).
 pub struct LiveBalanceService {
     snapshot_path: PathBuf,
     _snapshot_lock: SnapshotLock,
     disk: LiveBalanceSnapshot,
+    circuits: Arc<LiveCircuits>,
+    poisoned: bool,
+}
+
+/// The spend, Balance and CloseAssetBacking circuits. None of them depends on a channel: the
+/// channel id, salts, balances and signed heads are witness or public-input data, and the
+/// CloseAssetBacking circuit is built from the Balance verifier data alone. Proving and verifying
+/// take `&self`, so every live balance in a process shares one set. Building it is the expensive
+/// part of opening a live balance (~190 s on the 4-core testnet host), which the block producer
+/// daemon used to pay again for every channel it holds.
+struct LiveCircuits {
     spend: SpendCircuit<F, C, D>,
     balance: BalanceProcessor<F, C, D>,
-    close_asset_backing: OnceCell<CloseAssetBackingCircuit<F, C, D>>,
-    poisoned: bool,
+    /// Built on first use: only a head with a signer-independent exit kit needs it.
+    close_asset_backing: OnceLock<CloseAssetBackingCircuit<F, C, D>>,
+}
+
+impl LiveCircuits {
+    fn build() -> Self {
+        let (spend, balance) = build_circuits();
+        Self {
+            spend,
+            balance,
+            close_asset_backing: OnceLock::new(),
+        }
+    }
+
+    fn close_asset_backing(&self) -> &CloseAssetBackingCircuit<F, C, D> {
+        self.close_asset_backing
+            .get_or_init(|| CloseAssetBackingCircuit::new(&self.balance.balance_vd()))
+    }
+}
+
+/// The process-wide circuit set, built by the first live balance that needs it. Concurrent first
+/// callers block on the one build instead of each building their own.
+fn live_circuits() -> Arc<LiveCircuits> {
+    static CIRCUITS: OnceLock<Arc<LiveCircuits>> = OnceLock::new();
+    CIRCUITS.get_or_init(|| Arc::new(LiveCircuits::build())).clone()
 }
 
 impl LiveBalanceService {
@@ -521,7 +556,7 @@ impl LiveBalanceService {
         &self, circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F,C,D>,
         close_intent_digest: Bytes32, final_balance_state_h1: Bytes32, confirmed_commitment: Bytes32,
     ) -> anyhow::Result<crate::late_incoming::LateIncomingCheckpoint> {
-        let proof = ProofWithPublicInputs::from_bytes(self.disk.balance_proof.clone(), &self.balance.balance_vd().common)?;
+        let proof = ProofWithPublicInputs::from_bytes(self.disk.balance_proof.clone(), &self.circuits.balance.balance_vd().common)?;
         crate::late_incoming::LateIncomingCheckpoint::new(circuit, &proof,
             self.disk.full_private_state.clone(), close_intent_digest, final_balance_state_h1, confirmed_commitment)
     }
@@ -542,10 +577,10 @@ impl LiveBalanceService {
         let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(descriptor.source_channel_id, &transfer, descriptor.inter_channel_tx.base_nonce);
         anyhow::ensure!(tx_v2 == descriptor.tx_v2 && Bytes32::from(tx_v2_tree.get_root()) == descriptor.tx_tree_root,
             "noncanonical late incoming descriptor");
-        let sender_proof = ProofWithPublicInputs::from_bytes(source.source_backing.balance_attestation.balance_proof.clone(), &self.balance.balance_vd().common)?;
-        let spend_proof = ProofWithPublicInputs::from_bytes(source.spend_proof.clone(), &self.spend.data.common)?;
-        self.balance.balance_vd().verify(sender_proof.clone())?;
-        self.spend.data.verify(spend_proof.clone())?;
+        let sender_proof = ProofWithPublicInputs::from_bytes(source.source_backing.balance_attestation.balance_proof.clone(), &self.circuits.balance.balance_vd().common)?;
+        let spend_proof = ProofWithPublicInputs::from_bytes(source.spend_proof.clone(), &self.circuits.spend.data.common)?;
+        self.circuits.balance.balance_vd().verify(sender_proof.clone())?;
+        self.circuits.spend.data.verify(spend_proof.clone())?;
         let sender_pis = BalancePublicInputs::from_u64(&sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN])?;
         anyhow::ensure!(sender_pis.channel_id == descriptor.source_channel_id, "late source channel mismatch");
         let mut transfers = TransferTree::init(); transfers.push(transfer.clone());
@@ -562,7 +597,7 @@ impl LiveBalanceService {
         let blocks = producer.producer()?.witness_handle()?;
         let inner = blocks.borrow().current_extended_public_state().inner;
         let extended = producer.extended_public_state_matching(&inner)?;
-        checkpoint.prepare(&self.balance, circuit, blocks, &incoming, recipient_binding, &extended)
+        checkpoint.prepare(&self.circuits.balance, circuit, blocks, &incoming, recipient_binding, &extended)
     }
 
     /// Create a fresh base account. This does not require channel registration: the intended
@@ -616,8 +651,9 @@ impl LiveBalanceService {
             )));
         }
         let snapshot_lock = SnapshotLock::acquire(&snapshot_path)?;
-        let (spend, balance) = build_circuits();
-        let proof = balance
+        let circuits = live_circuits();
+        let proof = circuits
+            .balance
             .prove_initial(channel_id, salt)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("initial proof: {e}")))?;
         let disk = LiveBalanceSnapshot {
@@ -635,15 +671,13 @@ impl LiveBalanceService {
             terminal_close_funding: None,
             signed_head_exit_kit: None,
         };
-        verify_snapshot_semantics(&disk, &spend, &balance, None, None, true, true)?;
+        verify_snapshot_semantics(&disk, &circuits.spend, &circuits.balance, None, None, true, true)?;
         persist_snapshot(&snapshot_path, &disk)?;
         Ok(Self {
             snapshot_path,
             _snapshot_lock: snapshot_lock,
             disk,
-            spend,
-            balance,
-            close_asset_backing: OnceCell::new(),
+            circuits,
             poisoned: false,
         })
     }
@@ -664,15 +698,15 @@ impl LiveBalanceService {
         verify_private_mode(&snapshot_path, "snapshot")?;
         let snapshot_lock = SnapshotLock::acquire(&snapshot_path)?;
         let (disk, source_version) = read_snapshot(&snapshot_path)?;
-        let (spend, balance) = build_circuits();
+        let circuits = live_circuits();
         // Legacy snapshots are verified without trusting a missing v4 kit, then upgraded through
         // the same proof-generation and atomic persistence path as a newly accepted H. A native
         // v4 snapshot must already carry and verify its kit.
         if source_version < LIVE_BALANCE_SNAPSHOT_VERSION {
             verify_snapshot_semantics(
                 &disk,
-                &spend,
-                &balance,
+                &circuits.spend,
+                &circuits.balance,
                 Some(producer),
                 None,
                 false,
@@ -683,9 +717,7 @@ impl LiveBalanceService {
             snapshot_path,
             _snapshot_lock: snapshot_lock,
             disk,
-            spend,
-            balance,
-            close_asset_backing: OnceCell::new(),
+            circuits,
             poisoned: false,
         };
         if source_version < LIVE_BALANCE_SNAPSHOT_VERSION {
@@ -701,8 +733,8 @@ impl LiveBalanceService {
 
     pub fn status(&self) -> Result<LiveBalanceStatus, LiveBalanceServiceError> {
         self.ensure_healthy()?;
-        let proof = decode_balance_proof(&self.disk, &self.balance)?;
-        let pis = balance_public_inputs(&proof, &self.balance)?;
+        let proof = decode_balance_proof(&self.disk, &self.circuits.balance)?;
+        let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
         let last = self.disk.applied.last();
         Ok(LiveBalanceStatus {
             snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
@@ -778,8 +810,8 @@ impl LiveBalanceService {
         &self,
         disk: &LiveBalanceSnapshot,
     ) -> Result<LiveBaseHeadArtifact, LiveBalanceServiceError> {
-        let proof = decode_balance_proof(disk, &self.balance)?;
-        let pis = balance_public_inputs(&proof, &self.balance)?;
+        let proof = decode_balance_proof(disk, &self.circuits.balance)?;
+        let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
         Ok(LiveBaseHeadArtifact {
             snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
             channel_id: disk.channel_id,
@@ -834,7 +866,7 @@ impl LiveBalanceService {
             balance_attestation: ChannelBalanceAttestation {
                 balance_proof: disk.balance_proof.clone(),
             },
-            balance_verifier_data: serialize_verifier_data(&self.balance.balance_vd()).map_err(
+            balance_verifier_data: serialize_verifier_data(&self.circuits.balance.balance_vd()).map_err(
                 |error| {
                     LiveBalanceServiceError::Snapshot(format!(
                         "serialize resident balance verifier data: {error}"
@@ -925,8 +957,8 @@ impl LiveBalanceService {
                         "a deposit fund-import successor requires h2_tag == 0".into(),
                     ));
                 }
-                let proof = decode_balance_proof(&self.disk, &self.balance)?;
-                let pis = balance_public_inputs(&proof, &self.balance)?;
+                let proof = decode_balance_proof(&self.disk, &self.circuits.balance)?;
+                let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
                 if pis.settled_tx_chain != fund_import_state.balance_state.settled_tx_chain {
                     return Err(LiveBalanceServiceError::InvalidRequest(
                         "proposed fund-import settle chain differs from the pending live balance proof"
@@ -1010,8 +1042,8 @@ impl LiveBalanceService {
         self.install_signed_head_exit_kit(&mut candidate, producer)?;
         verify_snapshot_semantics(
             &candidate,
-            &self.spend,
-            &self.balance,
+            &self.circuits.spend,
+            &self.circuits.balance,
             Some(producer),
             Some(self.close_asset_backing_circuit()),
             true,
@@ -1091,7 +1123,7 @@ impl LiveBalanceService {
         })?;
         let (pis, proof_size) = verify_balance_proof_bytes(
             &material.balance_proof,
-            &self.balance,
+            &self.circuits.balance,
             "stored source send",
         )?;
         // `material.balance_proof` is the PRE-send proof (see the store site), so it cannot be
@@ -1111,13 +1143,13 @@ impl LiveBalanceService {
         )?;
         let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
             material.spend_proof.clone(),
-            &self.spend.data.common,
+            &self.circuits.spend.data.common,
         )
         .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend proof: {e}")))?;
         let stored_spend_pis =
             SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
                 .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend pis: {e}")))?;
-        self.spend
+        self.circuits.spend
             .data
             .verify(spend_proof)
             .map_err(|e| LiveBalanceServiceError::Snapshot(format!("verify stored spend: {e}")))?;
@@ -1158,7 +1190,7 @@ impl LiveBalanceService {
                 balance_attestation: ChannelBalanceAttestation {
                     balance_proof: material.balance_proof.clone(),
                 },
-                balance_verifier_data: serialize_verifier_data(&self.balance.balance_vd())
+                balance_verifier_data: serialize_verifier_data(&self.circuits.balance.balance_vd())
                     .map_err(|error| {
                         LiveBalanceServiceError::Snapshot(format!(
                             "serialize resident balance verifier data: {error}"
@@ -1251,7 +1283,7 @@ impl LiveBalanceService {
                 "deposit witness leaf differs from the exact journaled L1 request".to_string(),
             ));
         }
-        let new_proof = self.balance.prove_receive_deposit(&witness).map_err(|e| {
+        let new_proof = self.circuits.balance.prove_receive_deposit(&witness).map_err(|e| {
             LiveBalanceServiceError::Transition(format!("receive deposit proof: {e}"))
         })?;
         generator
@@ -1270,7 +1302,7 @@ impl LiveBalanceService {
         // The previous head's kit no longer matches the advanced balance proof; the next N-of-N
         // bind (or a prepared exit kit for the proposed import) proves the new statement.
         candidate.signed_head_exit_kit = None;
-        let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
+        let result = make_receipt(&candidate, producer_receipt, &self.circuits.balance)?;
         candidate.applied.push(AppliedTransition {
             request_id: producer_receipt.request_id.clone(),
             request_fingerprint: fingerprint,
@@ -1349,8 +1381,8 @@ impl LiveBalanceService {
                 "a generic signed-snapshot bind requires h2_tag == 0".to_string(),
             ));
         }
-        let proof = decode_balance_proof(&self.disk, &self.balance)?;
-        let pis = balance_public_inputs(&proof, &self.balance)?;
+        let proof = decode_balance_proof(&self.disk, &self.circuits.balance)?;
+        let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
         if pis.settled_tx_chain != signed_snapshot.state.balance_state.settled_tx_chain {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "signed snapshot settle chain differs from the pending live balance proof".into(),
@@ -1565,6 +1597,7 @@ impl LiveBalanceService {
             ));
         }
         let spend_proof = self
+            .circuits
             .spend
             .prove(&spend_witness)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("spend proof: {e}")))?;
@@ -1596,6 +1629,7 @@ impl LiveBalanceService {
             .send_tx_witness(&send_data)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("send witness: {e}")))?;
         let new_proof = self
+            .circuits
             .balance
             .prove_send_tx(&send_witness)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("send balance proof: {e}")))?;
@@ -1676,7 +1710,7 @@ impl LiveBalanceService {
             true,
         )?;
         candidate.signed_head = Some(signed_state.clone());
-        let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
+        let result = make_receipt(&candidate, producer_receipt, &self.circuits.balance)?;
         candidate.applied.push(AppliedTransition {
             request_id: producer_receipt.request_id.clone(),
             request_fingerprint: fingerprint,
@@ -1791,6 +1825,7 @@ impl LiveBalanceService {
             ));
         }
         let spend_proof = self
+            .circuits
             .spend
             .prove(&spend_witness)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("close spend proof: {e}")))?;
@@ -1813,7 +1848,7 @@ impl LiveBalanceService {
         let send_witness = generator
             .send_tx_witness(&send_data)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("close send witness: {e}")))?;
-        let new_proof = self.balance.prove_send_tx(&send_witness).map_err(|e| {
+        let new_proof = self.circuits.balance.prove_send_tx(&send_witness).map_err(|e| {
             LiveBalanceServiceError::Transition(format!("close send balance proof: {e}"))
         })?;
         generator
@@ -1834,7 +1869,7 @@ impl LiveBalanceService {
             previous_head,
             plan: plan.clone(),
         });
-        let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
+        let result = make_receipt(&candidate, producer_receipt, &self.circuits.balance)?;
         candidate.applied.push(AppliedTransition {
             request_id: producer_receipt.request_id.clone(),
             request_fingerprint: fingerprint,
@@ -1936,7 +1971,7 @@ impl LiveBalanceService {
         })?;
         let (source_pis, source_proof_size) = verify_balance_proof_bytes(
             &source.balance_attestation.balance_proof,
-            &self.balance,
+            &self.circuits.balance,
             "source receive artifact",
         )?;
         // The source artifact carries the PRE-send balance proof (the only one a ReceiveTransfer
@@ -1964,19 +1999,19 @@ impl LiveBalanceService {
         }
         let sender_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
             source.balance_attestation.balance_proof.clone(),
-            &self.balance.balance_vd().common,
+            &self.circuits.balance.balance_vd().common,
         )
         .map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!("decode source balance proof: {e}"))
         })?;
         let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
             source_artifact.spend_proof.clone(),
-            &self.spend.data.common,
+            &self.circuits.spend.data.common,
         )
         .map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!("decode source spend proof: {e}"))
         })?;
-        self.spend.data.verify(spend_proof.clone()).map_err(|e| {
+        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!("verify source spend proof: {e}"))
         })?;
 
@@ -2087,6 +2122,7 @@ impl LiveBalanceService {
                 LiveBalanceServiceError::Transition(format!("receive-transfer witness: {e}"))
             })?;
         let new_proof = self
+            .circuits
             .balance
             .prove_receive_transfer(&receive_witness)
             .map_err(|e| {
@@ -2109,7 +2145,7 @@ impl LiveBalanceService {
         candidate.channel_record = Some(destination_snapshot.record.clone());
         candidate.channel_members = Some(destination_snapshot.members.clone());
         candidate.signed_head = Some(destination_snapshot.state.clone());
-        let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
+        let result = make_receipt(&candidate, producer_receipt, &self.circuits.balance)?;
         candidate.applied.push(AppliedTransition {
             request_id: producer_receipt.request_id.clone(),
             request_fingerprint: fingerprint,
@@ -2190,12 +2226,12 @@ impl LiveBalanceService {
         }
         let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
             material.spend_proof.clone(),
-            &self.spend.data.common,
+            &self.circuits.spend.data.common,
         )
         .map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("decode journaled burn spend proof: {e}"))
         })?;
-        self.spend.data.verify(spend_proof.clone()).map_err(|e| {
+        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("verify journaled burn spend proof: {e}"))
         })?;
         let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
@@ -2253,7 +2289,7 @@ impl LiveBalanceService {
             })?;
 
         let single_withdrawal_circuit =
-            SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
+            SingleWithdawalCircuit::<F, C, D>::new(&self.circuits.balance.balance_vd());
         let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
         let single_proof = single_withdrawal_circuit.prove(&witness).map_err(|e| {
             LiveBalanceServiceError::Transition(format!("single withdrawal proof: {e}"))
@@ -2472,12 +2508,12 @@ impl LiveBalanceService {
 
         let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
             send_material.spend_proof.clone(),
-            &self.spend.data.common,
+            &self.circuits.spend.data.common,
         )
         .map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("decode terminal close spend proof: {e}"))
         })?;
-        self.spend.data.verify(spend_proof.clone()).map_err(|e| {
+        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("verify terminal close spend proof: {e}"))
         })?;
         let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
@@ -2519,7 +2555,7 @@ impl LiveBalanceService {
         };
         let proof_producer = producer.producer_at_anchor(&producer_anchor)?;
         let generator = self.generator_from_producer(&proof_producer)?;
-        let single_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
+        let single_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.circuits.balance.balance_vd());
         let single_vd = single_circuit.data.verifier_data();
         let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_vd);
         let wrapper = WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
@@ -2763,7 +2799,7 @@ impl LiveBalanceService {
         &self,
         producer: &ProductionBlockProducer,
     ) -> Result<BalanceWitnessGenerator<F, C, D>, LiveBalanceServiceError> {
-        let proof = decode_balance_proof(&self.disk, &self.balance)?;
+        let proof = decode_balance_proof(&self.disk, &self.circuits.balance)?;
         let handle = producer
             .witness_handle()
             .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?;
@@ -2777,8 +2813,7 @@ impl LiveBalanceService {
     }
 
     fn close_asset_backing_circuit(&self) -> &CloseAssetBackingCircuit<F, C, D> {
-        self.close_asset_backing
-            .get_or_init(|| CloseAssetBackingCircuit::new(&self.balance.balance_vd()))
+        self.circuits.close_asset_backing()
     }
 
     fn verify_candidate_semantics(
@@ -2792,8 +2827,8 @@ impl LiveBalanceService {
             .map(|_| self.close_asset_backing_circuit());
         verify_snapshot_semantics(
             candidate,
-            &self.spend,
-            &self.balance,
+            &self.circuits.spend,
+            &self.circuits.balance,
             producer,
             backing_circuit,
             true,
@@ -2834,8 +2869,8 @@ impl LiveBalanceService {
             return Ok(());
         }
 
-        let balance_proof = decode_balance_proof(candidate, &self.balance)?;
-        let balance_pis = balance_public_inputs(&balance_proof, &self.balance)?;
+        let balance_proof = decode_balance_proof(candidate, &self.circuits.balance)?;
+        let balance_pis = balance_public_inputs(&balance_proof, &self.circuits.balance)?;
         let extended_public_state = producer
             .extended_public_state_matching(&balance_pis.public_state)
             .map_err(|error| {
@@ -2848,7 +2883,7 @@ impl LiveBalanceService {
             &head,
             balance_proof,
             extended_public_state,
-            &self.balance.balance_vd(),
+            &self.circuits.balance.balance_vd(),
         )
         .map_err(|error| {
             LiveBalanceServiceError::Transition(format!(
@@ -3928,6 +3963,37 @@ impl Drop for SnapshotLock {
     fn drop(&mut self) {
         // SAFETY: the descriptor remains valid until after this Drop implementation returns.
         let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(test)]
+mod shared_circuit_tests {
+    use super::*;
+
+    /// Every live balance in a process gets the SAME circuit set, and sharing changes nothing a
+    /// proof or an L1 pin depends on: its verifier data are byte-identical to an independently
+    /// built set's (the Balance VD sha256 is pinned by setup-backing and the settlement stack).
+    #[test]
+    fn live_balances_share_one_deterministic_circuit_set() {
+        let first = live_circuits();
+        let second = live_circuits();
+        assert!(Arc::ptr_eq(&first, &second), "a second live balance must not build its own circuits");
+
+        let independent = LiveCircuits::build();
+        assert_eq!(
+            serialize_verifier_data(&first.balance.balance_vd()).unwrap(),
+            serialize_verifier_data(&independent.balance.balance_vd()).unwrap(),
+            "shared Balance verifier data must equal an independently built set's"
+        );
+        assert_eq!(
+            serialize_verifier_data(&first.spend.data.verifier_data()).unwrap(),
+            serialize_verifier_data(&independent.spend.data.verifier_data()).unwrap(),
+            "shared spend verifier data must equal an independently built set's"
+        );
+        assert!(
+            std::ptr::eq(first.close_asset_backing(), second.close_asset_backing()),
+            "the CloseAssetBacking circuit is built once and shared too"
+        );
     }
 }
 
