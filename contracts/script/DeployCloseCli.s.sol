@@ -12,6 +12,7 @@ import {
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
 import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
@@ -151,6 +152,44 @@ contract DeployCloseCli is Script {
         }
     }
 
+    /// @dev The materializer a sibling channel's registered manager already installed on `rollup`,
+    ///      checked to be the one this channel's settlement would have deployed: same rollup, a
+    ///      chain-pinned CloseAssetBacking adapter carrying the staged configuration's digests, and
+    ///      the pinned late-incoming adapter.
+    function _existingMaterializer(IntmaxRollup rollup, address existingManager, string memory backingConfigJson)
+        internal
+        view
+        returns (CloseFundingMaterializer materializer)
+    {
+        require(rollup.isRegisteredSettlementManager(existingManager), "existing manager is not registered");
+        ChannelSettlementManager incumbent = ChannelSettlementManager(payable(existingManager));
+        require(address(incumbent.registry()) == address(rollup), "existing manager uses another rollup");
+        materializer = CloseFundingMaterializer(incumbent.closeFundingMaterializer());
+        require(address(materializer).code.length != 0, "existing materializer has no code");
+        require(address(materializer.rollup()) == address(rollup), "existing materializer uses another rollup");
+        IPinnedMleVerifierV2 adapter = materializer.backingMleVerifier();
+        require(adapter.allowedChainId() == block.chainid, "existing backing adapter chain mismatch");
+        MleVerifierV2 core = MleVerifierV2(adapter.core());
+        require(core.allowedChainId() == block.chainid, "existing backing core chain mismatch");
+        require(
+            core.verificationConfigDigest()
+                == vm.parseJsonBytes32(backingConfigJson, ".pinnedVerifier.verificationConfigDigest"),
+            "existing backing verification config mismatch"
+        );
+        require(
+            core.circuitConfigDigest() == vm.parseJsonBytes32(backingConfigJson, ".pinnedVerifier.circuitConfigDigest"),
+            "existing backing circuit config mismatch"
+        );
+        require(
+            core.whirParametersDigest() == vm.parseJsonBytes32(backingConfigJson, ".pinnedVerifier.whirParametersDigest"),
+            "existing backing WHIR config mismatch"
+        );
+        require(
+            address(materializer.lateIncomingMleVerifier()) == vm.envAddress("LATE_INCOMING_VERIFIER"),
+            "existing materializer uses another late-incoming adapter"
+        );
+    }
+
     /// @return rollup  the deployed IntmaxRollup
     /// @return sv      the deployed ChannelSettlementVerifier (the four live settlement VKs keyed:
     ///                 close, withdrawalClaim, postCloseClaim and cancelClose; the retired direct
@@ -266,10 +305,22 @@ contract DeployCloseCli is Script {
         // There is no post-deploy VK latch any more: an omitted or substituted configuration cannot
         // yield a materializer at all, so the deployment can never be announced with a wrong or
         // missing backing verifier.
-        (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingConfigJson);
-        CloseFundingMaterializer materializer =
-            new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
+        //
+        // The rollup installs ONE materializer, set by the first registered manager, and refuses
+        // any other (`InvalidChannelExitManager`). Every later channel on the same rollup therefore
+        // reuses it: EXISTING_SETTLEMENT_MANAGER names a sibling channel's registered manager, and
+        // its materializer must be bound to this rollup, the staged backing circuit configuration
+        // and the pinned late-incoming adapter before it is adopted.
+        CloseFundingMaterializer materializer;
+        address existingManager = _envOrAddress("EXISTING_SETTLEMENT_MANAGER", address(0));
+        if (existingManager == address(0)) {
+            (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingConfigJson);
+            materializer = new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
                 IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")));
+        } else {
+            require(existingRollup != address(0), "EXISTING_SETTLEMENT_MANAGER requires EXISTING_ROLLUP");
+            materializer = _existingMaterializer(rollup, existingManager, backingConfigJson);
+        }
 
         // 3. Deploy all four circuit-specific adapters before the parent verifier.  Distinct
         //    constructor slots make cross-statement replay and partial initialization impossible.

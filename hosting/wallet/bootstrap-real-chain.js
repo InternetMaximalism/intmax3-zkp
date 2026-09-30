@@ -18,6 +18,8 @@
 //   4. bundle    — public_close_prover turns the envelope into the close-backing bundle.
 //   5. settlement— `deploy-settlement` attaches the settlement stack to the channel's rollup and
 //                  registers the channel on L1 (cosigners only; delegates keep joining afterwards).
+//                  A later channel reuses the rollup's close-funding materializer through a
+//                  sibling channel's manager.
 //   6. register  — the producer admits the channel after verifying the on-chain registration.
 //   7. exit kit  — installed for the registered head.
 //
@@ -96,6 +98,17 @@ function bundle(ch) {
   return dir;
 }
 
+// The rollup installs one close-funding materializer, set by its first settlement stack; every
+// later channel's stack must reuse it. Any channel already deployed on the same rollup names it
+// through its manager ('' for the first stack).
+function siblingManager(ch) {
+  const rollup = String(readJson(wc(ch, 'channel_backing.json')).rollup).toLowerCase();
+  const sibling = cliModule.CHANNELS.filter(other => other !== ch)
+    .map(other => wc(other, 'settlement.json')).filter(file => fs.existsSync(file)).map(readJson)
+    .find(binding => String(binding.rollup).toLowerCase() === rollup);
+  return sibling ? sibling.manager : '';
+}
+
 async function settlement(ch, bundleDir) {
   if (fs.existsSync(wc(ch, 'settlement.json'))) return step(ch, 'settlement', 'exists');
   for (const name of ['LATE_INCOMING_VERIFIER', 'LATE_MLE_CONFIG_PATH']) {
@@ -110,7 +123,10 @@ async function settlement(ch, bundleDir) {
     // That one refusal is a wait, not a failure: retry the same command until finality catches up.
     for (let attempt = 1; ; attempt++) {
       try {
-        cli(ch, ['deploy-settlement', RPC], { INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir });
+        cli(ch, ['deploy-settlement', RPC], {
+          INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir,
+          EXISTING_SETTLEMENT_MANAGER: siblingManager(ch),
+        });
         break;
       } catch (e) {
         const text = String((e && (e.stderr || e.message)) || e);

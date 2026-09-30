@@ -823,6 +823,10 @@ struct SettlementRuntimeCodeHashes {
 #[serde(deny_unknown_fields)]
 struct SettlementDeploymentIntent {
     late_incoming_verifier: String,
+    /// A sibling channel's registered manager whose close-funding materializer this deployment
+    /// reuses (the rollup installs exactly one). Empty for the rollup's first settlement stack.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    existing_settlement_manager: String,
     chain_id: u64,
     broadcaster: String,
     start_nonce: u64,
@@ -13311,6 +13315,7 @@ fn settlement_deployment_plan_digest(
     rollup: &str,
     state_digest: Bytes32,
     reg: &serde_json::Value,
+    existing_settlement_manager: &str,
 ) -> Result<Bytes32, String> {
     // Security-critical repo-owned sources for the existing-rollup attach and its linked v2
     // verifier libraries. Keeping this explicit makes relevant source changes invalidate --resume;
@@ -13368,6 +13373,11 @@ fn settlement_deployment_plan_digest(
     let reg_bytes =
         serde_json::to_vec(reg).map_err(|e| format!("serialize settlement record: {e}"))?;
     append_deployment_digest_field(&mut preimage, &reg_bytes);
+    // Appended only when set, so a first-stack plan keeps its historical digest.
+    if !existing_settlement_manager.is_empty() {
+        append_deployment_digest_field(&mut preimage, b"existing_settlement_manager");
+        append_deployment_digest_field(&mut preimage, strip0x(existing_settlement_manager).as_bytes());
+    }
 
     for relative in PLAN_FILES {
         let bytes = fs::read(contracts_dir.join(relative))
@@ -13410,8 +13420,10 @@ fn expected_settlement_deployment_intent(
 ) -> Result<SettlementDeploymentIntent, String> {
     let late_incoming_verifier = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
         .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?, 20, "late incoming verifier")?;
+    let existing_settlement_manager = existing_settlement_manager_env()?;
     Ok(SettlementDeploymentIntent {
         late_incoming_verifier,
+        existing_settlement_manager: existing_settlement_manager.clone(),
         chain_id,
         broadcaster: broadcaster.to_string(),
         start_nonce,
@@ -13425,7 +13437,84 @@ fn expected_settlement_deployment_intent(
             rollup,
             state_digest,
             reg,
+            &existing_settlement_manager,
         )?,
+    })
+}
+
+const EXISTING_SETTLEMENT_MANAGER_ENV: &str = "EXISTING_SETTLEMENT_MANAGER";
+
+/// The sibling manager named by `EXISTING_SETTLEMENT_MANAGER`, canonical lowercase hex, or empty.
+fn existing_settlement_manager_env() -> Result<String, String> {
+    match std::env::var(EXISTING_SETTLEMENT_MANAGER_ENV) {
+        Ok(value) if !value.trim().is_empty() => {
+            canonical_hex(value.trim(), 20, "existing settlement manager")
+        }
+        _ => Ok(String::new()),
+    }
+}
+
+/// The close-funding materializer (and its CloseAssetBacking adapter/core) a deployment reuses
+/// from a sibling channel's registered manager instead of creating.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReusedCloseFunding {
+    materializer: String,
+    backing_mle_core: String,
+    backing_mle_adapter: String,
+}
+
+/// Resolve and check the reused materializer before anything is staged or sent: the manager must
+/// be registered on THIS rollup, and its materializer bound to this rollup, the pinned
+/// late-incoming adapter and a CloseAssetBacking adapter carrying the staged configuration. The
+/// activation readback re-checks all of it at the finalized checkpoint.
+fn reused_close_funding(
+    rpc: &str,
+    chain_id: u64,
+    rollup: &str,
+    existing_manager: &str,
+    late_adapter: &str,
+    backing_pin: &SettlementMleV2ConfigPin,
+) -> Option<ReusedCloseFunding> {
+    if existing_manager.is_empty() {
+        return None;
+    }
+    let registered = cast_call(
+        rpc,
+        rollup,
+        "isRegisteredSettlementManager(address)(bool)",
+        &[existing_manager],
+    );
+    let registry = cast_call(rpc, existing_manager, "registry()(address)", &[]);
+    if registered != "true" || !strip0x(&registry).eq_ignore_ascii_case(&strip0x(rollup)) {
+        die(format!(
+            "{EXISTING_SETTLEMENT_MANAGER_ENV} {existing_manager} is not a settlement manager \
+             registered on rollup {rollup} (registered={registered}, registry={registry})"
+        ));
+    }
+    let materializer = cast_call(
+        rpc,
+        existing_manager,
+        "closeFundingMaterializer()(address)",
+        &[],
+    );
+    let materializer_rollup = cast_call(rpc, &materializer, "rollup()(address)", &[]);
+    let materializer_late = cast_call(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[]);
+    if !strip0x(&materializer_rollup).eq_ignore_ascii_case(&strip0x(rollup))
+        || !strip0x(&materializer_late).eq_ignore_ascii_case(&strip0x(late_adapter))
+    {
+        die(format!(
+            "materializer {materializer} of {existing_manager} is bound to rollup \
+             {materializer_rollup} and late-incoming adapter {materializer_late}, not \
+             {rollup} / {late_adapter}"
+        ));
+    }
+    let backing_mle_adapter = cast_call(rpc, &materializer, "backingMleVerifier()(address)", &[]);
+    let backing_mle_core =
+        require_mle_v2_pair_pin(rpc, chain_id, &backing_mle_adapter, None, backing_pin, None);
+    Some(ReusedCloseFunding {
+        materializer,
+        backing_mle_core,
+        backing_mle_adapter,
     })
 }
 
@@ -14232,6 +14321,46 @@ fn validate_settlement_mle_v2_pair(
 ///   13 ChannelSettlementManager
 ///   14 IntmaxRollup.registerSettlementManager
 /// There are no mutable VK initializers: every verifier binding is a constructor argument.
+/// The first stack's materializer CREATE: its constructor must bind the backing rollup, the
+/// CloseAssetBacking adapter created immediately before it, and the pinned late-incoming adapter.
+fn validate_created_materializer(
+    tx: &serde_json::Value,
+    rollup: &str,
+    backing_mle_adapter: &str,
+    late_incoming_verifier: &str,
+) -> Result<String, String> {
+    validate_settlement_tx_shape(
+        tx,
+        "CREATE",
+        "CloseFundingMaterializer",
+        None,
+        "close-funding materializer deploy",
+    )?;
+    let materializer =
+        settlement_artifact_contract_address(tx, "close-funding materializer deploy")?;
+    // Constructor arguments are checked against the creation input that was actually sent, never
+    // against Foundry's `arguments`: that field is a best-effort decode which locates the argument
+    // bytes by matching a compiled artifact, and it sliced this constructor two words early on a
+    // real Sepolia deployment whose on-chain bindings were correct. For static-argument
+    // constructors the initcode suffix is the complete, exact ABI encoding.
+    let encoded_materializer_constructor =
+        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier)?;
+    let materializer_input = tx
+        .get("transaction")
+        .and_then(|value| value.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "close-funding materializer deploy has no transaction.input".to_string())?;
+    if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
+        return Err(
+            "close-funding materializer is not bound to the backing rollup, the CloseAssetBacking \
+             adapter created by this run and the pinned late-incoming adapter: its creation input \
+             does not end in that constructor ABI"
+                .to_string(),
+        );
+    }
+    Ok(materializer)
+}
+
 fn validate_settlement_broadcast_value(
     artifact: &serde_json::Value,
     intent: &SettlementDeploymentIntent,
@@ -14239,7 +14368,14 @@ fn validate_settlement_broadcast_value(
     rollup: &str,
     mle_v2_pins: &[SettlementMleV2ConfigPin; 4],
     backing_pin: &SettlementMleV2ConfigPin,
+    reused: Option<&ReusedCloseFunding>,
 ) -> Result<SettlementBroadcastAddresses, String> {
+    if reused.is_some() == intent.existing_settlement_manager.is_empty() {
+        return Err(
+            "the reused close-funding materializer does not match the pinned deployment intent"
+                .to_string(),
+        );
+    }
     let artifact_chain = artifact
         .get("chain")
         .ok_or_else(|| "broadcast artifact has no chain".to_string())?;
@@ -14332,54 +14468,47 @@ fn validate_settlement_broadcast_value(
         settlement_artifact_contract_address(tx, &what)?;
         core_start += 1;
     }
-    const CORE_TRANSACTION_COUNT: usize = 15;
-    if transactions.len() != core_start + CORE_TRANSACTION_COUNT {
+    // The first stack on a rollup creates the CloseAssetBacking core/adapter and the materializer
+    // (3 CREATEs); a later channel reuses them and the rest of the layout shifts down by 3.
+    let close_funding_creates: usize = if reused.is_some() { 0 } else { 3 };
+    let core_transaction_count = close_funding_creates + 12;
+    if transactions.len() != core_start + core_transaction_count {
         return Err(format!(
             "broadcast artifact has {} core transactions after {core_start} library creates; \
-             expected exactly {CORE_TRANSACTION_COUNT}",
+             expected exactly {core_transaction_count}",
             transactions.len().saturating_sub(core_start)
         ));
     }
     let core = &transactions[core_start..];
-
-    let (backing_mle_core, backing_mle_adapter) =
-        validate_settlement_mle_v2_pair(&core[0], &core[1], intent.chain_id, backing_pin)?;
-
-    validate_settlement_tx_shape(
-        &core[2],
-        "CREATE",
-        "CloseFundingMaterializer",
-        None,
-        "close-funding materializer deploy",
-    )?;
-    let materializer =
-        settlement_artifact_contract_address(&core[2], "close-funding materializer deploy")?;
-    // Constructor arguments are checked against the creation input that was actually sent, never
-    // against Foundry's `arguments`: that field is a best-effort decode which locates the argument
-    // bytes by matching a compiled artifact, and it sliced this constructor two words early on a
-    // real Sepolia deployment whose on-chain bindings were correct. For static-argument
-    // constructors the initcode suffix is the complete, exact ABI encoding.
-    let encoded_materializer_constructor =
-        cast_encode_materializer_constructor(rollup, &backing_mle_adapter, &intent.late_incoming_verifier)?;
-    let materializer_input = core[2]
-        .get("transaction")
-        .and_then(|value| value.get("input"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "close-funding materializer deploy has no transaction.input".to_string())?;
-    if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
-        return Err(
-            "close-funding materializer is not bound to the backing rollup, the CloseAssetBacking \
-             adapter created by this run and the pinned late-incoming adapter: its creation input \
-             does not end in that constructor ABI"
-                .to_string(),
-        );
-    }
+    let at = |index: usize| &core[close_funding_creates + index];
+    let (backing_mle_core, backing_mle_adapter, materializer) = match reused {
+        Some(reused) => (
+            reused.backing_mle_core.clone(),
+            reused.backing_mle_adapter.clone(),
+            reused.materializer.clone(),
+        ),
+        None => {
+            let (backing_mle_core, backing_mle_adapter) = validate_settlement_mle_v2_pair(
+                &core[0],
+                &core[1],
+                intent.chain_id,
+                backing_pin,
+            )?;
+            let materializer = validate_created_materializer(
+                &core[2],
+                rollup,
+                &backing_mle_adapter,
+                &intent.late_incoming_verifier,
+            )?;
+            (backing_mle_core, backing_mle_adapter, materializer)
+        }
+    };
     let mut mle_v2_cores = Vec::with_capacity(4);
     let mut mle_v2_adapters = Vec::with_capacity(4);
     for (index, pin) in mle_v2_pins.iter().enumerate() {
         let (core_address, adapter_address) = validate_settlement_mle_v2_pair(
-            &core[3 + 2 * index],
-            &core[4 + 2 * index],
+            at(2 * index),
+            at(1 + 2 * index),
             intent.chain_id,
             pin,
         )?;
@@ -14394,19 +14523,20 @@ fn validate_settlement_broadcast_value(
         .map_err(|_| "internal MLE v2 adapter count mismatch".to_string())?;
 
     validate_settlement_tx_shape(
-        &core[11],
+        at(8),
         "CREATE",
         "ChannelSettlementVerifier",
         None,
         "settlement verifier deploy",
     )?;
-    let verifier = settlement_artifact_contract_address(&core[11], "settlement verifier deploy")?;
-    // The four ordered adapters, from the creation input itself (see the materializer above).
+    let verifier = settlement_artifact_contract_address(at(8), "settlement verifier deploy")?;
+    // The four ordered adapters, from the creation input itself (see the materializer).
     validate_settlement_creation_input_suffix(
-        &core[11],
+        at(8),
         &expected_settlement_verifier_constructor(&mle_v2_adapters)?,
         "settlement verifier deploy",
     )?;
+
 
     let member_count = reg["member_count"]
         .as_u64()
@@ -14427,7 +14557,7 @@ fn validate_settlement_broadcast_value(
         return Err("staged record has no valid block-proposer member".to_string());
     }
 
-    let register = &core[12];
+    let register = at(9);
     validate_settlement_tx_shape(
         register,
         "CALL",
@@ -14468,7 +14598,7 @@ fn validate_settlement_broadcast_value(
     }
     validate_settlement_call_input(register, "registerChannel")?;
 
-    let manager_deploy = &core[13];
+    let manager_deploy = at(10);
     validate_settlement_tx_shape(
         manager_deploy,
         "CREATE",
@@ -14479,6 +14609,8 @@ fn validate_settlement_broadcast_value(
     let manager =
         settlement_artifact_contract_address(manager_deploy, "settlement manager deploy")?;
     let mut deployed_addresses = HashSet::new();
+    // A reused materializer/backing pair is not created here, but it still must not coincide with
+    // any contract this run created.
     for address in [&materializer, &backing_mle_core, &backing_mle_adapter]
         .into_iter()
         .chain(mle_v2_cores.iter())
@@ -14559,7 +14691,7 @@ fn validate_settlement_broadcast_value(
         );
     }
 
-    let register_manager = &core[14];
+    let register_manager = at(11);
     validate_settlement_tx_shape(
         register_manager,
         "CALL",
@@ -14628,6 +14760,7 @@ fn validate_settlement_broadcast_artifact(
     rollup: &str,
     mle_v2_pins: &[SettlementMleV2ConfigPin; 4],
     backing_pin: &SettlementMleV2ConfigPin,
+    reused: Option<&ReusedCloseFunding>,
 ) -> Result<SettlementBroadcastAddresses, String> {
     let expected_relative = settlement_broadcast_artifact_relative_path(intent.chain_id);
     if intent.broadcast_artifact_path != expected_relative {
@@ -14657,7 +14790,7 @@ fn validate_settlement_broadcast_artifact(
         fs::read(&path).map_err(|e| format!("read broadcast artifact {}: {e}", path.display()))?;
     let artifact: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("parse broadcast artifact {}: {e}", path.display()))?;
-    validate_settlement_broadcast_value(&artifact, intent, reg, rollup, mle_v2_pins, backing_pin)
+    validate_settlement_broadcast_value(&artifact, intent, reg, rollup, mle_v2_pins, backing_pin, reused)
 }
 
 /// Adopt the exact final transaction from the pinned Foundry artifact only after its receipt is
@@ -14739,6 +14872,7 @@ mod settlement_broadcast_recovery_tests {
     fn intent() -> SettlementDeploymentIntent {
         SettlementDeploymentIntent {
             late_incoming_verifier: LATE_MLE_ADAPTER.to_string(),
+            existing_settlement_manager: String::new(),
             chain_id: CHAIN_ID,
             broadcaster: BROADCASTER.to_string(),
             start_nonce: START_NONCE,
@@ -15349,6 +15483,7 @@ mod settlement_broadcast_recovery_tests {
             ROLLUP,
             &pins,
             &backing,
+            None,
         )
         .unwrap();
         assert_eq!(strip0x(&addresses.verifier), strip0x(VERIFIER));
@@ -15382,6 +15517,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err(),
             "the backing adapter must bind the backing core created immediately before it"
@@ -15394,24 +15530,57 @@ mod settlement_broadcast_recovery_tests {
         let mut wrong_late_adapter = artifact.clone();
         wrong_late_adapter["transactions"][2]["transaction"]["input"] =
             materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER);
-        assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut materializer_on_other_rollup = artifact.clone();
         materializer_on_other_rollup["transactions"][2]["transaction"]["input"] =
             materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER);
-        assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         // Foundry's `arguments` is a best-effort decode that has sliced a correct constructor two
         // words early on Sepolia; it is not the authority and must neither accept nor refuse.
+        // A later channel on the same rollup reuses the materializer: the three close-funding
+        // CREATEs are absent and every other transaction moves down by three nonces.
+        let reused = ReusedCloseFunding {
+            materializer: MATERIALIZER.to_string(),
+            backing_mle_core: BACKING_MLE_CORE.to_string(),
+            backing_mle_adapter: BACKING_MLE_ADAPTER.to_string(),
+        };
+        let mut reused_intent = intent();
+        reused_intent.existing_settlement_manager = "0x".to_string() + &"77".repeat(20);
+        let mut reuse_artifact = artifact.clone();
+        {
+            let transactions = reuse_artifact["transactions"].as_array_mut().unwrap();
+            transactions.drain(0..3);
+            for (i, tx) in transactions.iter_mut().enumerate() {
+                tx["transaction"]["nonce"] = serde_json::json!(format!("0x{:x}", START_NONCE + i as u64));
+            }
+        }
+        let reused_addresses = validate_settlement_broadcast_value(
+            &reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&reused),
+        )
+        .unwrap();
+        assert_eq!(strip0x(&reused_addresses.materializer), strip0x(MATERIALIZER));
+        assert_eq!(strip0x(&reused_addresses.backing_mle_adapter), strip0x(BACKING_MLE_ADAPTER));
+        assert_eq!(strip0x(&reused_addresses.manager), strip0x(MANAGER));
+        assert_eq!(reused_addresses.registration_nonce, START_NONCE + 11);
+        // The reuse must be the pinned plan, in both directions, and the layouts cannot be mixed.
+        assert!(validate_settlement_broadcast_value(&reuse_artifact, &intent(), &reg, ROLLUP, &pins, &backing, Some(&reused)).is_err());
+        assert!(validate_settlement_broadcast_value(&reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, None).is_err());
+        assert!(validate_settlement_broadcast_value(&artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&reused)).is_err());
+        // The manager must be constructor-bound to the reused materializer, not another one.
+        let other_materializer = ReusedCloseFunding { materializer: MLE_ADAPTERS[0].to_string(), ..reused.clone() };
+        assert!(validate_settlement_broadcast_value(&reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&other_materializer)).is_err());
+
         // Attaching to an existing rollup: Foundry leaves the rollup CALLs unlabelled.
         let mut unlabelled_rollup_calls = artifact.clone();
         unlabelled_rollup_calls["transactions"][12]["contractName"] = serde_json::Value::Null;
         unlabelled_rollup_calls["transactions"][14]["contractName"] = serde_json::Value::Null;
-        assert!(validate_settlement_broadcast_value(&unlabelled_rollup_calls, &intent(), &reg, ROLLUP, &pins, &backing).is_ok());
+        assert!(validate_settlement_broadcast_value(&unlabelled_rollup_calls, &intent(), &reg, ROLLUP, &pins, &backing, None).is_ok());
         let mut mislabelled_call = artifact.clone();
         mislabelled_call["transactions"][12]["contractName"] = serde_json::json!("ChannelSettlementManager");
-        assert!(validate_settlement_broadcast_value(&mislabelled_call, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        assert!(validate_settlement_broadcast_value(&mislabelled_call, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut unlabelled_create = artifact.clone();
         unlabelled_create["transactions"][13]["contractName"] = serde_json::Value::Null;
-        assert!(validate_settlement_broadcast_value(&unlabelled_create, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        assert!(validate_settlement_broadcast_value(&unlabelled_create, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut misdecoded_arguments = artifact.clone();
         misdecoded_arguments["transactions"][2]["arguments"] = serde_json::json!([
             "0x815261296a610120826122b856fEa26469706673",
@@ -15420,7 +15589,7 @@ mod settlement_broadcast_recovery_tests {
         ]);
         misdecoded_arguments["transactions"][11]["arguments"] = serde_json::json!([]);
         assert!(
-            validate_settlement_broadcast_value(&misdecoded_arguments, &intent(), &reg, ROLLUP, &pins, &backing).is_ok(),
+            validate_settlement_broadcast_value(&misdecoded_arguments, &intent(), &reg, ROLLUP, &pins, &backing, None).is_ok(),
             "a correct creation input is accepted whatever Foundry's decoded arguments say"
         );
         let mut materializer_bound_to_other_adapter = artifact.clone();
@@ -15434,6 +15603,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err(),
             "the materializer must be constructor-bound to the CloseAssetBacking adapter"
@@ -15452,6 +15622,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err(),
             "a backing core deployed from the close config must fail the staged-config pin"
@@ -15467,8 +15638,7 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing
-            )
+                &backing, None)
             .is_err()
         );
 
@@ -15482,8 +15652,7 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing
-            )
+                &backing, None)
             .is_err()
         );
 
@@ -15497,8 +15666,7 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing
-            )
+                &backing, None)
             .is_err()
         );
 
@@ -15513,6 +15681,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err()
         );
@@ -15528,6 +15697,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err(),
             "a core whose raw constructor no longer matches the config-only fixture must fail"
@@ -15544,6 +15714,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err(),
             "each adapter must bind its immediately preceding circuit-specific core"
@@ -15560,6 +15731,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err()
         );
@@ -15576,6 +15748,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err()
         );
@@ -15589,8 +15762,7 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing
-            )
+                &backing, None)
             .is_err()
         );
 
@@ -15605,6 +15777,7 @@ mod settlement_broadcast_recovery_tests {
                 ROLLUP,
                 &pins,
                 &backing,
+                None,
             )
             .is_err()
         );
@@ -16296,6 +16469,22 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let late_pin = parse_settlement_mle_v2_config_pin(&late_config_value, "late incoming", "LATE_MLE_CONFIG_PATH")
         .unwrap_or_else(|e| die(e));
     require_mle_v2_pair_pin(rpc, chain_id, &late_adapter, None, &late_pin, None);
+    let existing_settlement_manager = existing_settlement_manager_env().unwrap_or_else(|e| die(e));
+    let reused = reused_close_funding(
+        rpc,
+        chain_id,
+        &backing_rollup_hex,
+        &existing_settlement_manager,
+        &late_adapter,
+        &backing_mle_v2_pin,
+    );
+    if let Some(reused) = &reused {
+        eprintln!(
+            "[deploy-settlement] reusing the rollup's close-funding materializer {} (backing \
+             adapter {}) from {existing_settlement_manager}",
+            reused.materializer, reused.backing_mle_adapter
+        );
+    }
     let data_dir = contracts_dir.join("test").join("data");
     let reg_path = data_dir.join("cli_reg_record.json");
     fs::write(
@@ -16340,6 +16529,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
                 &backing_rollup_hex,
                 &settlement_mle_v2_pins,
                 &backing_mle_v2_pin,
+                reused.as_ref(),
             )
             .unwrap_or_else(|e| {
                 die(format!(
@@ -16391,6 +16581,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         let forge_out = forge
             .env("EXISTING_ROLLUP", &backing_rollup_hex)
             .env("EXPECTED_BROADCASTER", &broadcaster)
+            .env(EXISTING_SETTLEMENT_MANAGER_ENV, &deployment_intent.existing_settlement_manager)
             .output()
             .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
         if !forge_out.status.success() {
@@ -16416,6 +16607,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_rollup_hex,
         &settlement_mle_v2_pins,
         &backing_mle_v2_pin,
+        reused.as_ref(),
     )
     .unwrap_or_else(|e| die(format!("post-broadcast artifact validation failed: {e}")));
     let rollup = backing_rollup_hex;

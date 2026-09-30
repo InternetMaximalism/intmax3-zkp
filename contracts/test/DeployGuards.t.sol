@@ -121,7 +121,14 @@ contract DeployCloseCliAttachHarness is DeployCloseCli {
         return super._read(f);
     }
 
+    address internal existingSettlementManager;
+
+    function setExistingSettlementManager(address manager) external {
+        existingSettlementManager = manager;
+    }
+
     function _envOrAddress(string memory name, address defaultValue) internal view override returns (address) {
+        if (keccak256(bytes(name)) == keccak256(bytes("EXISTING_SETTLEMENT_MANAGER"))) return existingSettlementManager;
         if (keccak256(bytes(name)) == keccak256(bytes("EXISTING_ROLLUP"))) return existingRollup;
         if (keccak256(bytes(name)) == keccak256(bytes("EXPECTED_BROADCASTER"))) return expectedBroadcaster;
         return super._envOrAddress(name, defaultValue);
@@ -943,21 +950,25 @@ contract DeployGuardsTest is Test {
     ///      the broadcaster and which DECLARES its `participant_root` — the attach branch refuses a
     ///      record that does not (`RegRecordLib.parse` re-derives and cross-checks it).
     function _attachRegRecord(address broadcaster) internal view returns (string memory) {
+        return _attachRegRecordFor(broadcaster, ATTACH_CHANNEL_ID);
+    }
+
+    function _attachRegRecordFor(address broadcaster, uint32 channelId) internal view returns (string memory) {
         bytes32[] memory pkGs = new bytes32[](ATTACH_MEMBER_COUNT);
         bytes32[] memory pkBs = new bytes32[](ATTACH_MEMBER_COUNT);
         bytes32[] memory regev = new bytes32[](ATTACH_MEMBER_COUNT);
         address[] memory recipients = new address[](ATTACH_MEMBER_COUNT);
         for (uint256 i = 0; i < ATTACH_MEMBER_COUNT; i++) {
-            pkGs[i] = keccak256(abi.encodePacked("attach_pk_g", i));
-            pkBs[i] = keccak256(abi.encodePacked("attach_pk_b", i));
-            regev[i] = keccak256(abi.encodePacked("attach_regev", i));
+            pkGs[i] = keccak256(abi.encodePacked("attach_pk_g", channelId, i));
+            pkBs[i] = keccak256(abi.encodePacked("attach_pk_b", channelId, i));
+            regev[i] = keccak256(abi.encodePacked("attach_regev", channelId, i));
         }
         recipients[0] = broadcaster;
         recipients[1] = alice;
         recipients[2] = bob;
         return string.concat(
             '{"channel_id":',
-            vm.toString(uint256(ATTACH_CHANNEL_ID)),
+            vm.toString(uint256(channelId)),
             ',"bp_member_slot":0,"member_count":',
             vm.toString(uint256(ATTACH_MEMBER_COUNT)),
             ',"reg_delegate_count":0,"active_delegate_count":0,"participant_root":"',
@@ -995,13 +1006,25 @@ contract DeployGuardsTest is Test {
         uint256 configBytes,
         bytes32 configSha
     ) internal pure returns (string memory) {
+        return _attachManifestFor(ATTACH_CHANNEL_ID, rollupAddr, backingMle, backingPis, mleSha, configBytes, configSha);
+    }
+
+    function _attachManifestFor(
+        uint32 channelId,
+        address rollupAddr,
+        string memory backingMle,
+        string memory backingPis,
+        bytes32 mleSha,
+        uint256 configBytes,
+        bytes32 configSha
+    ) internal pure returns (string memory) {
         return string.concat(
             '{"schemaVersion":3,"chainId":',
             vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
             ',"rollup":"',
             vm.toString(rollupAddr),
             '","channelId":',
-            vm.toString(uint256(ATTACH_CHANNEL_ID)),
+            vm.toString(uint256(channelId)),
             ',"selfVerified":true,"keyMaterialConsumed":false,"backingMleFile":"backing_mle.json","backingMleBytes":',
             vm.toString(bytes(backingMle).length),
             ',"backingMleSha256":"',
@@ -1136,6 +1159,73 @@ contract DeployGuardsTest is Test {
         );
         vm.expectRevert(bytes("backing config SHA-256 mismatch"));
         script.run();
+    }
+
+    /// The rollup installs ONE materializer (set by the first registered manager) and refuses any
+    /// other, so the second channel on a rollup must reuse the first channel's. This was found on
+    /// the Sepolia testnet: channel 8 could not be attached after channel 7.
+    function test_deployCloseCliScript_attach_secondChannelReusesTheRollupMaterializer() public {
+        (IntmaxRollup existing, address broadcaster) = _deployExistingRollup();
+        (, , ChannelSettlementManager first) = _attachChannel(existing, broadcaster, ATTACH_CHANNEL_ID, address(0));
+        uint32 second = ATTACH_CHANNEL_ID + 1;
+        (, , ChannelSettlementManager next) = _attachChannel(existing, broadcaster, second, address(first));
+
+        CloseFundingMaterializer materializer = CloseFundingMaterializer(first.closeFundingMaterializer());
+        assertEq(next.closeFundingMaterializer(), address(materializer), "the second channel must reuse the materializer");
+        assertEq(materializer.managerOfChannel(ATTACH_CHANNEL_ID), address(first));
+        assertEq(materializer.managerOfChannel(second), address(next));
+        assertTrue(existing.isRegisteredSettlementManager(address(next)));
+    }
+
+    /// Without the sibling manager the second channel deploys a fresh materializer, which the
+    /// rollup refuses: this is the failure the reuse path exists for.
+    function test_deployCloseCliScript_attach_secondChannelWithoutExistingManagerIsRefused() public {
+        (IntmaxRollup existing, address broadcaster) = _deployExistingRollup();
+        _attachChannel(existing, broadcaster, ATTACH_CHANNEL_ID, address(0));
+        DeployCloseCliAttachHarness script = _attachHarness(existing, broadcaster, ATTACH_CHANNEL_ID + 1);
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        script.run();
+    }
+
+    /// A materializer is adopted only through a manager the rollup actually registered.
+    function test_deployCloseCliScript_attach_unregisteredExistingManagerIsRefused() public {
+        (IntmaxRollup existing, address broadcaster) = _deployExistingRollup();
+        DeployCloseCliAttachHarness script = _attachHarness(existing, broadcaster, ATTACH_CHANNEL_ID);
+        script.setExistingSettlementManager(makeAddr("not_a_registered_manager"));
+        vm.expectRevert(bytes("existing manager is not registered"));
+        script.run();
+    }
+
+    function _attachHarness(IntmaxRollup existing, address broadcaster, uint32 channelId)
+        internal
+        returns (DeployCloseCliAttachHarness)
+    {
+        string memory backingMle = _attachBackingMleJson();
+        string memory backingPis = _attachBackingPublicInputsJson();
+        string memory backingConfig = _attachBackingConfigJson();
+        return new DeployCloseCliAttachHarness(
+            _attachRegRecordFor(broadcaster, channelId),
+            _attachManifestFor(
+                channelId,
+                address(existing),
+                backingMle,
+                backingPis,
+                sha256(bytes(backingMle)),
+                bytes(backingConfig).length,
+                sha256(bytes(backingConfig))
+            ),
+            address(existing),
+            broadcaster
+        );
+    }
+
+    function _attachChannel(IntmaxRollup existing, address broadcaster, uint32 channelId, address existingManager)
+        internal
+        returns (IntmaxRollup, ChannelSettlementVerifier, ChannelSettlementManager)
+    {
+        DeployCloseCliAttachHarness script = _attachHarness(existing, broadcaster, channelId);
+        script.setExistingSettlementManager(existingManager);
+        return script.run();
     }
 
     /// ... and a bundle scoped to a DIFFERENT rollup is refused: the backing proof is only meaningful
