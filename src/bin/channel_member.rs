@@ -771,10 +771,11 @@ struct StateSigningLedgerEntry {
     signature: MemberSignature,
 }
 
-/// Durable, sticky proof that this channel's participant identity has been frozen into an L1
-/// settlement manager.  It lives in the crash-safe private state rather than `settlement.json`:
-/// deleting a convenience address file or starting the CLI from another directory cannot turn a
-/// post-deployment channel back into one that admits new delegate keys.
+/// Durable, sticky record that this channel has an L1 settlement manager, and of the participant
+/// snapshot deployed into it (a prefix every later participant list must keep: delegates join
+/// after deployment, appended, never removed; the sig-cluster never changes). It lives in the
+/// crash-safe private state rather than `settlement.json`: deleting a convenience address file or
+/// starting the CLI from another directory cannot make a deployed channel deployable again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementBinding {

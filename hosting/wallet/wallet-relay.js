@@ -526,6 +526,28 @@ app.get('/api/cluster/status', (req, res) => {
   res.json({ enabled: true, ...cluster.status(reqChannel(req)), constants: cluster.constants });
 });
 
+// `init` is create OR join. A delegate JOIN advances the signed head (a new zero-balance delegate
+// at the boundary, H2=0, epoch+1) while leaving every asset cursor untouched. That new head must be
+// propagated to the daemon's THREE durable stores or the channel is left inconsistent: a later
+// deposit import fails "proposed record differs from the pinned channel record" / "settle chain
+// differs", and a refresh/send fails "SIGNER-INDEPENDENT EXIT REQUIRED: predecessor has no exit-kit
+// receipt". It follows whenever the live balance already holds a bound N-of-N head. That is NOT a
+// matter of applied transitions: an empty genesis (every public-chain channel, bootstrapped by
+// bootstrap-real-chain.js, and every devnet channel after the first) is bound before any
+// transition, and gating on `appliedTransitionCount > 0` left its joins unpropagated. Only a
+// funded genesis still awaiting adoption has no bound head; the first import's adoption binds it.
+async function followJoinedHead(ch, snapshot) {
+  const st = await producer.liveStatus(ch);
+  if (!st.signedHeadDigest || st.awaitingChannelBinding) return false;
+  const bound = String(st.signedHeadDigest).toLowerCase() === String(snapshot.state.digest).toLowerCase();
+  // An idempotent re-join of the bound head only completes a propagation a crash interrupted.
+  if (bound && JSON.parse(fs.readFileSync(wc(ch, 'cli_state.json'), 'utf8')).signer_exit_kit_receipt) return false;
+  if (!bound) await producer.liveBindSnapshot(ch, snapshot); // live balance follows (delegate-add gate)
+  await flushPublishedHead(ch);                              // producer public head follows
+  await installHeadExitKit(ch);                              // exit-kit receipt for the new head
+  return true;
+}
+
 app.post('/api/init', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
@@ -539,21 +561,8 @@ app.post('/api/init', (req, res) => {
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     require('../../api/lib/cli').ensureSettlement(ch);
-    // `init` is create OR join. A delegate JOIN advances the signed head (a new zero-balance
-    // delegate at the boundary, H2=0, epoch+1) while leaving every asset cursor untouched. That
-    // new head must be propagated to the daemon's THREE durable stores or the channel is left
-    // inconsistent: a later deposit's bind fails "settle chain differs"/"record changed", and a
-    // refresh/send fails "SIGNER-INDEPENDENT EXIT REQUIRED: predecessor has no exit-kit receipt".
-    // Only propagate once the channel actually has a bound live balance (a funded/adopted channel);
-    // an unbound genesis has nothing to advance and the first deposit's adoption binds it fresh.
-    // liveBindSnapshot is idempotent, so the initial create and idempotent re-joins are no-ops here.
     if (producer.liveSnapshotExists(ch)) {
-      const st = await producer.liveStatus(ch);
-      if (Number(st.appliedTransitionCount) > 0 && !st.awaitingChannelBinding) {
-        await producer.liveBindSnapshot(ch, snapshot); // live balance follows (delegate-add gate)
-        await flushPublishedHead(ch);                  // producer public head follows
-        await installHeadExitKit(ch);                  // install the exit-kit receipt for the new head
-      }
+      await followJoinedHead(ch, snapshot);
     } else {
       // An EMPTY-genesis channel (`setup-backing` with SETUP_BACKING_EMPTY_GENESIS — every local
       // channel after the first, see bootstrapBacking) has no backing deposit to adopt, so the
@@ -1687,6 +1696,14 @@ bootstrapBacking().then(() => {
     for (const ch of CHANNELS) cluster.watch(ch);
     cluster.startWatchdog();
   }
+  // Start the block producer now rather than on the first request: building its circuits takes
+  // minutes on a small host, and a public-chain relay never touches it during bootstrap, so the
+  // first browser join after every restart used to wait that long. Requests queue behind it.
+  const warmStart = Date.now();
+  producer.status().then(
+    () => console.log(`block producer ready (${Math.round((Date.now() - warmStart) / 1000)}s)`),
+    (e) => console.error('block producer failed to start:', e && e.message ? e.message : e),
+  );
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());
 }).catch((e) => {

@@ -211,6 +211,53 @@ other final-audit NO-GO items.
 Everything in this collapsed section describes the retired mutable-VK/tuple-proof deployment. It
 is preserved only as incident and infrastructure history.
 
+## Public-testnet bring-up with the maintained relay (`wallet-relay.js`)
+
+The public testnet runs the maintained relay (`hosting/wallet/wallet-relay.js`, the same pipeline
+as the local devnet: exit kits, live registration, deposit import), not `wallet-relay-ec2.js`.
+A public chain cannot deploy a channel's settlement stack inside a browser request, so the
+operator bootstraps each channel once, before the relay serves it.
+
+**Toolchain on the host (aarch64 Ubuntu 22.04):**
+- Foundry **v1.5.1** exactly (`foundryup --install v1.5.1`), as CI pins it. Newer `cast` wraps
+  `--json` output in an envelope the CLI does not read.
+- `FOUNDRY_SOLC=0.8.28`: svm's aarch64 solc 0.8.29 needs glibc 2.38 (the host has 2.35). The
+  rollup, late-incoming verifier and settlement stacks of this deployment are all compiled with
+  0.8.28; keep one compiler per deployment. (`FOUNDRY_SOLC_VERSION` is misparsed by Foundry.)
+- `MLE_VERIFIER_CHAIN_ID=<chain id>`: the explicit operator opt-in for pinning MLE verifiers to a
+  public chain (`FixtureLib.mleVerifierChainId`).
+- Build `channel_member` and `block_producer_service` with `--features authenticated-tail-receive`.
+  The late-incoming verifier, which a real-chain settlement requires, only exists for that balance
+  circuit, so the rollup, `setup-backing` and all config fixtures must come from the same build.
+
+**Order** (one writer per channel directory: the relay is stopped while this runs):
+1. Feature-build config fixtures → `Deploy.s.sol` (rollup) → `setup-backing` per channel →
+   `export_late_incoming_config` + `DeployLateIncomingVerifier.s.sol`.
+2. `BOOTSTRAP_STOP_AFTER=envelope node hosting/wallet/bootstrap-real-chain.js <ch>...` with the
+   relay's CLI/L1 environment plus `BOOTSTRAP_DELEGATE_RECIPIENT_<ch>` (the operator delegate's exit
+   address), `LATE_INCOMING_VERIFIER`, `LATE_MLE_CONFIG_PATH`, `CONTRACTS_DIR`. This writes the
+   genesis (with an operator delegate), the live balance, and `installed_exit_kit.json` (the head's
+   public backing envelope; it is installed only after settlement is ACTIVE).
+3. Prove the close-backing bundle wherever there is memory (about 16 GB peak, ~1 min per channel):
+   `public_close_prover --input installed_exit_kit.json --output-dir <ch dir>/public_close_bundle
+   --expected-channel-id <ch> --expected-chain-id <id> --expected-rollup <rollup>
+   --expected-balance-vd-sha256 <sha256 of balance_vd.bin>`.
+4. Run the bootstrap again without `BOOTSTRAP_STOP_AFTER`. Per channel it runs `deploy-settlement`
+   (waiting out L1 finality, ~15 min on Sepolia), verifies the `ChannelRegistered` log, registers
+   the channel in the producer, and installs the head exit kit. The first channel on a rollup
+   creates the rollup's single close-funding materializer; later channels reuse it through
+   `EXISTING_SETTLEMENT_MANAGER`, which the bootstrap fills from a sibling's `settlement.json`.
+5. Start the relay: systemd unit `intmax-wallet-relay` (`Conflicts=intmax-relay`), ExecStart
+   `node hosting/wallet/wallet-relay.js`, `EnvironmentFile=` holding `INTMAX_CHANNELS`, `RPC`, the
+   binaries, `CONTRACTS_DIR`, `INTMAX_COSIGNER_KEYFILE`, `CLI_RECIPIENT_SLOT_*`,
+   `INTMAX_L1_ACCOUNT` / `ETH_KEYSTORE_ACCOUNT` / `ETH_PASSWORD` (a path), `RELAY_PORT=443`,
+   `RELAY_HTTP_PORT=0`, `RELAY_HTTP_REDIRECT_PORT=80`, `RELAY_PUBLIC_DIR`, `RELAY_PKG_DIR`,
+   `TLS_CERT`, `TLS_KEY`. Verify `/api/health` reports the chain id and channels.
+
+A failed `deploy-settlement` is safe to re-run: while the broadcaster's nonce has not moved since
+the PREPARED write it restarts at the same nonce; once anything was sent it resumes only the
+validated broadcast artifact.
+
 ## Historical Sepolia procedure
 
 **Which script, for what — read this before running anything.**
