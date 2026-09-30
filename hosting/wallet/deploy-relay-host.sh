@@ -66,13 +66,15 @@ echo "$REV" > "$WORKDIR/REVISION"
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
 cd "$HOME/$DIR"
-echo "[deploy] stopping the relay"
-sudo systemctl stop intmax-wallet-relay
+# Everything that can fail runs while the old relay still serves; it is stopped only for the
+# short swap at the end. Sources and binaries replaced under a running relay are compatible for
+# that window: its JavaScript is already loaded, the daemon keeps its executable's old inode, and
+# a CLI change must stay command-compatible with the previous relay (review it as such).
+echo "[deploy] verifying $(wc -l < /tmp/submodules.sha256) submodule files against the pinned checkout"
+sha256sum --quiet -c /tmp/submodules.sha256
 tar -xzf /tmp/tree.tar.gz -C .
 echo "[deploy] verifying $(wc -l < /tmp/manifest.sha256) tracked files against the commit"
 sha256sum --quiet -c /tmp/manifest.sha256
-echo "[deploy] verifying $(wc -l < /tmp/submodules.sha256) submodule files against the pinned checkout"
-sha256sum --quiet -c /tmp/submodules.sha256
 echo "[deploy] node dependencies (declared manifests only)"
 (cd hosting/wallet && npm ci --ignore-scripts --no-audit --no-fund > /dev/null)
 (cd node && npm ci --ignore-scripts --no-audit --no-fund > /dev/null)
@@ -80,14 +82,13 @@ echo "[deploy] building binaries (authenticated-tail-receive)"
 cargo build --release --locked --features authenticated-tail-receive \
   --bin channel_member --bin block_producer_service --bin public_close_prover > /tmp/deploy-build.log 2>&1 \
   || { tail -30 /tmp/deploy-build.log; exit 1; }
-echo "[deploy] contracts-tail sources (its test/data keeps the feature-built configs)"
+echo "[deploy] swapping: stopping the relay"
+sudo systemctl stop intmax-wallet-relay
 rsync -a --delete --exclude 'test/data/' --exclude 'broadcast/' --exclude 'cache/' --exclude 'out/' contracts/ contracts-tail/
-echo "[deploy] public files"
 cp hosting/wallet/wallet-live.html hosting/wallet/public/index.html
 cp hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs \
   hosting/wallet/wallet-outbox.js hosting/wallet/wallet-transactions.js hosting/wallet/public/
 cp /tmp/REVISION DEPLOYED_REVISION
-echo "[deploy] starting the relay"
 sudo systemctl start intmax-wallet-relay
 for _ in $(seq 1 60); do curl -skf https://localhost/api/health > /dev/null && break; sleep 2; done
 curl -skf https://localhost/api/health
