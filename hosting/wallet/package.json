@@ -1,0 +1,10 @@
+{
+  "name": "intmax3-wallet-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "INTMAX3 wallet relay (wallet-relay.js) and its operator scripts. node/common's ethers resolves from node/package.json; install both: `npm ci` here and in node/.",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}

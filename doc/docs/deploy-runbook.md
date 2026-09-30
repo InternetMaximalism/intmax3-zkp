@@ -258,6 +258,31 @@ A failed `deploy-settlement` is safe to re-run: while the broadcaster's nonce ha
 the PREPARED write it restarts at the same nonce; once anything was sent it resumes only the
 validated broadcast artifact.
 
+**Rehearse first, every time.** `hosting/wallet/test/public-chain-rehearsal.sh` runs this whole
+procedure on a local anvil started with Sepolia's chain id (so every chain-id-gated branch takes
+its production path), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, and
+finality that advances an epoch at a time). `hosting/wallet/test/wallet-public-chain-e2e.js` then
+drives the production topology through `wallet-relay.js`: users joining operator-bootstrapped
+channels, deposits (including abandoned, foreign-recipient and non-member ones), intra- and
+inter-channel sends, receive-after-send, and a relay restart. Do not deploy what has not passed it.
+
+**Deploy.** `DEPLOY_HOST=ubuntu@<ip> DEPLOY_KEY=<pem> hosting/wallet/deploy-relay-host.sh` ships
+`git archive HEAD`, verifies every tracked file (and every submodule file) on the host against the
+commit's sha256 manifest, installs the declared Node dependencies (`hosting/wallet/package.json`,
+`node/package.json`), builds the binaries with the protocol feature, refreshes the public files,
+restarts `intmax-wallet-relay` and waits for `/api/health`. The host records the commit in
+`DEPLOYED_REVISION`. Never scp single files onto the host.
+
+**Deposits on a public chain** are consumed by the relay's deposit sequencer
+(`api/lib/deposit-sequencer.js`), not by the depositor's browser. The block producer accepts the
+rollup's deposits only in index order, for all channels at once, and a channel's live balance only
+accepts a deposit before its next transition; so every reorg-safe deposit is taken in order as soon
+as it appears, whoever is online. A deposit to a channel credits the slot whose bound exit address
+is the depositor. A deposit from an address that joined no slot is credited to the channel's
+operator delegate slot (the bootstrap delegate) and logged as `held in the operator delegate slot
+... for a refund`: refund it by hand. A deposit to any other recipient is only journaled. The
+sequencer's state and every outcome are in `wallet-live-work/producer/deposit-sequencer.json`.
+
 ## Historical Sepolia procedure
 
 **Which script, for what — read this before running anything.**
