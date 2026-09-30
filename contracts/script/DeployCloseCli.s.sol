@@ -76,7 +76,9 @@ contract DeployCloseCli is Script {
         string memory manifest = _read("close_asset_backing_manifest.json");
         backingJson = _read("close_asset_backing_mle.json");
         string memory backingPublicInputs = _read("close_asset_backing_public_inputs.json");
-        require(vm.parseJsonUint(manifest, ".schemaVersion") == 2, "unsupported public-close bundle schema");
+        // Bundle schema 3 (`public_close_prover::PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION`): wire-v3 MLE
+        // artifacts plus the backing circuit's proof-free deployment config, authenticated below.
+        require(vm.parseJsonUint(manifest, ".schemaVersion") == 3, "unsupported public-close bundle schema");
         require(vm.parseJsonUint(manifest, ".chainId") == block.chainid, "backing bundle chain mismatch");
         require(vm.parseJsonAddress(manifest, ".rollup") == expectedRollup, "backing bundle rollup mismatch");
         require(vm.parseJsonUint(manifest, ".channelId") == expectedChannelId, "backing bundle channel mismatch");
@@ -105,6 +107,21 @@ contract DeployCloseCli is Script {
         require(
             vm.parseJsonBytes32(manifest, ".backingPublicInputsSha256") == sha256(bytes(backingPublicInputs)),
             "backing public-input SHA-256 mismatch"
+        );
+        // The materializer's adapter is constructed from this config: it must be the bundle's own.
+        string memory backingConfig = _read("close_asset_backing_mle_config.json");
+        require(
+            keccak256(bytes(vm.parseJsonString(manifest, ".backingMleConfigFile")))
+                == keccak256(bytes("backing_mle_config.json")),
+            "backing bundle names an unexpected config file"
+        );
+        require(
+            vm.parseJsonUint(manifest, ".backingMleConfigBytes") == bytes(backingConfig).length,
+            "backing config length mismatch"
+        );
+        require(
+            vm.parseJsonBytes32(manifest, ".backingMleConfigSha256") == sha256(bytes(backingConfig)),
+            "backing config SHA-256 mismatch"
         );
     }
 

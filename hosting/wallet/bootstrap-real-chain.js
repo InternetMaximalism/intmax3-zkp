@@ -50,6 +50,9 @@ const HEX20 = /^0x[0-9a-fA-F]{40}$/;
 // Public slot label for the operator delegate's key derivation (not key material; see
 // `gen-contribution`). Distinct per channel so the delegates never share an identity.
 const OPERATOR_DELEGATE_LABEL = ch => String(900000 + ch);
+const FINALITY_RETRY_MS = 60 * 1000;
+const FINALITY_RETRIES = 60;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function step(ch, name, message) { console.log(`[ch${ch}] ${name}: ${message}`); }
 
@@ -93,7 +96,7 @@ function bundle(ch) {
   return dir;
 }
 
-function settlement(ch, bundleDir) {
+async function settlement(ch, bundleDir) {
   if (fs.existsSync(wc(ch, 'settlement.json'))) return step(ch, 'settlement', 'exists');
   for (const name of ['LATE_INCOMING_VERIFIER', 'LATE_MLE_CONFIG_PATH']) {
     if (!process.env[name]) throw new Error(`${name} is required to deploy the settlement stack`);
@@ -102,7 +105,20 @@ function settlement(ch, bundleDir) {
   const previous = process.env.INTMAX_CLI_TIMEOUT_MS;
   process.env.INTMAX_CLI_TIMEOUT_MS = String(3 * 3600 * 1000);
   try {
-    cli(ch, ['deploy-settlement', RPC], { INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir });
+    // The CLI activates the binding only from FINALIZED reads and exits, journal intact, while its
+    // transactions are still above the finalized head (~13 min on Sepolia after the broadcast).
+    // That one refusal is a wait, not a failure: retry the same command until finality catches up.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        cli(ch, ['deploy-settlement', RPC], { INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir });
+        break;
+      } catch (e) {
+        const text = String((e && (e.stderr || e.message)) || e);
+        if (!/not finalized yet|retry after the finalized head advances/.test(text) || attempt >= FINALITY_RETRIES) throw e;
+        step(ch, 'settlement', `waiting for L1 finality (attempt ${attempt})`);
+        await sleep(FINALITY_RETRY_MS);
+      }
+    }
   } finally {
     if (previous === undefined) delete process.env.INTMAX_CLI_TIMEOUT_MS; else process.env.INTMAX_CLI_TIMEOUT_MS = previous;
   }
@@ -121,7 +137,7 @@ async function bootstrap(ch) {
       step(ch, 'envelope', `written to ${await writeHeadExitKitEnvelope(ch)}`);
     }
     if (STOP_AFTER === 'envelope') return step(ch, 'stop', 'BOOTSTRAP_STOP_AFTER=envelope');
-    settlement(ch, bundle(ch));
+    await settlement(ch, bundle(ch));
   }
   await ensureLiveRegistration(ch, readJson(wc(ch, 'channel_snapshot.json')));
   step(ch, 'register', 'the producer admitted the L1-registered channel');

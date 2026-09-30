@@ -13451,6 +13451,31 @@ fn settlement_deploy_mode_for_intent(
     }
 }
 
+/// How a retry of a PREPARED deployment continues. A Forge run can fail before transaction zero
+/// (compiler, RPC, signer or script error): then no transaction of this attempt exists and there is
+/// no broadcast artifact to resume, and a --resume-only rule would wedge the channel in PREPARED
+/// for good, even after the failing script is fixed. The broadcaster's own nonce separates the cases: while both its mined and
+/// its pending nonce still equal the pinned start nonce, nothing at or after that nonce was sent,
+/// so a fresh run starts at the SAME nonce and creates the same addresses the intent pinned. Once
+/// the nonce has moved, transactions may belong to this attempt and only the validated --resume
+/// may continue. A nonce below the pin is inconsistent with the PREPARED write and fails closed.
+fn prepared_retry_mode(
+    latest_nonce: u64,
+    pending_nonce: u64,
+    start_nonce: u64,
+) -> Result<RealSettlementDeployMode, String> {
+    if latest_nonce < start_nonce || pending_nonce < latest_nonce {
+        return Err(format!(
+            "broadcaster nonce (latest {latest_nonce}, pending {pending_nonce}) is below the \
+             pinned start nonce {start_nonce}; refusing to guess which transactions were sent"
+        ));
+    }
+    if latest_nonce == start_nonce && pending_nonce == start_nonce {
+        return Ok(RealSettlementDeployMode::Fresh);
+    }
+    Ok(RealSettlementDeployMode::Resume)
+}
+
 /// Production phase 1.  The nonce/chain/signer/artifact identity is included in the SAME fsynced
 /// write that pauses delegate joins for the deployment, so there is no state in which transactions may have started but a
 /// retry is still allowed to invent a new Foundry run.
@@ -13481,7 +13506,7 @@ fn prepare_real_settlement_binding(
         if existing.status == SettlementBindingStatus::Active {
             die("settlement binding is already ACTIVE in cli_state.json");
         }
-        let persisted = existing.deployment.as_ref().unwrap_or_else(|| {
+        let persisted = existing.deployment.clone().unwrap_or_else(|| {
             die(
                 "real-chain settlement is PREPARED but has no broadcast recovery identity. \
                  Refusing a fresh forge run: transactions may already have been sent. Operator \
@@ -13499,8 +13524,44 @@ fn prepare_real_settlement_binding(
             reg,
         )
         .unwrap_or_else(|e| die(e));
-        settlement_deploy_mode_for_intent(true, Some(persisted), &expected)
-            .unwrap_or_else(|e| die(format!("cannot resume settlement deployment: {e}")))
+        let mode = prepared_retry_mode(
+            read_account_nonce(rpc, broadcaster, "latest"),
+            read_account_nonce(rpc, broadcaster, "pending"),
+            persisted.start_nonce,
+        )
+        .unwrap_or_else(|e| die(format!("cannot resume settlement deployment: {e}")));
+        if mode == RealSettlementDeployMode::Resume {
+            // Transactions may belong to the pinned attempt: only its exact identity may continue.
+            return settlement_deploy_mode_for_intent(true, Some(&persisted), &expected)
+                .unwrap_or_else(|e| die(format!("cannot resume settlement deployment: {e}")));
+        }
+        // Nothing was sent since the pin, so no transaction is bound to the old plan. Re-pin the
+        // plan (script, fixtures, record) at the SAME start nonce/block before the fresh run; the
+        // channel identity was already required to match above, and the chain/signer/late adapter
+        // must still be the pinned ones.
+        if expected.chain_id != persisted.chain_id
+            || !expected.broadcaster.eq_ignore_ascii_case(&persisted.broadcaster)
+            || !expected
+                .late_incoming_verifier
+                .eq_ignore_ascii_case(&persisted.late_incoming_verifier)
+        {
+            die(format!(
+                "cannot restart settlement deployment: persisted identity {persisted:?} names a \
+                 different chain, broadcaster or late-incoming adapter than this run {expected:?}"
+            ));
+        }
+        if expected != persisted {
+            eprintln!(
+                "[deploy-settlement] nothing was sent since start nonce {}; re-pinning the plan \
+                 digest {:?} -> {:?}",
+                persisted.start_nonce, persisted.plan_digest, expected.plan_digest
+            );
+            if let Some(binding) = state.settlement_binding.as_mut() {
+                binding.deployment = Some(expected);
+            }
+            save_state(state);
+        }
+        RealSettlementDeployMode::Fresh
     } else {
         let latest_nonce = read_account_nonce(rpc, broadcaster, "latest");
         let pending_nonce = read_account_nonce(rpc, broadcaster, "pending");
@@ -14049,7 +14110,13 @@ fn validate_settlement_tx_shape(
     if settlement_artifact_string(tx, "transactionType", what)? != expected_type {
         return Err(format!("{what} is not a {expected_type} transaction"));
     }
-    if settlement_artifact_string(tx, "contractName", what)? != expected_contract {
+    // `contractName` is Foundry's label, not an authority. It names every contract the run
+    // created, but a CALL into a contract created elsewhere (the existing rollup a settlement
+    // stack attaches to) carries null. The CALL's target (`validate_settlement_call_target`) and
+    // its re-encoded calldata (`validate_settlement_call_input`) are what bind it.
+    let label_optional = expected_type == "CALL"
+        && tx.get("contractName").is_some_and(serde_json::Value::is_null);
+    if !label_optional && settlement_artifact_string(tx, "contractName", what)? != expected_contract {
         return Err(format!("{what} is not for {expected_contract}"));
     }
     if let Some(prefix) = expected_function_prefix {
@@ -14287,19 +14354,11 @@ fn validate_settlement_broadcast_value(
     )?;
     let materializer =
         settlement_artifact_contract_address(&core[2], "close-funding materializer deploy")?;
-    let materializer_args =
-        settlement_artifact_args(&core[2], "close-funding materializer deploy")?;
-    if materializer_args.len() != 3
-        || !strip0x(materializer_args[0]).eq_ignore_ascii_case(&strip0x(rollup))
-        || !strip0x(materializer_args[1]).eq_ignore_ascii_case(&strip0x(&backing_mle_adapter))
-        || !strip0x(materializer_args[2]).eq_ignore_ascii_case(&strip0x(&intent.late_incoming_verifier))
-    {
-        return Err(
-            "close-funding materializer is not bound to the backing rollup and the CloseAssetBacking \
-             adapter created by this run"
-                .to_string(),
-        );
-    }
+    // Constructor arguments are checked against the creation input that was actually sent, never
+    // against Foundry's `arguments`: that field is a best-effort decode which locates the argument
+    // bytes by matching a compiled artifact, and it sliced this constructor two words early on a
+    // real Sepolia deployment whose on-chain bindings were correct. For static-argument
+    // constructors the initcode suffix is the complete, exact ABI encoding.
     let encoded_materializer_constructor =
         cast_encode_materializer_constructor(rollup, &backing_mle_adapter, &intent.late_incoming_verifier)?;
     let materializer_input = core[2]
@@ -14309,7 +14368,9 @@ fn validate_settlement_broadcast_value(
         .ok_or_else(|| "close-funding materializer deploy has no transaction.input".to_string())?;
     if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
         return Err(
-            "close-funding materializer creation input does not end in its inspected rollup/adapter constructor ABI"
+            "close-funding materializer is not bound to the backing rollup, the CloseAssetBacking \
+             adapter created by this run and the pinned late-incoming adapter: its creation input \
+             does not end in that constructor ABI"
                 .to_string(),
         );
     }
@@ -14340,18 +14401,7 @@ fn validate_settlement_broadcast_value(
         "settlement verifier deploy",
     )?;
     let verifier = settlement_artifact_contract_address(&core[11], "settlement verifier deploy")?;
-    let verifier_args = settlement_artifact_args(&core[11], "settlement verifier deploy")?;
-    if verifier_args.len() != 4
-        || verifier_args
-            .iter()
-            .zip(&mle_v2_adapters)
-            .any(|(actual, expected)| !strip0x(actual).eq_ignore_ascii_case(&strip0x(expected)))
-    {
-        return Err(
-            "ChannelSettlementVerifier is not bound to the four ordered pinned-v2 adapters"
-                .to_string(),
-        );
-    }
+    // The four ordered adapters, from the creation input itself (see the materializer above).
     validate_settlement_creation_input_suffix(
         &core[11],
         &expected_settlement_verifier_constructor(&mle_v2_adapters)?,
@@ -15278,6 +15328,18 @@ mod settlement_broadcast_recovery_tests {
     }
 
     #[test]
+    fn prepared_retry_restarts_only_while_nothing_was_sent() {
+        // Forge failed before transaction zero: nothing mined or pending past the pin.
+        assert_eq!(prepared_retry_mode(40, 40, 40), Ok(RealSettlementDeployMode::Fresh));
+        // Anything sent since the pin, mined or still pending, may belong to this attempt.
+        assert_eq!(prepared_retry_mode(41, 41, 40), Ok(RealSettlementDeployMode::Resume));
+        assert_eq!(prepared_retry_mode(40, 41, 40), Ok(RealSettlementDeployMode::Resume));
+        // Inconsistent with the PREPARED write: fail closed.
+        assert!(prepared_retry_mode(39, 39, 40).is_err());
+        assert!(prepared_retry_mode(41, 40, 40).is_err());
+    }
+
+    #[test]
     fn artifact_is_bound_to_chain_sender_nonce_rollup_and_snapshot_constructor() {
         let (artifact, reg, pins, backing) = artifact();
         let addresses = validate_settlement_broadcast_value(
@@ -15324,12 +15386,46 @@ mod settlement_broadcast_recovery_tests {
             .is_err(),
             "the backing adapter must bind the backing core created immediately before it"
         );
+        // The materializer's bindings are read from the creation input that was sent.
+        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str| {
+            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late).unwrap();
+            serde_json::json!(format!("0x6002{}", strip0x(&encoded)))
+        };
         let mut wrong_late_adapter = artifact.clone();
-        wrong_late_adapter["transactions"][2]["arguments"][2] = serde_json::json!(BACKING_MLE_ADAPTER);
+        wrong_late_adapter["transactions"][2]["transaction"]["input"] =
+            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER);
         assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        let mut materializer_on_other_rollup = artifact.clone();
+        materializer_on_other_rollup["transactions"][2]["transaction"]["input"] =
+            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER);
+        assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        // Foundry's `arguments` is a best-effort decode that has sliced a correct constructor two
+        // words early on Sepolia; it is not the authority and must neither accept nor refuse.
+        // Attaching to an existing rollup: Foundry leaves the rollup CALLs unlabelled.
+        let mut unlabelled_rollup_calls = artifact.clone();
+        unlabelled_rollup_calls["transactions"][12]["contractName"] = serde_json::Value::Null;
+        unlabelled_rollup_calls["transactions"][14]["contractName"] = serde_json::Value::Null;
+        assert!(validate_settlement_broadcast_value(&unlabelled_rollup_calls, &intent(), &reg, ROLLUP, &pins, &backing).is_ok());
+        let mut mislabelled_call = artifact.clone();
+        mislabelled_call["transactions"][12]["contractName"] = serde_json::json!("ChannelSettlementManager");
+        assert!(validate_settlement_broadcast_value(&mislabelled_call, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        let mut unlabelled_create = artifact.clone();
+        unlabelled_create["transactions"][13]["contractName"] = serde_json::Value::Null;
+        assert!(validate_settlement_broadcast_value(&unlabelled_create, &intent(), &reg, ROLLUP, &pins, &backing).is_err());
+        let mut misdecoded_arguments = artifact.clone();
+        misdecoded_arguments["transactions"][2]["arguments"] = serde_json::json!([
+            "0x815261296a610120826122b856fEa26469706673",
+            "0x723019ccEcb518A5b7Cacc554A1fFf49096db72c",
+            "0x1c00330000000000000000000000003c9D21C388"
+        ]);
+        misdecoded_arguments["transactions"][11]["arguments"] = serde_json::json!([]);
+        assert!(
+            validate_settlement_broadcast_value(&misdecoded_arguments, &intent(), &reg, ROLLUP, &pins, &backing).is_ok(),
+            "a correct creation input is accepted whatever Foundry's decoded arguments say"
+        );
         let mut materializer_bound_to_other_adapter = artifact.clone();
-        materializer_bound_to_other_adapter["transactions"][2]["arguments"][1] =
-            serde_json::json!(MLE_ADAPTERS[0]);
+        materializer_bound_to_other_adapter["transactions"][2]["transaction"]["input"] =
+            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER);
         assert!(
             validate_settlement_broadcast_value(
                 &materializer_bound_to_other_adapter,
@@ -16217,8 +16313,9 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
 
     // The PREPARED write below pauses delegate joins until this deployment is ACTIVE.  It includes the
     // exact chain/signer/start nonce and local-input digest, and is fsynced before Forge can send
-    // transaction zero.  An existing PREPARED binding always selects --resume; it never starts a
-    // fresh script run with shifted nonces and orphan CREATE addresses.
+    // transaction zero.  An existing PREPARED binding selects --resume, or a fresh run at the SAME
+    // pinned start nonce only while the broadcaster has sent nothing since (`prepared_retry_mode`);
+    // it never starts a run with shifted nonces and orphan CREATE addresses.
     let deploy_mode = prepare_real_settlement_binding(
         rpc,
         &contracts_dir,
@@ -16278,8 +16375,10 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             // registrations target contracts created earlier in the same run), and a public
             // network can reorder or drop a parallel batch.
             "--slow",
-            "--code-size-limit",
-            "50000",
+            // No --code-size-limit here (unlike the anvil paths): a public chain enforces EIP-170
+            // and EIP-3860 itself, so a raised simulation limit only hides a deployment the chain
+            // will reject. It also applies twice its value to the SCRIPT contract's initcode,
+            // which forge otherwise exempts, and DeployCloseCli is far above 100 000 bytes.
         ]);
         if deploy_mode == RealSettlementDeployMode::Resume {
             forge.arg("--resume");
@@ -16297,8 +16396,9 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         if !forge_out.status.success() {
             die(format!(
                 "forge deploy-settlement ({}) FAILED while cli_state remains PREPARED. A retry \
-                 will validate and resume only the pinned artifact; it will never start a new \
-                 nonce sequence.\nstdout: {}\nstderr: {}",
+                 resumes the validated pinned artifact, or restarts at the same pinned start nonce \
+                 if the broadcaster has sent nothing since; it never starts a shifted nonce \
+                 sequence.\nstdout: {}\nstderr: {}",
                 plan.script(),
                 String::from_utf8_lossy(&forge_out.stdout),
                 String::from_utf8_lossy(&forge_out.stderr)

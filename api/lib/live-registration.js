@@ -21,7 +21,9 @@ function rpc(method, params) {
 function registrationLogs(ch) {
   const settlement = cli.readJson(cli.wc(ch, 'settlement.json'));
   const checkpoint = settlement.activation_checkpoint;
-  const head = checkpoint ? Number(checkpoint.block_number) : Number(BigInt(rpc('eth_blockNumber', [])));
+  // settlement.json serializes the checkpoint camelCase (`L1FinalizedCheckpoint`).
+  const head = checkpoint ? Number(checkpoint.blockNumber) : Number(BigInt(rpc('eth_blockNumber', [])));
+  if (!Number.isSafeInteger(head) || head < 0) throw new Error(`channel ${ch} settlement has no valid activation block`);
   const address = cli.rollupOf(ch);
   for (let to = head; to >= 0; to -= LOG_WINDOW) {
     const from = Math.max(0, to - LOG_WINDOW + 1);

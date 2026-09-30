@@ -978,11 +978,25 @@ contract DeployGuardsTest is Test {
     ///      authenticates, bound to `rollupAddr` and to the SHA-256 of the exact staged bytes.
     function _attachManifest(address rollupAddr, string memory backingMle, string memory backingPis, bytes32 mleSha)
         internal
-        pure
+        view
         returns (string memory)
     {
+        string memory backingConfig = _attachBackingConfigJson();
+        return _attachManifestWithConfig(
+            rollupAddr, backingMle, backingPis, mleSha, bytes(backingConfig).length, sha256(bytes(backingConfig))
+        );
+    }
+
+    function _attachManifestWithConfig(
+        address rollupAddr,
+        string memory backingMle,
+        string memory backingPis,
+        bytes32 mleSha,
+        uint256 configBytes,
+        bytes32 configSha
+    ) internal pure returns (string memory) {
         return string.concat(
-            '{"schemaVersion":2,"chainId":',
+            '{"schemaVersion":3,"chainId":',
             vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
             ',"rollup":"',
             vm.toString(rollupAddr),
@@ -994,6 +1008,10 @@ contract DeployGuardsTest is Test {
             vm.toString(mleSha),
             '","backingPublicInputCount":34,"backingPublicInputsFile":"backing_public_inputs.json","backingPublicInputsSha256":"',
             vm.toString(sha256(bytes(backingPis))),
+            '","backingMleConfigFile":"backing_mle_config.json","backingMleConfigBytes":',
+            vm.toString(configBytes),
+            ',"backingMleConfigSha256":"',
+            vm.toString(configSha),
             '"}'
         );
     }
@@ -1098,6 +1116,25 @@ contract DeployGuardsTest is Test {
             broadcaster
         );
         vm.expectRevert(bytes("backing MLE SHA-256 mismatch"));
+        script.run();
+    }
+
+    /// ... the materializer's adapter config is authenticated the same way: a config that is not
+    /// the bundle's own must abort before broadcast.
+    function test_deployCloseCliScript_attach_rejectsBackingConfigNotInManifest() public {
+        (IntmaxRollup existing, address broadcaster) = _deployExistingRollup();
+        string memory backingMle = _attachBackingMleJson();
+        string memory backingPis = _attachBackingPublicInputsJson();
+        uint256 configBytes = bytes(_attachBackingConfigJson()).length;
+        DeployCloseCliAttachHarness script = new DeployCloseCliAttachHarness(
+            _attachRegRecord(broadcaster),
+            _attachManifestWithConfig(
+                address(existing), backingMle, backingPis, sha256(bytes(backingMle)), configBytes, keccak256("other config")
+            ),
+            address(existing),
+            broadcaster
+        );
+        vm.expectRevert(bytes("backing config SHA-256 mismatch"));
         script.run();
     }
 

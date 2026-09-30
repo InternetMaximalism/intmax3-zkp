@@ -31,16 +31,21 @@ function chain({ head, deployedAt, registeredAt }) {
   return calls;
 }
 test('finds a registration far below the finalized activation block within the RPC range cap', () => {
-  channel(7, { activation_checkpoint: { block_number: 9_000_000 } });
+  channel(7, { activation_checkpoint: { blockNumber: 9_000_000, chainId: 11155111 } });
   const calls = chain({ head: 9_000_100, deployedAt: 8_990_000, registeredAt: 8_994_321 });
   assert.deepEqual(registrationLogs(7), [{ blockNumber: 8_994_321 }]);
   assert.ok(calls.filter(m => m === 'eth_getLogs').length <= 6);
 });
 test('stops at the rollup deployment instead of scanning to genesis when nothing was registered', () => {
-  channel(8, { activation_checkpoint: { block_number: 9_000_000 } });
+  channel(8, { activation_checkpoint: { blockNumber: 9_000_000, chainId: 11155111 } });
   const calls = chain({ head: 9_000_000, deployedAt: 8_997_500, registeredAt: null });
   assert.deepEqual(registrationLogs(8), []);
   assert.equal(calls.filter(m => m === 'eth_getLogs').length, 3);
+});
+test('a settlement.json without a readable activation block fails instead of scanning nothing', () => {
+  channel(10, { activation_checkpoint: { block_number: 9_000_000 } });
+  chain({ head: 9_000_000, deployedAt: 0, registeredAt: 8_999_000 });
+  assert.throws(() => registrationLogs(10), /no valid activation block/);
 });
 test('a devnet settlement without a checkpoint scans back from the current head to block 0', () => {
   channel(9, {});
