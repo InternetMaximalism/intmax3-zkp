@@ -12570,10 +12570,24 @@ fn settlement_reg_json(
     })
 }
 
-/// WHAT THESE TESTS ARE FOR (security, not mechanics). The registration record is read by three
-/// deploy scripts, and until now ONE `delegate_count` field fed both the L1 registration and the
-/// settlement manager. Each direction of that conflation is a distinct defect, so there is one test
-/// per direction — a single test asserting "the two agree" would pass for either broken value.
+#[cfg(test)]
+mod cast_number_annotation_tests {
+    use super::strip_cast_number_annotations;
+
+    #[test]
+    fn strips_the_scientific_annotation_of_large_integers() {
+        assert_eq!(strip_cast_number_annotations("11155111 [1.115e7]\n"), "11155111");
+        assert_eq!(strip_cast_number_annotations("7\n100000 [1e5]"), "7\n100000");
+    }
+
+    #[test]
+    fn leaves_every_other_output_shape_unchanged() {
+        for value in ["3", "true", "0x3c9D21c388a0Ac5430c0cD9B1BACD19044BE9AE8", "0x", "[1, 2]", "(1, 2)", "\"a b\""] {
+            assert_eq!(strip_cast_number_annotations(value), value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod deployed_participant_prefix_tests {
     //! Delegates join after settlement deployment (appended, never removed); the sig-cluster does
@@ -12643,6 +12657,10 @@ mod deployed_participant_prefix_tests {
     }
 }
 
+/// WHAT THESE TESTS ARE FOR (security, not mechanics). The registration record is read by three
+/// deploy scripts, and until now ONE `delegate_count` field fed both the L1 registration and the
+/// settlement manager. Each direction of that conflation is a distinct defect, so there is one test
+/// per direction — a single test asserting "the two agree" would pass for either broken value.
 #[cfg(test)]
 mod settlement_reg_record_tests {
     use super::*;
@@ -15745,7 +15763,7 @@ fn cast_call(rpc: &str, to: &str, sig: &str, args: &[&str]) -> String {
     let mut argv: Vec<&str> = vec!["call", to, sig];
     argv.extend_from_slice(args);
     argv.extend_from_slice(&["--rpc-url", rpc]);
-    cast(&argv).trim().to_string()
+    strip_cast_number_annotations(&cast(&argv))
 }
 
 fn cast_call_at(rpc: &str, to: &str, sig: &str, args: &[&str], block_number: u64) -> String {
@@ -15753,7 +15771,34 @@ fn cast_call_at(rpc: &str, to: &str, sig: &str, args: &[&str], block_number: u64
     let mut argv: Vec<&str> = vec!["call", to, sig];
     argv.extend_from_slice(args);
     argv.extend_from_slice(&["--block", &block, "--rpc-url", rpc]);
-    cast(&argv).trim().to_string()
+    strip_cast_number_annotations(&cast(&argv))
+}
+
+/// `cast call` decodes an integer at or above 10 000 as `<decimal> [<scientific>]`, e.g.
+/// `11155111 [1.115e7]`. The bracket is display-only; every caller compares or parses the exact
+/// decimal, so drop it per output line (tuple returns print one value per line). Only a line
+/// that is exactly `<digits> [<annotation>]` is rewritten: addresses, hashes, bools and byte
+/// strings never have that shape and pass through unchanged.
+fn strip_cast_number_annotations(output: &str) -> String {
+    output
+        .trim()
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            match line.split_once(' ') {
+                Some((digits, annotation))
+                    if !digits.is_empty()
+                        && digits.bytes().all(|b| b.is_ascii_digit())
+                        && annotation.starts_with('[')
+                        && annotation.ends_with(']') =>
+                {
+                    digits
+                }
+                _ => line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn cast_code_at(rpc: &str, address: &str, block_number: u64) -> String {
@@ -16623,8 +16668,8 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
          Verified on-chain: rollup validity/withdrawal, all four settlement and the distinct \
          CloseAssetBacking pinned-v2 adapter/core/config bindings match their proof-free \
          configs; channel {channel_id} is registered; the manager is an authorized settlement \
-         manager; participant root/count match the signed live snapshot; and delegate joins are \
-         durably frozen in cli_state.json. All \
+         manager; and participant root/count match the signed live snapshot, recorded as the \
+         deployment snapshot in cli_state.json (delegates keep joining after it). All \
          activation reads were pinned to finalized block {} ({}).\n\
          The manager is attached to the EXISTING backing rollup {rollup}; no escrow moved and no \
          replacement rollup was created.\n\

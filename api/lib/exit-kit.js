@@ -109,9 +109,17 @@ async function cliWithPreparedExitKit(ch, args, extraEnv, options = {}) {
 // Archive the live balance service's kit for the channel's CURRENT head into the CLI state. Used
 // for kit-pending heads (a destination credit) and any head whose receipt was lost.
 async function installHeadExitKit(ch) {
+  await writeHeadExitKitEnvelope(ch);
+  return cliModule.cli(ch, ['install-exit-kit', INSTALL_FILE]);
+}
+
+// The public backing envelope of the CURRENT head, without installing it. On a public chain the
+// CLI refuses to install a kit before the settlement binding is ACTIVE (there is no production
+// context yet), but the pre-deployment close-backing bundle is proved from this same envelope.
+async function writeHeadExitKitEnvelope(ch) {
   const artifact = await producer.liveBackingArtifact(ch);
   writeJson(wc(ch, INSTALL_FILE), envelopeFor(ch, artifact));
-  return cliModule.cli(ch, ['install-exit-kit', INSTALL_FILE]);
+  return wc(ch, INSTALL_FILE);
 }
 
 // A child can save its output and then lose the final API journal acknowledgement. Recovery
@@ -133,6 +141,7 @@ function acknowledgePreparedExitKit(ch, acceptedState) {
 module.exports = {
   cliWithPreparedExitKit,
   installHeadExitKit,
+  writeHeadExitKitEnvelope,
   acknowledgePreparedExitKit,
   debitRequestId,
   envelopeFor,
