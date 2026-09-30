@@ -1696,14 +1696,21 @@ bootstrapBacking().then(() => {
     for (const ch of CHANNELS) cluster.watch(ch);
     cluster.startWatchdog();
   }
-  // Start the block producer now rather than on the first request: building its circuits takes
-  // minutes on a small host, and a public-chain relay never touches it during bootstrap, so the
-  // first browser join after every restart used to wait that long. Requests queue behind it.
+  // Start the block producer and open every channel's live balance now rather than on the first
+  // request: loading a live balance builds its circuits, which takes minutes on a small host, and
+  // a public-chain relay never touches either during bootstrap, so the first browser join after
+  // every restart used to wait that long. Requests queue behind the warm-up.
   const warmStart = Date.now();
-  producer.status().then(
-    () => console.log(`block producer ready (${Math.round((Date.now() - warmStart) / 1000)}s)`),
-    (e) => console.error('block producer failed to start:', e && e.message ? e.message : e),
-  );
+  const seconds = () => Math.round((Date.now() - warmStart) / 1000);
+  (async () => {
+    await producer.status();
+    console.log(`block producer ready (${seconds()}s)`);
+    for (const ch of CHANNELS) {
+      if (!producer.liveSnapshotExists(ch)) continue;
+      await producer.liveStatus(ch);
+      console.log(`channel ${ch} live balance ready (${seconds()}s)`);
+    }
+  })().catch((e) => console.error('block producer warm-up failed:', e && e.message ? e.message : e));
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());
 }).catch((e) => {
