@@ -29,9 +29,13 @@ function registrationLogs(ch) {
   const head = checkpoint ? Number(checkpoint.blockNumber) : Number(BigInt(rpc('eth_blockNumber', [])));
   if (!Number.isSafeInteger(head) || head < 0) throw new Error(`channel ${ch} settlement has no valid activation block`);
   const address = cli.rollupOf(ch);
+  // The registration was broadcast after the settlement deployment was PREPARED at `start_block`
+  // (recorded in the CLI state): scan down to it and no further. Without it (the local devnet),
+  // stop where the rollup has no code — a probe of historical state that public RPCs prune.
+  const floor = deploymentStartBlock(ch);
   let window = LOG_WINDOW;
-  for (let to = head; to >= 0;) {
-    const from = Math.max(0, to - window + 1);
+  for (let to = head; to >= floor;) {
+    const from = Math.max(floor, to - window + 1);
     let logs;
     try {
       logs = rpc('eth_getLogs', [{ address, fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), topics: topics(ch) }]);
@@ -42,10 +46,20 @@ function registrationLogs(ch) {
       continue;
     }
     if (logs.length) return logs;
-    if (from === 0 || rpc('eth_getCode', [address, '0x' + from.toString(16)]) === '0x') return [];
+    if (from === floor || (floor === 0 && rpc('eth_getCode', [address, '0x' + from.toString(16)]) === '0x')) return [];
     to = from - 1;
   }
   return [];
+}
+
+function deploymentStartBlock(ch) {
+  try {
+    const binding = cli.readJson(cli.wc(ch, 'cli_state.json')).settlement_binding;
+    const start = binding && binding.deployment && binding.deployment.start_block;
+    return Number.isSafeInteger(start) && start >= 0 ? start : 0;
+  } catch (_) {
+    return 0;
+  }
 }
 
 // Registration is shared producer state: serialize across channels, not only within one channel.

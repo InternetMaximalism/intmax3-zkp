@@ -51,7 +51,47 @@ function writeState(state) {
   fs.renameSync(temp, STATE_FILE());
 }
 
-// The first block holding the rollup's code: no Deposited log can be older.
+// Where the log scan starts: no Deposited log can be older than the rollup's deployment. Public
+// RPCs prune historical state (publicnode keeps a few thousand blocks), so it cannot be found by
+// probing old code once the rollup is a few days old; it is read, in order, from the operator's
+// explicit DEPOSIT_SCAN_FROM_BLOCK, from the forge broadcast that deployed this rollup
+// (CONTRACTS_DIR/broadcast/Deploy.s.sol/<chain>/run-*.json), and only then probed (archive RPCs,
+// the local devnet). An earlier block is harmless; a later one would stall the sequence.
+function scanStart(rollup, head) {
+  const configured = process.env.DEPOSIT_SCAN_FROM_BLOCK;
+  if (configured !== undefined && configured !== '') {
+    const block = Number(configured);
+    if (!Number.isSafeInteger(block) || block < 0) throw new Error('DEPOSIT_SCAN_FROM_BLOCK must be a block number');
+    return block;
+  }
+  const recorded = deploymentBlockFromBroadcast(rollup);
+  if (recorded !== null) return recorded;
+  try {
+    return deploymentBlock(rollup, head);
+  } catch (error) {
+    throw new Error(`cannot find the block rollup ${rollup} was deployed at (${String((error && (error.stderr || error.message)) || error).trim()}); `
+      + 'set DEPOSIT_SCAN_FROM_BLOCK to it (or to any earlier block)');
+  }
+}
+
+function deploymentBlockFromBroadcast(rollup) {
+  const dir = process.env.CONTRACTS_DIR;
+  if (!dir) return null;
+  const runs = path.join(dir, 'broadcast', 'Deploy.s.sol', String(cli.chainId()));
+  let files;
+  try { files = fs.readdirSync(runs).filter(f => /^run-.*\.json$/.test(f)); } catch (_) { return null; }
+  for (const file of files) {
+    let run;
+    try { run = JSON.parse(fs.readFileSync(path.join(runs, file), 'utf8')); } catch (_) { continue; }
+    const create = (run.transactions || []).find(t => t.transactionType === 'CREATE' && t.contractName === 'IntmaxRollup'
+      && String(t.contractAddress).toLowerCase() === rollup);
+    const receipt = create && (run.receipts || []).find(r => r.transactionHash === create.hash);
+    if (receipt && receipt.blockNumber !== undefined) return num(receipt.blockNumber);
+  }
+  return null;
+}
+
+// The first block holding the rollup's code (needs historical state: archive RPCs, the devnet).
 function deploymentBlock(rollup, head) {
   let low = 0, high = head;
   while (low < high) {
@@ -187,7 +227,7 @@ function run(withLock) {
     const rollup = rollupAddress();
     const head = num(rpc('eth_blockNumber', []));
     if (!state || state.rollup !== rollup) {
-      state = { rollup, scanFrom: deploymentBlock(rollup, head), pending: {}, outcomes: {} };
+      state = { rollup, scanFrom: scanStart(rollup, head), pending: {}, outcomes: {} };
     }
     scan(state, head);
     writeState(state);

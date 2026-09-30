@@ -58,6 +58,15 @@ test('a settlement.json without a readable activation block fails instead of sca
   chain({ head: 9_000_000, deployedAt: 0, registeredAt: 8_999_000 });
   assert.throws(() => registrationLogs(10), /no valid activation block/);
 });
+test('the scan stops at the recorded settlement start block and never probes pruned state', () => {
+  channel(13, { activation_checkpoint: { blockNumber: 9_000_000, chainId: 11155111 } });
+  fs.writeFileSync(cli.wc(13, 'cli_state.json'), JSON.stringify({ settlement_binding: { deployment: { start_block: 8_999_500 } } }));
+  const calls = chain({ head: 9_000_000, deployedAt: 0, registeredAt: null });
+  const original = cli.sh;
+  cli.sh = (bin, args) => { if (args[1] === 'eth_getCode') throw new Error('state at block is pruned'); return original(bin, args); };
+  assert.deepEqual(registrationLogs(13), []);
+  assert.equal(calls.filter(m => m === 'eth_getLogs').length, 1);
+});
 test('a devnet settlement without a checkpoint scans back from the current head to block 0', () => {
   channel(9, {});
   chain({ head: 2500, deployedAt: 0, registeredAt: 5 });

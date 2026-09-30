@@ -38,6 +38,9 @@ RPC="http://127.0.0.1:${PROXY_PORT}"
 # rollup is deployed far above block 0) at a size anvil mines in seconds.
 PREMINE_BLOCKS="${PREMINE_BLOCKS:-6000}"
 export RPC_LOGS_MAX_RANGE="${RPC_LOGS_MAX_RANGE:-2000}"
+# Historical state is pruned well inside the rehearsal's lifetime (it spans ~1 500 blocks after the
+# rollup deploys), so anything probing old state fails here as it does on publicnode.
+export RPC_STATE_RETENTION="${RPC_STATE_RETENTION:-300}"
 ACCOUNT=intmax-rehearsal-anvil0
 # anvil's PUBLIC dev accounts (worthless outside a local anvil).
 ANVIL0_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80

@@ -20,8 +20,10 @@ const OPERATOR = '0x' + 'aa'.repeat(20), ALICE = '0x' + 'a1'.repeat(20), STRANGE
 
 // ── chain, producer and import stubs ──────────────────────────────────────────────────────────
 let chain, nextIndex, liveAwaiting, imports, journaled, importBehaviour;
-function reset({ head = 5000, deployedAt = 100, cap = 1000 } = {}) {
-  chain = { head, deployedAt, cap, deposits: [] };
+function reset({ head = 5000, deployedAt = 100, cap = 1000, retention = Infinity } = {}) {
+  chain = { head, deployedAt, cap, retention, deposits: [] };
+  delete process.env.DEPOSIT_SCAN_FROM_BLOCK;
+  delete process.env.CONTRACTS_DIR;
   nextIndex = 0; liveAwaiting = {}; imports = []; journaled = []; importBehaviour = () => {};
   fs.rmSync(path.join(work, 'producer'), { recursive: true, force: true });
   for (const ch of [7, 8]) {
@@ -40,7 +42,11 @@ cli.sh = (_bin, args) => {
   const method = args[1];
   const params = args.slice(2, args.indexOf('--rpc-url')).map(p => (p.startsWith('{') || p.startsWith('[') ? JSON.parse(p) : p));
   if (method === 'eth_blockNumber') return JSON.stringify('0x' + chain.head.toString(16));
-  if (method === 'eth_getCode') return JSON.stringify(parseInt(params[1], 16) >= chain.deployedAt ? '0x60' : '0x');
+  if (method === 'eth_getCode') {
+    const block = parseInt(params[1], 16);
+    if (block < chain.head - chain.retention) throw Object.assign(new Error('cast rpc failed'), { stderr: `error code -32603: state at block #${block} is pruned` });
+    return JSON.stringify(block >= chain.deployedAt ? '0x60' : '0x');
+  }
   if (method === 'eth_getLogs') {
     const from = parseInt(params[0].fromBlock, 16), to = parseInt(params[0].toBlock, 16);
     if (to - from + 1 > chain.cap) throw Object.assign(new Error('cast rpc failed'), { stderr: `error code -32701: exceed maximum block range: ${chain.cap}` });
@@ -179,4 +185,39 @@ test('the log scan pages within any RPC range cap', async () => {
   deposit(1, { recipient: RECIPIENT[7], depositor: ALICE, block: 19000 });
   await sequencer.run(withLock);
   assert.deepEqual(imports.map(i => i.index), [0, 1]);
+});
+
+// Public RPCs prune historical state (publicnode keeps a few thousand blocks): the rollup's
+// deployment block cannot be probed once it is old, which is exactly how the first testnet
+// deployment of this sequencer failed.
+function broadcastArtifact(block) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'contracts-'));
+  const runs = path.join(dir, 'broadcast', 'Deploy.s.sol', '11155111');
+  fs.mkdirSync(runs, { recursive: true });
+  fs.writeFileSync(path.join(runs, 'run-latest.json'), JSON.stringify({
+    transactions: [{ transactionType: 'CREATE', contractName: 'IntmaxRollup', contractAddress: ROLLUP, hash: '0xaa' }],
+    receipts: [{ transactionHash: '0xaa', blockNumber: '0x' + block.toString(16) }],
+  }));
+  return dir;
+}
+
+test('with old state pruned, the scan starts at the deployment the forge broadcast recorded', async () => {
+  reset({ head: 50000, deployedAt: 100, retention: 10000 });
+  process.env.CONTRACTS_DIR = broadcastArtifact(100);
+  deposit(0, { recipient: RECIPIENT[7], depositor: ALICE, block: 150 });
+  await sequencer.run(withLock);
+  assert.deepEqual(imports.map(i => i.index), [0]);
+});
+
+test('an explicit DEPOSIT_SCAN_FROM_BLOCK is used first', async () => {
+  reset({ head: 50000, deployedAt: 100, retention: 10000 });
+  process.env.DEPOSIT_SCAN_FROM_BLOCK = '120';
+  deposit(0, { recipient: RECIPIENT[7], depositor: ALICE, block: 150 });
+  await sequencer.run(withLock);
+  assert.deepEqual(imports.map(i => i.index), [0]);
+});
+
+test('with old state pruned and no record, the operator is told what to configure', async () => {
+  reset({ head: 50000, deployedAt: 100, retention: 10000 });
+  await assert.rejects(sequencer.run(withLock), /set DEPOSIT_SCAN_FROM_BLOCK/);
 });

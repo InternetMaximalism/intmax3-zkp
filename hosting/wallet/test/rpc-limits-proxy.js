@@ -9,7 +9,10 @@
 //   * eth_getLogs without an explicit range ("latest"/omitted bounds count from block 0);
 //   * `finalized` / `safe` advance an EPOCH at a time (RPC_EPOCH_BLOCKS, default 32) and lag the
 //     head by two epochs, as on a proof-of-stake chain. Anvil moves them every block, which hides
-//     both the long finality wait and a read straddling a finality step.
+//     both the long finality wait and a read straddling a finality step;
+//   * historical STATE is pruned: a state read at a block older than head - RPC_STATE_RETENTION
+//     (default 10 000; publicnode keeps a few thousand to ~20 000) fails as publicnode's does.
+//     Anvil keeps every state, which hid a deployment-block probe that failed on the testnet.
 // Anvil itself is started with the public chain's id and gas limit (see the rehearsal script).
 //
 // Usage: node rpc-limits-proxy.js <listen port> <upstream url>
@@ -60,8 +63,20 @@ async function resolveTag(tag, head) {
   return Number(BigInt(tag));
 }
 
+const RETENTION = Number(process.env.RPC_STATE_RETENTION || 10000);
+const STATE_TAG_INDEX = { eth_call: 1, eth_getBalance: 1, eth_getCode: 1, eth_getTransactionCount: 1, eth_getStorageAt: 2, eth_getProof: 2 };
+
 // Returns an error object to answer with, or null to forward.
 async function refusal(call) {
+  const tagIndex = STATE_TAG_INDEX[call.method];
+  if (tagIndex !== undefined) {
+    const tag = (call.params || [])[tagIndex];
+    if (typeof tag === 'string' && /^0x[0-9a-f]+$/i.test(tag)) {
+      const block = Number(BigInt(tag));
+      if (block < (await blockNumber()) - RETENTION) return { code: -32603, message: `state at block #${block} is pruned` };
+    }
+    return null;
+  }
   if (call.method !== 'eth_getLogs') return null;
   const filter = (call.params && call.params[0]) || {};
   if (filter.blockHash) return null;
