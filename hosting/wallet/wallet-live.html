@@ -1492,8 +1492,44 @@ function describeToken(tokenIndex) {
 // ---- LocalStorage --------------------------------------------------------------------------
 const walletTransactions = new WalletTransactions(localStorage);
 const walletOutbox = new WalletOutbox();
-const sendOutboxKey = () => "inter:" + (myChannel ?? activeCh);
-const depositJournalKey = () => 'deposit:' + (myChannel ?? activeCh);
+// Saved Deposit/Send records (the recovery handles that prevent a second payment) are scoped to
+// their DEPLOYMENT — chain id and rollup — and channel. They used to be keyed by the channel number
+// alone, so a record an earlier deployment left in this browser (an abandoned rollup) was read by
+// the next deployment's channel with the same number, refused as "another wallet or deployment",
+// and, because Clear also refuses while a saved operation exists, blocked Deposit for good.
+// Records saved under the old key are adopted only when they belong to THIS deployment; any other
+// is left untouched (it is the only local trace of that deployment's payment) and never read.
+let deploymentScopePromise = null;
+function deploymentScope() {
+  if (!deploymentScopePromise) {
+    deploymentScopePromise = fetchDepositInfo().then(
+      (info) => info.chainId + ':' + String(info.rollup).toLowerCase(),
+      (error) => { deploymentScopePromise = null; throw error; });
+  }
+  return deploymentScopePromise;
+}
+function sameDeployment(record, scope) {
+  return !!record && String(record.chainId) + ':' + String(record.rollup).toLowerCase() === scope;
+}
+async function depositJournalKey() {
+  const scope = await deploymentScope(), ch = myChannel ?? activeCh, key = 'deposit:' + scope + ':' + ch;
+  let legacy = null;
+  try { legacy = walletTransactions.read('deposit:' + ch); } catch (_) { /* unreadable: never adopted */ }
+  if (legacy && sameDeployment(legacy.context, scope) && !walletTransactions.read(key)) {
+    walletTransactions.save(key, legacy);
+    walletTransactions.clear('deposit:' + ch);
+  }
+  return key;
+}
+async function sendOutboxKey() {
+  const scope = await deploymentScope(), ch = myChannel ?? activeCh, key = 'inter:' + scope + ':' + ch;
+  const legacy = await walletOutbox.read('inter:' + ch);
+  if (legacy && sameDeployment(legacy, scope) && !(await walletOutbox.read(key))) {
+    await walletOutbox.save(key, legacy);
+    await walletOutbox.clear('inter:' + ch);
+  }
+  return key;
+}
 const SEED_KEY = 'intmax_channel_seed';
 const CH_KEY = 'intmax_channel_id';
 function savedChannel() { return parseInt(localStorage.getItem(CH_KEY) || '', 10) || null; }
@@ -1787,7 +1823,7 @@ async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDeposi
   log('DEPOSIT: ' + shown + ' (' + amountBase + ' base units, token #' + token.tokenIndex
     + ') → rollup ' + info.rollup + ', value ' + value, 'zk');
   const context = {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()};
-  const saved = await walletTransactions.send(walletProvider, depositJournalKey(),
+  const saved = await walletTransactions.send(walletProvider, (await depositJournalKey()),
     {from:walletAccount,to:info.rollup,value,data}, context,
     {amount:amountBase,tokenIndex:token.tokenIndex,recipientSlot:mySlot,depositor:walletAccount});
   const txHash = saved.txHash;
@@ -1797,7 +1833,7 @@ async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDeposi
   try { receipt = await awaitReceipt(txHash, 'deposit'); }
   catch (error) {
     const observed = await walletProvider.request({method:'eth_getTransactionReceipt',params:[txHash]});
-    if (observed && observed.status === '0x0') walletTransactions.clear(depositJournalKey());
+    if (observed && observed.status === '0x0') walletTransactions.clear((await depositJournalKey()));
     throw error;
   }
   const blockNumber = parseInt(receipt.blockNumber, 16);
@@ -2646,7 +2682,7 @@ $('btnOpen').onclick = guard('account', async () => {
 
 $('btnClear').onclick = guard('clear', async () => {
   try {
-    if (await walletOutbox.read(sendOutboxKey()) || walletTransactions.read(depositJournalKey())) {
+    if (await walletOutbox.read((await sendOutboxKey())) || walletTransactions.read((await depositJournalKey()))) {
       log('Finish the saved Send or Deposit before clearing this account.', 'err'); return;
     }
   } catch (error) { log('Cannot check saved operations: '+error.message, 'err'); return; }
@@ -2681,7 +2717,7 @@ async function attemptSend(to, amountBase, token) {
   const info = await fetchDepositInfo();
   const pending = {version:1,kind:'solo',channel:myChannel ?? activeCh,chainId:info.chainId,rollup:info.rollup,
     identity:await sha256Hex(localStorage.getItem(SEED_KEY)),payload,slim};
-  await walletOutbox.save(sendOutboxKey(),pending);
+  await walletOutbox.save((await sendOutboxKey()),pending);
   return resumeSoloSend(pending, true);
 }
 
@@ -2716,7 +2752,7 @@ async function resumeSoloSend(pending, fresh = false) {
     }
     if (!state) throw new Error('The accepted send is waiting for its signed snapshot. Retry Send.');
     const report = JSON.parse(await call('finalize',{stateJson:JSON.stringify(state)}));
-    await walletOutbox.clear(sendOutboxKey());
+    await walletOutbox.clear((await sendOutboxKey()));
     return report;
   }
   const raw = await api('/api/snapshot',null,'GET');
@@ -2727,7 +2763,7 @@ async function resumeSoloSend(pending, fresh = false) {
   }
   const report = JSON.parse(await call('importChannel',{snapshotJson:raw}));
   setChannelFrom(raw); mySlot = report.slot;
-  await walletOutbox.clear(sendOutboxKey());
+  await walletOutbox.clear((await sendOutboxKey()));
   return report;
 }
 
@@ -2841,7 +2877,7 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   const pending = {version:1, channel:myChannel ?? activeCh, chainId:info.chainId, rollup:info.rollup,
     identity:await sha256Hex(localStorage.getItem(SEED_KEY)),
     body:JSON.stringify({debitPayload:built.debitPayload,transferDescriptor:built.transferDescriptor})};
-  await walletOutbox.save(sendOutboxKey(), pending);
+  await walletOutbox.save((await sendOutboxKey()), pending);
   return resumeInterSend(pending);
 }
 
@@ -2860,13 +2896,13 @@ async function resumeInterSend(pending) {
   const snapshot = await api('/api/snapshot', null, 'GET');
   const report = JSON.parse(await call('importChannel', {snapshotJson:snapshot}));
   setChannelFrom(snapshot); mySlot = report.slot;
-  await walletOutbox.clear(sendOutboxKey());
+  await walletOutbox.clear((await sendOutboxKey()));
   return report;
 }
 
 async function restoreSendControl() {
   try {
-    const pending = await walletOutbox.read(sendOutboxKey());
+    const pending = await walletOutbox.read((await sendOutboxKey()));
     if (!$('btnSend').disabled) $('btnSend').textContent = pending ? 'Send (resume)' : 'Send';
   } catch (error) { log('Could not read the saved transfer: ' + error.message, 'err'); }
 }
@@ -2925,7 +2961,7 @@ $('btnSend').onclick = guard('send', async () => {
   const tick = setInterval(() => { $('btnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnSend').disabled = true;
-    const pending = await walletOutbox.read(sendOutboxKey());
+    const pending = await walletOutbox.read((await sendOutboxKey()));
     if (pending) {
       showBalance(await (pending.kind === 'solo' ? resumeSoloSend(pending) : resumeInterSend(pending)));
       log('Saved transfer completed.', 'ok');
@@ -3065,7 +3101,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     infoPromise.catch(() => {}); // awaited below only on the paths that send; never an unhandled rejection
     await fetchTickets();
     if (ticketLoadFailed) throw new Error('Cannot verify pending deposits. Retry Deposit when the relay is available; no new funds were sent.');
-    const localDeposit = walletTransactions.read(depositJournalKey());
+    const localDeposit = walletTransactions.read((await depositJournalKey()));
     const pendingDeposit = ticketOfType('deposit');
     if (pendingDeposit && (pendingDeposit.status !== 'l1_done' || !HEX32_RE.test(String(pendingDeposit.params.txHash)))) {
       throw new Error('The pending deposit cannot yet be resumed. Its record was kept; no new funds were sent.');
@@ -3083,13 +3119,13 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     } else if (localDeposit) {
       await ensureWallet();
       const info = await infoPromise; await ensureChain(info);
-      const saved = await walletTransactions.recover(walletProvider, depositJournalKey(),
+      const saved = await walletTransactions.recover(walletProvider, (await depositJournalKey()),
         {chainId:info.chainId,rollup:info.rollup.toLowerCase(),account:walletAccount.toLowerCase()});
       if (saved) {
         try { await awaitReceipt(saved.txHash, 'deposit'); }
         catch (error) {
           const receipt = await walletProvider.request({method:'eth_getTransactionReceipt',params:[saved.txHash]});
-          if (receipt && receipt.status === '0x0') walletTransactions.clear(depositJournalKey());
+          if (receipt && receipt.status === '0x0') walletTransactions.clear((await depositJournalKey()));
           throw error;
         }
         dr = {...saved.details,txHash:saved.txHash};
@@ -3133,7 +3169,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     await loadTokenMeta(true);           // the deposit may be this channel's first position for the token
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);
-    walletTransactions.clear(depositJournalKey());
+    walletTransactions.clear((await depositJournalKey()));
     log('deposit imported into slot ' + mySlot, 'ok');
     $('depositModal').classList.add('hidden');
     await fetchTickets(); applyTicketState();
