@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Script, console2} from "forge-std/Script.sol";
+import {console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
+import {ProducerValidityConfig} from "./ProducerValidityConfig.sol";
 
 /// @title Deploy
 /// @notice Sepolia (and local anvil) deploy of IntmaxRollup with the REAL
@@ -26,13 +27,11 @@ import {FixtureLib} from "./FixtureLib.sol";
 ///
 ///         This mirrors, broadcast-side, the exact constructor construction in
 ///         `contracts/test/MleFinalizeE2E.t.sol` (the passing full-path test).
-contract Deploy is Script {
+contract Deploy is ProducerValidityConfig {
     /// @return rollup   the deployed IntmaxRollup (returned so tests can assert on its state)
     /// @return validityVerifier the immutable adapter for the validity circuit
     function run() external returns (IntmaxRollup rollup, PinnedMleVerifierV2 validityVerifier) {
-        string memory localConfig = vm.envOr("WALLET_VALIDITY_CONFIG", string(""));
-        require(bytes(localConfig).length == 0 || block.chainid == 31337, "wallet config override is local-only");
-        string memory mleJson = bytes(localConfig).length == 0 ? FixtureLib.loadMleConfig() : vm.readFile(localConfig);
+        string memory mleJson = _validityConfigJson();
         string memory blockJson = FixtureLib.loadBlock();
         // Read the withdrawal fixture BEFORE broadcasting: if it is missing, this reverts before a
         // single transaction is sent, rather than after the rollup is already live on chain.

@@ -23,6 +23,11 @@
 //   6. register  — the producer admits the channel after verifying the on-chain registration.
 //   7. exit kit  — installed for the registered head.
 //
+// Before any of it, the rollup itself is checked: its validity verifier must pin the circuit
+// configuration of THIS producer (verify-validity-deployment.js). A rollup pinned to anything else
+// can never finalize a block, so nothing deposited into it could ever be withdrawn; no channel is
+// set up on it. The check also writes the record the relay requires before it offers deposits.
+//
 // Every step is skipped when its result already exists, so the script can be re-run after a
 // failure. Prerequisites: the rollup is deployed and each channel dir holds its `setup-backing`
 // artifacts; the late-incoming verifier is deployed (contracts/script/DeployLateIncomingVerifier.s.sol).
@@ -43,6 +48,7 @@ const cliModule = require('../../api/lib/cli');
 const producer = require('../../api/lib/block-producer');
 const { installHeadExitKit, writeHeadExitKitEnvelope } = require('../../api/lib/exit-kit');
 const { ensureLiveRegistration } = require('../../api/lib/live-registration');
+const validityDeployment = require('../../api/lib/validity-deployment');
 
 const { cli, wc, readJson, writeJson, RPC } = cliModule;
 const REPO = path.resolve(__dirname, '..', '..');
@@ -129,6 +135,9 @@ async function settlement(ch, bundleDir) {
         cli(ch, ['deploy-settlement', RPC], {
           INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir,
           EXISTING_SETTLEMENT_MANAGER: siblingManager(ch),
+          // The attach checks the rollup's validity verifier against the producer's own export,
+          // the configuration the rollup was verified with before any channel was set up.
+          WALLET_VALIDITY_CONFIG: validityDeployment.exportedConfig(),
         });
         break;
       } catch (e) {
@@ -169,6 +178,10 @@ async function bootstrap(ch) {
   if (!channels.length || channels.some(ch => !Number.isSafeInteger(ch) || ch <= 0)) {
     throw new Error('usage: bootstrap-real-chain.js <channel> [<channel> ...]');
   }
+  const rollup = validityDeployment.servedRollup(channels);
+  if (!rollup) throw new Error('no channel is backed yet — run setup-backing first');
+  const record = validityDeployment.verify(rollup);
+  console.log(`[rollup] validity verifier matches the producer (arities ${record.arities}, circuit ${record.pins.circuitConfigDigest})`);
   for (const ch of channels) await bootstrap(ch);
 })().then(() => { producer.stop(); process.exit(0); }, (e) => {
   console.error(e && (e.stderr ? String(e.stderr) : (e.stack || e.message)) || e);

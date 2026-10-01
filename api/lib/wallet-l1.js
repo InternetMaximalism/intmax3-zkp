@@ -1,21 +1,11 @@
 'use strict';
 // The wallet relay's explicit Anvil workflow. Public chains must use the pinned operator publisher.
-const fs = require('fs'), path = require('path'), crypto = require('crypto');
+const fs = require('fs'), path = require('path');
 const { isDeepStrictEqual } = require('util');
 const cli = require('./cli'), producer = require('./block-producer');
 const { envelopeFor } = require('./exit-kit');
+const { exportedConfig: deploymentConfig } = require('./validity-deployment');
 let queue = Promise.resolve();
-function deploymentConfig() {
-  const arities = process.env.BLOCK_PRODUCER_ARITIES || '2,4,8,16';
-  if (!/^[0-9]+(,[0-9]+)*$/.test(arities)) throw new Error('invalid producer arities');
-  const dir = path.join(cli.REPO, 'proof-da-output');
-  fs.mkdirSync(dir, { recursive: true });
-  const build = crypto.createHash('sha256').update(fs.readFileSync(cli.CLI)).digest('hex').slice(0, 16);
-  const file = path.join(dir, 'wallet-validity-config-' + arities.replaceAll(',', '_') + '-' + build + '.json');
-  if (!fs.existsSync(file)) cli.sh(cli.CLI, ['export-wallet-validity-config', file, arities],
-    { timeout: Math.max(3_600_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0)) });
-  return file;
-}
 function configure(rollup) {
   if (cli.chainId() !== 31337) throw new Error('wallet L1 orchestration requires Anvil');
   const code = cli.sh('cast', ['code', rollup, '--rpc-url', cli.RPC]).trim();

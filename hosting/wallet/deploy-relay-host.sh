@@ -82,6 +82,19 @@ echo "[deploy] building binaries (authenticated-tail-receive)"
 cargo build --release --locked --features authenticated-tail-receive \
   --bin channel_member --bin block_producer_service --bin public_close_prover > /tmp/deploy-build.log 2>&1 \
   || { tail -30 /tmp/deploy-build.log; exit 1; }
+# A rollup verified to finalize the producer's blocks stays verified only for the binaries that were
+# checked (api/lib/validity-deployment.js). Re-verify the new build before it serves, so a build
+# whose validity circuits no longer match the deployed rollup never goes live. Without a record the
+# deployment offers no deposits and there is nothing to re-verify.
+WORK_DIR=$(grep -h '^INTMAX_WORK_DIR=' "$HOME/relay/relay.env" | cut -d= -f2- || true)
+if [ -f "${WORK_DIR:-$HOME/$DIR/wallet-live-work}/producer/validity-deployment.json" ]; then
+  echo "[deploy] re-verifying the rollup's validity verifier against the new build"
+  (set -a; . "$HOME/relay/relay.env"; set +a; node hosting/wallet/verify-validity-deployment.js > /tmp/deploy-verify.log 2>&1) || {
+    tail -5 /tmp/deploy-verify.log
+    echo "[deploy] ABORTED before the swap: the new build does not finalize on the deployed rollup. The running relay keeps serving; restarted on these binaries it would refuse deposits." >&2
+    exit 1
+  }
+fi
 echo "[deploy] swapping: stopping the relay"
 sudo systemctl stop intmax-wallet-relay
 rsync -a --delete --exclude 'test/data/' --exclude 'broadcast/' --exclude 'cache/' --exclude 'out/' contracts/ contracts-tail/

@@ -10,8 +10,11 @@
 # proxy (rpc-limits-proxy.js) enforces publicnode's eth_getLogs range cap.
 #
 # Usage: public-chain-rehearsal.sh <step>   (run the steps in order; each is re-runnable)
+#   build      build the binaries exactly as deploy-relay-host.sh does (a no-op when fresh): a
+#              rehearsal of a stale build rehearses something that will not be deployed
 #   chain      start anvil (chain id 11155111) + the limits proxy, pre-mine history, operator keystore
-#   rollup     feature-config contracts copy + Deploy.s.sol
+#   rollup     feature-config contracts copy + Deploy.s.sol, its validity verifier pinned to the
+#              producer's own exported configuration (never the arity-[2] test fixture)
 #   backing    setup-backing (empty genesis) for every channel
 #   late       export the late-incoming config from the channel Balance VD + deploy its verifier
 #   bootstrap  bootstrap-real-chain.js up to the envelope, public_close_prover, then settlement,
@@ -19,10 +22,9 @@
 #   relay      start wallet-relay.js (HTTPS :$RELAY_PORT, HTTP :$RELAY_PORT+1)
 #   env        print the environment (source it to run CLI commands by hand)
 #
-# Requires: target/release/{channel_member,block_producer_service,public_close_prover,
-# export_late_incoming_config} built with --features authenticated-tail-receive, Foundry v1.5.1,
-# and TAIL_CONFIGS=<dir with the feature-built *_config.json fixtures> (generate_*_fixture
-# --mle-config-only under the same feature).
+# Requires: Foundry v1.5.1 and TAIL_CONFIGS=<dir with the feature-built *_config.json fixtures>
+# (generate_*_fixture --mle-config-only under the same feature). `build` produces
+# target/release/{channel_member,block_producer_service,public_close_prover,export_late_incoming_config}.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -82,6 +84,14 @@ EOF
 
 load_env() { eval "$(environment)"; }
 
+step_build() {
+  (cd "$REPO" && cargo build --release --locked --features authenticated-tail-receive \
+    --bin channel_member --bin block_producer_service --bin public_close_prover \
+    --bin export_late_incoming_config > "$R/build.log" 2>&1) || { tail -30 "$R/build.log"; exit 1; }
+  grep -q "Finished" "$R/build.log" || { tail -30 "$R/build.log"; exit 1; }
+  echo "build: $(tail -1 "$R/build.log")"
+}
+
 step_chain() {
   if ! curl -s -o /dev/null "http://127.0.0.1:${ANVIL_PORT}"; then
     # Sepolia: 60M gas, EIP-170/3860 enforced (no --code-size-limit), finalized ~2 epochs behind.
@@ -120,7 +130,16 @@ step_rollup() {
   fi
   local artifact="$CONTRACTS/broadcast/Deploy.s.sol/$CHAIN_ID/run-latest.json"
   if [ ! -f "$artifact" ]; then
-    (cd "$CONTRACTS" && FRAUD_TREASURY=$OPERATOR forge script script/Deploy.s.sol --rpc-url "$RPC" \
+    # The producer's validity configuration, exported from this build's circuits (cached per build;
+    # minutes and ~15 GB the first time), placed where Foundry may read it (../proof-da-output/).
+    local exported config
+    exported=$(cd "$REPO" && node -e 'process.stdout.write(require("./api/lib/validity-deployment").exportedConfig())')
+    mkdir -p "$R/proof-da-output"
+    config="$R/proof-da-output/$(basename "$exported")"
+    cp "$exported" "$config"
+    (cd "$CONTRACTS" && FRAUD_TREASURY=$OPERATOR WALLET_VALIDITY_CONFIG="$config" \
+      WALLET_VALIDITY_CONFIG_SHA256="0x$(shasum -a 256 "$config" | cut -d' ' -f1)" \
+      forge script script/Deploy.s.sol --rpc-url "$RPC" \
       --account "$ACCOUNT" --broadcast --slow > "$R/rollup.log" 2>&1) || { tail -30 "$R/rollup.log"; exit 1; }
   fi
   node -e 'const a=require(process.argv[1]);const t=a.transactions.find(t=>t.contractName==="IntmaxRollup"&&t.transactionType==="CREATE");process.stdout.write(t.contractAddress)' "$artifact" > "$R/rollup"
@@ -192,6 +211,7 @@ step_relay() {
 }
 
 case "${1:-}" in
+  build) step_build ;;
   chain) step_chain ;;
   rollup) step_rollup ;;
   backing) step_backing ;;
@@ -199,5 +219,5 @@ case "${1:-}" in
   bootstrap) step_bootstrap ;;
   relay) step_relay ;;
   env) environment ;;
-  *) sed -n '2,24p' "$0"; exit 2 ;;
+  *) sed -n '2,27p' "$0"; exit 2 ;;
 esac

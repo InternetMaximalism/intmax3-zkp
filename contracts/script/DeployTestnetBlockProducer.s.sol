@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Script, console2} from "forge-std/Script.sol";
+import {console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
+import {ProducerValidityConfig} from "./ProducerValidityConfig.sol";
 
 /// @title DeployTestnetBlockProducer
 /// @notice ===================== TESTNET DEPLOY (anvil / testnet only) =====================
@@ -27,14 +28,14 @@ import {FixtureLib} from "./FixtureLib.sol";
 ///         Deployer key comes from the standard Foundry mechanism (`--private-key`/`--account`).
 ///         FRAUD_TREASURY defaults to the broadcaster on anvil (chainid 31337); it is REQUIRED
 ///         on any other chain (see IntmaxRollup deploy guard).
-contract DeployTestnetBlockProducer is Script {
+contract DeployTestnetBlockProducer is ProducerValidityConfig {
     // TESTNET: the designated block-production authority. Override with BLOCK_PRODUCER_ADMIN.
     address internal constant TESTNET_BLOCK_PRODUCER_ADMIN = 0x2C0BF10558adafDd21296CbF71dd6FE88c782C80;
 
     /// @return rollup   the deployed IntmaxRollup (returned so tests can assert on its state)
     /// @return validityVerifier the immutable adapter for the validity circuit
     function run() external returns (IntmaxRollup rollup, PinnedMleVerifierV2 validityVerifier) {
-        string memory mleJson = FixtureLib.loadMleConfig();
+        string memory mleJson = _validityConfigJson();
         string memory blockJson = FixtureLib.loadBlock();
         // Read the withdrawal fixture BEFORE broadcasting: a missing fixture must abort before the
         // rollup exists on chain, not after.

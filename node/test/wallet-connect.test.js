@@ -110,6 +110,8 @@ function depositHarness(balances) {
   let opens = 0;
   Object.assign(h.context, {
     fetchDepositInfo: async () => ({ chainId: 31337 }),
+    depositAvailable: () => true,
+    depositUnavailableMessage: () => 'Deposits are not available on this deployment: unverified rollup.',
     ensureChain: async () => {},
     renderDepositTokens: () => {},
     depositTokenOptions: [
@@ -145,6 +147,15 @@ test('join offers the ERC-20 selector when ETH is zero but an accepted token has
   assert.equal(h.context.$('depositToken').value, '2');
   assert.equal(h.requests[1].params[0].data, '0x70a08231' + '0'.repeat(24) + '11'.repeat(20));
   assert.equal(h.requests[1].params[0].to, '0x' + '22'.repeat(20));
+});
+
+test('a relay that offers no deposit keeps Deposit closed after join and says why', async () => {
+  const h = depositHarness({ eth_getBalance: '0x5', eth_call: '0x5' });
+  h.context.depositAvailable = () => false;
+  await h.context.offerDepositAfterJoin();
+  assert.equal(h.opens(), 0);
+  assert.equal(h.requests.length, 0, 'no wallet balance is even read');
+  assert.ok(h.events.some(e => e[0] === 'log' && /not available on this deployment: unverified rollup/.test(e[1])));
 });
 
 test('zero balances do not open Deposit; failed reads are not reported as zero', async () => {

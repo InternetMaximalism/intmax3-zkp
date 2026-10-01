@@ -30,6 +30,7 @@ function runner(mismatch = false) {
     if (name === './cli') return cli;
     if (name === './block-producer') return producer;
     if (name === './exit-kit') return {};
+    if (name === './validity-deployment') return { exportedConfig: () => '/pinned-config.json' };
     return require(name);
   } });
   return { run: () => module.exports.publish(7), state: () => ({ published, acknowledged }) };

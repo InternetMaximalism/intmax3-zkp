@@ -20,7 +20,7 @@ function harness() {
   const outbox = new Map();
   const context = {
     myChannel: 7, activeCh: 7, String,
-    fetchDepositInfo: async () => ({ chainId: 11155111, rollup: NEW_ROLLUP }),
+    fetchDeploymentInfo: async () => ({ chainId: 11155111, rollup: NEW_ROLLUP }),
     walletTransactions: new WalletTransactions(storage),
     walletOutbox: {
       read: async k => outbox.get(k),

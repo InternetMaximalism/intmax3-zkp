@@ -4,7 +4,7 @@ const html=fs.readFileSync(path.join(__dirname,'../../hosting/wallet/wallet-live
 const start=html.indexOf('async function resumeInterSend('),end=html.indexOf('// ---- SEND token selector',start);
 function harness({failed=false,wrong=false,verifyFailed=false}={}){
  const saved={version:1,channel:7,chainId:31337,rollup:'rollup',identity:'identity',body:'exact original proof'};let requests=0,cleared=0,verified=0;
- const context={fetchDepositInfo:async()=>({chainId:31337,rollup:'rollup'}),myChannel:7,activeCh:7,sha256Hex:async()=>wrong?'wrong':'identity',localStorage:{getItem:()=>''},SEED_KEY:'seed',log(){},sendOutboxKey:()=>7,
+ const context={fetchDeploymentInfo:async()=>({chainId:31337,rollup:'rollup'}),myChannel:7,activeCh:7,sha256Hex:async()=>wrong?'wrong':'identity',localStorage:{getItem:()=>''},SEED_KEY:'seed',log(){},sendOutboxKey:()=>7,
  fetch:async(_,options)=>{requests++;assert.equal(options.body,saved.body);return {ok:!failed,text:async()=>JSON.stringify(failed?{error:'lost'}:{sourceHead:{digest:'accepted'}})};},
  api:async()=>JSON.stringify({state:{digest:'verified'}}),call:async()=>{if(verifyFailed)throw Error('signature failed');verified++;return JSON.stringify({slot:3});},setChannelFrom(){},walletOutbox:{clear:async()=>{assert.equal(verified,1);cleared++;}}};
  vm.createContext(context);vm.runInContext(html.slice(html.indexOf('async function validateSavedSend('),html.indexOf('async function resumeSoloSend(')) + html.slice(start,end),context);return {run:()=>context.resumeInterSend(saved),counts:()=>({requests,cleared})};

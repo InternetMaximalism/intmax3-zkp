@@ -258,6 +258,13 @@ $('btnBack').onclick = () => showView('main');
 async function openDeposit() {
   $('depositPending').classList.add('hidden');
   $('depositModal').classList.remove('hidden');
+  const available = depositAvailable();
+  for (const id of ['btnDeposit', 'depositToken', 'depositAmount']) $(id).disabled = !available;
+  if (!available) {
+    $('depositPreview').className = 'hint err';
+    $('depositPreview').textContent = depositUnavailableMessage();
+    return;
+  }
   renderDepositTokens();                       // render immediately from what we already have
   try { await loadTokenMeta(true); } catch (e) {}
   await refreshDepositInfoCache();             // so the spender can be shown before signing
@@ -1502,7 +1509,7 @@ const walletOutbox = new WalletOutbox();
 let deploymentScopePromise = null;
 function deploymentScope() {
   if (!deploymentScopePromise) {
-    deploymentScopePromise = fetchDepositInfo().then(
+    deploymentScopePromise = fetchDeploymentInfo().then(
       (info) => info.chainId + ':' + String(info.rollup).toLowerCase(),
       (error) => { deploymentScopePromise = null; throw error; });
   }
@@ -1678,8 +1685,27 @@ async function ensureWallet() {
   });
 }
 
+function checkedDeployment(info) {
+  if (!HEX20_RE.test(String(info && info.rollup))) throw new Error('relay returned a malformed rollup address');
+  if (String(info.rollup).toLowerCase() === ZERO_ADDRESS_20) throw new Error('relay returned the zero rollup address');
+  if (!Number.isInteger(info.chainId) || info.chainId <= 0) throw new Error('relay returned a malformed chainId');
+  const minConf = Number.isInteger(info.minConfirmations) && info.minConfirmations >= 0
+    ? info.minConfirmations : null;
+  return { rollup: info.rollup, rpc: info.rpc, chainId: info.chainId, minConfirmations: minConf };
+}
+
 /**
- * `/api/deposit-info`, SHAPE-CHECKED.
+ * `/api/deployment`, SHAPE-CHECKED: the channel's chain and rollup. Saved records are scoped to it,
+ * a wallet is switched to its chain, and a claim pays from its rollup. Everything but a deposit
+ * uses this: the relay hands out a deposit target only where a deposit can be withdrawn again.
+ */
+async function fetchDeploymentInfo() {
+  return checkedDeployment(JSON.parse(await api('/api/deployment', null, 'GET')));
+}
+
+/**
+ * `/api/deposit-info`, SHAPE-CHECKED. Refused (501) by a relay whose rollup is not verified to
+ * settle withdrawals (`relayCapabilities.deposit`).
  *
  * SECURITY: `rollup` is both the deposit target AND the ERC-20 approve spender, and
  * `depositRecipient` is the channel binding the on-chain `Deposited` log is matched against — so
@@ -1690,13 +1716,9 @@ async function ensureWallet() {
  */
 async function fetchDepositInfo() {
   const info = JSON.parse(await api('/api/deposit-info', null, 'GET'));
-  if (!HEX20_RE.test(String(info && info.rollup))) throw new Error('relay returned a malformed rollup address');
-  if (String(info.rollup).toLowerCase() === ZERO_ADDRESS_20) throw new Error('relay returned the zero rollup address');
+  const deployment = checkedDeployment(info);
   if (!HEX32_RE.test(String(info.depositRecipient))) throw new Error('relay returned a malformed deposit recipient');
-  if (!Number.isInteger(info.chainId) || info.chainId <= 0) throw new Error('relay returned a malformed chainId');
-  const minConf = Number.isInteger(info.minConfirmations) && info.minConfirmations >= 0
-    ? info.minConfirmations : null;
-  return { rollup: info.rollup, depositRecipient: info.depositRecipient, rpc: info.rpc, chainId: info.chainId, minConfirmations: minConf };
+  return { ...deployment, depositRecipient: info.depositRecipient };
 }
 
 async function ensureChain(info) {
@@ -2441,14 +2463,25 @@ function guard(key, fn) {
 
 // What the relay's deployment supports (GET /api/health). A public-chain relay cannot yet settle a
 // burn on L1, so Withdraw is offered only where both steps can run: a burn whose Step 2 cannot run
-// would leave the funds burned and unsettled.
+// would leave the funds burned and unsettled. Deposit is offered only into a rollup verified to
+// finalize the producer's blocks: anything deposited elsewhere could never be withdrawn.
 let relayCapabilities = null;
+let relayUnavailable = {};
 async function loadRelayCapabilities() {
-  try { relayCapabilities = JSON.parse(await api('/api/health', null, 'GET')).capabilities || null; }
-  catch (e) { relayCapabilities = null; }
+  try {
+    const health = JSON.parse(await api('/api/health', null, 'GET'));
+    relayCapabilities = health.capabilities || null;
+    relayUnavailable = health.unavailable || {};
+  } catch (e) { relayCapabilities = null; relayUnavailable = {}; }
   return relayCapabilities;
 }
 const withdrawalAvailable = () => !!(relayCapabilities && relayCapabilities.partialWithdrawal);
+const depositAvailable = () => !!(relayCapabilities && relayCapabilities.deposit);
+function depositUnavailableMessage() {
+  return 'Deposits are not available on this deployment'
+    + (relayUnavailable.deposit ? ': ' + relayUnavailable.deposit : ' (the relay did not confirm that deposits can be withdrawn)')
+    + '. A deposit is offered only into a rollup verified to settle withdrawals.';
+}
 
 // Restore the withdrawal controls on BOTH automatic account restore and Withdraw navigation.
 function restorePartialWithdrawalControls() {
@@ -2624,6 +2657,7 @@ async function tryRestore() {
 
 // Offer the shared multi-token deposit form only when the connected L1 wallet has funds.
 async function offerDepositAfterJoin() {
+  if (!depositAvailable()) { log(depositUnavailableMessage(), 'err'); return; }
   await loadTokenMeta(true);
   const info = await fetchDepositInfo();
   await ensureChain(info);
@@ -2738,7 +2772,7 @@ async function attemptSend(to, amountBase, token) {
   // so the streaming relay can reject stale work without buffering or parsing the body. Old JSON
   // spool files remain accepted by the CLI during rolling upgrades.
   const slim = await call('slimWire', { payloadJson: payload });
-  const info = await fetchDepositInfo();
+  const info = await fetchDeploymentInfo();
   const pending = {version:1,kind:'solo',channel:myChannel ?? activeCh,chainId:info.chainId,rollup:info.rollup,
     identity:await sha256Hex(localStorage.getItem(SEED_KEY)),payload,slim};
   await walletOutbox.save((await sendOutboxKey()),pending);
@@ -2746,7 +2780,7 @@ async function attemptSend(to, amountBase, token) {
 }
 
 async function validateSavedSend(pending) {
-  const info = await fetchDepositInfo();
+  const info = await fetchDeploymentInfo();
   if (pending.version !== 1 || pending.channel !== (myChannel ?? activeCh)
       || pending.chainId !== info.chainId || pending.rollup !== info.rollup
       || pending.identity !== await sha256Hex(localStorage.getItem(SEED_KEY))) {
@@ -2897,7 +2931,7 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   log('  ZKP generated · transfer encrypted', 'zk');
   log('  relay co-signing debit + credit atomically...');
   sendPhase = 'Waiting for co-sign';
-  const info = await fetchDepositInfo();
+  const info = await fetchDeploymentInfo();
   const pending = {version:1, channel:myChannel ?? activeCh, chainId:info.chainId, rollup:info.rollup,
     identity:await sha256Hex(localStorage.getItem(SEED_KEY)),
     body:JSON.stringify({debitPayload:built.debitPayload,transferDescriptor:built.transferDescriptor})};
@@ -3104,6 +3138,7 @@ $('depositToken').onchange = renderDepositPreview;
 $('depositAmount').oninput = renderDepositPreview;
 
 $('btnDeposit').onclick = guard('deposit', async () => {
+  if (!depositAvailable()) { log(depositUnavailableMessage(), 'err'); return; }
   const t0 = Date.now();
   let phase = 'Depositing';
   const tick = setInterval(() => { $('btnDeposit').textContent = phase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
@@ -3200,7 +3235,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
   } catch (e) { pend.classList.add('hidden'); log('deposit failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnDeposit').textContent = 'Deposit';
-  $('btnDeposit').disabled = false;
+  $('btnDeposit').disabled = !depositAvailable();
 });
 
 // ---- REFRESH -------------------------------------------------------------------------------
@@ -3314,7 +3349,7 @@ $('btnPwSettle').onclick = guard('settle', async () => {
     const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
     if (fin.claim) {
       const c = fin.claim;
-      const info = await fetchDepositInfo();
+      const info = await fetchDeploymentInfo();
       await ensureWallet(); await ensureChain(info);
       const amount = BigInt(c.amount), token = Number(c.tokenIndex);
       const word = n => BigInt(n).toString(16).padStart(64, '0');
@@ -3448,7 +3483,7 @@ async function fetchBrowserClaimContext() {
   // Independent browser-visible join to the channel's backing route. The Manager/rollup equality
   // is already enforced server-side and on-chain; this catches a compromised relay response before
   // asking MetaMask to switch/sign.
-  const backing = await fetchDepositInfo();
+  const backing = await fetchDeploymentInfo();
   if (backing.chainId !== context.authority.chainId
       || String(backing.rollup).toLowerCase() !== String(context.authority.rollup).toLowerCase()) {
     throw new Error('claim authority differs from the browser-visible channel backing');

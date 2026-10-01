@@ -50,6 +50,8 @@ http.createServer(async(req,res)=>{
  }
  if(u.pathname==='/api/channels')return json(res,{channels:[37]});
  if(u.pathname==='/api/backing')return json(res,{fund:'0',rollup});
+ if(u.pathname==='/api/health')return json(res,{ok:true,chainId:31337,channels:[37],capabilities:{partialWithdrawal:true,channelClose:true,deposit:true},unavailable:{}});
+ if(u.pathname==='/api/deployment')return json(res,{rollup,chainId:31337,minConfirmations:0,rpc:'http://localhost:'+port});
  if(u.pathname==='/api/deposit-info')return json(res,{rollup,depositRecipient:pk,chainId:31337,minConfirmations:0,rpc:'http://localhost:'+port});
  if(u.pathname==='/api/tokens')return json(res,{tokenCount:1,tokens:[{tokenSlot:0,tokenIndex:0,symbol:'ETH',name:'Ether',decimals:18,address:null,native:true,verified:true,fundAmount:'10000000000000000'}]});
  if(u.pathname==='/api/faucet')return json(res,{enabled:false});

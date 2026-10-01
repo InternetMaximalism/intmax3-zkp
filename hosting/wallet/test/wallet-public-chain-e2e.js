@@ -166,8 +166,15 @@ async function restartRelay() {
 (async () => {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (cast('chain-id') === '31337') throw Error('this acceptance is for the public-chain path; use wallet-tail-e2e.js on devnet');
-  const health = await api(7, '/api/health');
+  // The relay checks at startup that its rollup can finalize the producer's blocks, and offers a
+  // deposit target only then: a rollup that cannot would lock every deposit (no refund path).
+  let health = await api(7, '/api/health');
+  for (let i = 0; i < 60 && !health.capabilities.deposit && /still checking/.test(health.unavailable.deposit || ''); i++) {
+    await sleep(1000);
+    health = await api(7, '/api/health');
+  }
   log('relay', JSON.stringify(health));
+  if (health.capabilities.deposit !== true) throw Error('the relay offers no deposits on a verified rollup: ' + health.unavailable.deposit);
   await wallet.initialize();
 
   // Users join operator-bootstrapped, settlement-ACTIVE channels (none creates one).

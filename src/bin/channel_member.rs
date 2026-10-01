@@ -13408,6 +13408,14 @@ fn settlement_deployment_plan_digest(
         append_deployment_digest_field(&mut preimage, b"existing_settlement_manager");
         append_deployment_digest_field(&mut preimage, strip0x(existing_settlement_manager).as_bytes());
     }
+    // The validity configuration the attached rollup is checked against, when it is the producer's
+    // export rather than the fixture below (likewise appended only when set).
+    if let Some(path) = rollup_validity_config_path(chain_id)? {
+        let bytes = fs::read(&path)
+            .map_err(|e| format!("read {ROLLUP_VALIDITY_CONFIG_ENV} {}: {e}", path.display()))?;
+        append_deployment_digest_field(&mut preimage, b"rollup_validity_config");
+        append_deployment_digest_field(&mut preimage, &bytes);
+    }
 
     for relative in PLAN_FILES {
         let bytes = fs::read(contracts_dir.join(relative))
@@ -14060,8 +14068,15 @@ fn load_mle_v2_config_pin(
     label: &'static str,
     file: &'static str,
 ) -> Result<SettlementMleV2ConfigPin, String> {
-    let path = contracts_dir.join("test/data").join(file);
-    let bytes = fs::read(&path)
+    load_mle_v2_config_pin_at(&contracts_dir.join("test/data").join(file), label, file)
+}
+
+fn load_mle_v2_config_pin_at(
+    path: &Path,
+    label: &'static str,
+    file: &'static str,
+) -> Result<SettlementMleV2ConfigPin, String> {
+    let bytes = fs::read(path)
         .map_err(|error| format!("read MLE v2 config {}: {error}", path.display()))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| format!("MLE v2 config {} is not UTF-8: {error}", path.display()))?;
@@ -14076,12 +14091,19 @@ fn load_mle_v2_config_pin(
     parse_settlement_mle_v2_config_pin(&value, label, file)
 }
 
+/// `validity_config` replaces the validity fixture (see `rollup_validity_config_path`).
 fn load_rollup_mle_v2_config_pins(
     contracts_dir: &Path,
+    validity_config: Option<&Path>,
 ) -> Result<[SettlementMleV2ConfigPin; 2], String> {
     let mut pins = Vec::with_capacity(ROLLUP_MLE_V2_CONFIGS.len());
     for (label, _, file) in ROLLUP_MLE_V2_CONFIGS {
-        pins.push(load_mle_v2_config_pin(contracts_dir, label, file)?);
+        pins.push(match (label, validity_config) {
+            ("validity", Some(path)) => {
+                load_mle_v2_config_pin_at(path, label, ROLLUP_VALIDITY_CONFIG_LABEL)?
+            }
+            _ => load_mle_v2_config_pin(contracts_dir, label, file)?,
+        });
     }
     pins.try_into()
         .map_err(|_| "internal rollup MLE v2 config pin count mismatch".to_string())
@@ -16057,6 +16079,27 @@ const ROLLUP_MLE_V2_CONFIGS: [(&str, &str, &str); 2] = [
     ),
 ];
 
+const ROLLUP_VALIDITY_CONFIG_ENV: &str = "WALLET_VALIDITY_CONFIG";
+const ROLLUP_VALIDITY_CONFIG_LABEL: &str = "WALLET_VALIDITY_CONFIG (the producer's export)";
+
+/// The validity circuit configuration the attached rollup must pin. Off the local devnet it is the
+/// PUBLISHING producer's own export (`export-wallet-validity-config`), the file `Deploy.s.sol`
+/// pinned the rollup to — never the test fixture. A rollup pinned to anything else finalizes no
+/// producer block and, with no refund path, locks every deposit for good: the first Sepolia rollup
+/// was pinned to the arity-[2] fixture under a 2,4,8,16 producer. On the devnet the checked-in
+/// fixture stays the default.
+fn rollup_validity_config_path(chain_id: u64) -> Result<Option<PathBuf>, String> {
+    match std::env::var(ROLLUP_VALIDITY_CONFIG_ENV) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(PathBuf::from(value.trim()))),
+        _ if chain_id == DEVNET_CHAIN_ID => Ok(None),
+        _ => Err(format!(
+            "{ROLLUP_VALIDITY_CONFIG_ENV} (the producer's exported validity config) is required off \
+             the local devnet: the attached rollup's validity verifier must pin the producer's own \
+             circuit configuration, never the test fixture"
+        )),
+    }
+}
+
 /// `cast call <to> <sig> [args…]`, trimmed. Every read-back below goes through this.
 fn cast_call(rpc: &str, to: &str, sig: &str, args: &[&str]) -> String {
     let mut argv: Vec<&str> = vec!["call", to, sig];
@@ -16384,8 +16427,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
 
     let settlement_mle_v2_pins = load_settlement_mle_v2_config_pins(&contracts_dir)
         .unwrap_or_else(|error| die(format!("preflight settlement MLE v2 configs: {error}")));
-    let rollup_mle_v2_pins = load_rollup_mle_v2_config_pins(&contracts_dir)
-        .unwrap_or_else(|error| die(format!("load existing-rollup MLE v2 configs: {error}")));
+    let rollup_validity_config =
+        rollup_validity_config_path(chain_id).unwrap_or_else(|error| die(error));
+    let rollup_mle_v2_pins =
+        load_rollup_mle_v2_config_pins(&contracts_dir, rollup_validity_config.as_deref())
+            .unwrap_or_else(|error| die(format!("load existing-rollup MLE v2 configs: {error}")));
     let l1_signer = L1Signer::for_chain_id(chain_id);
 
     // SECURITY: the member set this deploy REGISTERS on L1 is derived from the co-signer key
@@ -21501,11 +21547,42 @@ mod deploy_plan_tests {
         assert!(!script.contains("MockMleVerifier"));
     }
 
+    /// Off the devnet the attach checks the rollup's validity verifier against the PRODUCER's
+    /// export, never the arity-[2] fixture the first Sepolia rollup was wrongly pinned to; the
+    /// export replaces the validity pin only.
+    #[test]
+    fn attached_rollup_validity_pin_is_the_producer_export_off_devnet() {
+        if std::env::var(ROLLUP_VALIDITY_CONFIG_ENV).is_err() {
+            assert_eq!(rollup_validity_config_path(DEVNET_CHAIN_ID), Ok(None));
+            let refused = rollup_validity_config_path(11_155_111).unwrap_err();
+            assert!(
+                refused.contains("required off the local devnet"),
+                "{refused}"
+            );
+        }
+        let contracts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts");
+        let export = contracts.join("test/data/close_lifecycle_validity_mle_config.json");
+        let fixture = load_rollup_mle_v2_config_pins(&contracts, None).expect("fixture pins");
+        let exported =
+            load_rollup_mle_v2_config_pins(&contracts, Some(&export)).expect("export pins");
+        assert_eq!(exported[0].file, ROLLUP_VALIDITY_CONFIG_LABEL);
+        assert_eq!(
+            exported[0].circuit_config_digest,
+            fixture[0].circuit_config_digest
+        );
+        assert_eq!(
+            exported[1].file, fixture[1].file,
+            "the withdrawal pin is unchanged"
+        );
+        let missing = contracts.join("test/data/no-such-validity-config.json");
+        assert!(load_rollup_mle_v2_config_pins(&contracts, Some(&missing)).is_err());
+    }
+
     #[test]
     fn all_six_attachment_config_fixtures_pass_the_production_parser() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let contracts = root.join("contracts");
-        let rollup = load_rollup_mle_v2_config_pins(&contracts)
+        let rollup = load_rollup_mle_v2_config_pins(&contracts, None)
             .expect("parse both proof-free rollup MLE v2 config fixtures");
         let settlement = load_settlement_mle_v2_config_pins(&contracts)
             .expect("parse all four proof-free settlement MLE v2 config fixtures");

@@ -31,6 +31,7 @@ const { createCluster } = require('../../api/lib/cluster');
 const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const depositSequencer = require('../../api/lib/deposit-sequencer');
+const validityDeployment = require('../../api/lib/validity-deployment');
 const { installHeadExitKit, cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../../api/lib/exit-kit');
 const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = require('../../api/lib/inter-channel-send');
 
@@ -99,13 +100,32 @@ function requireDevnet(res, what) {
 //    this relay yet (api/lib/wallet-l1.js is the Anvil workflow). The burn is therefore refused
 //    BEFORE anything is signed: a burn whose settlement cannot run strands the user's funds;
 //  * closing a channel (close / settle / withdraw) is an operator decision on a SHARED channel.
-//    The relay signs it with every co-signer key, so a browser request must never trigger it.
-const capabilities = () => ({ partialWithdrawal: isDevnet(), channelClose: isDevnet() });
+//    The relay signs it with every co-signer key, so a browser request must never trigger it;
+//  * a deposit is offered only into a rollup verified to finalize this producer's blocks
+//    (api/lib/validity-deployment.js): every exit needs a finalized validity proof and the rollup
+//    has no refund path, so a deposit anywhere else could never be withdrawn. Unknown until the
+//    startup check has run, and closed until then.
+let depositReadiness = { ok: false, reason: 'the relay is still checking that this rollup can settle withdrawals' };
+const capabilities = () => ({ partialWithdrawal: isDevnet(), channelClose: isDevnet(), deposit: isDevnet() || depositReadiness.ok });
+const unavailableReasons = () => (capabilities().deposit ? {} : { deposit: depositReadiness.reason });
 function requireCapability(res, name, what) {
   if (capabilities()[name]) return true;
+  const why = unavailableReasons()[name];
   res.status(501).json({ code: 'NOT_AVAILABLE', capability: name,
-    error: `${what} is not available on this deployment (chain ${relayChainId()}). Nothing was signed or sent.` });
+    error: `${what} is not available on this deployment (chain ${relayChainId()})${why ? ': ' + why : ''}. Nothing was signed or sent.` });
   return false;
+}
+// Re-read on a transient chain-read failure only: a missing or mismatched record needs an operator.
+function checkDepositReadiness() {
+  try {
+    const rollup = validityDeployment.servedRollup(CHANNELS);
+    depositReadiness = rollup ? validityDeployment.readiness(rollup) : { ok: false, reason: 'no channel is backed by a rollup yet' };
+  } catch (e) {
+    depositReadiness = { ok: false, reason: String((e && e.message) || e).split('\n')[0] };
+  }
+  if (depositReadiness.ok) console.log(`deposits enabled: rollup ${depositReadiness.record.rollup} verified to finalize this producer's blocks`);
+  else console.error(`deposits disabled: ${depositReadiness.reason}`);
+  if (!depositReadiness.ok && depositReadiness.transient) setTimeout(checkDepositReadiness, 60 * 1000).unref();
 }
 
 fs.mkdirSync(WORK, { recursive: true });
@@ -1236,25 +1256,33 @@ function minConfirmationsForDisplay(chainId) {
   return chainId === 31337 ? 0 : 12;
 }
 
+app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS,
+  capabilities: capabilities(), unavailable: unavailableReasons() }));
+
+// GET /api/deployment?channel=N
+// The channel's L1 deployment (chain and rollup): what saved records are scoped to, the network a
+// wallet must be on, and the rollup a claim pays from. Never a deposit target.
+function deploymentOf(ch) {
+  const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+  if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+  return { backing, info: { rollup: backing.rollup, rpc: RPC, chainId: relayChainId(),
+    minConfirmations: minConfirmationsForDisplay(relayChainId()) } };
+}
+app.get('/api/deployment', (req, res) => {
+  try { res.json(deploymentOf(reqChannel(req)).info); }
+  catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // GET /api/deposit-info?channel=N
 // Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via
 // MetaMask (native ETH or any L1-registered ERC-20 — `rollup` is both the deposit target and the
-// ERC-20 approve spender).
-app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS, capabilities: capabilities() }));
-
+// ERC-20 approve spender). Only where deposits can be withdrawn again (capability `deposit`).
 app.get('/api/deposit-info', (req, res) => {
+  if (!requireCapability(res, 'deposit', 'Depositing')) return;
   try {
-    const ch = reqChannel(req);
-    const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
-    if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+    const { backing, info } = deploymentOf(reqChannel(req));
     if (!backing.deposit_recipient) throw new Error('no deposit_recipient in channel_backing.json');
-    res.json({
-      rollup: backing.rollup,
-      depositRecipient: backing.deposit_recipient,
-      rpc: RPC,
-      chainId: relayChainId(),
-      minConfirmations: minConfirmationsForDisplay(relayChainId()),
-    });
+    res.json({ ...info, depositRecipient: backing.deposit_recipient });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -1786,8 +1814,13 @@ bootstrapBacking().then(() => {
       }).catch(e => console.error(`channel ${ch}: registered record catch-up failed:`, e && e.message ? e.message : e));
     }
   })().catch((e) => console.error('block producer warm-up failed:', e && e.message ? e.message : e));
-  // Public chain: consume the rollup's deposits in order from now on, whoever is online.
-  if (!isDevnet()) depositSequencer.start(withLock);
+  // Public chain: consume the rollup's deposits in order from now on, whoever is online. Deposits
+  // that reach the rollup directly are still imported while new ones are not offered: they are on
+  // L1 either way, and imported they stay spendable in the channel.
+  if (!isDevnet()) {
+    depositSequencer.start(withLock);
+    setImmediate(checkDepositReadiness);
+  }
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());
 }).catch((e) => {

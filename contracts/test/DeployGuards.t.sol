@@ -165,6 +165,43 @@ contract DeployCloseCliAttachHarness is DeployCloseCli {
 /// @dev The scripts are executed, not grepped: `run()` performs the same CREATEs and calls it
 ///      performs under `forge script`, so deleting either fix makes these tests fail rather than
 ///      merely go stale.
+/// @notice `Deploy` with the environment it reads for the validity configuration served by the test
+/// (the script's own `run()` verbatim). `vm.setEnv` is process-global and forge runs a contract's
+/// test functions in parallel, so an env-driven value would leak into the concurrently running
+/// `Deploy` guards.
+contract DeployRollupHarness is Deploy {
+    string internal validityConfig;
+    string internal validityConfigSha256;
+
+    constructor(string memory validityConfig_, string memory validityConfigSha256_) {
+        validityConfig = validityConfig_;
+        validityConfigSha256 = validityConfigSha256_;
+    }
+
+    function _envString(string memory name) internal view override returns (string memory) {
+        if (keccak256(bytes(name)) == keccak256(bytes("WALLET_VALIDITY_CONFIG"))) return validityConfig;
+        if (keccak256(bytes(name)) == keccak256(bytes("WALLET_VALIDITY_CONFIG_SHA256"))) return validityConfigSha256;
+        return super._envString(name);
+    }
+}
+
+/// @notice `DeployTestnetBlockProducer` with the same served environment as `DeployRollupHarness`.
+contract DeployTestnetBlockProducerHarness is DeployTestnetBlockProducer {
+    string internal validityConfig;
+    string internal validityConfigSha256;
+
+    constructor(string memory validityConfig_, string memory validityConfigSha256_) {
+        validityConfig = validityConfig_;
+        validityConfigSha256 = validityConfigSha256_;
+    }
+
+    function _envString(string memory name) internal view override returns (string memory) {
+        if (keccak256(bytes(name)) == keccak256(bytes("WALLET_VALIDITY_CONFIG"))) return validityConfig;
+        if (keccak256(bytes(name)) == keccak256(bytes("WALLET_VALIDITY_CONFIG_SHA256"))) return validityConfigSha256;
+        return super._envString(name);
+    }
+}
+
 contract DeployGuardsTest is Test {
     /// Historical pre-retirement selector, fixed independently of future PCS proof-tuple changes.
     bytes4 internal constant LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR = 0x66e3ff78;
@@ -412,11 +449,41 @@ contract DeployGuardsTest is Test {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        Deploy script = new Deploy();
+        // A pinned validity configuration passes the configuration gate; the MLE engine guard runs.
+        string memory config = string.concat(vm.projectRoot(), "/test/data/mle_fixture_config.json");
+        Deploy script = new DeployRollupHarness(config, vm.toString(sha256(bytes(vm.readFile(config)))));
         vm.expectRevert(
             abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
         );
         script.run();
+    }
+
+    /// Off the devnet the rollup must pin the PUBLISHING producer's validity configuration. The
+    /// test fixture is no default there: a rollup pinned to another circuit configuration finalizes
+    /// no producer block, and with no refund path every deposit into it is locked for good.
+    function test_deployScript_realChain_requiresProducerValidityConfig() public {
+        vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
+        Deploy script = new DeployRollupHarness("", "");
+        vm.expectRevert(
+            bytes("WALLET_VALIDITY_CONFIG (the producer's exported validity config) is required off the local devnet")
+        );
+        script.run();
+    }
+
+    /// The deployed configuration is the reviewed one: its SHA-256 pin must be given and match.
+    function test_deployScript_realChain_refusesValidityConfigOtherThanItsPin() public {
+        vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
+        string memory config = string.concat(vm.projectRoot(), "/test/data/mle_fixture_config.json");
+        bytes32 otherFile =
+            sha256(bytes(vm.readFile(string.concat(vm.projectRoot(), "/test/data/withdrawal_mle_config.json"))));
+        Deploy wrongPin = new DeployRollupHarness(config, vm.toString(otherFile));
+        vm.expectRevert(bytes("WALLET_VALIDITY_CONFIG does not match WALLET_VALIDITY_CONFIG_SHA256"));
+        wrongPin.run();
+        Deploy noPin = new DeployRollupHarness(config, "");
+        vm.expectRevert(bytes("WALLET_VALIDITY_CONFIG does not match WALLET_VALIDITY_CONFIG_SHA256"));
+        noPin.run();
     }
 
     /// Same requirement for the other production-shaped deployer. It was missing the call too, and
@@ -425,9 +492,22 @@ contract DeployGuardsTest is Test {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        DeployTestnetBlockProducer script = new DeployTestnetBlockProducer();
+        string memory config = string.concat(vm.projectRoot(), "/test/data/mle_fixture_config.json");
+        DeployTestnetBlockProducer script =
+            new DeployTestnetBlockProducerHarness(config, vm.toString(sha256(bytes(vm.readFile(config)))));
         vm.expectRevert(
             abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
+        );
+        script.run();
+    }
+
+    /// The testnet deployer is positioned for a public testnet too, so the same validity rule holds.
+    function test_deployTestnetBlockProducerScript_realChain_requiresProducerValidityConfig() public {
+        vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
+        DeployTestnetBlockProducer script = new DeployTestnetBlockProducerHarness("", "");
+        vm.expectRevert(
+            bytes("WALLET_VALIDITY_CONFIG (the producer's exported validity config) is required off the local devnet")
         );
         script.run();
     }

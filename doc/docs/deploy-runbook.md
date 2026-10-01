@@ -230,12 +230,29 @@ operator bootstraps each channel once, before the relay serves it.
   The late-incoming verifier, which a real-chain settlement requires, only exists for that balance
   circuit, so the rollup, `setup-backing` and all config fixtures must come from the same build.
 
+**The rollup must finalize the producer's blocks.** Every exit (partial-withdrawal payout, close
+funding, late incoming claim) needs a validity proof the rollup has FINALIZED, the rollup verifies
+validity proofs only against the circuit configuration pinned in its immutable validity verifier,
+and it has no refund path. A rollup pinned to anything but the producer's own configuration
+therefore locks every deposit for good. The first Sepolia rollup (`0x3c9D21…`) was deployed with
+`Deploy.s.sol`'s default, the arity-[2] test fixture (circuitConfigDigest `0xc80d78f4…`), while the
+producer proves arities 2,4,8,16 (`0x43533afd…`): it can never finalize a block. `Deploy.s.sol` now
+refuses to deploy off the devnet without `WALLET_VALIDITY_CONFIG`, the producer's export, pinned by
+`WALLET_VALIDITY_CONFIG_SHA256`. Export it with the binaries that will run
+(`node -e 'console.log(require("./api/lib/validity-deployment").exportedConfig())'` with the relay's
+`CHANNEL_MEMBER_BIN` / `BLOCK_PRODUCER_ARITIES`; minutes and ~15 GB the first time per build) and
+copy it under `proof-da-output/` next to the contracts directory, which Foundry may read.
+
 **Order** (one writer per channel directory: the relay is stopped while this runs):
-1. Feature-build config fixtures → `Deploy.s.sol` (rollup) → `setup-backing` per channel →
+1. Feature-build config fixtures → the producer's validity configuration → `Deploy.s.sol` (rollup,
+   with `WALLET_VALIDITY_CONFIG` + `WALLET_VALIDITY_CONFIG_SHA256`) → `setup-backing` per channel →
    `export_late_incoming_config` + `DeployLateIncomingVerifier.s.sol`.
 2. `BOOTSTRAP_STOP_AFTER=envelope node hosting/wallet/bootstrap-real-chain.js <ch>...` with the
    relay's CLI/L1 environment plus `BOOTSTRAP_DELEGATE_RECIPIENT_<ch>` (the operator delegate's exit
-   address), `LATE_INCOMING_VERIFIER`, `LATE_MLE_CONFIG_PATH`, `CONTRACTS_DIR`. This writes the
+   address), `LATE_INCOMING_VERIFIER`, `LATE_MLE_CONFIG_PATH`, `CONTRACTS_DIR`. It first verifies
+   that the rollup's validity verifier pins the producer's configuration and stops if it does not
+   (`hosting/wallet/verify-validity-deployment.js`, which writes
+   `wallet-live-work/producer/validity-deployment.json`). Then it writes the
    genesis (with an operator delegate), the live balance, and `installed_exit_kit.json` (the head's
    public backing envelope; it is installed only after settlement is ACTIVE).
 3. Prove the close-backing bundle wherever there is memory (about 16 GB peak, ~1 min per channel):
@@ -243,7 +260,9 @@ operator bootstraps each channel once, before the relay serves it.
    --expected-channel-id <ch> --expected-chain-id <id> --expected-rollup <rollup>
    --expected-balance-vd-sha256 <sha256 of balance_vd.bin>`.
 4. Run the bootstrap again without `BOOTSTRAP_STOP_AFTER`. Per channel it runs `deploy-settlement`
-   (waiting out L1 finality, ~15 min on Sepolia), verifies the `ChannelRegistered` log, registers
+   (waiting out L1 finality, ~15 min on Sepolia; its attach checks the rollup's validity verifier
+   against `WALLET_VALIDITY_CONFIG`, required off the devnet, which the bootstrap sets to the
+   producer's export), verifies the `ChannelRegistered` log, registers
    the channel in the producer, and installs the head exit kit. The first channel on a rollup
    creates the rollup's single close-funding materializer; later channels reuse it through
    `EXISTING_SETTLEMENT_MANAGER`, which the bootstrap fills from a sibling's `settlement.json`.
@@ -261,10 +280,13 @@ validated broadcast artifact.
 **Rehearse first, every time.** `hosting/wallet/test/public-chain-rehearsal.sh` runs this whole
 procedure on a local anvil started with Sepolia's chain id (so every chain-id-gated branch takes
 its production path), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, and
-finality that advances an epoch at a time). `hosting/wallet/test/wallet-public-chain-e2e.js` then
-drives the production topology through `wallet-relay.js`: users joining operator-bootstrapped
-channels, deposits (including abandoned, foreign-recipient and non-member ones), intra- and
-inter-channel sends, receive-after-send, and a relay restart. Do not deploy what has not passed it.
+finality that advances an epoch at a time). Its first step builds the binaries exactly as the deploy
+does: a rehearsal of a stale local build rehearses something that will not be deployed.
+`hosting/wallet/test/wallet-public-chain-e2e.js` then drives the production topology through
+`wallet-relay.js`: the relay offering deposits only on its verified rollup, users joining
+operator-bootstrapped channels, deposits (including abandoned, foreign-recipient and non-member
+ones), intra- and inter-channel sends, receive-after-send, a relay restart, and Withdraw refused
+before signing. Do not deploy what has not passed it.
 
 **Deploy.** `DEPLOY_HOST=ubuntu@<ip> DEPLOY_KEY=<pem> hosting/wallet/deploy-relay-host.sh` ships
 `git archive HEAD`, verifies every tracked file (and every submodule file) on the host against the
@@ -272,6 +294,17 @@ commit's sha256 manifest, installs the declared Node dependencies (`hosting/wall
 `node/package.json`), builds the binaries with the protocol feature, refreshes the public files,
 restarts `intmax-wallet-relay` and waits for `/api/health`. The host records the commit in
 `DEPLOYED_REVISION`. Never scp single files onto the host.
+
+**Deposits are offered only into a verified rollup.** At startup the relay re-checks
+`validity-deployment.json` against the chain, the served rollup, the producer's arities, the exact
+`channel_member` / `block_producer_service` binaries and the deployed verifier's digests
+(`api/lib/validity-deployment.js`). Unless all match, `/api/health` reports
+`capabilities.deposit: false` with the reason in `unavailable.deposit`, `/api/deposit-info` answers
+501, and the wallet shows the reason instead of a Deposit form. Saved records, sends and claims use
+`/api/deployment` (chain and rollup only), which is always served. Because the record is bound to the
+binaries, `deploy-relay-host.sh` re-verifies a new build before it stops the old relay and aborts the
+deploy on a mismatch; that export needs ~15 GB beside the running relay (a 32 GB host). A deployment
+with no record (the first Sepolia rollup) keeps deposits off.
 
 **Deposits on a public chain** are consumed by the relay's deposit sequencer
 (`api/lib/deposit-sequencer.js`), not by the depositor's browser. The block producer accepts the
