@@ -14,6 +14,8 @@ test('relay burn returns exactly the signed state while durably retaining its re
   let handler, ticket;
   const context = {
     app: { post(_url, fn) { handler = fn; } },
+    // The devnet path: the public-chain refusal is covered by relay-capabilities.test.js.
+    requireCapability: () => true,
     reqChannel: () => 7,
     withLock: (_ch, fn) => Promise.resolve().then(fn),
     findActiveTicket: () => null,

@@ -93,6 +93,21 @@ function requireDevnet(res, what) {
   return false;
 }
 
+// What this deployment can do for a browser. On a public chain:
+//  * a partial withdrawal (burn, then settle on L1) needs the public L1 settlement path — validity
+//    publication, backing attestation and the manager's challenge period — which is not wired into
+//    this relay yet (api/lib/wallet-l1.js is the Anvil workflow). The burn is therefore refused
+//    BEFORE anything is signed: a burn whose settlement cannot run strands the user's funds;
+//  * closing a channel (close / settle / withdraw) is an operator decision on a SHARED channel.
+//    The relay signs it with every co-signer key, so a browser request must never trigger it.
+const capabilities = () => ({ partialWithdrawal: isDevnet(), channelClose: isDevnet() });
+function requireCapability(res, name, what) {
+  if (capabilities()[name]) return true;
+  res.status(501).json({ code: 'NOT_AVAILABLE', capability: name,
+    error: `${what} is not available on this deployment (chain ${relayChainId()}). Nothing was signed or sent.` });
+  return false;
+}
+
 fs.mkdirSync(WORK, { recursive: true });
 const chDir = (ch) => path.join(WORK, 'ch' + ch);
 const wc = (ch, n) => path.join(chDir(ch), n);
@@ -1151,6 +1166,7 @@ app.post('/api/inter/send', (req, res) => {
 
 // POST /api/close?channel=N  body: { manager, sv }
 app.post('/api/close', (req, res) => {
+  if (!requireCapability(res, 'channelClose', 'Closing a shared channel')) return;
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
   withLock(ch, () => {
@@ -1167,6 +1183,7 @@ app.post('/api/close', (req, res) => {
 
 // POST /api/settle?channel=N  body: { manager }
 app.post('/api/settle', (req, res) => {
+  if (!requireCapability(res, 'channelClose', 'Closing a shared channel')) return;
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
   withLock(ch, () => {
@@ -1182,6 +1199,7 @@ app.post('/api/settle', (req, res) => {
 
 // POST /api/withdraw?channel=N  body: { manager }  (rollup→manager via the full withdrawal pipeline)
 app.post('/api/withdraw', (req, res) => {
+  if (!requireCapability(res, 'channelClose', 'Closing a shared channel')) return;
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
   withLock(ch, () => {
@@ -1222,7 +1240,7 @@ function minConfirmationsForDisplay(chainId) {
 // Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via
 // MetaMask (native ETH or any L1-registered ERC-20 — `rollup` is both the deposit target and the
 // ERC-20 approve spender).
-app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS }));
+app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS, capabilities: capabilities() }));
 
 app.get('/api/deposit-info', (req, res) => {
   try {
@@ -1398,6 +1416,7 @@ app.post('/api/faucet', (req, res) => {
 // POST /api/cosign-burn?channel=N  body: { debitPayload, transferDescriptor, amount?, recipient? }
 // Co-sign a burn send (partial withdrawal debit leg).
 app.post('/api/cosign-burn', (req, res) => {
+  if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
   const ch = reqChannel(req);
   withLock(ch, async () => {
     const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
@@ -1408,6 +1427,7 @@ app.post('/api/cosign-burn', (req, res) => {
 // POST /api/deploy-settlement?channel=N   (idempotent)
 // Deploy ChannelSettlementManager + ChannelSettlementVerifier on anvil for this channel.
 app.post('/api/deploy-settlement', (req, res) => {
+  if (!requireCapability(res, 'channelClose', 'Deploying a settlement stack from a browser')) return;
   const ch = reqChannel(req);
   withLock(ch, () => {
     if (fs.existsSync(wc(ch, 'settlement.json'))) {

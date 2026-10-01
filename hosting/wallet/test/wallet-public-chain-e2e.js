@@ -205,6 +205,18 @@ async function restartRelay() {
   await sendIntra('C', 'A', ETH(0.001), 'c-a');
   await sendInter('B', 'C', ETH(0.002), 'b-c');
   await expectBalances({ A: ETH(0.008), B: ETH(0.011), C: ETH(0.008) }, 'balances-3');
+  // Withdraw is not offered on a public chain until its L1 settlement exists: the burn is refused
+  // before anything is signed, and the balances above are untouched.
+  await once('withdraw-refused', async () => {
+    const health = await api(7, '/api/health');
+    if (!health.capabilities || health.capabilities.partialWithdrawal !== false) throw Error('health must report partialWithdrawal: false');
+    const before = (await api(7, '/api/snapshot')).state.digest;
+    try { await api(7, '/api/cosign-burn', { debitPayload: {}, transferDescriptor: {} }); throw Error('a burn was accepted'); }
+    catch (e) { if (e.status !== 501 || !/NOT_AVAILABLE/.test(e.body || '')) throw e; }
+    if ((await api(7, '/api/snapshot')).state.digest !== before) throw Error('a refused burn changed the channel');
+    return { refused: true };
+  });
+  await expectBalances({ A: ETH(0.008), B: ETH(0.011), C: ETH(0.008) }, 'balances-4');
   save('success', { at: new Date().toISOString() });
   log('SUCCESS: joins onto bound channels, in-order deposits with abandoned/foreign/outsider ones, intra/inter sends, receive-after-send, restart');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

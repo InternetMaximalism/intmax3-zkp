@@ -164,6 +164,7 @@ function selectionHarness(channels, saved) {
     fetch: async () => ({ok: true, json: async () => ({channels})}),
     savedChannel: () => saved, showBacking: () => events.push('backing'),
     guard: (_key, fn) => fn, tryRestore: async () => events.push('restore'),
+    loadRelayCapabilities: async () => events.push('capabilities'),
   };
   vm.createContext(context);vm.runInContext(selectionSource.slice(selectionSource.indexOf('\n') + 1), context);
   return {context, events, elements};
@@ -174,14 +175,15 @@ test('replacement relay selects its first channel and preserves the old saved id
   assert.equal(h.context.activeCh,17);
   assert.equal(h.elements.joinChannel.value,17);
   assert.equal(h.elements.btnOpen.disabled,false);
-  assert.deepEqual(h.events,['backing']);
+  assert.deepEqual(h.events,['capabilities','backing']);
   assert.match(h.elements.connectStatus.textContent,/Channel 7 is preserved/);
 });
 test('relay channel selection restores a saved channel only when it is served', async () => {
   const h = selectionHarness([17,18],18);
   await h.context.initializeChannelSelection();
   assert.equal(h.context.activeCh,18);
-  assert.deepEqual(h.events,['backing','restore']);
+  // Capabilities are known before a restore can show Withdraw (fail closed).
+  assert.deepEqual(h.events,['capabilities','backing','restore']);
 });
 test('invalid relay channel list leaves Join disabled', async () => {
   const h = selectionHarness([17,'18'],7);

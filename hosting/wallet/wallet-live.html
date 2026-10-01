@@ -2266,9 +2266,9 @@ function showJoined() {
   $('btnSend').disabled = false;
   restoreSendControl();
   $('btnRefresh').disabled = false;
-  $('btnBurnSend').disabled = false;
+  $('btnBurnSend').disabled = !withdrawalAvailable();
   const isCoSigner = mySlot < 3;
-  if (isCoSigner) {
+  if (isCoSigner && relayCapabilities && relayCapabilities.channelClose) {
     $('panelFullWithdraw').classList.remove('hidden');
     $('btnFwDeploySettlement').disabled = false;
   }
@@ -2439,10 +2439,32 @@ function guard(key, fn) {
   };
 }
 
+// What the relay's deployment supports (GET /api/health). A public-chain relay cannot yet settle a
+// burn on L1, so Withdraw is offered only where both steps can run: a burn whose Step 2 cannot run
+// would leave the funds burned and unsettled.
+let relayCapabilities = null;
+async function loadRelayCapabilities() {
+  try { relayCapabilities = JSON.parse(await api('/api/health', null, 'GET')).capabilities || null; }
+  catch (e) { relayCapabilities = null; }
+  return relayCapabilities;
+}
+const withdrawalAvailable = () => !!(relayCapabilities && relayCapabilities.partialWithdrawal);
+
 // Restore the withdrawal controls on BOTH automatic account restore and Withdraw navigation.
 function restorePartialWithdrawalControls() {
   const status = $('pwRecoveryStatus');
   const ticket = ticketOfType('partial_withdrawal');
+  if (!withdrawalAvailable()) {
+    status.classList.toggle('hidden', false);
+    status.textContent = ticket
+      ? 'Withdrawal is not available on this testnet yet. Your burn of ' + ticketAmountLabel(ticket)
+        + ' is saved; Step 2 — Settle on L1 becomes available here once settlement is enabled. Do not burn again.'
+      : 'Withdrawal is not available on this testnet yet: settling a burn on L1 is not enabled. Nothing will be burned.';
+    $('btnBurnSend').disabled = true;
+    $('btnPwSettle').disabled = true;
+    $('pwAmount').disabled = true; $('pwAddress').disabled = true;
+    return;
+  }
   status.classList.toggle('hidden', !ticket && !ticketLoadFailed);
   if (ticketLoadFailed) {
     status.textContent = 'Could not refresh withdrawal status. Open Withdraw again to retry.';
@@ -2532,6 +2554,8 @@ async function initializeChannelSelection() {
       || channels.some(ch => !Number.isSafeInteger(ch) || ch < 1)) {
     throw new Error('The relay returned invalid available channels.');
   }
+  // Unknown capabilities leave Withdraw off (fail closed): a burn must never outrun its settlement.
+  await loadRelayCapabilities();
   const saved = savedChannel();
   activeCh = channels.includes(saved) ? saved : channels[0];
   $('joinChannel').value = activeCh;

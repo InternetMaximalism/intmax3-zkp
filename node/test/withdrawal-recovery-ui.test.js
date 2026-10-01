@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../../hosting/wallet/wallet-live.html'), 'utf8');
 const source = html.slice(html.indexOf('function guard(key, fn)'), html.indexOf('function applyTicketState()'));
-function render(ticket, failed = false) {
+function render(ticket, failed = false, capabilities = { partialWithdrawal: true, channelClose: true }) {
   const elements = new Map();
   const $ = id => {
     if (!elements.has(id)) {
@@ -16,7 +16,9 @@ function render(ticket, failed = false) {
   };
   const ctx = { $, mySlot: 3, ticketLoadFailed: failed, _inflight: new Set(),
     ticketOfType: () => ticket, ticketAmountLabel: () => '0.005 ETH' };
-  vm.createContext(ctx);vm.runInContext(source, ctx);ctx.restorePartialWithdrawalControls();
+  vm.createContext(ctx);vm.runInContext(source, ctx);
+  ctx.__capabilities = capabilities; vm.runInContext('relayCapabilities = __capabilities;', ctx);
+  ctx.restorePartialWithdrawalControls();
   return Object.assign($, { context: ctx });
 }
 test('a saved burn enables settlement directly in Withdraw and prevents another burn', () => {
@@ -77,4 +79,23 @@ test('full withdrawal remains pending after L1 settlement until recipient claim'
  assert.equal(context.ticketOfType('full_withdrawal').status,'settle_done');
  assert.equal(context.isTerminalTicket({type:'partial_withdrawal',status:'settle_done'}),true);
  assert.equal(context.isTerminalTicket({type:'full_withdrawal',status:'claim_done'}),true);
+});
+
+// A public-chain relay cannot settle a burn on L1 yet: Withdraw must not offer a burn whose Step 2
+// cannot run (that stranded a real 0.005 ETH burn on the v3 testnet), nor a settle that will fail.
+test('without the withdrawal capability no burn and no settlement is offered', () => {
+  const $ = render(null, false, { partialWithdrawal: false, channelClose: false });
+  assert.equal($('btnBurnSend').disabled, true);
+  assert.equal($('btnPwSettle').disabled, true);
+  assert.match($('pwRecoveryStatus').textContent, /not available on this testnet/);
+});
+test('a saved burn on such a deployment is reported as kept, and nothing can be burned again', () => {
+  const $ = render({ status: 'burn_done', params: { recipient: '0xrecipient' } }, false, { partialWithdrawal: false });
+  assert.equal($('btnBurnSend').disabled, true);
+  assert.equal($('btnPwSettle').disabled, true);
+  assert.match($('pwRecoveryStatus').textContent, /Your burn of 0.005 ETH is saved/);
+});
+test('unknown capabilities (health not loaded) fail closed', () => {
+  const $ = render(null, false, null);
+  assert.equal($('btnBurnSend').disabled, true);
 });
