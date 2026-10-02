@@ -98,6 +98,10 @@ fi
 echo "[deploy] swapping: stopping the relay"
 sudo systemctl stop intmax-wallet-relay
 rsync -a --delete --exclude 'test/data/' --exclude 'broadcast/' --exclude 'cache/' --exclude 'out/' contracts/ contracts-tail/
+# Compile from scratch, as the rehearsal does: an incremental Foundry cache kept across source
+# updates once left a stale CloseFundingMaterializer artifact that the deploy script's creation
+# code no longer matched, and forge refused the settlement deploy ("ABI decoding failed").
+rm -rf contracts-tail/out contracts-tail/cache
 cp hosting/wallet/wallet-live.html hosting/wallet/public/index.html
 cp hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs \
   hosting/wallet/wallet-outbox.js hosting/wallet/wallet-transactions.js hosting/wallet/public/
