@@ -306,6 +306,24 @@ binaries, `deploy-relay-host.sh` re-verifies a new build before it stops the old
 deploy on a mismatch; that export needs ~15 GB beside the running relay (a 32 GB host). A deployment
 with no record (the first Sepolia rollup) keeps deposits off.
 
+**Partial withdrawals on a public chain** are settled by the relay in the background
+(`hosting/wallet/pw-settlement.js`), starting right after the burn; the wallet follows the ticket.
+Phases (`steps.settle.phase` of the `partial_withdrawal` ticket): `publishing` — the producer's
+validity history up to its head is proven by the resident validity prover (the daemon starts with
+it on a verified rollup) and posted with `postBlockAndSubmitGuarded`, one blob post per producer
+block, each waiting for L1 finality, then attested and finalized (`publish-wallet-validity`);
+`submitting` — the post-burn head's backing is attested and the intent is submitted with a close
+proof of that head (`pw-submit`); `challenge` — the manager's challenge period (one day, the
+contract's floor off the devnet) runs until `deadline`; `finalizing` — `pw-finalize` authorizes the
+burn and credits the payout; then the ticket is `claim_pending` until the recipient pulls it with its
+own wallet. A failed step is recorded on the ticket and retried every five minutes; a relay restart
+resumes at the recorded phase. Until the intent is submitted the burn owns the channel head (the
+manager accepts a burn only with its own post-burn signed state), so every other operation on that
+channel answers 409 `SETTLING_WITHDRAWAL`; other channels are unaffected. Each blob post locks the
+rollup's `POST_BLOCK_STAKE` (1 ETH) from the operator until its batch is finalized (then
+`reclaimStake` / the finalize refund), so the operator needs one ETH per producer block posted in a
+settlement on top of gas.
+
 **Deposits on a public chain** are consumed by the relay's deposit sequencer
 (`api/lib/deposit-sequencer.js`), not by the depositor's browser. The block producer accepts the
 rollup's deposits only in index order, for all channels at once, and a channel's live balance only

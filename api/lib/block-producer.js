@@ -45,10 +45,14 @@ function configureLocalValidity(config) {
 
 function daemonArgs() {
   if (localValidity && localValidityActive) {
+    // Off the devnet the daemon reads L1 only at the RPC's finalized head; the confirmation depth
+    // exists for the devnet's unfinalized escape.
+    const chainId = String(localValidity.chainId || 31337);
     return ['--journal', JOURNAL, '--supported-user-counts', ARITIES, '--live-root', LIVE_ROOT,
       '--validity-snapshot', localValidity.snapshot, '--validity-prover', localValidity.prover,
-      '--l1-rpc-url', localValidity.rpc, '--l1-chain-id', '31337', '--l1-rollup', localValidity.rollup,
-      '--l1-rollup-runtime-code-hash', localValidity.codeHash, '--l1-confirmations', '1'];
+      '--l1-rpc-url', localValidity.rpc, '--l1-chain-id', chainId, '--l1-rollup', localValidity.rollup,
+      '--l1-rollup-runtime-code-hash', localValidity.codeHash,
+      ...(chainId === '31337' ? ['--l1-confirmations', '1'] : [])];
   }
   const args = ['--journal', JOURNAL, '--supported-user-counts', ARITIES, '--live-root', LIVE_ROOT];
   if (process.env.INTMAX_REGEV_TEST_PROOFS === '1') args.push('--regev-test-proofs');
@@ -107,6 +111,9 @@ function start() {
   const proc = child;
   proc.stderr.setEncoding('utf8');
   proc.stderr.on('data', chunk => process.stderr.write(`[block-producer] ${chunk}`));
+  // A write to a daemon that just died fails with EPIPE: its waiter is rejected by the write
+  // callback and the 'exit' handler below. Unhandled, the stream error would crash the relay.
+  proc.stdin.on('error', () => {});
   proc.on('error', error => {
     if (child !== proc) return;
     failPending(error);

@@ -15,7 +15,7 @@ function render(ticket, failed = false, capabilities = { partialWithdrawal: true
     return elements.get(id);
   };
   const ctx = { $, mySlot: 3, ticketLoadFailed: failed, _inflight: new Set(),
-    ticketOfType: () => ticket, ticketAmountLabel: () => '0.005 ETH' };
+    ticketOfType: () => ticket, ticketAmountLabel: () => '0.005 ETH', setInterval: () => 0 };
   vm.createContext(ctx);vm.runInContext(source, ctx);
   ctx.__capabilities = capabilities; vm.runInContext('relayCapabilities = __capabilities;', ctx);
   ctx.restorePartialWithdrawalControls();
@@ -98,4 +98,29 @@ test('a saved burn on such a deployment is reported as kept, and nothing can be 
 test('unknown capabilities (health not loaded) fail closed', () => {
   const $ = render(null, false, null);
   assert.equal($('btnBurnSend').disabled, true);
+});
+
+// Public chain: the relay settles the burn on L1 in the background; the wallet shows where it is
+// and offers Step 2 only to receive the payout.
+const BACKGROUND = { partialWithdrawal: true, channelClose: false, settlement: 'background' };
+test('a burn settling in the background shows its phase and offers nothing to click', () => {
+  const $ = render({ status: 'settle_pending', params: { recipient: '0xr' },
+    steps: { settle: { phase: 'challenge', deadline: 1790900000 } } }, false, BACKGROUND);
+  assert.match($('pwRecoveryStatus').textContent, /one-day challenge period until/);
+  assert.doesNotMatch($('pwRecoveryStatus').textContent, /channel is paused/, 'the channel is free once submitted');
+  assert.equal($('btnPwSettle').disabled, true);
+  assert.equal($('btnBurnSend').disabled, true);
+});
+test('before its intent is submitted, a background settlement says the channel is paused and shows a retried error', () => {
+  const $ = render({ status: 'burn_done', params: { recipient: '0xr' },
+    steps: { settle: { error: 'rpc unavailable' } } }, false, BACKGROUND);
+  assert.match($('pwRecoveryStatus').textContent, /publishing the channel history/);
+  assert.match($('pwRecoveryStatus').textContent, /retried automatically: rpc unavailable/);
+  assert.match($('pwRecoveryStatus').textContent, /channel is paused/);
+  assert.equal($('btnPwSettle').disabled, true);
+});
+test('a background settlement whose payout is credited offers Step 2 to receive it', () => {
+  const $ = render({ status: 'claim_pending', params: { recipient: '0xr', claim: {} } }, false, BACKGROUND);
+  assert.equal($('btnPwSettle').disabled, false);
+  assert.match($('pwRecoveryStatus').textContent, /receive the funds/);
 });

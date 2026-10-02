@@ -107,7 +107,7 @@ function resumeSubmittedAuth(ch) {
 // Never retry arbitrary CLI errors or downgrade the native finalized-checkpoint requirement.
 async function finalizeSavedPayout(ch, {rpc=cli.RPC, run=cli.cli, env={}, wait=ms=>new Promise(r=>setTimeout(r,ms))}={}) {
   for (let attempt=0; ; attempt++) {
-    try { return run(ch, ['pw-finalize', rpc], env); }
+    try { return await run(ch, ['pw-finalize', rpc], env); }
     catch (error) {
       const detail=String(error.stderr || error.message || error);
       if (attempt>=2 || env.INTMAX_WALLET_ANVIL_MINE!=='1'

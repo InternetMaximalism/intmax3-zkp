@@ -14,10 +14,12 @@ function runner(mismatch = false) {
       if (file.endsWith('candidate.json')) return pinned;
       if (file.endsWith('wallet-l1.json')) return { validityConfig: '/pinned-config.json' };
       if (file.endsWith('wallet_validity_receipt.json')) return { candidateId: id, transactionHash: 'tx' };
+      if (file.endsWith('posts.json')) return { rollup, submitter: '0xoperator', rounds: [] };
       throw new Error('unexpected read ' + file);
     },
     writeJson: (file, value) => written.set(file, value), sh: () => '',
     cli() { published = true; assert.deepEqual(written.get('/work/ch7/wallet_validity_finalize.json'), pinned.finalize); },
+    async cliAsync(...args) { return this.cli(...args); }, DEVNET_CHAIN_ID: 31337,
   };
   const producer = { enableLocalValidity: async () => {}, validityStatus: async () => ({ candidate: {} }),
     status: async () => ({ blockNumber: 4 }), validityPostingArtifact: async () => posting,
@@ -25,7 +27,7 @@ function runner(mismatch = false) {
     acknowledgeValidity: async (_, candidateId, hash) => { assert.equal(candidateId, id); assert.equal(hash, 'tx'); acknowledged = true; },
   };
   const module = { exports: {} };
-  vm.runInNewContext(source, { module, require(name) {
+  vm.runInNewContext(source, { module, process, setTimeout, require(name) {
     if (name === 'fs') return { existsSync: file => file.endsWith('/candidate.json') };
     if (name === './cli') return cli;
     if (name === './block-producer') return producer;

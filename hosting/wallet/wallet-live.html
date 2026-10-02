@@ -2476,6 +2476,26 @@ async function loadRelayCapabilities() {
   return relayCapabilities;
 }
 const withdrawalAvailable = () => !!(relayCapabilities && relayCapabilities.partialWithdrawal);
+// Public chain: the relay settles a burn on L1 in the background (its steps wait for L1 finality
+// and the manager's one-day challenge period); the wallet follows the ticket.
+const backgroundSettlement = () => !!(relayCapabilities && relayCapabilities.settlement === 'background');
+function settlementProgress(ticket) {
+  const settle = (ticket.steps && ticket.steps.settle) || {};
+  const amount = ticketAmountLabel(ticket);
+  const phase = ticket.status === 'burn_done' ? 'publishing' : settle.phase;
+  let text = {
+    publishing: 'Your burn of ' + amount + ' is being settled on L1: publishing the channel history to the rollup. Every L1 step waits for finality, so this can take an hour.',
+    submitting: 'Your burn of ' + amount + ' is being settled on L1: submitting the withdrawal to the channel\'s settlement contract.',
+    challenge: 'Your withdrawal of ' + amount + ' is in the one-day challenge period'
+      + (settle.deadline ? ' until ' + new Date(Number(settle.deadline) * 1000).toLocaleString() : '') + '. It is paid out after that.',
+    finalizing: 'Your withdrawal of ' + amount + ' is being paid out on L1.',
+  }[phase] || ('Your burn of ' + amount + ' is being settled on L1 (' + (phase || ticket.status) + ').');
+  if (settle.waiting) text += ' Waiting for ' + settle.waiting + '.';
+  if (settle.error) text += ' The last attempt failed and is retried automatically: ' + settle.error;
+  const holding = phase === 'publishing' || phase === 'submitting';
+  return text + (holding ? ' The channel is paused for other operations until the withdrawal is submitted.' : '')
+    + ' Do not burn again.';
+}
 const depositAvailable = () => !!(relayCapabilities && relayCapabilities.deposit);
 function depositUnavailableMessage() {
   return 'Deposits are not available on this deployment'
@@ -2524,6 +2544,13 @@ function restorePartialWithdrawalControls() {
   $('pwAmount').disabled = true;
   $('pwAddress').disabled = true;
   if (ticket.params && ticket.params.recipient) $('pwAddress').value = ticket.params.recipient;
+  if (backgroundSettlement() && ticket.status !== 'claim_pending') {
+    // Public chain: the relay settles the burn on L1 by itself; there is nothing to click until
+    // the payout can be received.
+    $('btnPwSettle').disabled = true;
+    status.textContent = settlementProgress(ticket);
+    return;
+  }
   const resumable = ['burn_done', 'settle_pending', 'settle_blocked', 'claim_pending'].includes(ticket.status);
   $('btnPwSettle').disabled = !resumable || _inflight.has('settle');
   if (ticket.status === 'claim_pending') {
@@ -2534,6 +2561,13 @@ function restorePartialWithdrawalControls() {
     ? 'Burn complete: ' + ticketAmountLabel(ticket) + '. Continue with Step 2 — Settle on L1. Do not burn again.'
     : 'Partial withdrawal pending (' + ticket.status + '). Do not burn again.';
 }
+
+// Public chain: follow a background settlement until its payout can be received.
+setInterval(() => {
+  const ticket = ticketOfType('partial_withdrawal');
+  if (!backgroundSettlement() || !ticket || !['burn_done', 'settle_pending'].includes(ticket.status) || _inflight.size) return;
+  fetchTickets().then(applyTicketState, () => {});
+}, 30 * 1000);
 
 function applyTicketState() {
   restorePartialWithdrawalControls();
@@ -3344,6 +3378,14 @@ $('btnPwSettle').onclick = guard('settle', async () => {
     }
     log('submitting partial withdrawal...');
     const submit = JSON.parse(await api('/api/pw-submit', JSON.stringify({ recipient })));
+    if (submit.settling) {
+      // Public chain: the relay is settling it on L1; this button is for receiving the payout.
+      log(settlementProgress(submit.ticket));
+      clearInterval(tick);
+      $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
+      await fetchTickets(); applyTicketState();
+      return;
+    }
     log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
     log('finalizing...');
     const fin = JSON.parse(await api('/api/pw-finalize', '{}'));

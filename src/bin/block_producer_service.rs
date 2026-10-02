@@ -30,6 +30,8 @@ use intmax3_zkp::{
 use serde::{Deserialize, Serialize};
 
 const MAX_COMMAND_BYTES: usize = 128 * 1024 * 1024;
+/// Startup L1 bindings retried after a finalized-head advance (5 s apart: about two minutes).
+const STARTUP_BINDING_RETRIES: u32 = 24;
 
 #[derive(Debug, Parser)]
 #[command(name = "block-producer-service")]
@@ -463,7 +465,26 @@ fn configure_validity(
     } else {
         ValidityProverService::initialize(snapshot, &args.supported_user_counts, prover, producer)?
     };
-    service.bind_or_revalidate_l1_authority(&l1)?;
+    // The binding reads the rollup at one finalized block. A read that straddles an advance of
+    // the RPC's finalized head is refused as transient; bind again at the new head.
+    let mut attempts = 0u32;
+    loop {
+        match service.bind_or_revalidate_l1_authority(&l1) {
+            Err(error)
+                if attempts < STARTUP_BINDING_RETRIES
+                    && error
+                        .to_string()
+                        .contains(intmax3_zkp::validity_prover_service::STABLE_HEAD_RETRY) =>
+            {
+                attempts += 1;
+                eprintln!(
+                    "[validity] {error}; binding again ({attempts}/{STARTUP_BINDING_RETRIES})"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            result => break result?,
+        }
+    }
     Ok((Some(service), Some(l1)))
 }
 

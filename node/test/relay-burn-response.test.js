@@ -23,6 +23,7 @@ test('relay burn returns exactly the signed state while durably retaining its re
       events.push('run');store.upsertTicket(ch,{status:'burn_done',params:{amount:input.amount}});return state;
     }},
     readTickets: () => [], readHistory: () => [],
+    pwSettlement: { start: () => events.push('settle') },
     upsertTicket: (_ch, value) => {ticket=value;return value;},
     sendRouteError: (_res, error) => { throw error; },
     console,
@@ -35,5 +36,6 @@ test('relay burn returns exactly the signed state while durably retaining its re
     'extra response fields break the exact WASM-finalized snapshot archive check');
   assert.equal(ticket.status, 'burn_done');
   assert.equal(ticket.params.amount, '5000000000000000');
-  assert.deepEqual(events, ['run']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['run', 'settle'], 'a public-chain burn starts its L1 settlement');
 });

@@ -32,6 +32,7 @@ const producer = require('../../api/lib/block-producer');
 const { flushPublishedHead } = require('../../api/lib/producer-head');
 const depositSequencer = require('../../api/lib/deposit-sequencer');
 const validityDeployment = require('../../api/lib/validity-deployment');
+const { createPwSettlement } = require('./pw-settlement');
 const { installHeadExitKit, cliWithPreparedExitKit, acknowledgePreparedExitKit, debitRequestId, OPERATION_FILE: EXIT_KIT_OPERATION_FILE } = require('../../api/lib/exit-kit');
 const { interChannelSend, pendingInterTransfer, resumePendingInterTransfer } = require('../../api/lib/inter-channel-send');
 
@@ -95,19 +96,27 @@ function requireDevnet(res, what) {
 }
 
 // What this deployment can do for a browser. On a public chain:
-//  * a partial withdrawal (burn, then settle on L1) needs the public L1 settlement path — validity
-//    publication, backing attestation and the manager's challenge period — which is not wired into
-//    this relay yet (api/lib/wallet-l1.js is the Anvil workflow). The burn is therefore refused
-//    BEFORE anything is signed: a burn whose settlement cannot run strands the user's funds;
+//  * a deposit and a partial withdrawal (burn, then settle on L1) are offered only on a rollup
+//    verified to finalize this producer's blocks (api/lib/validity-deployment.js): every exit needs
+//    a finalized validity proof and the rollup has no refund path, so a deposit anywhere else could
+//    never be withdrawn, and a burn there could never be settled. Unknown until the startup check
+//    has run, and closed until then. Settlement runs in the background (hosting/wallet/
+//    pw-settlement.js): its L1 steps wait for finality, and the manager's challenge lasts a day;
 //  * closing a channel (close / settle / withdraw) is an operator decision on a SHARED channel.
-//    The relay signs it with every co-signer key, so a browser request must never trigger it;
-//  * a deposit is offered only into a rollup verified to finalize this producer's blocks
-//    (api/lib/validity-deployment.js): every exit needs a finalized validity proof and the rollup
-//    has no refund path, so a deposit anywhere else could never be withdrawn. Unknown until the
-//    startup check has run, and closed until then.
-let depositReadiness = { ok: false, reason: 'the relay is still checking that this rollup can settle withdrawals' };
-const capabilities = () => ({ partialWithdrawal: isDevnet(), channelClose: isDevnet(), deposit: isDevnet() || depositReadiness.ok });
-const unavailableReasons = () => (capabilities().deposit ? {} : { deposit: depositReadiness.reason });
+//    The relay signs it with every co-signer key, so a browser request must never trigger it.
+let settlementReadiness = { ok: false, reason: 'the relay is still checking that this rollup can settle withdrawals' };
+// The resident validity prover must be configured before the block producer starts; a rollup
+// verified only later (after a transient read failure) settles withdrawals after a restart.
+let validityConfigured = false;
+const capabilities = () => ({
+  partialWithdrawal: isDevnet() || (settlementReadiness.ok && validityConfigured), channelClose: isDevnet(),
+  deposit: isDevnet() || settlementReadiness.ok, settlement: isDevnet() ? 'interactive' : 'background',
+});
+function unavailableReasons() {
+  if (isDevnet()) return {};
+  if (!settlementReadiness.ok) return { deposit: settlementReadiness.reason, partialWithdrawal: settlementReadiness.reason };
+  return validityConfigured ? {} : { partialWithdrawal: 'the rollup was verified after the block producer started; restart the relay to settle withdrawals' };
+}
 function requireCapability(res, name, what) {
   if (capabilities()[name]) return true;
   const why = unavailableReasons()[name];
@@ -116,16 +125,21 @@ function requireCapability(res, name, what) {
   return false;
 }
 // Re-read on a transient chain-read failure only: a missing or mismatched record needs an operator.
-function checkDepositReadiness() {
+// `onReady` runs once, when the rollup is first found verified.
+function checkSettlementReadiness(onReady = () => {}) {
   try {
     const rollup = validityDeployment.servedRollup(CHANNELS);
-    depositReadiness = rollup ? validityDeployment.readiness(rollup) : { ok: false, reason: 'no channel is backed by a rollup yet' };
+    settlementReadiness = rollup ? validityDeployment.readiness(rollup) : { ok: false, reason: 'no channel is backed by a rollup yet' };
   } catch (e) {
-    depositReadiness = { ok: false, reason: String((e && e.message) || e).split('\n')[0] };
+    settlementReadiness = { ok: false, reason: String((e && e.message) || e).split('\n')[0] };
   }
-  if (depositReadiness.ok) console.log(`deposits enabled: rollup ${depositReadiness.record.rollup} verified to finalize this producer's blocks`);
-  else console.error(`deposits disabled: ${depositReadiness.reason}`);
-  if (!depositReadiness.ok && depositReadiness.transient) setTimeout(checkDepositReadiness, 60 * 1000).unref();
+  if (settlementReadiness.ok) {
+    console.log(`deposits and withdrawals enabled: rollup ${settlementReadiness.record.rollup} verified to finalize this producer's blocks`);
+    onReady(settlementReadiness.record.rollup);
+  } else {
+    console.error(`deposits and withdrawals disabled: ${settlementReadiness.reason}`);
+    if (settlementReadiness.transient) setTimeout(() => checkSettlementReadiness(onReady), 60 * 1000).unref();
+  }
 }
 
 fs.mkdirSync(WORK, { recursive: true });
@@ -149,7 +163,7 @@ function sendRouteError(res, e) {
   console.error(error);
   const status = e && Number.isInteger(e.status) && e.status >= 400 && e.status <= 599
     ? e.status : (e && e.staleAnchor ? 409 : 500);
-  res.status(status).json({ error });
+  res.status(status).json(e && e.code === 'SETTLING_WITHDRAWAL' ? { error, code: e.code } : { error });
 }
 // The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
 // for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
@@ -178,10 +192,22 @@ function cli(ch, args, extraEnv) {
 
 // Per-channel mutex: serialize all mutating CLI calls to prevent concurrent state corruption.
 const _chLocks = {};
-function withLock(ch, fn) {
+// A partial withdrawal being settled owns its channel head until its intent is on L1
+// (pw-settlement.js `frozen`): every other operation is refused at once, not queued behind it.
+function refuseIfSettling(ch, owner) {
+  const ticket = pwSettlement.frozen(ch);
+  if (!ticket || ticket.id === owner) return;
+  const phase = (ticket.steps && ticket.steps.settle && ticket.steps.settle.phase) || 'starting';
+  throw Object.assign(new Error(`Channel ${ch} is settling a partial withdrawal on L1 (${phase}). `
+    + 'Other operations on this channel are paused until its withdrawal intent is submitted, so the '
+    + 'burned funds stay withdrawable. Retry later.'), { status: 409, code: 'SETTLING_WITHDRAWAL' });
+}
+function withLock(ch, fn, { owner } = {}) {
+  try { refuseIfSettling(ch, owner); } catch (e) { return Promise.reject(e); }
   if (!_chLocks[ch]) _chLocks[ch] = Promise.resolve();
   const prev = _chLocks[ch];
   const run = async () => {
+    refuseIfSettling(ch, owner);
     // A pending burn owns this head. Finish its exact request before any later mutation can
     // invalidate the saved proof, including an incoming transfer targeting this channel.
     if (burnOperations.pending(ch)) await burnOperations.run(ch, {}, {
@@ -334,6 +360,15 @@ function rollupOf(ch) {
   if (!b.rollup) throw new Error('channel has no rollup in channel_backing.json (run setup-backing)');
   return b.rollup;
 }
+
+// L1 settlement of partial withdrawals: in the background on a public chain, inside the wallet's
+// Step 2 requests on the devnet (hosting/wallet/pw-settlement.js).
+const pwSettlement = createPwSettlement({
+  cli: require('../../api/lib/cli'), producer, walletL1: require('../../api/lib/wallet-l1'),
+  live: require('../../api/lib/partial-withdrawal-live'), pull: require('../../node/common/partial-withdrawal-pull'),
+  withLock, findActiveTicket, upsertTicket,
+  enabled: () => capabilities().partialWithdrawal, background: () => !isDevnet(),
+});
 
 // ── Token DISPLAY metadata (multi-token detail2 §N-1/§N-7, threat model TM-10b) ───────────────
 //
@@ -1056,6 +1091,8 @@ const cosignBatcher = createBatchWindow({
 
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
+  // Refused at once, not batched, while a withdrawal being settled owns the channel head.
+  try { refuseIfSettling(ch); } catch (e) { return sendRouteError(res, e); }
   cosignBatcher.enqueue(ch, req.body).then(
     (result) => res.json(result),
     (e) => {
@@ -1446,10 +1483,15 @@ app.post('/api/faucet', (req, res) => {
 app.post('/api/cosign-burn', (req, res) => {
   if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
   const ch = reqChannel(req);
+  // A replay of the burn that already owns the channel is answered from its record (a different
+  // burn is refused by burnOperations while that ticket is active).
+  const active = findActiveTicket(ch, 'partial_withdrawal');
   withLock(ch, async () => {
     const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
     res.json(cosignedHead);
-  }).catch((e) => sendRouteError(res, e));
+    // Public chain: settle it on L1 in the background, starting now (the channel waits for it).
+    pwSettlement.start(ch);
+  }, { owner: active && active.id }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
@@ -1488,9 +1530,18 @@ app.get('/api/settlement', (req, res) => {
 // POST /api/pw-submit?channel=N
 // Submit partial withdrawal intent on-chain.
 app.post('/api/pw-submit', (req, res) => {
-  // api/lib/wallet-l1.js (validity publication + backing attestation) is implemented for Anvil only.
-  if (!requireDevnet(res, 'Partial withdrawal')) return;
+  if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
   const ch = reqChannel(req);
+  const active = findActiveTicket(ch, 'partial_withdrawal');
+  if (active && active.status === 'claim_pending') {
+    return res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
+  }
+  // Public chain: settlement runs in the background from the burn on; report where it is.
+  if (!isDevnet()) {
+    if (!active) return res.status(404).json({ error: 'no partial withdrawal to settle on this channel' });
+    pwSettlement.start(ch);
+    return res.status(202).json({ settling: true, ticket: active });
+  }
   withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     if (ticket && ticket.status === 'claim_pending') {
@@ -1505,46 +1556,42 @@ app.post('/api/pw-submit', (req, res) => {
         cli(ch, ['deploy-settlement', RPC]);
       }
       const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
-      const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-      await require('../../api/lib/wallet-l1').publish(ch);
-      const proofEnv = await require('../../api/lib/partial-withdrawal-live').stageSubmitProof(ch);
-      await require('../../api/lib/wallet-l1').attest(ch, await producer.liveBackingArtifact(ch));
-      cli(ch, ['pw-submit', RPC], { ...extra, ...proofEnv, INTMAX_WALLET_ANVIL_MINE: '1' });
+      if (ticket && pwRecipient) ticket.params.recipient = pwRecipient;
+      await pwSettlement.publish(ch);
+      const out = await pwSettlement.submit(ch, ticket || { params: { recipient: pwRecipient } });
+      if (ticket) {
+        ticket.steps.settle = { ...(ticket.steps.settle || {}), phase: 'challenge', deadline: out.deadline, authDigest: out.authDigest };
+        upsertTicket(ch, ticket);
+      }
     } catch (e) {
       // A failed submit is retryable: put the ticket back instead of leaving it settle_pending.
       if (ticket) { ticket.status = before; upsertTicket(ch, ticket); }
       throw e;
     }
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 500).json({ error: String(e.stderr || e.message || e) }); });
+  }, { owner: active && active.id }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // POST /api/pw-finalize?channel=N
 // Finalize partial withdrawal (advance time + finalize on-chain).
 app.post('/api/pw-finalize', (req, res) => {
-  if (!requireDevnet(res, 'Partial withdrawal')) return;
+  if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
   const ch = reqChannel(req);
-  withLock(ch, async () => {
-    const existing = findActiveTicket(ch, 'partial_withdrawal');
-    if (existing && existing.status === 'claim_pending') {
-      const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
-      return res.json({ ok: true, authDigest: auth.auth_digest, claim: existing.params.claim });
-    }
-    await require('../../api/lib/partial-withdrawal-live').stagePayoutArtifacts(ch);
-    await require('../../api/lib/partial-withdrawal-live').finalizeSavedPayout(ch, {
-      rpc: RPC, run: cli, env: { INTMAX_WALLET_ANVIL_MINE: '1' },
-    });
+  const active = findActiveTicket(ch, 'partial_withdrawal');
+  if (active && active.status === 'claim_pending') {
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
+    return res.json({ ok: true, authDigest: auth.auth_digest, claim: active.params.claim });
+  }
+  // Public chain: the background settlement finalizes once the challenge period has passed.
+  if (!isDevnet()) {
+    const settle = (active && active.steps && active.steps.settle) || {};
+    return res.status(409).json({ code: 'SETTLING', error: active ? `withdrawal is settling on L1 (${settle.phase || active.status})` : 'no partial withdrawal to finalize', ticket: active || null });
+  }
+  withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    let claim = ticket && ticket.params.claim || null;
-    const helper = require('../../api/lib/cli');
-    if (!claim && helper.l1SignerAddress().toLowerCase() !== auth.withdrawal_recipient.toLowerCase()) {
-      claim = require('../../node/common/partial-withdrawal-pull').pullTransaction(auth, rollupOf(ch));
-      claim.afterBlock = helper.sh('cast', ['rpc', 'eth_blockNumber', '--rpc-url', RPC]).trim().replace(/"/g, '');
-    }
-    if (ticket) { ticket.status = claim ? 'claim_pending' : 'settle_done'; ticket.params.claim = claim; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
-    res.json({ ok: true, authDigest: auth.auth_digest, claim });
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+    const out = await pwSettlement.finalize(ch, ticket || { params: {}, steps: {} });
+    res.json({ ok: true, authDigest: out.authDigest, claim: out.claim });
+  }, { owner: active && active.id }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // The receiver pulls the credited amount through MetaMask; verify that exact mined call.
@@ -1693,12 +1740,20 @@ const needBacking = CHANNELS.filter((ch) =>
 async function bootstrapBacking() {
   if (!isDevnet()) {
     // A public chain never gets the devnet bootstrap: its rollup, backing and settlement are
-    // provisioned by the operator (setup-backing, then hosting/wallet/bootstrap-real-chain.js), and
-    // the L1 validity orchestration in api/lib/wallet-l1.js exists for Anvil only.
+    // provisioned by the operator (setup-backing, then hosting/wallet/bootstrap-real-chain.js).
     if (needBacking.length) {
       throw new Error(`channels ${needBacking.join(', ')} have no deposit backing on chain ${relayChainId()}; `
         + 'provision them with `channel_member setup-backing` and hosting/wallet/bootstrap-real-chain.js');
     }
+    // On a verified rollup the block producer starts with its resident validity prover, which
+    // publishes the producer's history when a withdrawal is settled.
+    checkSettlementReadiness((rollup) => {
+      try {
+        require('../../api/lib/wallet-l1').configure(rollup);
+        producer.enableLocalValidity();
+        validityConfigured = true;
+      } catch (e) { console.error(`validity prover not configured: ${e.message || e}`); }
+    });
     return;
   }
   if (!needBacking.length) {
@@ -1768,6 +1823,11 @@ app.use((err, req, res, next) => {
   res.status(err && err.status ? err.status : 500).json({ error: String((err && err.message) || err) });
 });
 
+// Stop the block producer with the relay. An orphaned daemon keeps the producer journal locked
+// (while it builds its circuits it reads no input, so it does not see the relay go), and the next
+// relay could not start one. systemd stops the whole unit anyway; a plain kill did not.
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { producer.stop(); process.exit(0); });
+
 bootstrapBacking().then(() => {
   // After backing exists (verification reads channel_backing.json's rollup).
   loadTokenManifests(RPC);
@@ -1819,7 +1879,7 @@ bootstrapBacking().then(() => {
   // L1 either way, and imported they stay spendable in the channel.
   if (!isDevnet()) {
     depositSequencer.start(withLock);
-    setImmediate(checkDepositReadiness);
+    pwSettlement.resumeAll(CHANNELS);
   }
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());

@@ -6,11 +6,13 @@ import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
-/// Local wallet orchestration only. Every proof is checked by the deployed pinned verifier.
+/// The wallet relay's L1 settlement steps (api/lib/wallet-l1.js), on the devnet and on a public
+/// chain alike. Every proof is checked by the deployed pinned verifier; the script only refuses a
+/// rollup deployed for another chain.
 contract WalletL1Lifecycle is Script {
     function finalizeValidity() external {
-        require(block.chainid == 31337, "local wallet only");
         IntmaxRollup rollup = IntmaxRollup(payable(vm.envAddress("ROLLUP")));
+        require(rollup.deploymentChainId() == block.chainid, "rollup deployed for another chain");
         string memory j = vm.readFile(vm.envString("WALLET_VPIS_PATH"));
         bytes memory proof = FixtureLib.parseCompactProofV2(vm.readFile(vm.envString("WALLET_VALIDITY_PATH")));
         IntmaxRollup.ValidityPublicInputs memory p;
@@ -31,9 +33,9 @@ contract WalletL1Lifecycle is Script {
         require(rollup.latestFinalizedBlockNumber() >= p.finalBlockNumber, "finalized height mismatch");
     }
     function attestBacking() external {
-        require(block.chainid == 31337, "local wallet only");
         ChannelSettlementManager manager = ChannelSettlementManager(payable(vm.envAddress("MANAGER")));
         CloseFundingMaterializer materializer = CloseFundingMaterializer(address(manager.closeFundingMaterializer()));
+        require(materializer.rollup().deploymentChainId() == block.chainid, "rollup deployed for another chain");
         bytes memory proof = FixtureLib.parseCompactProofV2(vm.readFile(vm.envString("WALLET_BACKING_PATH")));
         vm.startBroadcast();
         materializer.attestSignedHeadBacking(manager, proof);

@@ -6507,6 +6507,20 @@ struct ProofDaPostRoundJournal {
     receipt_block_hash: Option<String>,
     receipt_block_number: Option<u64>,
     finalized_checkpoint: Option<intmax3_zkp::l1_finality::L1FinalizedCheckpoint>,
+    /// Set when the round was signed for `postBlockAndSubmitGuarded`: the rollup head this post
+    /// must extend, read when the round was signed and bound into its calldata. Absent for the
+    /// devnet-only unguarded endpoint (and every journal written before it existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guarded_predecessor: Option<GuardedPredecessor>,
+}
+
+/// The exact rollup head (`blockNumber`, `blockHashChain`) a guarded post extends. The contract
+/// checks it before taking the stake, so a post can never land on a head it was not built for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuardedPredecessor {
+    block_number: u64,
+    block_hash_chain: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -6555,6 +6569,7 @@ fn load_or_create_proof_da_post_journal(
     proof_hash: &str,
     proof_length: u32,
     state_root: &str,
+    max_rounds: usize,
 ) -> ProofDaPostJournal {
     if path.exists() {
         secure_private_path(path);
@@ -6569,7 +6584,7 @@ fn load_or_create_proof_da_post_journal(
             || !same_hex_value(&journal.proof_hash, proof_hash)
             || journal.proof_length != proof_length
             || !same_hex_value(&journal.state_root, state_root)
-            || journal.rounds.len() > 3
+            || journal.rounds.len() > max_rounds
             || journal
                 .rounds
                 .iter()
@@ -6956,6 +6971,59 @@ fn decode_signed_blob_transaction(raw_transaction: &str) -> DecodedBlobTransacti
         .unwrap_or_else(|error| die(format!("parse decoded signed blob transaction: {error}")))
 }
 
+/// `postBlockAndSubmitGuarded` with the predecessor head, or the devnet-only unguarded endpoint.
+fn blob_post_call_args(
+    sub_block: &str,
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+    pending_pin: &str,
+    guarded_predecessor: Option<&GuardedPredecessor>,
+) -> Vec<String> {
+    const POST_SIG: &str =
+        "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)";
+    const GUARDED_POST_SIG: &str = "postBlockAndSubmitGuarded((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32,uint64,bytes32)";
+    let signature = if guarded_predecessor.is_some() {
+        GUARDED_POST_SIG
+    } else {
+        POST_SIG
+    };
+    let mut args = vec![
+        signature.to_string(),
+        sub_block.to_string(),
+        proof_hash.to_string(),
+        proof_length.to_string(),
+        state_root.to_string(),
+        pending_pin.to_string(),
+    ];
+    if let Some(predecessor) = guarded_predecessor {
+        args.push(predecessor.block_number.to_string());
+        args.push(predecessor.block_hash_chain.clone());
+    }
+    args
+}
+
+fn blob_post_calldata(
+    sub_block: &str,
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+    pending_pin: &str,
+    guarded_predecessor: Option<&GuardedPredecessor>,
+) -> String {
+    let args = blob_post_call_args(
+        sub_block,
+        proof_hash,
+        proof_length,
+        state_root,
+        pending_pin,
+        guarded_predecessor,
+    );
+    let mut argv = vec!["calldata"];
+    argv.extend(args.iter().map(String::as_str));
+    cast(&argv).trim().to_string()
+}
+
 fn sign_blob_post(
     rollup: &str,
     signer: &L1Signer,
@@ -6966,32 +7034,27 @@ fn sign_blob_post(
     proof_length: u32,
     state_root: &str,
     pending_pin: &str,
+    guarded_predecessor: Option<&GuardedPredecessor>,
 ) -> (String, String) {
-    const POST_SIG: &str =
-        "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)";
-    let proof_length = proof_length.to_string();
-    let intended_calldata = cast(&[
-        "calldata",
-        POST_SIG,
+    let intended_calldata = blob_post_calldata(
         sub_block,
         proof_hash,
-        &proof_length,
+        proof_length,
         state_root,
         pending_pin,
-    ])
-    .trim()
-    .to_string();
-
+        guarded_predecessor,
+    );
     let mut command = Command::new("cast");
-    command.args([
-        "mktx",
-        rollup,
-        POST_SIG,
+    command.args(["mktx", rollup]);
+    command.args(blob_post_call_args(
         sub_block,
         proof_hash,
-        &proof_length,
+        proof_length,
         state_root,
         pending_pin,
+        guarded_predecessor,
+    ));
+    command.args([
         "--value",
         "1ether",
         "--blob",
@@ -8267,6 +8330,7 @@ fn post_block_round(
     proof_length: u32,
     journal_path: &Path,
     journal: &mut ProofDaPostJournal,
+    guarded: bool,
 ) -> (String, String) {
     let block = &lc["blocks"][i];
     let channel_id = block["channel_id"]
@@ -8291,17 +8355,19 @@ fn post_block_round(
     let existing = journal.rounds.get(i).cloned();
     let (mut round, validated): (ProofDaPostRoundJournal, ValidatedBlobSidecars) =
         if let Some(round) = existing {
-            let expected_calldata = cast(&[
-            "calldata",
-            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)",
-            &sub_block,
-            proof_hash,
-            &proof_length.to_string(),
-            state_root,
-            &round.pending_chains_pin,
-        ])
-        .trim()
-        .to_string();
+            if guarded != round.guarded_predecessor.is_some() {
+                die(format!(
+                    "persisted proof-DA round {i} was signed for the other post endpoint"
+                ));
+            }
+            let expected_calldata = blob_post_calldata(
+                &sub_block,
+                proof_hash,
+                proof_length,
+                state_root,
+                &round.pending_chains_pin,
+                round.guarded_predecessor.as_ref(),
+            );
             if round.round_index != i || !same_hex_value(&round.calldata, &expected_calldata) {
                 die(format!(
                     "persisted proof-DA round {i} has different calldata"
@@ -8341,6 +8407,20 @@ fn post_block_round(
                         .trim()
                         .to_string()
                 });
+            // A guarded post extends exactly the head it was signed against. The previous round
+            // is finalized before this one is signed, so the head read here is that round's.
+            let guarded_predecessor = guarded.then(|| GuardedPredecessor {
+                block_number: parse_u64_quantity(
+                    cast_call(rpc, rollup, "blockNumber()(uint64)", &[])
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default(),
+                    "rollup block number",
+                ),
+                block_hash_chain: cast_call(rpc, rollup, "blockHashChain()(bytes32)", &[])
+                    .trim()
+                    .to_string(),
+            });
             let (raw_signed_transaction, calldata) = sign_blob_post(
                 rollup,
                 signer,
@@ -8351,6 +8431,7 @@ fn post_block_round(
                 proof_length,
                 state_root,
                 &pending_pin,
+                guarded_predecessor.as_ref(),
             );
             let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
             let checked = validate_decoded_blob_transaction(
@@ -8375,6 +8456,7 @@ fn post_block_round(
                 receipt_block_hash: None,
                 receipt_block_number: None,
                 finalized_checkpoint: None,
+                guarded_predecessor,
             };
             // Irreversible ordering: signed raw tx + sidecars hit durable storage first.  Only the
             // next line after this branch may publish it.
@@ -8733,6 +8815,7 @@ fn cmd_withdraw(args: &[String]) {
         &proof_da.proof_hash,
         proof_length,
         final_state_root,
+        3,
     );
 
     // 1. registerChannel (one-time per channel; skip if already registered so re-runs are
@@ -8837,6 +8920,7 @@ fn cmd_withdraw(args: &[String]) {
         proof_length,
         &proof_da_journal_path,
         &mut proof_da_journal,
+        false,
     );
 
     // 3. Deposit (P5-B option B: `withdraw` ALWAYS makes the deposit here, between the registration
@@ -9022,6 +9106,7 @@ fn cmd_withdraw(args: &[String]) {
         proof_length,
         &proof_da_journal_path,
         &mut proof_da_journal,
+        false,
     );
     let (final_sub, final_blob_sidecars) = post_block_round(
         &rollup,
@@ -9035,6 +9120,7 @@ fn cmd_withdraw(args: &[String]) {
         proof_length,
         &proof_da_journal_path,
         &mut proof_da_journal,
+        false,
     );
 
     // 6. Split proof-DA attestation and MLE finalization.  Each call has its own durable intent and
@@ -18029,15 +18115,17 @@ fn preflight_burn_authorization_is_matchable(
 /// (written by `cosign-burn-send`) and the settlement addresses from `settlement.json`.
 /// Usage:
 ///   channel_member pw-submit <rpc_url>
-// This helper is deliberately devnet-only; public chains use the pinned operator publisher.
+// Publishes the resident producer's validity candidate: one blob post per producer block (each
+// with that block's own pending-chain checkpoint), then proof-DA attestation and finalization.
+// Off the devnet every post is `postBlockAndSubmitGuarded`, bound to the rollup head it extends,
+// and every round waits for the RPC's finalized head before the next is signed.
 fn cmd_publish_wallet_validity(args: &[String]) {
     use intmax3_zkp::validity_prover_service::{ValidityFinalizeArtifact, ValidityPostingArtifact};
     let rpc = args
         .get(1)
         .unwrap_or_else(|| die("publish-wallet-validity <rpc> <posting.json> <finalize.json>"));
-    if rpc_chain_id(rpc) != DEVNET_CHAIN_ID {
-        die("wallet validity publisher is local-devnet only");
-    }
+    let chain_id = rpc_chain_id(rpc);
+    let guarded = chain_id != DEVNET_CHAIN_ID;
     let posting: ValidityPostingArtifact =
         read_json(args.get(2).unwrap_or_else(|| die("posting file required")));
     let final_artifact: ValidityFinalizeArtifact =
@@ -18105,12 +18193,13 @@ fn cmd_publish_wallet_validity(args: &[String]) {
     let journal_path = dir.join("posts.json");
     let mut journal = load_or_create_proof_da_post_journal(
         &journal_path,
-        DEVNET_CHAIN_ID,
+        chain_id,
         &rollup,
         &sender,
         &hash,
         length,
         &final_artifact.final_state_root.to_hex(),
+        posting.sub_blocks.len(),
     );
     let blocks: Vec<serde_json::Value> = posting.sub_blocks.iter().map(|b| {
         let pin = keccak_hash::keccak([b.deposit_hash_chain.to_bytes_be(), b.channel_reg_hash_chain.to_bytes_be()].concat());
@@ -18142,6 +18231,7 @@ fn cmd_publish_wallet_validity(args: &[String]) {
             length,
             &journal_path,
             &mut journal,
+            guarded,
         ));
     }
     let (sub_id, sidecars) = last.unwrap();
@@ -18172,28 +18262,51 @@ fn cmd_publish_wallet_validity(args: &[String]) {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let filter = serde_json::json!({"address":rollup,"fromBlock":"0x0","toBlock":"latest","topics":[format!("0x{}",hex::encode(keccak_hash::keccak(b"Finalized(uint256,bytes32)").0))]});
-    let logs: serde_json::Value = serde_json::from_str(&cast(&[
-        "rpc",
-        "eth_getLogs",
-        &filter.to_string(),
-        "--rpc-url",
-        rpc,
-    ]))
-    .unwrap_or_else(|e| die(e));
-    let found = logs
-        .as_array()
-        .unwrap_or_else(|| die("invalid Finalized logs"))
-        .iter()
-        .rev()
-        .find(|l| {
-            l["removed"].as_bool() != Some(true)
-                && l["data"]
-                    .as_str()
-                    .map(|d| same_hex_value(d, &final_artifact.final_state_root.to_hex()))
-                    .unwrap_or(false)
-        })
-        .unwrap_or_else(|| die("no canonical Finalized event for validity candidate"));
+    // The candidate is finalized at or after its last post. Public RPCs cap eth_getLogs ranges,
+    // so scan forward from that receipt in bounded windows instead of from genesis.
+    let topic = format!(
+        "0x{}",
+        hex::encode(keccak_hash::keccak(b"Finalized(uint256,bytes32)").0)
+    );
+    let mut from = journal
+        .rounds
+        .last()
+        .and_then(|round| round.receipt_block_number)
+        .unwrap_or_else(|| die("validity posts have no recorded receipt block"));
+    let head = parse_u64_quantity(cast(&["block-number", "--rpc-url", rpc]).trim(), "L1 head");
+    let window = std::env::var("L1_LOG_WINDOW_BLOCKS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1000);
+    let mut found = None;
+    while found.is_none() && from <= head {
+        let to = head.min(from + window - 1);
+        let filter = serde_json::json!({"address":rollup,"fromBlock":format!("0x{from:x}"),
+            "toBlock":format!("0x{to:x}"),"topics":[topic]});
+        let logs: serde_json::Value = serde_json::from_str(&cast(&[
+            "rpc",
+            "eth_getLogs",
+            &filter.to_string(),
+            "--rpc-url",
+            rpc,
+        ]))
+        .unwrap_or_else(|e| die(e));
+        found = logs
+            .as_array()
+            .unwrap_or_else(|| die("invalid Finalized logs"))
+            .iter()
+            .find(|l| {
+                l["removed"].as_bool() != Some(true)
+                    && l["data"]
+                        .as_str()
+                        .map(|d| same_hex_value(d, &final_artifact.final_state_root.to_hex()))
+                        .unwrap_or(false)
+            })
+            .cloned();
+        from = to + 1;
+    }
+    let found = found.unwrap_or_else(|| die("no canonical Finalized event for validity candidate"));
     write_json(
         "wallet_validity_receipt.json",
         &serde_json::json!({"candidateId":r.candidate_id,"transactionHash":found["transactionHash"]}),

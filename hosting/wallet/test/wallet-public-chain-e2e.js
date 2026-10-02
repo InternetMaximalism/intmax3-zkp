@@ -10,12 +10,18 @@
 //   * several users per channel, joining before AND after the channel's first deposit;
 //   * deposits come from ordinary accounts and wait for the chain's own confirmation depth; the
 //     relay's devnet-only deposit helper is not used;
-//   * the relay is restarted mid-run and the flow continues.
+//   * the relay is restarted mid-run and the flow continues;
+//   * a partial withdrawal is settled on L1 by the relay in the background: the producer history
+//     is published and finalized, the intent is submitted from the post-burn head (the channel is
+//     refused other operations until then), the manager's one-day challenge period passes, and
+//     the recipient pulls the payout with its own account. Advancing anvil's clock past the
+//     challenge deadline is this harness's only shortcut (REHEARSAL_ANVIL_RPC).
 // It follows the browser's API sequence (wallet-live.html): init → deposit-info → L1 deposit →
 // ticket → import-deposit (retrying only on the confirmation refusal) → cosign / inter/send.
 //
 // Env: WALLET_E2E_DIR (state, resumable), RPC (the proxy), WALLET_E2E_URL (relay HTTP base),
-//      REHEARSAL_RESTART (command that restarts the relay; optional).
+//      REHEARSAL_RESTART (command that restarts the relay; optional), REHEARSAL_ANVIL_RPC (anvil
+//      itself, for advancing its clock; default http://127.0.0.1:8597).
 const fs = require('fs'), path = require('path'), cp = require('child_process'), crypto = require('crypto');
 const { Wallet } = require('../../../node/common/wallet');
 
@@ -109,6 +115,92 @@ async function depositWithoutImport(from, recipient, amount, tag) {
   return tx.transactionHash;
 }
 
+// Poll the user's channel tickets until `done` holds for its partial withdrawal; log each phase.
+async function waitWithdrawal(ch, done, what) {
+  let last = '';
+  for (const t0 = Date.now(); Date.now() - t0 < 4 * 3600 * 1000;) {
+    let tickets;
+    // The settlement outlives relay restarts; keep following it across one.
+    try { tickets = (await api(ch, '/api/tickets')).concat(await api(ch, '/api/tickets/history')); }
+    catch (e) { if (e.status) throw e; await sleep(10 * 1000); continue; }
+    const ticket = tickets.find(t => t.type === 'partial_withdrawal' && !t.retired);
+    const settle = (ticket && ticket.steps && ticket.steps.settle) || {};
+    const now = ticket ? `${ticket.status}/${settle.phase || '-'}${settle.error ? ' (retrying: ' + settle.error.slice(0, 160) + ')' : ''}` : 'none';
+    if (now !== last) { log(`withdrawal ${now}`); last = now; }
+    if (ticket && done(ticket)) return ticket;
+    await sleep(10 * 1000);
+  }
+  throw Error('withdrawal did not reach ' + what);
+}
+
+async function withdraw(user, amount, tag) {
+  const u = USERS[user], anvil = process.env.REHEARSAL_ANVIL_RPC || 'http://127.0.0.1:8597';
+  const t0 = Date.now();
+  await once(tag + '-burn', async () => {
+    await load(user);
+    const head = await api(u.ch, '/api/base-head');
+    const payload = wallet.burnSend(amount, u.address, 0, head.nonce);
+    wallet.finalize(await api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }));
+    log(`withdraw ${tag}: ${user} burned ${amount} to ${u.address}`);
+    return { at: Date.now() };
+  });
+  // Until the intent is on L1 the burn owns the channel: anything else is refused at once.
+  await once(tag + '-frozen', async () => {
+    const ticket = (await api(u.ch, '/api/tickets')).find(t => t.type === 'partial_withdrawal');
+    const phase = ticket && ticket.steps && ticket.steps.settle && ticket.steps.settle.phase;
+    if (ticket && ['challenge', 'finalizing'].includes(phase)) return { skipped: phase };
+    const t1 = Date.now();
+    try { await api(u.ch, '/api/cosign', {}); throw Error('a send was accepted while the burn owns the channel'); }
+    catch (e) { if (e.status !== 409 || !/SETTLING_WITHDRAWAL/.test(e.body || '')) throw e; }
+    if (Date.now() - t1 > 5000) throw Error('the refusal waited behind the settlement instead of answering at once');
+    return { refused: true };
+  });
+  const submitted = await waitWithdrawal(u.ch, t => t.steps && t.steps.settle && ['challenge', 'finalizing', 'done'].includes(t.steps.settle.phase), 'its L1 intent');
+  log(`withdraw ${tag}: intent on L1 after ${((Date.now() - t0) / 60000).toFixed(1)} min, deadline ${submitted.steps.settle.deadline}`);
+  // The manager's challenge period is a day of L1 time; pass it on the local chain.
+  await once(tag + '-challenge-passed', async () => {
+    const deadline = Number(submitted.steps.settle.deadline);
+    const now = Number(cp.execFileSync('cast', ['block', 'latest', '-f', 'timestamp', '--rpc-url', anvil], { encoding: 'utf8' }).trim());
+    if (now <= deadline) {
+      cp.execFileSync('cast', ['rpc', 'evm_increaseTime', String(deadline - now + 1), '--rpc-url', anvil]);
+      cp.execFileSync('cast', ['rpc', 'evm_mine', '--rpc-url', anvil]);
+    }
+    return { deadline, advancedFrom: now };
+  });
+  const ready = await waitWithdrawal(u.ch, t => ['claim_pending', 'settle_done'].includes(t.status), 'its payout');
+  const claim = ready.params.claim;
+  if (!claim || claim.recipient.toLowerCase() !== u.address || claim.amount !== amount) throw Error('unexpected payout claim ' + JSON.stringify(claim));
+  // The recipient pulls the credited payout with its own account.
+  const pull = await once(tag + '-pull', async () => {
+    const before = BigInt(cast('balance', u.address));
+    const receipt = JSON.parse(cast('send', claim.to, claim.data, '--unlocked', '--from', u.address, '--json'));
+    if (receipt.status !== '0x1') throw Error('payout pull reverted');
+    const after = BigInt(cast('balance', u.address));
+    if (after - before + BigInt(receipt.gasUsed) * BigInt(receipt.effectiveGasPrice) !== BigInt(amount)) throw Error('recipient did not receive the exact payout');
+    return receipt;
+  });
+  await once(tag + '-confirmed', () => api(u.ch, '/api/pw-claim-confirm', { txHash: pull.transactionHash }));
+  await waitWithdrawal(u.ch, t => t.status === 'settle_done', 'settled');
+  // Every blob post locked 1 ETH of the operator's; all of it must be back in its account.
+  const rollup = (await api(u.ch, '/api/deployment')).rollup.toLowerCase();
+  // The CLI journals its L1 publications in proof-da-output/ beside the contracts directory.
+  const outputs = process.env.REHEARSAL_PROOF_DA_DIR || path.join(directory, '..', 'proof-da-output');
+  const journals = fs.readdirSync(outputs).filter(d => d.startsWith('wallet-validity-0x'))
+    .map(d => path.join(outputs, d, 'posts.json')).filter(f => fs.existsSync(f))
+    .map(f => JSON.parse(fs.readFileSync(f))).filter(j => j.rollup.toLowerCase() === rollup);
+  if (!journals.length) throw Error('no validity posting journal for this rollup');
+  for (const j of journals) {
+    for (const round of j.rounds) {
+      const submitter = cast('call', rollup, 'stakeInfo(uint256)(address,bool)', String(BigInt(round.submissionId))).split(/\s+/)[0];
+      if (!/^0x0{40}$/i.test(submitter)) throw Error(`stake of submission ${round.submissionId} was not released`);
+    }
+    const credit = cast('call', rollup, 'pendingWithdrawals(address)(uint256)', j.submitter).split(/\s+/)[0];
+    if (credit !== '0') throw Error('the operator\'s reclaimed stakes were not pulled back: ' + credit);
+  }
+  log(`withdraw ${tag}: ${user} received ${amount} on L1 (${((Date.now() - t0) / 60000).toFixed(1)} min); `
+    + `${journals.reduce((n, j) => n + j.rounds.length, 0)} posting stakes released`);
+}
+
 async function sendIntra(from, to, amount, tag) {
   const f = USERS[from], t = USERS[to];
   if (f.ch !== t.ch) throw Error('intra-channel send needs one channel');
@@ -132,10 +224,14 @@ async function sendInter(from, to, amount, tag) {
   });
   const t0 = Date.now();
   await once(tag + '-result', () => api(f.ch, '/api/inter/send', payload));
-  // A repeated delivery of the same transfer must not credit twice.
-  const before = (await api(t.ch, '/api/snapshot')).state.digest;
-  await api(f.ch, '/api/inter/send', payload);
-  if ((await api(t.ch, '/api/snapshot')).state.digest !== before) throw Error('duplicate delivery advanced the destination');
+  // A repeated delivery of the same transfer must not credit twice (checked once, right after it
+  // landed: a resumed run may meet the channel paused by a later withdrawal).
+  await once(tag + '-replayed', async () => {
+    const before = (await api(t.ch, '/api/snapshot')).state.digest;
+    await api(f.ch, '/api/inter/send', payload);
+    if ((await api(t.ch, '/api/snapshot')).state.digest !== before) throw Error('duplicate delivery advanced the destination');
+    return { at: Date.now() };
+  });
   log(`send ${tag}: ${from}(ch${f.ch}) -> ${to}(ch${t.ch}) ${amount} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 }
 
@@ -212,18 +308,11 @@ async function restartRelay() {
   await sendIntra('C', 'A', ETH(0.001), 'c-a');
   await sendInter('B', 'C', ETH(0.002), 'b-c');
   await expectBalances({ A: ETH(0.008), B: ETH(0.011), C: ETH(0.008) }, 'balances-3');
-  // Withdraw is not offered on a public chain until its L1 settlement exists: the burn is refused
-  // before anything is signed, and the balances above are untouched.
-  await once('withdraw-refused', async () => {
-    const health = await api(7, '/api/health');
-    if (!health.capabilities || health.capabilities.partialWithdrawal !== false) throw Error('health must report partialWithdrawal: false');
-    const before = (await api(7, '/api/snapshot')).state.digest;
-    try { await api(7, '/api/cosign-burn', { debitPayload: {}, transferDescriptor: {} }); throw Error('a burn was accepted'); }
-    catch (e) { if (e.status !== 501 || !/NOT_AVAILABLE/.test(e.body || '')) throw e; }
-    if ((await api(7, '/api/snapshot')).state.digest !== before) throw Error('a refused burn changed the channel');
-    return { refused: true };
-  });
-  await expectBalances({ A: ETH(0.008), B: ETH(0.011), C: ETH(0.008) }, 'balances-4');
+  await withdraw('A', ETH(0.002), 'pw-A');
+  await expectBalances({ A: ETH(0.006), B: ETH(0.011), C: ETH(0.008) }, 'balances-4');
+  // The channel is free again once the intent is on L1.
+  await sendIntra('C', 'A', ETH(0.001), 'c-a-2');
+  await expectBalances({ A: ETH(0.007), B: ETH(0.011), C: ETH(0.007) }, 'balances-5');
   save('success', { at: new Date().toISOString() });
-  log('SUCCESS: joins onto bound channels, in-order deposits with abandoned/foreign/outsider ones, intra/inter sends, receive-after-send, restart');
+  log('SUCCESS: joins onto bound channels, in-order deposits with abandoned/foreign/outsider ones, intra/inter sends, receive-after-send, restart, partial withdrawal settled on L1');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

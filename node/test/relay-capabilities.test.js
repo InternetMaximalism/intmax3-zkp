@@ -10,7 +10,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../../hosting/wallet/wallet-relay.js'), 'utf8');
 const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
-const helpers = slice('let depositReadiness', 'fs.mkdirSync(WORK');
+const helpers = slice('let settlementReadiness', 'fs.mkdirSync(WORK');
 const ROUTES = {
   '/api/cosign-burn': slice("app.post('/api/cosign-burn'", '// POST /api/deploy-settlement'),
   '/api/deploy-settlement': slice("app.post('/api/deploy-settlement'", '\n});\n') + '\n});\n',
@@ -24,6 +24,7 @@ function call(route, devnet) {
   const ctx = {
     isDevnet: () => devnet, relayChainId: () => (devnet ? 31337 : 11155111),
     app: { post: (p, h) => { handlers[p] = h; } }, CHANNELS: [7], validityDeployment: {}, setTimeout,
+    findActiveTicket: () => null, pwSettlement: { start() {} },
     reqChannel: () => { touched.push('reqChannel'); return 7; },
     withLock: () => { touched.push('withLock'); return Promise.resolve(); },
     burnOperations: { run: () => { touched.push('burn'); } },
@@ -95,37 +96,45 @@ test('before the startup check, a public-chain relay offers no deposit target an
 test('an unverified or mismatched rollup keeps deposits off, with the reason, and is not retried', () => {
   const reason = "rollup cannot finalize this producer's blocks";
   const r = relay({ readiness: () => ({ ok: false, reason }) });
-  r.ctx.checkDepositReadiness();
+  r.ctx.checkSettlementReadiness();
   const info = r.get('/api/deposit-info');
   assert.equal(info.status, 501);
   assert.ok(info.body.error.includes(reason));
   assert.equal(r.get('/api/health').body.unavailable.deposit, reason);
   assert.deepEqual(r.retries, [], 'an operator must act; polling would not change the record');
-  assert.ok(r.logged.some(m => /deposits disabled/.test(m)));
+  assert.ok(r.logged.some(m => /deposits and withdrawals disabled/.test(m)));
 });
 
 test('a transient chain-read failure keeps deposits off and re-checks a minute later', () => {
   const r = relay({ readiness: () => ({ ok: false, reason: 'could not read', transient: true }) });
-  r.ctx.checkDepositReadiness();
+  r.ctx.checkSettlementReadiness();
   assert.equal(r.get('/api/deposit-info').status, 501);
   assert.deepEqual(r.retries, [60 * 1000]);
 });
 
-test('a verified rollup serves the deposit target', () => {
+test('a verified rollup serves the deposit target, and withdrawals once its validity prover is configured', () => {
   const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
-  r.ctx.checkDepositReadiness();
+  let configured = null;
+  r.ctx.checkSettlementReadiness((rollup) => { configured = rollup; });
+  assert.equal(configured, ROLLUP, 'the validity prover is configured for the verified rollup');
   const info = r.get('/api/deposit-info');
   assert.equal(info.status, 200);
   assert.deepEqual(JSON.parse(JSON.stringify(info.body)),
     { rollup: ROLLUP, rpc: 'https://rpc.example', chainId: 11155111, minConfirmations: 12, depositRecipient: RECIPIENT });
-  const h = r.get('/api/health').body;
+  let h = r.get('/api/health').body;
   assert.equal(h.capabilities.deposit, true);
+  assert.equal(h.capabilities.partialWithdrawal, false, 'not before the validity prover is configured');
+  assert.equal(h.capabilities.settlement, 'background');
+  assert.match(h.unavailable.partialWithdrawal, /restart the relay/);
+  vm.runInContext('validityConfigured = true', r.ctx);
+  h = r.get('/api/health').body;
+  assert.equal(h.capabilities.partialWithdrawal, true);
   assert.deepEqual(JSON.parse(JSON.stringify(h.unavailable)), {});
 });
 
 test('the deployment (chain and rollup) is served whatever the deposit capability, without a deposit target', () => {
   const r = relay({ readiness: () => ({ ok: false, reason: 'unverified' }) });
-  r.ctx.checkDepositReadiness();
+  r.ctx.checkSettlementReadiness();
   const d = r.get('/api/deployment');
   assert.equal(d.status, 200);
   assert.deepEqual(JSON.parse(JSON.stringify(d.body)), { rollup: ROLLUP, rpc: 'https://rpc.example', chainId: 11155111, minConfirmations: 12 });
@@ -134,5 +143,8 @@ test('the deployment (chain and rollup) is served whatever the deposit capabilit
 test('the local devnet offers deposits without a validity deployment record', () => {
   const r = relay({ devnet: true, readiness: () => assert.fail('devnet is not checked') });
   assert.equal(r.get('/api/deposit-info').status, 200);
-  assert.equal(r.get('/api/health').body.capabilities.deposit, true);
+  const h = r.get('/api/health').body;
+  assert.equal(h.capabilities.deposit, true);
+  assert.equal(h.capabilities.partialWithdrawal, true);
+  assert.equal(h.capabilities.settlement, 'interactive');
 });

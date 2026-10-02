@@ -1479,9 +1479,9 @@ fn validate_l1_state_authority_evidence(
     // All rollup reads above were pinned to `head_before`. Do not label a newer head authoritative
     // without reading the state at that newer block too; retrying performs a clean new binding.
     if evidence.head_after != evidence.head_before {
-        return Err(l1_rejected(
-            "durable L1 head changed during state binding; retry against one stable finalized block",
-        ));
+        return Err(l1_rejected(&format!(
+            "durable L1 head changed during state binding; {STABLE_HEAD_RETRY}"
+        )));
     }
     if !evidence.root_membership {
         return Err(l1_rejected(
@@ -1860,6 +1860,11 @@ fn validate_l1_finalization_evidence_at_position(
     }
     Ok(())
 }
+
+/// Marks the one L1 binding rejection that is transient: the RPC's finalized head advanced while
+/// the rollup was being read at it (public RPCs advance it an epoch at a time). Binding again reads
+/// everything at the new head; callers may retry exactly this rejection.
+pub const STABLE_HEAD_RETRY: &str = "retry against one stable finalized block";
 
 fn l1_rejected(message: &str) -> ValidityProverServiceError {
     ValidityProverServiceError::ProducerReconciliation(format!(

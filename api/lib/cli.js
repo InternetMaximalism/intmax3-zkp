@@ -1,4 +1,4 @@
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -105,6 +105,37 @@ function cli(ch, args, extraEnv) {
 
 function sh(bin, args, opts) {
   return execFileSync(bin, args, { encoding: 'utf8', maxBuffer: CLI_MAX_BUFFER, ...opts });
+}
+
+// The asynchronous form of `sh`, for L1 work that waits on public-chain finality (minutes to an
+// hour): `execFileSync` would stall every other request of the relay for that long. Resolves with
+// stdout; rejects with an Error carrying `stdout`, `stderr` and `status` as `execFileSync` does.
+function shAsync(bin, args, { cwd, env, timeout = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env: env || process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', timer = null;
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    if (timeout > 0) timer = setTimeout(() => child.kill('SIGTERM'), timeout);
+    child.on('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
+    child.on('close', (status, signal) => {
+      if (timer) clearTimeout(timer);
+      if (status === 0) return resolve(stdout);
+      const why = signal ? `killed by ${signal}` : `exit status ${status}`;
+      reject(Object.assign(new Error(`${path.basename(bin)} ${args.join(' ')}: ${why}\n${stderr}`),
+        { stdout, stderr, status, signal }));
+    });
+  });
+}
+
+// `cli` without blocking the relay; `timeout` 0 waits as long as the command runs (its own L1
+// waits are bounded).
+async function cliAsync(ch, args, extraEnv, { timeout = 0 } = {}) {
+  console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}  (async)`);
+  try {
+    return await shAsync(CLI, args, { cwd: chDir(ch), timeout,
+      env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) } });
+  } catch (e) { throw sanitizeCliError(e); }
 }
 
 function rollupOf(ch) {
@@ -274,7 +305,7 @@ writeJson.sequence = 0;
 
 module.exports = {
   REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, l1SignerArgsForChain, l1SignerArgs,
-  l1SignerAddress, chDir, wc, validChannel, cli, sh,
+  l1SignerAddress, chDir, wc, validChannel, cli, sh, cliAsync, shAsync,
   rollupOf, readJson, writeJson, chainId, ensureSettlement, failRoute, SettlementUnavailable,
   verifyActiveSettlementBinding,
 };
