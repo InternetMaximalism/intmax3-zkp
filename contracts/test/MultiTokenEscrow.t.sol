@@ -63,7 +63,8 @@ contract MultiTokenEscrowTest is Test {
             fraudTreasury,
             validityMle,
             withdrawalMle,
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 

@@ -30,7 +30,8 @@ contract RollupChainPinDoSTest is Test {
             address(this), // fraudTreasury
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
-            bytes32(0) // genesisStateRoot
+            bytes32(0), // genesisStateRoot
+            1 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);

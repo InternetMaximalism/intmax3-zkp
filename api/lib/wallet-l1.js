@@ -104,7 +104,7 @@ async function publishCandidate(ch) {
     await acknowledge(receipt.candidateId, receipt.transactionHash);
 }
 
-// Every blob post locked the rollup's 1 ETH POST_BLOCK_STAKE. Finalization refunds the finalized
+// Every blob post locked the rollup's `postBlockStake` bond. Finalization refunds the finalized
 // round's; the earlier rounds are reclaimable once their blocks are finalized, and nothing else
 // returns them. Reclaim every finalized one this operator posted on the rollup and pull its credit
 // back to its account. Idempotent: an unfinalized, spent or foreign stake is skipped, an empty

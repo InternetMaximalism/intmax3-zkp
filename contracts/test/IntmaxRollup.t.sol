@@ -322,7 +322,8 @@ contract IntmaxRollupTest is Test {
 
     function setUp() public {
         rollup = new IntmaxRollup(
-            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
+            1 ether
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
@@ -455,7 +456,8 @@ contract IntmaxRollupTest is Test {
     ///      `registerChannel`, and return the emitted `newChannelRegHashChain`.
     function _registerChannelDiff(uint256 memberCount) internal returns (bytes32) {
         IntmaxRollup fresh = new IntmaxRollup(
-            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
+            1 ether
         );
 
         (bytes32[] memory sphincs, bytes32[] memory pkBs, bytes32[] memory regev, address[] memory recipients) =
@@ -485,7 +487,8 @@ contract IntmaxRollupTest is Test {
     /// @dev Deploy a FRESH rollup with an empty config (registration-only tests).
     function _freshRollup() internal returns (IntmaxRollup) {
         return new IntmaxRollup(
-            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
+            1 ether
         );
     }
 
@@ -742,6 +745,42 @@ contract IntmaxRollupTest is Test {
         vm.prank(blockProducer);
         vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
         rollup.postBlockAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
+    }
+
+    /// The posting bond is a deployment parameter (`postBlockStake`, immutable): a post must carry
+    /// exactly it, and it is what a refund, a reclaim or a slash moves.
+    function test_postBlockStake_isTheDeploymentValue() public {
+        IntmaxRollup cheap = new IntmaxRollup(
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0), 0.1 ether
+        );
+        cheap.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
+        cheap.setBlockProducer(blockProducer, true);
+        assertEq(cheap.postBlockStake(), 0.1 ether);
+        assertEq(rollup.postBlockStake(), 1 ether);
+
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 42;
+        IntmaxRollup.SubBlock[] memory batch =
+            _singleBlockBatch(5, ids, uint64(block.timestamp), bytes32(uint256(0x1234)));
+        _mockBlob();
+        bytes32 pin = cheap.pendingChainsPin();
+        vm.prank(blockProducer);
+        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
+        cheap.postBlockAndSubmit{value: 1 ether}(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
+        vm.prank(blockProducer);
+        cheap.postBlockAndSubmit{value: 0.1 ether}(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
+        (address bonded, bool spent) = cheap.stakeInfo(cheap.nextSubmissionId() - 1);
+        assertEq(bonded, blockProducer);
+        assertFalse(spent);
+        assertEq(address(cheap).balance, 0.1 ether);
+    }
+
+    /// A zero bond would make posting free and leave fraud unpunished: refused at deployment.
+    function test_postBlockStake_zeroIsRefused() public {
+        MockPinnedMleVerifierV2 validity = new MockPinnedMleVerifierV2(31337);
+        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
+        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1014,7 +1053,7 @@ contract IntmaxRollupTest is Test {
     function test_constructor_rejectsDuplicatePinnedAdapters() public {
         MockPinnedMleVerifierV2 adapter = new MockPinnedMleVerifierV2(31337);
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, adapter, adapter, bytes32(0));
+        new IntmaxRollup(fraudTreasury, adapter, adapter, bytes32(0), 1 ether);
     }
 
     function test_constructor_rejectsCrossStatementCoreReuse() public {
@@ -1023,7 +1062,7 @@ contract IntmaxRollupTest is Test {
         MockPinnedMleVerifierV2WithCore withdrawal = new MockPinnedMleVerifierV2WithCore(31337, address(sharedCore));
 
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
     }
 
     function test_constructor_rejectsCrossStatementAdapterCoreAlias() public {
@@ -1032,7 +1071,7 @@ contract IntmaxRollupTest is Test {
         MockPinnedMleVerifierV2WithCore validity = new MockPinnedMleVerifierV2WithCore(31337, address(withdrawal));
 
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
     }
 
     function test_constructor_rejectsCoreChainMismatch() public {
@@ -1048,13 +1087,13 @@ contract IntmaxRollupTest is Test {
                 uint256(31338)
             )
         );
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
     }
 
     function test_constructor_rejectsPinnedAdapterWithoutCode() public {
         MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
         vm.expectRevert(abi.encodeWithSelector(IntmaxRollup.InvalidPinnedMleVerifier.selector, address(0xBEEF)));
-        new IntmaxRollup(fraudTreasury, IPinnedMleVerifierV2(address(0xBEEF)), withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, IPinnedMleVerifierV2(address(0xBEEF)), withdrawal, bytes32(0), 1 ether);
     }
 
     function test_constructor_rejectsWrongChainPinnedAdapter() public {
@@ -1068,7 +1107,7 @@ contract IntmaxRollupTest is Test {
                 uint256(31338)
             )
         );
-        new IntmaxRollup(fraudTreasury, wrongChain, withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, wrongChain, withdrawal, bytes32(0), 1 ether);
     }
 
     /// @notice A local-only verification bypass must not survive a chain-id
@@ -1113,7 +1152,8 @@ contract IntmaxRollupTest is Test {
             fraudTreasury,
             new MockPinnedMleVerifierV2(publicChain),
             new MockPinnedMleVerifierV2(publicChain),
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         assertEq(pinned.deploymentChainId(), publicChain, "deployment chain pin");
 
@@ -1144,7 +1184,7 @@ contract IntmaxRollupTest is Test {
                 IntmaxRollup.PinnedMleVerifierChainMismatch.selector, address(validity), publicChain, 31337
             )
         );
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
     }
 
     function test_finalize_success() public {
@@ -1303,7 +1343,7 @@ contract IntmaxRollupTest is Test {
     /// supply a proof that (a) carries the CORRECT PI limbs, so the preimage pre-condition passes,
     /// and (b) fails WHIR verification, so fraud is confirmed for the right reason.
     function _newMleEnabledRollup() internal returns (IntmaxRollup r) {
-        r = new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
+        r = new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(address(this), true);
         r.setBlockProducer(submitter, true);
@@ -1519,7 +1559,7 @@ contract IntmaxRollupTest is Test {
     function test_fraudProof_e2e_corruptedMleCommitment() public {
         // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
         IntmaxRollup mleRollup =
-            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
         bytes memory mleProof = _defaultMleProof();
@@ -1560,7 +1600,7 @@ contract IntmaxRollupTest is Test {
     function test_fraudProof_e2e_corruptedMleEvals() public {
         // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
         IntmaxRollup mleRollup =
-            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
         bytes memory mleProof = _defaultMleProof();
@@ -1908,7 +1948,8 @@ contract IntmaxRollupTest is Test {
             // B-4: fraud is confirmed only by the authenticated InvalidMleProof selector.
             new RejectingMleVerifier(),
             new MockPinnedMleVerifierV2(31337),
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         rollup2.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
@@ -2008,7 +2049,7 @@ contract BlockHashHarness is IntmaxRollup {
         IPinnedMleVerifierV2 validityVerifier_,
         IPinnedMleVerifierV2 withdrawalVerifier_,
         bytes32 genesisStateRoot_
-    ) IntmaxRollup(fraudTreasury_, validityVerifier_, withdrawalVerifier_, genesisStateRoot_) {}
+    ) IntmaxRollup(fraudTreasury_, validityVerifier_, withdrawalVerifier_, genesisStateRoot_, 1 ether) {}
 
     function computeBlockHashForTest(
         bytes32 prevHash,

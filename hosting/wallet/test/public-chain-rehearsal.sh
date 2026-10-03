@@ -137,7 +137,9 @@ step_rollup() {
     mkdir -p "$R/proof-da-output"
     config="$R/proof-da-output/$(basename "$exported")"
     cp "$exported" "$config"
+    # The testnet's posting bond (POST_BLOCK_STAKE_WEI, set at deployment): 0.1 ETH.
     (cd "$CONTRACTS" && FRAUD_TREASURY=$OPERATOR WALLET_VALIDITY_CONFIG="$config" \
+      POST_BLOCK_STAKE_WEI="${POST_BLOCK_STAKE_WEI:-100000000000000000}" \
       WALLET_VALIDITY_CONFIG_SHA256="0x$(shasum -a 256 "$config" | cut -d' ' -f1)" \
       forge script script/Deploy.s.sol --rpc-url "$RPC" \
       --account "$ACCOUNT" --broadcast --slow > "$R/rollup.log" 2>&1) || { tail -30 "$R/rollup.log"; exit 1; }

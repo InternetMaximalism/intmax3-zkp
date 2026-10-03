@@ -6215,7 +6215,31 @@ struct ProofDaMetadata {
 
 const PROOF_DA_POST_JOURNAL_VERSION: u32 = 1;
 const FULL_WITHDRAWAL_JOURNAL_VERSION: u32 = 1;
-const POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
+/// The posting bond of a rollup deployed before `postBlockStake` was a deployment parameter.
+const LEGACY_POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
+
+/// The rollup's posting bond (`postBlockStake`, set at deployment). A rollup deployed before it was
+/// a parameter has no getter — its call reverts — and bonds the legacy 1 ETH; any other failure
+/// stops rather than sign a post with a guessed value.
+fn rollup_post_block_stake(rpc: &str, rollup: &str) -> u64 {
+    let output = Command::new("cast")
+        .args(["call", rollup, "postBlockStake()(uint256)", "--rpc-url", rpc])
+        .output()
+        .unwrap_or_else(|error| die(format!("cast postBlockStake failed to start: {error}")));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("revert") {
+            return LEGACY_POST_BLOCK_STAKE_WEI;
+        }
+        die(format!("read the rollup's postBlockStake: {}", stderr.trim()));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| die(format!("the rollup's postBlockStake is unreadable: {text:?}")))
+}
 
 /// Stable, semantic identity of one full-withdrawal lifecycle.  Unlike the validity proof hash,
 /// these fields do not change when the randomized MLE/WHIR prover is invoked again.  There is one
@@ -7035,6 +7059,7 @@ fn sign_blob_post(
     state_root: &str,
     pending_pin: &str,
     guarded_predecessor: Option<&GuardedPredecessor>,
+    stake: u64,
 ) -> (String, String) {
     let intended_calldata = blob_post_calldata(
         sub_block,
@@ -7054,9 +7079,10 @@ fn sign_blob_post(
         pending_pin,
         guarded_predecessor,
     ));
+    let stake = stake.to_string();
     command.args([
         "--value",
-        "1ether",
+        &stake,
         "--blob",
         "--path",
         proof_da_path,
@@ -8332,6 +8358,7 @@ fn post_block_round(
     journal: &mut ProofDaPostJournal,
     guarded: bool,
 ) -> (String, String) {
+    let stake = rollup_post_block_stake(rpc, rollup);
     let block = &lc["blocks"][i];
     let channel_id = block["channel_id"]
         .as_u64()
@@ -8380,7 +8407,7 @@ fn post_block_round(
                 journal.chain_id,
                 &journal.submitter,
                 rollup,
-                POST_BLOCK_STAKE_WEI,
+                stake,
                 &round.calldata,
             )
             .unwrap_or_else(|error| {
@@ -8432,6 +8459,7 @@ fn post_block_round(
                 state_root,
                 &pending_pin,
                 guarded_predecessor.as_ref(),
+                stake,
             );
             let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
             let checked = validate_decoded_blob_transaction(
@@ -8440,7 +8468,7 @@ fn post_block_round(
                 journal.chain_id,
                 &journal.submitter,
                 rollup,
-                POST_BLOCK_STAKE_WEI,
+                stake,
                 &calldata,
             )
             .unwrap_or_else(|error| die(format!("validate signed proof-DA round {i}: {error}")));
@@ -9346,7 +9374,7 @@ fn cmd_withdraw(args: &[String]) {
                 &rollup,
                 &FullWithdrawalEventExpectation::WithdrawalCredited {
                     recipient: depositor_hex.clone(),
-                    amount: POST_BLOCK_STAKE_WEI,
+                    amount: rollup_post_block_stake(&rpc, &rollup),
                 },
             )
             .unwrap_or_else(|| {

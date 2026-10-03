@@ -79,7 +79,8 @@ contract RegisterTokensTest is Test {
             fraudTreasury,
             validityMle,
             withdrawalMle,
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         assertEq(rollup.deployer(), address(script), "the script must be the rollup deployer");
     }

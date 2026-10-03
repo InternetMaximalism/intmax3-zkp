@@ -320,9 +320,11 @@ own wallet. A failed step is recorded on the ticket and retried every five minut
 resumes at the recorded phase. Until the intent is submitted the burn owns the channel head (the
 manager accepts a burn only with its own post-burn signed state), so every other operation on that
 channel answers 409 `SETTLING_WITHDRAWAL`; other channels are unaffected. Each blob post locks the
-rollup's `POST_BLOCK_STAKE` (1 ETH) from the operator until its batch is finalized (then
-`reclaimStake` / the finalize refund), so the operator needs one ETH per producer block posted in a
-settlement on top of gas.
+rollup's `postBlockStake` bond from the operator until its batch is finalized (then `reclaimStake`
+/ the finalize refund, both pulled back by the relay). The bond is set at deployment
+(`Deploy.s.sol` reads `POST_BLOCK_STAKE_WEI`, default 1 ETH, non-zero; the v3 testnet uses 0.1 ETH)
+and is immutable. The relay offers a withdrawal only while the operator holds one bond per producer
+block not yet finalized plus the burn's own, and a 0.2 ETH gas reserve (`SETTLEMENT_GAS_RESERVE_WEI`).
 
 **Deposits on a public chain** are consumed by the relay's deposit sequencer
 (`api/lib/deposit-sequencer.js`), not by the depositor's browser. The block producer accepts the

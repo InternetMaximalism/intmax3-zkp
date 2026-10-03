@@ -54,7 +54,8 @@ contract ReclaimStakeTest is Test {
             fraudTreasury,
             IPinnedMleVerifierV2(address(validityAdapter)),
             new MockPinnedMleVerifierV2(31337),
-            genesis
+            genesis,
+            1 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting

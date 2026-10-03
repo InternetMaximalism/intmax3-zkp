@@ -100,6 +100,6 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         IPinnedMleVerifierV2 validity = rollup.validityMleVerifier();
         bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, validity, validity, genesis);
+        new IntmaxRollup(fraudTreasury, validity, validity, genesis, 1 ether);
     }
 }

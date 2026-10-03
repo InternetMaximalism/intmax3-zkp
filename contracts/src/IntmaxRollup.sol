@@ -549,7 +549,7 @@ contract IntmaxRollup {
     /// SECURITY: `totalEscrowed` is the global ceiling for all future native payouts
     ///           (Σ payouts ≤ totalEscrowed). It is enforced later by an underflow-revert on every
     ///           decrement at payout time, so no payout path can ever release more ETH than was
-    ///           escrowed here. It is intentionally kept disjoint from the `POST_BLOCK_STAKE` ETH
+    ///           escrowed here. It is intentionally kept disjoint from the `postBlockStake` ETH
     ///           tracked by `stakeInfo`/`pendingWithdrawals` (fraud-stake accounting), which is NOT
     ///           part of this balance.
     /// @dev Multi-token (§N-7): ETH escrow accounting DELIBERATELY stays on `totalEscrowed` (not
@@ -636,7 +636,10 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Fraud/Stake configuration
     // -----------------------------------------------------------------------
-    uint256 private constant POST_BLOCK_STAKE = 1 ether;
+    /// @notice The bond a block producer posts with every batch (`postBlockAndSubmit*`): refunded on
+    ///         finalization or reclaimable once the batch is finalized history, slashed to a fraud
+    ///         reporter and the treasury on fraud. Set at deployment (non-zero) and immutable.
+    uint256 public immutable postBlockStake;
     uint256 private constant FRAUD_REWARD_PERCENT = 90;
     uint256 private constant FRAUD_TREASURY_PERCENT = 10;
 
@@ -674,8 +677,11 @@ contract IntmaxRollup {
         address _fraudTreasury,
         IPinnedMleVerifierV2 _validityMleVerifier,
         IPinnedMleVerifierV2 _withdrawalMleVerifier,
-        bytes32 _genesisStateRoot
+        bytes32 _genesisStateRoot,
+        uint256 _postBlockStake
     ) {
+        if (_postBlockStake == 0) revert InvalidStakeAmount();
+        postBlockStake = _postBlockStake;
         address validityAdapter = address(_validityMleVerifier);
         address withdrawalAdapter = address(_withdrawalMleVerifier);
         if (validityAdapter == withdrawalAdapter) {
@@ -1025,7 +1031,7 @@ contract IntmaxRollup {
         if (!isBlockProducer[msg.sender] && msg.sender != blockProducerAdmin) {
             revert NotAuthorizedBlockProducer();
         }
-        if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
+        if (msg.value != postBlockStake) revert InvalidStakeAmount();
         BatchMetadata memory meta =
             _postBlock(subBlocks, checkpointDepositChain, checkpointRegistrationChain, checkpointDepositCount);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
@@ -1637,7 +1643,7 @@ contract IntmaxRollup {
         if (!ok) revert WithdrawTransferFailed();
     }
 
-    /// @notice Reclaim a POST_BLOCK_STAKE bond once its submission's batch is part of canonical
+    /// @notice Reclaim a `postBlockStake` bond once its submission's batch is part of canonical
     ///         FINALIZED history. Permissionless caller; the bond is always credited to the recorded
     ///         submitter (a helper may sweep on their behalf with no benefit to itself).
     ///
@@ -1698,8 +1704,8 @@ contract IntmaxRollup {
         // Effects before credit (CEI); pull-payment only — no external call here.
         info.spent = true;
         delete stakeInfo[submissionId];
-        pendingWithdrawals[submitter] += POST_BLOCK_STAKE;
-        emit WithdrawalCredited(submitter, POST_BLOCK_STAKE);
+        pendingWithdrawals[submitter] += postBlockStake;
+        emit WithdrawalCredited(submitter, postBlockStake);
     }
 
     // -----------------------------------------------------------------------
@@ -2218,8 +2224,8 @@ contract IntmaxRollup {
         info.spent = true;
         delete stakeInfo[submissionId];
 
-        uint256 reward = (POST_BLOCK_STAKE * FRAUD_REWARD_PERCENT) / 100;
-        uint256 treasuryShare = POST_BLOCK_STAKE - reward;
+        uint256 reward = (postBlockStake * FRAUD_REWARD_PERCENT) / 100;
+        uint256 treasuryShare = postBlockStake - reward;
 
         pendingWithdrawals[reporter] += reward;
         pendingWithdrawals[fraudTreasury] += treasuryShare;
@@ -2241,8 +2247,8 @@ contract IntmaxRollup {
         address recipient = info.submitter;
         delete stakeInfo[submissionId];
 
-        pendingWithdrawals[recipient] += POST_BLOCK_STAKE;
-        emit WithdrawalCredited(recipient, POST_BLOCK_STAKE);
+        pendingWithdrawals[recipient] += postBlockStake;
+        emit WithdrawalCredited(recipient, postBlockStake);
     }
 
     // -----------------------------------------------------------------------

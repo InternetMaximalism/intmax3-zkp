@@ -60,7 +60,8 @@ contract C2CFullE2ETest is Test {
             fraudTreasury,
             IPinnedMleVerifierV2(address(validityAdapter)),
             IPinnedMleVerifierV2(address(withdrawalAdapter)),
-            genesis
+            genesis,
+            1 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting

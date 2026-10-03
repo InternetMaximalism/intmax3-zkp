@@ -161,11 +161,12 @@ test('the operator must hold a 1 ETH stake for every unfinalized block plus the 
   const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
   r.ctx.checkSettlementReadiness(() => {});
   vm.runInContext('validityConfigured = true', r.ctx);
-  let balance = 4n * 10n ** 18n;
+  let balance = 4n * 10n ** 18n, stake = 10n ** 18n;
   r.ctx.producer = { status: async () => ({ blockNumber: 4 }) };
   r.ctx.require = () => ({
     l1SignerAddress: () => '0xoperator',
-    sh: (_bin, args) => (args[0] === 'balance' ? `${balance}\n` : '1 [1e0]\n'), // latestFinalizedBlockNumber = 1
+    sh: (_bin, args) => (args[0] === 'balance' ? `${balance}\n`
+      : args[2] === 'postBlockStake()(uint256)' ? `${stake}\n` : '1 [1e0]\n'), // latestFinalizedBlockNumber = 1
   });
   // Blocks 2..4 are unfinalized, plus the burn's own: 4 posts, 4 ETH of stake and 0.2 ETH of gas.
   const short = await r.ctx.checkSettlementFunding();
@@ -175,4 +176,19 @@ test('the operator must hold a 1 ETH stake for every unfinalized block plus the 
   balance = 42n * 10n ** 17n;
   assert.equal((await r.ctx.checkSettlementFunding()).ok, true);
   assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, true);
+});
+
+test('the stake is the rollup\'s own deployment value', async () => {
+  const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
+  r.ctx.checkSettlementReadiness(() => {});
+  vm.runInContext('validityConfigured = true', r.ctx);
+  r.ctx.producer = { status: async () => ({ blockNumber: 4 }) };
+  r.ctx.require = () => ({
+    l1SignerAddress: () => '0xoperator',
+    sh: (_bin, args) => (args[0] === 'balance' ? `${5n * 10n ** 17n}\n`
+      : args[2] === 'postBlockStake()(uint256)' ? '100000000000000000 [1e17]\n' : '1 [1e0]\n'),
+  });
+  // 4 posts at 0.1 ETH plus the 0.2 ETH reserve: 0.6 ETH, more than the 0.5 ETH held.
+  const short = await r.ctx.checkSettlementFunding();
+  assert.match(short.reason, /needs 0\.6 ETH \(4 block posts at a 0\.1 ETH stake each/);
 });

@@ -29,7 +29,8 @@ contract ProofDaRollupTest is Test {
             address(0xdead),
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
-            genesis
+            genesis,
+            1 ether
         );
         da = new ProofDaIntegrationHarness();
         rollup.setKzgVerifier(da);
@@ -191,7 +192,8 @@ contract ProofDaRollupTest is Test {
         MockPinnedMleVerifierV2 validityMle = new MockPinnedMleVerifierV2(31337);
         if (invalidFraudVerdict) validityMle.setFraudVerdict(0);
         deployed = new IntmaxRollup(
-            address(0xdead), validityMle, new MockPinnedMleVerifierV2(31337), genesis
+            address(0xdead), validityMle, new MockPinnedMleVerifierV2(31337), genesis,
+            1 ether
         );
     }
 

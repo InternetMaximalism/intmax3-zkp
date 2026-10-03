@@ -113,7 +113,8 @@ contract RollupFraudHardeningTest is Test {
             fraudTreasury,
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);
@@ -201,7 +202,8 @@ contract RollupFraudHardeningTest is Test {
             fraudTreasury,
             IPinnedMleVerifierV2(verifierAddr),
             new MockPinnedMleVerifierV2(31337),
-            bytes32(0)
+            bytes32(0),
+            1 ether
         );
         r.setBlockProducer(submitter, true);
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));

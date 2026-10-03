@@ -26,7 +26,8 @@ contract GenesisFinalizedRootTest is Test {
             address(0xdead),
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
-            genesis
+            genesis,
+            1 ether
         );
     }
 }
