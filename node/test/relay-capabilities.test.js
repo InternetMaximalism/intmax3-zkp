@@ -23,7 +23,7 @@ function call(route, devnet) {
   const handlers = {}, touched = [];
   const ctx = {
     isDevnet: () => devnet, relayChainId: () => (devnet ? 31337 : 11155111),
-    app: { post: (p, h) => { handlers[p] = h; } }, CHANNELS: [7], validityDeployment: {}, setTimeout,
+    app: { post: (p, h) => { handlers[p] = h; } }, CHANNELS: [7], validityDeployment: {}, setTimeout, process,
     findActiveTicket: () => null, pwSettlement: { start() {} },
     reqChannel: () => { touched.push('reqChannel'); return 7; },
     withLock: () => { touched.push('withLock'); return Promise.resolve(); },
@@ -58,7 +58,7 @@ const ROLLUP = '0x' + '3c'.repeat(20), RECIPIENT = '0x' + '07'.repeat(32);
 function relay({ devnet = false, readiness } = {}) {
   const handlers = {}, touched = [], logged = [], retries = [];
   const ctx = {
-    isDevnet: () => devnet, relayChainId: () => (devnet ? 31337 : 11155111), CHANNELS: [7, 8],
+    isDevnet: () => devnet, relayChainId: () => (devnet ? 31337 : 11155111), CHANNELS: [7, 8], process,
     app: { get: (p, h) => { handlers[p] = h; }, post() {} },
     reqChannel: () => { touched.push('reqChannel'); return 7; },
     wc: (_ch, name) => name, RPC: 'https://rpc.example', minConfirmationsForDisplay: () => 12,
@@ -128,7 +128,14 @@ test('a verified rollup serves the deposit target, and withdrawals once its vali
   assert.match(h.unavailable.partialWithdrawal, /restart the relay/);
   vm.runInContext('validityConfigured = true', r.ctx);
   h = r.get('/api/health').body;
+  assert.equal(h.capabilities.partialWithdrawal, false, 'not before the operator is known to fund settlement');
+  assert.match(h.unavailable.partialWithdrawal, /operator's funds/);
+  vm.runInContext("settlementFunding = { ok: false, reason: 'the operator cannot fund the L1 settlement of a withdrawal now: it needs 4.2 ETH' }", r.ctx);
+  assert.match(r.get('/api/health').body.unavailable.partialWithdrawal, /needs 4.2 ETH/);
+  vm.runInContext('settlementFunding = { ok: true }', r.ctx);
+  h = r.get('/api/health').body;
   assert.equal(h.capabilities.partialWithdrawal, true);
+  assert.equal(h.capabilities.deposit, true, 'deposits never depend on the operator funds');
   assert.deepEqual(JSON.parse(JSON.stringify(h.unavailable)), {});
 });
 
@@ -147,4 +154,25 @@ test('the local devnet offers deposits without a validity deployment record', ()
   assert.equal(h.capabilities.deposit, true);
   assert.equal(h.capabilities.partialWithdrawal, true);
   assert.equal(h.capabilities.settlement, 'interactive');
+});
+
+// ── withdrawals: offered only while the operator can fund their L1 settlement ──────────────────
+test('the operator must hold a 1 ETH stake for every unfinalized block plus the burn, and a gas reserve', async () => {
+  const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
+  r.ctx.checkSettlementReadiness(() => {});
+  vm.runInContext('validityConfigured = true', r.ctx);
+  let balance = 4n * 10n ** 18n;
+  r.ctx.producer = { status: async () => ({ blockNumber: 4 }) };
+  r.ctx.require = () => ({
+    l1SignerAddress: () => '0xoperator',
+    sh: (_bin, args) => (args[0] === 'balance' ? `${balance}\n` : '1 [1e0]\n'), // latestFinalizedBlockNumber = 1
+  });
+  // Blocks 2..4 are unfinalized, plus the burn's own: 4 posts, 4 ETH of stake and 0.2 ETH of gas.
+  const short = await r.ctx.checkSettlementFunding();
+  assert.equal(short.ok, false);
+  assert.match(short.reason, /needs 4\.2 ETH \(4 block posts at a 1 ETH stake each.*\) and has 4 ETH/);
+  assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, false);
+  balance = 42n * 10n ** 17n;
+  assert.equal((await r.ctx.checkSettlementFunding()).ok, true);
+  assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, true);
 });

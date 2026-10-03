@@ -23,7 +23,7 @@ test('relay burn returns exactly the signed state while durably retaining its re
       events.push('run');store.upsertTicket(ch,{status:'burn_done',params:{amount:input.amount}});return state;
     }},
     readTickets: () => [], readHistory: () => [],
-    pwSettlement: { start: () => events.push('settle') },
+    pwSettlement: { start: () => events.push('settle') }, isDevnet: () => true,
     upsertTicket: (_ch, value) => {ticket=value;return value;},
     sendRouteError: (_res, error) => { throw error; },
     console,

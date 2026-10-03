@@ -108,14 +108,45 @@ let settlementReadiness = { ok: false, reason: 'the relay is still checking that
 // The resident validity prover must be configured before the block producer starts; a rollup
 // verified only later (after a transient read failure) settles withdrawals after a restart.
 let validityConfigured = false;
+// A burn is accepted only while the operator can fund its L1 settlement at once: every producer
+// block not yet finalized on the rollup, plus the burn's own, is posted with the rollup's 1 ETH
+// POST_BLOCK_STAKE (returned after finalization), and the settlement's transactions need gas
+// (about 0.1 ETH on the rehearsal). A burn the operator cannot settle holds its channel and the
+// burned funds until someone funds the operator.
+const POST_BLOCK_STAKE_WEI = 10n ** 18n;
+const SETTLEMENT_GAS_RESERVE_WEI = BigInt(process.env.SETTLEMENT_GAS_RESERVE_WEI || String(2n * 10n ** 17n));
+let settlementFunding = { ok: false, reason: "the relay is still checking the operator's funds for L1 settlement" };
+const settlementEnabled = () => isDevnet() || (settlementReadiness.ok && validityConfigured);
 const capabilities = () => ({
-  partialWithdrawal: isDevnet() || (settlementReadiness.ok && validityConfigured), channelClose: isDevnet(),
+  partialWithdrawal: isDevnet() || (settlementEnabled() && settlementFunding.ok), channelClose: isDevnet(),
   deposit: isDevnet() || settlementReadiness.ok, settlement: isDevnet() ? 'interactive' : 'background',
 });
 function unavailableReasons() {
   if (isDevnet()) return {};
   if (!settlementReadiness.ok) return { deposit: settlementReadiness.reason, partialWithdrawal: settlementReadiness.reason };
-  return validityConfigured ? {} : { partialWithdrawal: 'the rollup was verified after the block producer started; restart the relay to settle withdrawals' };
+  if (!validityConfigured) return { partialWithdrawal: 'the rollup was verified after the block producer started; restart the relay to settle withdrawals' };
+  return settlementFunding.ok ? {} : { partialWithdrawal: settlementFunding.reason };
+}
+const ethText = (wei) => (Number(wei / 10n ** 12n) / 1e6).toString();
+let operatorAddress = null;
+async function checkSettlementFunding() {
+  if (!settlementEnabled() || isDevnet()) return settlementFunding;
+  try {
+    const helper = require('../../api/lib/cli');
+    const view = (args) => helper.sh('cast', [...args, '--rpc-url', RPC], { stdio: 'pipe' }).trim().split(/\s+/)[0];
+    operatorAddress = operatorAddress || helper.l1SignerAddress();
+    const head = Number((await producer.status()).blockNumber);
+    const finalized = Number(view(['call', settlementReadiness.record.rollup, 'latestFinalizedBlockNumber()(uint64)']));
+    const balance = BigInt(view(['balance', operatorAddress]));
+    const posts = BigInt(Math.max(0, head - finalized) + 1);
+    const needed = posts * POST_BLOCK_STAKE_WEI + SETTLEMENT_GAS_RESERVE_WEI;
+    settlementFunding = balance >= needed ? { ok: true } : { ok: false, reason: `the operator cannot fund the L1 settlement of a `
+      + `withdrawal now: it needs ${ethText(needed)} ETH (${posts} block posts at a 1 ETH stake each, returned after `
+      + `finalization, plus gas) and has ${ethText(balance)} ETH` };
+  } catch (e) {
+    settlementFunding = { ok: false, reason: "could not check the operator's funds for L1 settlement: " + String((e && e.message) || e).split('\n')[0] };
+  }
+  return settlementFunding;
 }
 function requireCapability(res, name, what) {
   if (capabilities()[name]) return true;
@@ -163,7 +194,7 @@ function sendRouteError(res, e) {
   console.error(error);
   const status = e && Number.isInteger(e.status) && e.status >= 400 && e.status <= 599
     ? e.status : (e && e.staleAnchor ? 409 : 500);
-  res.status(status).json(e && e.code === 'SETTLING_WITHDRAWAL' ? { error, code: e.code } : { error });
+  res.status(status).json(e && ['SETTLING_WITHDRAWAL', 'NOT_AVAILABLE'].includes(e.code) ? { error, code: e.code } : { error });
 }
 // The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
 // for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
@@ -315,8 +346,10 @@ const TICKET_FILE = 'tickets.json';
 const HISTORY_FILE = 'ticket_history.json';
 const TICKET_TTL = 3600_000;
 const HISTORY_CAP = 200;
-const TERMINAL = { partial_withdrawal: 'settle_done', deposit: 'import_done', full_withdrawal: 'claim_done' };
-const isTerminal = (t) => TERMINAL[t.type] === t.status;
+// A partial withdrawal ends settled, or abandoned by an owner decision when its L1 settlement could
+// not run (its burned amount is then never settled; the channel is released).
+const TERMINAL = { partial_withdrawal: ['settle_done', 'abandoned'], deposit: ['import_done'], full_withdrawal: ['claim_done'] };
+const isTerminal = (t) => (TERMINAL[t.type] || []).includes(t.status);
 
 function readTickets(ch) {
   const tickets = readTicketsFile(wc(ch, TICKET_FILE));
@@ -338,7 +371,7 @@ function archiveTicket(ch, ticket) {
   writeTicketsFile(wc(ch, HISTORY_FILE), hist.slice(-HISTORY_CAP));
 }
 function findActiveTicket(ch, type) {
-  return readTickets(ch).find(t => t.type === type && t.status !== TERMINAL[type]);
+  return readTickets(ch).find(t => t.type === type && !isTerminal(t));
 }
 function upsertTicket(ch, ticket) {
   const tickets = readTickets(ch);
@@ -367,7 +400,7 @@ const pwSettlement = createPwSettlement({
   cli: require('../../api/lib/cli'), producer, walletL1: require('../../api/lib/wallet-l1'),
   live: require('../../api/lib/partial-withdrawal-live'), pull: require('../../node/common/partial-withdrawal-pull'),
   withLock, findActiveTicket, upsertTicket,
-  enabled: () => capabilities().partialWithdrawal, background: () => !isDevnet(),
+  enabled: settlementEnabled, background: () => !isDevnet(),
 });
 
 // ── Token DISPLAY metadata (multi-token detail2 §N-1/§N-7, threat model TM-10b) ───────────────
@@ -1487,6 +1520,11 @@ app.post('/api/cosign-burn', (req, res) => {
   // burn is refused by burnOperations while that ticket is active).
   const active = findActiveTicket(ch, 'partial_withdrawal');
   withLock(ch, async () => {
+    // A new burn re-checks, just before it is signed, that the operator can still fund it.
+    if (!active && !isDevnet() && !(await checkSettlementFunding()).ok) {
+      throw Object.assign(new Error(`Withdrawal is not available now: ${settlementFunding.reason}. Nothing was signed or sent.`),
+        { status: 501, code: 'NOT_AVAILABLE' });
+    }
     const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
     res.json(cosignedHead);
     // Public chain: settle it on L1 in the background, starting now (the channel waits for it).
@@ -1880,6 +1918,10 @@ bootstrapBacking().then(() => {
   if (!isDevnet()) {
     depositSequencer.start(withLock);
     pwSettlement.resumeAll(CHANNELS);
+    // Withdrawals are offered while the operator can fund their settlement; follow its balance.
+    const refreshFunding = () => checkSettlementFunding().catch(() => {});
+    refreshFunding();
+    setInterval(refreshFunding, 60 * 1000).unref();
   }
   // Land any inter-channel transfer whose sender vanished: once at startup, then periodically.
   sweepPendingInterTransfers().finally(() => setInterval(() => { sweepPendingInterTransfers(); }, INTER_RESUME_MS).unref());

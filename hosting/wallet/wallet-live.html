@@ -2444,7 +2444,7 @@ function ticketAmountLabel(t) {
 }
 
 function isTerminalTicket(ticket) {
-  return ({partial_withdrawal:'settle_done',deposit:'import_done',full_withdrawal:'claim_done'})[ticket.type] === ticket.status;
+  return (({partial_withdrawal:['settle_done','abandoned'],deposit:['import_done'],full_withdrawal:['claim_done']})[ticket.type] || []).includes(ticket.status);
 }
 function ticketOfType(type) {
   return activeTickets.find(t => t.type === type && !isTerminalTicket(t));
@@ -2507,12 +2507,14 @@ function depositUnavailableMessage() {
 function restorePartialWithdrawalControls() {
   const status = $('pwRecoveryStatus');
   const ticket = ticketOfType('partial_withdrawal');
-  if (!withdrawalAvailable()) {
+  // A burn already being settled in the background is shown below even while new burns are not
+  // offered (the operator's funds only gate new ones).
+  if (!withdrawalAvailable() && !(backgroundSettlement() && ticket)) {
     status.classList.toggle('hidden', false);
     status.textContent = ticket
       ? 'Withdrawal is not available on this testnet yet. Your burn of ' + ticketAmountLabel(ticket)
         + ' is saved; Step 2 — Settle on L1 becomes available here once settlement is enabled. Do not burn again.'
-      : 'Withdrawal is not available on this testnet yet: settling a burn on L1 is not enabled. Nothing will be burned.';
+      : 'Withdrawal is not available now: ' + (relayUnavailable.partialWithdrawal || 'settling a burn on L1 is not enabled') + '. Nothing will be burned.';
     $('btnBurnSend').disabled = true;
     $('btnPwSettle').disabled = true;
     $('pwAmount').disabled = true; $('pwAddress').disabled = true;

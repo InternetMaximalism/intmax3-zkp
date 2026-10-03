@@ -87,7 +87,20 @@ test('without the withdrawal capability no burn and no settlement is offered', (
   const $ = render(null, false, { partialWithdrawal: false, channelClose: false });
   assert.equal($('btnBurnSend').disabled, true);
   assert.equal($('btnPwSettle').disabled, true);
-  assert.match($('pwRecoveryStatus').textContent, /not available on this testnet/);
+  assert.match($('pwRecoveryStatus').textContent, /not available now: settling a burn on L1 is not enabled/);
+});
+test('the relay\'s reason (the operator cannot fund a settlement) is shown, and nothing can be burned', () => {
+  const $ = render(null, false, { partialWithdrawal: false, settlement: 'background' });
+  vm.runInContext("relayUnavailable = { partialWithdrawal: 'the operator cannot fund the L1 settlement of a withdrawal now: it needs 5.2 ETH' }", $.context);
+  $.context.restorePartialWithdrawalControls();
+  assert.match($('pwRecoveryStatus').textContent, /needs 5.2 ETH. Nothing will be burned/);
+  assert.equal($('btnBurnSend').disabled, true);
+});
+test('a burn already settling keeps showing its progress while new burns are not offered', () => {
+  const $ = render({ status: 'settle_pending', params: {}, steps: { settle: { phase: 'publishing' } } }, false,
+    { partialWithdrawal: false, settlement: 'background' });
+  assert.match($('pwRecoveryStatus').textContent, /publishing the channel history/);
+  assert.equal($('btnBurnSend').disabled, true);
 });
 test('a saved burn on such a deployment is reported as kept, and nothing can be burned again', () => {
   const $ = render({ status: 'burn_done', params: { recipient: '0xrecipient' } }, false, { partialWithdrawal: false });
