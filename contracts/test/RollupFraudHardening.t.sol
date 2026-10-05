@@ -114,7 +114,8 @@ contract RollupFraudHardeningTest is Test {
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);
@@ -203,7 +204,8 @@ contract RollupFraudHardeningTest is Test {
             IPinnedMleVerifierV2(verifierAddr),
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         r.setBlockProducer(submitter, true);
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
@@ -420,7 +422,8 @@ contract RollupFraudHardeningTest is Test {
 
         assertTrue(rollup.finalize(0, root, pis, proof), "honest finalize must still succeed");
         assertTrue(rollup.isFinalized(0), "submission finalized");
-        assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "bond refunded to the submitter");
+        (, uint48 posted, uint48 released) = rollup.bonds(submitter);
+        assertEq(released, posted, "the post is released from the submitter's bond");
     }
 
     // =======================================================================

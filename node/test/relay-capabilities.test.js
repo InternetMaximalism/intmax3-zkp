@@ -157,38 +157,52 @@ test('the local devnet offers deposits without a validity deployment record', ()
 });
 
 // ── withdrawals: offered only while the operator can fund their L1 settlement ──────────────────
-test('the operator must hold a 1 ETH stake for every unfinalized block plus the burn, and a gas reserve', async () => {
+// The rollup's views as `cast call` prints them: one value per line, large ones annotated.
+function bondViews({ base, perPost, onL1, bond, balance }) {
+  return (_bin, args) => {
+    if (args[0] === 'balance') return `${balance()}\n`;
+    switch (args[2]) {
+      case 'baseStake()(uint256)': return `${base} [1e17]\n`;
+      case 'postStake()(uint256)': return `${perPost} [1e15]\n`;
+      case 'blockNumber()(uint64)': return `${onL1}\n`;
+      case 'bonds(address)(uint96,uint48,uint48)': assert.equal(args[3], '0xoperator'); return bond().map(String).join('\n') + '\n';
+      default: throw new Error('unexpected cast ' + args.join(' '));
+    }
+  };
+}
+
+test('the operator must be able to top its posting bond up for every block not yet on L1 plus the burn, and hold a gas reserve', async () => {
   const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
   r.ctx.checkSettlementReadiness(() => {});
   vm.runInContext('validityConfigured = true', r.ctx);
-  let balance = 4n * 10n ** 18n, stake = 10n ** 18n;
+  const ether = 10n ** 18n;
+  let balance = 25n * ether / 100n, bond = [0n, 0n, 0n];
   r.ctx.producer = { status: async () => ({ blockNumber: 4 }) };
-  r.ctx.require = () => ({
-    l1SignerAddress: () => '0xoperator',
-    sh: (_bin, args) => (args[0] === 'balance' ? `${balance}\n`
-      : args[2] === 'postBlockStake()(uint256)' ? `${stake}\n` : '1 [1e0]\n'), // latestFinalizedBlockNumber = 1
-  });
-  // Blocks 2..4 are unfinalized, plus the burn's own: 4 posts, 4 ETH of stake and 0.2 ETH of gas.
+  r.ctx.require = () => ({ l1SignerAddress: () => '0xoperator',
+    sh: bondViews({ base: ether / 10n, perPost: ether / 1000n, onL1: 1, bond: () => bond, balance: () => balance }) });
+  // Blocks 2..4 are not on L1, plus the burn's own: 4 posts. An empty bond needs the 0.1 ETH base
+  // plus 4 x 0.001 ETH, and the settlement 0.2 ETH of gas: 0.304 ETH, more than the 0.25 held.
   const short = await r.ctx.checkSettlementFunding();
   assert.equal(short.ok, false);
-  assert.match(short.reason, /needs 4\.2 ETH \(4 block posts at a 1 ETH stake each.*\) and has 4 ETH/);
+  assert.match(short.reason, /needs 0\.304 ETH \(0\.104 ETH more posting bond for 4 block posts — a 0\.1 ETH base plus 0\.001 ETH per unfinalized post.*\) and has 0\.25 ETH/);
   assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, false);
-  balance = 42n * 10n ** 17n;
+  // A bond that already holds the base and one posted, unfinalized post needs 5 x 0.001 more: 0.004.
+  bond = [ether / 10n + ether / 1000n, 3n, 2n];
   assert.equal((await r.ctx.checkSettlementFunding()).ok, true);
   assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, true);
+  balance = 2n * ether / 10n;
+  assert.match((await r.ctx.checkSettlementFunding()).reason, /needs 0\.204 ETH \(0\.004 ETH more posting bond/);
 });
 
-test('the stake is the rollup\'s own deployment value', async () => {
+test('a rollup whose bond cannot be read offers no withdrawal', async () => {
   const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
   r.ctx.checkSettlementReadiness(() => {});
   vm.runInContext('validityConfigured = true', r.ctx);
   r.ctx.producer = { status: async () => ({ blockNumber: 4 }) };
-  r.ctx.require = () => ({
-    l1SignerAddress: () => '0xoperator',
-    sh: (_bin, args) => (args[0] === 'balance' ? `${5n * 10n ** 17n}\n`
-      : args[2] === 'postBlockStake()(uint256)' ? '100000000000000000 [1e17]\n' : '1 [1e0]\n'),
-  });
-  // 4 posts at 0.1 ETH plus the 0.2 ETH reserve: 0.6 ETH, more than the 0.5 ETH held.
-  const short = await r.ctx.checkSettlementFunding();
-  assert.match(short.reason, /needs 0\.6 ETH \(4 block posts at a 0\.1 ETH stake each/);
+  r.ctx.require = () => ({ l1SignerAddress: () => '0xoperator',
+    sh: () => { throw Object.assign(new Error('execution reverted'), { stderr: 'execution reverted' }); } });
+  const result = await r.ctx.checkSettlementFunding();
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /could not check the operator's funds/);
+  assert.equal(r.get('/api/health').body.capabilities.partialWithdrawal, false);
 });

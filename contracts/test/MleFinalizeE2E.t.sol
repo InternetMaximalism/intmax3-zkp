@@ -36,7 +36,8 @@ contract MleFinalizeE2ETest is Test {
             validity,
             new MockPinnedMleVerifierV2(31337),
             vm.parseJsonBytes32(_loadBlock(), ".genesis_state_root"),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true);

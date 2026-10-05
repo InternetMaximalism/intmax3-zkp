@@ -30,7 +30,7 @@ contract C2CFullE2ETest is Test {
     string internal payoutJson;
     bool internal ready;
 
-    uint256 internal constant STAKE = 1 ether; // POST_BLOCK_STAKE
+    uint256 internal constant STAKE = 1 ether; // each post's bond top-up
 
     function setUp() public {
         string memory root = string.concat(vm.projectRoot(), "/test/data/");
@@ -61,7 +61,8 @@ contract C2CFullE2ETest is Test {
             IPinnedMleVerifierV2(address(validityAdapter)),
             IPinnedMleVerifierV2(address(withdrawalAdapter)),
             genesis,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
@@ -120,18 +121,12 @@ contract C2CFullE2ETest is Test {
         assertEq(rollup.pendingWithdrawals(recipient), 0, "credit cleared");
     }
 
-    /// POST_BLOCK_STAKE recovery, and the stranded-stake lesson from the 2026-06-14 Sepolia run.
-    /// @notice Every `postBlockAndSubmit` locks exactly 1 ETH (POST_BLOCK_STAKE), refunded ONLY by
-    ///         `finalize()`-ing THAT submission (`_refundStake`, the sole refund path — there is no
-    ///         standalone reclaim). `finalize` requires `initialExtCommitment == latestFinalizedStateRoot`
-    ///         and advances it monotonically, so ONE aggregate genesis->blockN proof finalizes ONE
-    ///         submission and refunds ONE stake; the other postBlock submissions stay locked.
-    ///         To recover EVERY stake you must finalize EACH submission incrementally (a proof per
-    ///         [latest -> that submission's block boundary]) OR post fewer submissions by batching
-    ///         multiple SubBlocks into a single postBlockAndSubmit call (one stake per call, not per
-    ///         block). This test pins both the working refund->withdraw path AND the stranding so a
-    ///         future run never silently burns stakes again.
-    function test_c2c_postBlockStakes_recovery_and_strandedLesson() public {
+    /// The posting bond over the real lifecycle, and the stranded-stake lesson of the 2026-06-14
+    /// Sepolia run. A fixed per-post stake refunded only by finalizing THAT submission left four
+    /// of five stakes locked when one aggregate proof finalized all five posts. The bond releases
+    /// every post of the submitter up to the finalized one, so the same aggregate proof frees all
+    /// of it at once.
+    function test_c2c_bond_aggregateFinalizeReleasesEveryPost() public {
         if (!ready) {
             vm.skip(true);
             return;
@@ -155,42 +150,31 @@ contract C2CFullE2ETest is Test {
         _postRound(3, proofHash, proofLength, finalStateRoot);
         uint256 finalSubId = _postRound(4, proofHash, proofLength, finalStateRoot);
 
-        // Poster locked 5 stakes (one per postBlockAndSubmit call).
-        assertEq(poster.balance, 10 ether - 5 * STAKE, "poster locked 5 x POST_BLOCK_STAKE");
-        for (uint256 i = 0; i <= 4; i++) {
-            (address submitter, bool spent) = rollup.stakeInfo(i);
-            assertEq(submitter, poster, "submission staked by poster");
-            assertFalse(spent, "stake not yet spent/refunded");
-        }
+        // Each post topped the bond up by STAKE; all five posts are unfinalized.
+        assertEq(poster.balance, 10 ether - 5 * STAKE, "poster bonded 5 x STAKE");
+        (uint96 bonded, uint48 posted, uint48 released) = rollup.bonds(poster);
+        assertEq(bonded, 5 * STAKE);
+        assertEq(posted, 5);
+        assertEq(released, 0);
+        vm.prank(poster);
+        vm.expectRevert(IntmaxRollup.NothingToWithdraw.selector);
+        rollup.withdrawBond(5 * STAKE);
 
-        // Finalize the aggregate genesis->block5 proof: refunds EXACTLY the finalized submission's stake.
+        // One aggregate genesis->block5 proof finalizes the last post and releases all five.
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
         bytes memory vproof = _readCompactProof("c2c_lifecycle_validity_mle.json");
         assertTrue(rollup.finalize(finalSubId, finalStateRoot, vpis, vproof), "finalize failed");
+        (, posted, released) = rollup.bonds(poster);
+        assertEq(released, posted, "every post released");
 
-        // --- WORKING RECOVERY PATH: finalized submission's stake is credited to the poster, then pulled. ---
-        assertEq(rollup.pendingWithdrawals(poster), STAKE, "finalized submission's stake refunded to poster");
         uint256 balBefore = poster.balance;
         vm.prank(poster);
-        rollup.withdraw(STAKE);
-        assertEq(poster.balance, balBefore + STAKE, "poster pulled the refunded stake as real ETH");
-        (address s4, bool spent4) = rollup.stakeInfo(finalSubId);
-        assertEq(s4, address(0), "finalized submission's stakeInfo cleared");
-        assertFalse(spent4, "stakeInfo deleted on refund");
-
-        // --- STRANDED LESSON: the other four postBlock stakes stay locked. ---
-        // The same aggregate proof CANNOT refund them: finalize now requires initialExtCommitment ==
-        // latestFinalizedStateRoot (advanced to block5), but the proof's initial commitment is genesis.
-        for (uint256 i = 0; i < 4; i++) {
-            (address submitter, bool spent) = rollup.stakeInfo(i);
-            assertEq(submitter, poster, "un-finalized submission stake still locked");
-            assertFalse(spent, "un-finalized stake not refunded");
-        }
+        rollup.withdrawBond(5 * STAKE);
+        assertEq(poster.balance, balBefore + 5 * STAKE, "poster pulled the whole bond as real ETH");
         assertFalse(
             rollup.finalize(0, finalStateRoot, vpis, vproof),
             "re-finalizing with the same genesis->block5 proof must fail: latestFinalizedStateRoot already advanced"
         );
-        assertEq(rollup.pendingWithdrawals(poster), 0, "no further stake recoverable with this proof");
     }
 
     // ─── helpers ───────────────────────────────────────────────────────────

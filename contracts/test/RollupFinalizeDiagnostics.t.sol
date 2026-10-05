@@ -52,7 +52,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
             validityMle,
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(poster, true);

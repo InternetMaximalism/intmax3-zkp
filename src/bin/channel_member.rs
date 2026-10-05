@@ -6215,30 +6215,41 @@ struct ProofDaMetadata {
 
 const PROOF_DA_POST_JOURNAL_VERSION: u32 = 1;
 const FULL_WITHDRAWAL_JOURNAL_VERSION: u32 = 1;
-/// The posting bond of a rollup deployed before `postBlockStake` was a deployment parameter.
-const LEGACY_POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
-
-/// The rollup's posting bond (`postBlockStake`, set at deployment). A rollup deployed before it was
-/// a parameter has no getter — its call reverts — and bonds the legacy 1 ETH; any other failure
-/// stops rather than sign a post with a guessed value.
-fn rollup_post_block_stake(rpc: &str, rollup: &str) -> u64 {
+/// The bond a post must add as its `msg.value`. The rollup holds each producer's prepaid posting
+/// bond and accepts a post only while it covers `baseStake` plus `postStake` for every unfinalized
+/// post of the producer, this one included; the post tops up the shortfall. A rollup without the
+/// bond (it bonded a fixed `postBlockStake` per post) is refused rather than posted to with a
+/// guessed value.
+fn rollup_bond_top_up(rpc: &str, rollup: &str, producer: &str) -> u64 {
     let output = Command::new("cast")
-        .args(["call", rollup, "postBlockStake()(uint256)", "--rpc-url", rpc])
+        .args(["call", rollup, "baseStake()(uint256)", "--rpc-url", rpc])
         .output()
-        .unwrap_or_else(|error| die(format!("cast postBlockStake failed to start: {error}")));
+        .unwrap_or_else(|error| die(format!("cast baseStake failed to start: {error}")));
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("revert") {
-            return LEGACY_POST_BLOCK_STAKE_WEI;
+            die(format!(
+                "rollup {rollup} predates the prepaid posting bond (it has no baseStake); post to it with the binaries it was deployed with"
+            ));
         }
-        die(format!("read the rollup's postBlockStake: {}", stderr.trim()));
+        die(format!("read the rollup's baseStake: {}", stderr.trim()));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| die(format!("the rollup's postBlockStake is unreadable: {text:?}")))
+    let word = |raw: &str, what: &str| -> u128 {
+        raw.split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u128>().ok())
+            .unwrap_or_else(|| die(format!("the rollup's {what} is unreadable: {raw:?}")))
+    };
+    let base = word(&strip_cast_number_annotations(&String::from_utf8_lossy(&output.stdout)), "baseStake");
+    let per_post = word(&cast_call(rpc, rollup, "postStake()(uint256)", &[]), "postStake");
+    let bond = cast_call(rpc, rollup, "bonds(address)(uint96,uint48,uint48)", &[producer]);
+    let fields: Vec<u128> = bond.lines().map(|line| word(line, "bond")).collect();
+    let [balance, posted, released] = fields[..] else {
+        die(format!("the rollup's bond for {producer} is unreadable: {bond:?}"))
+    };
+    let required = base + (posted + 1 - released) * per_post;
+    u64::try_from(required.saturating_sub(balance))
+        .unwrap_or_else(|_| die(format!("the bond top-up for {producer} does not fit a u64")))
 }
 
 /// Stable, semantic identity of one full-withdrawal lifecycle.  Unlike the validity proof hash,
@@ -6536,6 +6547,10 @@ struct ProofDaPostRoundJournal {
     /// devnet-only unguarded endpoint (and every journal written before it existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     guarded_predecessor: Option<GuardedPredecessor>,
+    /// The `msg.value` the round was signed with: the bond top-up it needed when signed. Absent in
+    /// every journal written for a rollup without the prepaid bond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    value_wei: Option<u64>,
 }
 
 /// The exact rollup head (`blockNumber`, `blockHashChain`) a guarded post extends. The contract
@@ -7059,7 +7074,7 @@ fn sign_blob_post(
     state_root: &str,
     pending_pin: &str,
     guarded_predecessor: Option<&GuardedPredecessor>,
-    stake: u64,
+    value: u64,
 ) -> (String, String) {
     let intended_calldata = blob_post_calldata(
         sub_block,
@@ -7079,10 +7094,10 @@ fn sign_blob_post(
         pending_pin,
         guarded_predecessor,
     ));
-    let stake = stake.to_string();
+    let value = value.to_string();
     command.args([
         "--value",
-        &stake,
+        &value,
         "--blob",
         "--path",
         proof_da_path,
@@ -7503,8 +7518,6 @@ const ERC20_WITHDRAWN_TOPIC0: &str =
     "0x8f44e01a37a9f44336a841309918a3d5ba2899c0707d8cbea326b68dfd84796e";
 const CHANNEL_FUNDS_PULLED_TOPIC0: &str =
     "0x9553ce64219459d216d4165bfe5b52b4c4495e00b24a1fc57afcb4a0d38e5d50";
-const WITHDRAWAL_CREDITED_TOPIC0: &str =
-    "0x459f560336b72d57e46610439b7c1a8426cf7b7a2a0428d5fb5c7b0b7528b60d";
 const FINALIZED_TOPIC0: &str = "0xa05a0e9561eff1f01a29e7a680d5957bb7312e5766a8da1f494b6d6ac18031f4";
 const PROOF_DATA_ATTESTED_TOPIC0: &str =
     "0x7ede6b2f9f8a23acaf8c0e62b696ec12ae1bc8df6da2a0816238ee2909768993";
@@ -7521,10 +7534,6 @@ enum FullWithdrawalEventExpectation {
     Finalized {
         submission_id: u64,
         state_root: String,
-    },
-    WithdrawalCredited {
-        recipient: String,
-        amount: u64,
     },
     NativeWithdrawn {
         recipient: String,
@@ -7550,7 +7559,6 @@ impl FullWithdrawalEventExpectation {
         match self {
             Self::ProofDataAttested { .. } => PROOF_DATA_ATTESTED_TOPIC0,
             Self::Finalized { .. } => FINALIZED_TOPIC0,
-            Self::WithdrawalCredited { .. } => WITHDRAWAL_CREDITED_TOPIC0,
             Self::NativeWithdrawn { .. } => NATIVE_WITHDRAWN_TOPIC0,
             Self::Erc20Withdrawn { .. } => ERC20_WITHDRAWN_TOPIC0,
             Self::ChannelFundsPulled { .. } => CHANNEL_FUNDS_PULLED_TOPIC0,
@@ -7603,10 +7611,6 @@ impl FullWithdrawalEventExpectation {
                 abi_word_u64(topic(1)?, "Finalized.submissionId") == *submission_id
                     && same_hex_value(abi_word(data, 0), state_root),
             ),
-            Self::WithdrawalCredited { recipient, amount } => {
-                Ok(address_topic_matches(topic(1)?, recipient)?
-                    && abi_word_u64(abi_word(data, 0), "WithdrawalCredited.amount") == *amount)
-            }
             Self::NativeWithdrawn {
                 recipient,
                 amount,
@@ -8358,7 +8362,6 @@ fn post_block_round(
     journal: &mut ProofDaPostJournal,
     guarded: bool,
 ) -> (String, String) {
-    let stake = rollup_post_block_stake(rpc, rollup);
     let block = &lc["blocks"][i];
     let channel_id = block["channel_id"]
         .as_u64()
@@ -8400,6 +8403,11 @@ fn post_block_round(
                     "persisted proof-DA round {i} has different calldata"
                 ));
             }
+            let value = round.value_wei.unwrap_or_else(|| {
+                die(format!(
+                    "persisted proof-DA round {i} was signed for a rollup without the prepaid posting bond"
+                ))
+            });
             let decoded = decode_signed_blob_transaction(&round.raw_signed_transaction);
             let checked = validate_decoded_blob_transaction(
                 &decoded,
@@ -8407,7 +8415,7 @@ fn post_block_round(
                 journal.chain_id,
                 &journal.submitter,
                 rollup,
-                stake,
+                value,
                 &round.calldata,
             )
             .unwrap_or_else(|error| {
@@ -8448,6 +8456,11 @@ fn post_block_round(
                     .trim()
                     .to_string(),
             });
+            // The previous round is finalized before this one is signed. Until this post mines, a
+            // finalization or release can only lower what the bond needs (the surplus stays in
+            // the bond); a truncation, the only way it can need more, also rewinds the head the
+            // guarded post is bound to, so that post reverts instead of landing underfunded.
+            let value = rollup_bond_top_up(rpc, rollup, &journal.submitter);
             let (raw_signed_transaction, calldata) = sign_blob_post(
                 rollup,
                 signer,
@@ -8459,7 +8472,7 @@ fn post_block_round(
                 state_root,
                 &pending_pin,
                 guarded_predecessor.as_ref(),
-                stake,
+                value,
             );
             let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
             let checked = validate_decoded_blob_transaction(
@@ -8468,7 +8481,7 @@ fn post_block_round(
                 journal.chain_id,
                 &journal.submitter,
                 rollup,
-                stake,
+                value,
                 &calldata,
             )
             .unwrap_or_else(|error| die(format!("validate signed proof-DA round {i}: {error}")));
@@ -8485,6 +8498,7 @@ fn post_block_round(
                 receipt_block_number: None,
                 finalized_checkpoint: None,
                 guarded_predecessor,
+                value_wei: Some(value),
             };
             // Irreversible ordering: signed raw tx + sidecars hit durable storage first.  Only the
             // next line after this branch may publish it.
@@ -8936,7 +8950,7 @@ fn cmd_withdraw(args: &[String]) {
     }
 
     // 2. Registration block.
-    let (registration_submission, _) = post_block_round(
+    let (_registration_submission, _) = post_block_round(
         &rollup,
         &lc,
         0,
@@ -9122,7 +9136,7 @@ fn cmd_withdraw(args: &[String]) {
     }
 
     // 4. Deposit block, then 5. Withdrawal block.
-    let (deposit_submission, _) = post_block_round(
+    let (_deposit_submission, _) = post_block_round(
         &rollup,
         &lc,
         1,
@@ -9322,134 +9336,51 @@ fn cmd_withdraw(args: &[String]) {
         die("finalized submission/root canonical receipt-block read-back failed");
     }
 
-    // One aggregate proof finalizes all three rounds but `finalize` refunds only the selected
-    // submission. Reclaim the first two now that their block ranges are finalized, then pull all
-    // three credits. A zero submitter means the exact bond was already refunded/reclaimed; this
-    // makes crash recovery idempotent without trusting a local completion flag.
-    for submission in [&registration_submission, &deposit_submission] {
-        let step = format!("reclaim-stake-{submission}");
-        let calldata = cast(&["calldata", "reclaimStake(uint256)", submission]);
-        let intent = ensure_full_withdrawal_call_intent(
-            &rpc,
-            chain_id,
-            &l1_signer,
-            &operation_journal_path,
-            &mut operation_journal,
-            &step,
-            &rollup,
-            calldata.trim(),
-            0,
-            Some(finalize_confirmation.block_number),
-        );
-        let stake = cast_call(
-            &rpc,
-            &rollup,
-            "stakeInfo(uint256)(address,bool)",
-            &[submission],
-        );
-        let submitter = stake
-            .split_whitespace()
-            .next()
-            .unwrap_or_else(|| die("stakeInfo returned no submitter"));
-        let stake_cleared = same_hex_value(submitter, "0x0000000000000000000000000000000000000000");
-        let reclaim_confirmation = if intent.confirmation.is_some() {
-            execute_full_withdrawal_call(
-                &rpc,
-                chain_id,
-                &l1_signer,
-                &operation_journal_path,
-                &mut operation_journal,
-                &step,
-                &intent.target,
-                &intent.calldata,
-                intent.value,
-            )
-        } else if intent.external_completion.is_some() || stake_cleared {
-            reconcile_external_full_withdrawal_effect(
-                &rpc,
-                chain_id,
-                &operation_journal_path,
-                &mut operation_journal,
-                &step,
-                &rollup,
-                &FullWithdrawalEventExpectation::WithdrawalCredited {
-                    recipient: depositor_hex.clone(),
-                    amount: rollup_post_block_stake(&rpc, &rollup),
-                },
-            )
-            .unwrap_or_else(|| {
-                die(format!(
-                    "stake {submission} is cleared but the exact permissionless reclaim event is not yet durable"
-                ))
-            })
-        } else {
-            execute_full_withdrawal_call(
-                &rpc,
-                chain_id,
-                &l1_signer,
-                &operation_journal_path,
-                &mut operation_journal,
-                &step,
-                &rollup,
-                calldata.trim(),
-                0,
-            )
-        };
-        let after = cast_call_at(
-            &rpc,
-            &rollup,
-            "stakeInfo(uint256)(address,bool)",
-            &[submission],
-            reclaim_confirmation.block_number,
-        );
-        let after_submitter = after
-            .split_whitespace()
-            .next()
-            .unwrap_or_else(|| die("stakeInfo read-back returned no submitter"));
-        if !same_hex_value(
-            after_submitter,
-            "0x0000000000000000000000000000000000000000",
-        ) {
-            die(format!(
-                "stake {submission} was not cleared after canonical reclaim"
-            ));
-        }
-    }
-    let pending_stake_refund = cast_call(
-        &rpc,
-        &rollup,
-        "pendingWithdrawals(address)(uint256)",
-        &[&depositor_hex],
-    );
-    let pending_stake_refund = pending_stake_refund
-        .split_whitespace()
-        .next()
-        .unwrap_or_else(|| die("pendingWithdrawals returned no amount"));
-    if let Some(intent) = operation_journal.calls.get("pull-stake-refunds").cloned() {
+    // The aggregate finalization released every post of this submitter (`finalize` raises the
+    // bond's released count to the finalized post), so none of its bond is locked: take it back.
+    // A journaled withdrawal replays its exact intent after a crash.
+    if let Some(intent) = operation_journal.calls.get("withdraw-bond").cloned() {
         execute_full_withdrawal_call(
             &rpc,
             chain_id,
             &l1_signer,
             &operation_journal_path,
             &mut operation_journal,
-            "pull-stake-refunds",
+            "withdraw-bond",
             &intent.target,
             &intent.calldata,
             intent.value,
         );
-    } else if parse_u64_quantity(pending_stake_refund, "pending stake refund") != 0 {
-        let calldata = cast(&["calldata", "withdraw(uint256)", pending_stake_refund]);
-        execute_full_withdrawal_call(
+    } else {
+        let bond = cast_call(
             &rpc,
-            chain_id,
-            &l1_signer,
-            &operation_journal_path,
-            &mut operation_journal,
-            "pull-stake-refunds",
             &rollup,
-            calldata.trim(),
-            0,
+            "bonds(address)(uint96,uint48,uint48)",
+            &[&depositor_hex],
         );
+        let fields: Vec<&str> = bond.lines().map(str::trim).collect();
+        let [balance, posted, released] = fields[..] else {
+            die(format!("the rollup's bond for {depositor_hex} is unreadable: {bond:?}"))
+        };
+        if posted != released {
+            die(format!(
+                "the bond still counts {posted} posts with {released} released after the finalization"
+            ));
+        }
+        if parse_u64_quantity(balance, "bond balance") != 0 {
+            let calldata = cast(&["calldata", "withdrawBond(uint256)", balance]);
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                "withdraw-bond",
+                &rollup,
+                calldata.trim(),
+                0,
+            );
+        }
     }
 
     // 7. withdrawNative.  Dry-run only materializes the exact large calldata; the durable

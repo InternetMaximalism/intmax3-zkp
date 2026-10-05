@@ -57,7 +57,8 @@ contract Deploy is ProducerValidityConfig {
             IPinnedMleVerifierV2(address(validityVerifier)),
             IPinnedMleVerifierV2(address(withdrawalVerifier)),
             genesisStateRoot,
-            vm.envOr("POST_BLOCK_STAKE_WEI", uint256(1 ether))
+            vm.envOr("BASE_STAKE_WEI", uint256(0.1 ether)),
+            vm.envOr("POST_STAKE_WEI", uint256(0.001 ether))
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());

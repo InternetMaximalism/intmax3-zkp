@@ -101,7 +101,8 @@ const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 20_000_000;
 /// The node's block gas limit. Proof-DA attestation (KZG openings over two blobs) and the
 /// multi-block validity finalization are separate transactions above the 20M submit envelope.
 const ANVIL_BLOCK_GAS_LIMIT: u64 = 30_000_000;
-/// `IntmaxRollup.POST_BLOCK_STAKE`.
+/// Each post's `msg.value`: it tops the producer's posting bond up by more than a post needs
+/// (`baseStake` + `postStake` per unfinalized post); the surplus stays in the bond.
 const POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
 const POST_SIG: &str =
     "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)";

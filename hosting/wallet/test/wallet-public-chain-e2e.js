@@ -181,7 +181,8 @@ async function withdraw(user, amount, tag) {
   });
   await once(tag + '-confirmed', () => api(u.ch, '/api/pw-claim-confirm', { txHash: pull.transactionHash }));
   await waitWithdrawal(u.ch, t => t.status === 'settle_done', 'settled');
-  // Every blob post locked 1 ETH of the operator's; all of it must be back in its account.
+  // Every blob post is backed by the operator's prepaid posting bond; the finalization must have
+  // released all of them, leaving the whole bond withdrawable (nothing unfinalized locks it).
   const rollup = (await api(u.ch, '/api/deployment')).rollup.toLowerCase();
   // The CLI journals its L1 publications in proof-da-output/ beside the contracts directory.
   const outputs = process.env.REHEARSAL_PROOF_DA_DIR || path.join(directory, '..', 'proof-da-output');
@@ -189,16 +190,15 @@ async function withdraw(user, amount, tag) {
     .map(d => path.join(outputs, d, 'posts.json')).filter(f => fs.existsSync(f))
     .map(f => JSON.parse(fs.readFileSync(f))).filter(j => j.rollup.toLowerCase() === rollup);
   if (!journals.length) throw Error('no validity posting journal for this rollup');
-  for (const j of journals) {
-    for (const round of j.rounds) {
-      const submitter = cast('call', rollup, 'stakeInfo(uint256)(address,bool)', String(BigInt(round.submissionId))).split(/\s+/)[0];
-      if (!/^0x0{40}$/i.test(submitter)) throw Error(`stake of submission ${round.submissionId} was not released`);
-    }
-    const credit = cast('call', rollup, 'pendingWithdrawals(address)(uint256)', j.submitter).split(/\s+/)[0];
-    if (credit !== '0') throw Error('the operator\'s reclaimed stakes were not pulled back: ' + credit);
+  const posts = journals.reduce((n, j) => n + j.rounds.length, 0);
+  for (const submitter of new Set(journals.map(j => j.submitter.toLowerCase()))) {
+    const [bond, posted, released] = cast('call', rollup, 'bonds(address)(uint96,uint48,uint48)', submitter)
+      .split('\n').map(line => line.trim().split(/\s+/)[0]);
+    if (posted !== released) throw Error(`the operator's bond still locks ${BigInt(posted) - BigInt(released)} unfinalized posts`);
+    log(`withdraw ${tag}: the operator's bond holds ${bond} wei, all of it released (${posted} posts)`);
   }
   log(`withdraw ${tag}: ${user} received ${amount} on L1 (${((Date.now() - t0) / 60000).toFixed(1)} min); `
-    + `${journals.reduce((n, j) => n + j.rounds.length, 0)} posting stakes released`);
+    + `${posts} posts, all released from the bond`);
 }
 
 async function sendIntra(from, to, amount, tag) {

@@ -61,11 +61,10 @@ async function acknowledge(candidateId, transactionHash) {
   }
 }
 
+// Each post tops the operator's prepaid posting bond up as it needs; the finalization releases
+// every post up to the finalized one, and the bond stays in the rollup for the next posts.
 function publish(ch) {
-  const run = queue.then(async () => {
-    await publishCandidate(ch);
-    await reclaimStakes(cli.rollupOf(ch));
-  });
+  const run = queue.then(() => publishCandidate(ch));
   queue = run.catch(() => {});
   return run;
 }
@@ -102,42 +101,6 @@ async function publishCandidate(ch) {
     if (receipt.candidateId !== posting.receipt.candidateId) throw new Error('published validity candidate mismatch');
     if (devnet()) cli.sh('cast', ['rpc', 'anvil_mine', '0x40', '--rpc-url', cli.RPC]);
     await acknowledge(receipt.candidateId, receipt.transactionHash);
-}
-
-// Every blob post locked the rollup's `postBlockStake` bond. Finalization refunds the finalized
-// round's; the earlier rounds are reclaimable once their blocks are finalized, and nothing else
-// returns them. Reclaim every finalized one this operator posted on the rollup and pull its credit
-// back to its account. Idempotent: an unfinalized, spent or foreign stake is skipped, an empty
-// credit is not pulled.
-async function reclaimStakes(rollup) {
-  const dir = proofDaDir();
-  const journals = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter(d => d.startsWith('wallet-validity-0x'))
-    .map(d => path.join(dir, d, 'posts.json')).filter(f => fs.existsSync(f)).map(f => cli.readJson(f))
-    .filter(j => String(j.rollup).toLowerCase() === String(rollup).toLowerCase());
-  const view = (sig, ...args) => cli.sh('cast', ['call', rollup, sig, ...args, '--rpc-url', cli.RPC]).trim();
-  const send = (sig, ...args) => cli.shAsync('cast', ['send', rollup, sig, ...args, '--rpc-url', cli.RPC,
-    ...cli.l1SignerArgs()], { timeout: 1_200_000 });
-  // `reclaimStake` reverts until the round's blocks are finalized: simulate it first.
-  const reclaimable = (id, submitter) => {
-    try { cli.sh('cast', ['call', rollup, 'reclaimStake(uint256)', id, '--from', submitter, '--rpc-url', cli.RPC], { stdio: 'pipe' }); return true; }
-    catch (e) { return false; }
-  };
-  const submitters = new Set();
-  for (const journal of journals) {
-    submitters.add(journal.submitter.toLowerCase());
-    for (const round of journal.rounds) {
-      if (!round.submissionId) continue;
-      const id = String(BigInt(round.submissionId));
-      const [submitter, spent] = view('stakeInfo(uint256)(address,bool)', id).split(/\s+/);
-      if (submitter.toLowerCase() !== journal.submitter.toLowerCase() || spent === 'true') continue;
-      if (!reclaimable(id, submitter)) continue;
-      await send('reclaimStake(uint256)', id);
-    }
-  }
-  for (const submitter of submitters) {
-    const credit = BigInt(view('pendingWithdrawals(address)(uint256)', submitter).split(/\s+/)[0]);
-    if (credit > 0n) await send('withdraw(uint256)', credit.toString());
-  }
 }
 
 async function attest(ch, backing) {

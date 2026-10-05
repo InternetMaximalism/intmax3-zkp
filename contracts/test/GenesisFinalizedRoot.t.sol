@@ -27,7 +27,8 @@ contract GenesisFinalizedRootTest is Test {
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
             genesis,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
     }
 }

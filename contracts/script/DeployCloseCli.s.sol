@@ -270,7 +270,8 @@ contract DeployCloseCli is Script {
                 IPinnedMleVerifierV2(address(validityVerifier)),
                 IPinnedMleVerifierV2(address(withdrawalVerifier)),
                 genesis,
-                1 ether
+                0.1 ether,
+                0.001 ether
             );
             // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
             rollup.setKzgVerifier(new BlobKZGVerifierExt());

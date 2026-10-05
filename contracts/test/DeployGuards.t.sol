@@ -1371,7 +1371,8 @@ contract MaterializerSetOnceTest is Test {
             IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid))),
             IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid))),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         m1 = new SetOnceMockMaterializer();
         m2 = new SetOnceMockMaterializer();

@@ -19,7 +19,7 @@
 
 // EXACT event fragments (human-readable; ethers derives topic0 + decodes args by name).
 const ROLLUP_FRAGMENTS = [
-  'event BlockPosted(uint64 indexed blockNumber, uint32 channelId, uint32[] keyIds, bytes32 txTreeRoot, bytes32 newBlockHashChain)',
+  'event BlockPosted(uint64 indexed blockNumber, uint256 indexed submissionId, uint32 channelId, uint32[] keyIds, bytes32 txTreeRoot, bytes32 newBlockHashChain)',
   'event Deposited(uint64 indexed depositIndex, address depositor, bytes32 recipient, uint32 tokenIndex, uint256 amount, bytes32 auxData, bytes32 newDepositHashChain)',
   'event ChannelRegistered(uint64 indexed regIndex, uint32 indexed channelId, uint8 bpMemberSlot, bytes32[] memberPkGs, bytes32[] regevPkDigests, address[] recipients, bytes32 memberPubkeysRoot, bytes32 regevPkRoot, bytes32 newChannelRegHashChain)',
   'event Submitted(uint256 indexed id, address indexed submitter, bytes32 blobVersionedHash, bytes32 proofHash, uint32 proofLength, bytes32 stateRoot)',

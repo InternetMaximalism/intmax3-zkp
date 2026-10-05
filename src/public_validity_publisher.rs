@@ -59,8 +59,6 @@ use crate::{
 // Refuse to reinterpret a pending legacy tuple-proof journal under those stronger invariants.
 const JOURNAL_VERSION: u32 = 2;
 const ENVELOPE_SCHEMA_VERSION: u32 = 2;
-/// The posting bond of a rollup deployed before `postBlockStake` was a deployment parameter.
-const LEGACY_POST_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
 const MAX_ENVELOPE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RAW_TRANSACTION_CHARS: usize = 4 * 1024 * 1024;
@@ -180,8 +178,9 @@ struct FinalizeArtifact {
 #[derive(Clone, Debug)]
 struct PreparedEnvelope {
     envelope: ValidityEnvelope,
-    /// The rollup's `postBlockStake`, read before signing (`rollup_post_stake`).
-    post_stake_wei: u64,
+    /// The post's `msg.value`: the bond top-up it needs (`rollup_bond_top_up`), or the value of the
+    /// post already journaled. Zero until the journal is loaded.
+    post_value_wei: u64,
     candidate_id: String,
     initial_block_number: u64,
     initial_block_chain: String,
@@ -1458,7 +1457,7 @@ fn prepare_envelope(bytes: &[u8]) -> Result<PreparedEnvelope> {
 
     Ok(PreparedEnvelope {
         envelope,
-        post_stake_wei: LEGACY_POST_STAKE_WEI,
+        post_value_wei: 0,
         candidate_id,
         initial_block_number,
         initial_block_chain,
@@ -1664,32 +1663,51 @@ fn checked_output(mut command: Command, what: &str, limit: usize) -> Result<Stri
     })
 }
 
-/// The rollup's posting bond (`postBlockStake`, set at deployment). A rollup deployed before it
-/// was a parameter has no getter — its call reverts — and bonds the legacy 1 ETH; any other
-/// failure stops the publication rather than sign a post with a guessed value.
-fn rollup_post_stake(rpc: &str, rollup: &str) -> Result<u64> {
-    let mut command = Command::new("cast");
-    command.args(["call", rollup, "postBlockStake()(uint256)", "--rpc-url", rpc]);
-    let output = command
-        .output()
-        .map_err(|error| PublicValidityPublisherError::Command(format!("start postBlockStake: {error}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("revert") {
-            return Ok(LEGACY_POST_STAKE_WEI);
+/// The bond a post must add as its `msg.value`. The rollup holds each producer's prepaid posting
+/// bond and accepts a post only while it covers `baseStake` plus `postStake` for every unfinalized
+/// post of the producer, this one included; the post tops up the shortfall. A rollup without the
+/// bond (it has no `baseStake`) is refused rather than posted to with a guessed value.
+fn rollup_bond_top_up(rpc: &str, rollup: &str, producer: &str) -> Result<u64> {
+    let call = |sig: &str, args: &[&str]| -> Result<String> {
+        let mut command = Command::new("cast");
+        command.args(["call", rollup, sig]).args(args).args(["--rpc-url", rpc]);
+        let output = command
+            .output()
+            .map_err(|error| PublicValidityPublisherError::Command(format!("start {sig}: {error}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if sig.starts_with("baseStake") && stderr.contains("revert") {
+                return Err(PublicValidityPublisherError::Configuration(format!(
+                    "rollup {rollup} predates the prepaid posting bond (it has no baseStake)"
+                )));
+            }
+            return Err(PublicValidityPublisherError::Command(format!(
+                "{sig} returned {}: {}",
+                output.status,
+                stderr.trim()
+            )));
         }
-        return Err(PublicValidityPublisherError::Command(format!(
-            "postBlockStake returned {}: {}",
-            output.status,
-            stderr.trim()
-        )));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| PublicValidityPublisherError::Command(format!("postBlockStake returned {text:?}")))
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let words = |text: &str, sig: &str| -> Result<Vec<u128>> {
+        text.lines()
+            .map(|line| {
+                line.split_whitespace()
+                    .next()
+                    .and_then(|value| value.parse::<u128>().ok())
+                    .ok_or_else(|| PublicValidityPublisherError::Command(format!("{sig} returned {text:?}")))
+            })
+            .collect()
+    };
+    let base = words(&call("baseStake()(uint256)", &[])?, "baseStake")?;
+    let per_post = words(&call("postStake()(uint256)", &[])?, "postStake")?;
+    let bond = words(&call("bonds(address)(uint96,uint48,uint48)", &[producer])?, "bonds")?;
+    let ([base], [per_post], [balance, posted, released]) = (&base[..], &per_post[..], &bond[..]) else {
+        return Err(PublicValidityPublisherError::Command("bond views returned an unexpected shape".into()));
+    };
+    let required = base + (posted + 1 - released) * per_post;
+    u64::try_from(required.saturating_sub(*balance))
+        .map_err(|_| PublicValidityPublisherError::Command("the bond top-up does not fit a u64".into()))
 }
 
 fn cast_output(args: &[&str], what: &str, limit: usize) -> Result<String> {
@@ -1871,7 +1889,7 @@ fn sign_blob_transaction(
         &prepared.initial_block_number.to_string(),
         &prepared.initial_block_chain,
         "--value",
-        &prepared.post_stake_wei.to_string(),
+        &prepared.post_value_wei.to_string(),
         "--blob",
         "--path",
         proof_path,
@@ -1898,7 +1916,7 @@ fn sign_blob_transaction(
         prepared.envelope.chain_id,
         signer_address,
         &prepared.envelope.rollup,
-        prepared.post_stake_wei,
+        prepared.post_value_wei,
         &prepared.post_calldata,
     )
     .map_err(PublicValidityPublisherError::Evidence)?;
@@ -1914,7 +1932,7 @@ fn sign_blob_transaction(
                 &hex::decode(prepared.post_calldata.trim_start_matches("0x"))
                     .expect("prepared calldata is hex"),
             ),
-            value: prepared.post_stake_wei,
+            value: prepared.post_value_wei,
             nonce,
             raw_signed_transaction: raw,
             transaction_hash: checked.transaction_hash,
@@ -1973,7 +1991,7 @@ fn validate_persisted_blob_step(
         prepared.envelope.chain_id,
         signer,
         &prepared.envelope.rollup,
-        prepared.post_stake_wei,
+        prepared.post_value_wei,
         &prepared.post_calldata,
     )
     .map_err(PublicValidityPublisherError::Evidence)?;
@@ -1987,7 +2005,7 @@ fn validate_persisted_blob_step(
             .expect("prepared post calldata is valid hex"),
     );
     if !same_hex(&step.transaction.target, &prepared.envelope.rollup)
-        || step.transaction.value != prepared.post_stake_wei
+        || step.transaction.value != prepared.post_value_wei
         || !same_hex(&step.transaction.calldata_hash, &calldata_hash)
         || step.transaction.nonce != nonce
         || !same_hex(
@@ -4725,7 +4743,6 @@ pub fn publish_public_validity(
         "validity envelope",
     )?;
     let mut prepared = prepare_envelope(&envelope_bytes)?;
-    prepared.post_stake_wei = rollup_post_stake(&config.rpc_url, &prepared.envelope.rollup)?;
     let observed_chain_id = rpc_chain_id(&config.rpc_url)?;
     if observed_chain_id != prepared.envelope.chain_id {
         return Err(PublicValidityPublisherError::Evidence(format!(
@@ -4765,6 +4782,11 @@ pub fn publish_public_validity(
     )?;
     let proof_path = proof_payload_path(&config.journal_path)?;
     ensure_proof_payload(&proof_path, &prepared.proof_payload)?;
+    // A journaled post keeps the value it was signed with; a new one tops up what the bond lacks.
+    prepared.post_value_wei = match journal.post.as_ref() {
+        Some(post) => post.transaction.value,
+        None => rollup_bond_top_up(&config.rpc_url, &prepared.envelope.rollup, &signer_address)?,
+    };
 
     let post_reservation = validity_signer_reservation(
         observed_chain_id,
@@ -4774,7 +4796,7 @@ pub fn publish_public_validity(
         "post",
         &prepared.envelope.rollup,
         &journal.binding.post_calldata_hash,
-        prepared.post_stake_wei,
+        prepared.post_value_wei,
     )?;
     let post_needs_reservation = journal
         .post
@@ -5214,6 +5236,7 @@ pub fn publish_public_validity(
 
 #[cfg(test)]
 mod tests {
+    const TEST_POST_VALUE_WEI: u64 = 101_000_000_000_000_000;
     use super::*;
     use plonky2::{
         field::types::Field as _,
@@ -5406,7 +5429,7 @@ mod tests {
 
     fn sample_prepared_with_proof(proof_payload: Vec<u8>, vpis: Value) -> PreparedEnvelope {
         PreparedEnvelope {
-            post_stake_wei: LEGACY_POST_STAKE_WEI,
+            post_value_wei: TEST_POST_VALUE_WEI,
             envelope: ValidityEnvelope {
                 schema_version: ENVELOPE_SCHEMA_VERSION,
                 channel_id: 7,
@@ -5759,7 +5782,7 @@ process.stdout.write(calldata);
         let mut first =
             load_or_create_journal(&path, binding.clone(), &signer, &lock_root).unwrap();
         let mut blob_transaction = sample_raw_step(17, 0xa1);
-        blob_transaction.value = LEGACY_POST_STAKE_WEI;
+        blob_transaction.value = TEST_POST_VALUE_WEI;
         first.post = Some(BlobPostStep {
             transaction: blob_transaction,
             blob_versioned_hashes: vec![word(0xb1), word(0xb2)],
@@ -5867,7 +5890,7 @@ process.stdout.write(calldata);
             "post",
             &binding.rollup,
             &binding.post_calldata_hash,
-            LEGACY_POST_STAKE_WEI,
+            TEST_POST_VALUE_WEI,
         )
         .unwrap();
         let attest = validity_signer_reservation(

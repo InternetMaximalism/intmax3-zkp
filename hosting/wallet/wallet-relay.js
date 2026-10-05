@@ -108,13 +108,14 @@ let settlementReadiness = { ok: false, reason: 'the relay is still checking that
 // The resident validity prover must be configured before the block producer starts; a rollup
 // verified only later (after a transient read failure) settles withdrawals after a restart.
 let validityConfigured = false;
-// A burn is accepted only while the operator can fund its L1 settlement at once: every producer
-// block not yet finalized on the rollup, plus the burn's own, is posted with the rollup's
-// `postBlockStake` bond (set at its deployment; returned after finalization), and the settlement's
-// transactions need gas (about 0.1 ETH on the rehearsal). A burn the operator cannot settle holds
-// its channel and the burned funds until someone funds the operator.
-const LEGACY_POST_BLOCK_STAKE_WEI = 10n ** 18n; // a rollup deployed before the stake was a parameter
-let postBlockStakeWei = null;
+// A burn is accepted only while the operator can fund its L1 settlement at once. The rollup holds
+// the operator's prepaid posting bond and accepts each post only while the bond covers its
+// `baseStake` plus `postStake` per unfinalized post (both set at deployment; released by the
+// finalization). Every producer block not yet on L1, plus the burn's own, is one more post; the
+// operator tops the bond up with those posts, and the settlement's transactions need gas (about
+// 0.1 ETH on the rehearsal). A burn the operator cannot settle holds its channel and the burned
+// funds until someone funds the operator.
+let bondStakes = null; // { base, perPost } of the rollup, immutable
 const SETTLEMENT_GAS_RESERVE_WEI = BigInt(process.env.SETTLEMENT_GAS_RESERVE_WEI || String(2n * 10n ** 17n));
 let settlementFunding = { ok: false, reason: "the relay is still checking the operator's funds for L1 settlement" };
 const settlementEnabled = () => isDevnet() || (settlementReadiness.ok && validityConfigured);
@@ -134,20 +135,25 @@ async function checkSettlementFunding() {
   if (!settlementEnabled() || isDevnet()) return settlementFunding;
   try {
     const helper = require('../../api/lib/cli');
-    const view = (args) => helper.sh('cast', [...args, '--rpc-url', RPC], { stdio: 'pipe' }).trim().split(/\s+/)[0];
+    const rollup = settlementReadiness.record.rollup;
+    const read = (args) => helper.sh('cast', [...args, '--rpc-url', RPC], { stdio: 'pipe' }).trim()
+      .split('\n').map(line => BigInt(line.trim().split(/\s+/)[0]));
     operatorAddress = operatorAddress || helper.l1SignerAddress();
-    const head = Number((await producer.status()).blockNumber);
-    const finalized = Number(view(['call', settlementReadiness.record.rollup, 'latestFinalizedBlockNumber()(uint64)']));
-    const balance = BigInt(view(['balance', operatorAddress]));
-    if (postBlockStakeWei === null) {
-      try { postBlockStakeWei = BigInt(view(['call', settlementReadiness.record.rollup, 'postBlockStake()(uint256)'])); }
-      catch (e) { if (!/revert/.test(String(e.stderr || e.message))) throw e; postBlockStakeWei = LEGACY_POST_BLOCK_STAKE_WEI; }
-    }
-    const posts = BigInt(Math.max(0, head - finalized) + 1);
-    const needed = posts * postBlockStakeWei + SETTLEMENT_GAS_RESERVE_WEI;
+    bondStakes = bondStakes || { base: read(['call', rollup, 'baseStake()(uint256)'])[0],
+      perPost: read(['call', rollup, 'postStake()(uint256)'])[0] };
+    const head = BigInt((await producer.status()).blockNumber);
+    const [onL1] = read(['call', rollup, 'blockNumber()(uint64)']);
+    const [bond, posted, released] = read(['call', rollup, 'bonds(address)(uint96,uint48,uint48)', operatorAddress]);
+    const [balance] = read(['balance', operatorAddress]);
+    const posts = (head > onL1 ? head - onL1 : 0n) + 1n;
+    const unfinalized = posted - released + posts;
+    const required = bondStakes.base + unfinalized * bondStakes.perPost;
+    const topUp = required > bond ? required - bond : 0n;
+    const needed = topUp + SETTLEMENT_GAS_RESERVE_WEI;
     settlementFunding = balance >= needed ? { ok: true } : { ok: false, reason: `the operator cannot fund the L1 settlement of a `
-      + `withdrawal now: it needs ${ethText(needed)} ETH (${posts} block posts at a ${ethText(postBlockStakeWei)} ETH stake each, `
-      + `returned after finalization, plus gas) and has ${ethText(balance)} ETH` };
+      + `withdrawal now: it needs ${ethText(needed)} ETH (${ethText(topUp)} ETH more posting bond for ${posts} block posts — a `
+      + `${ethText(bondStakes.base)} ETH base plus ${ethText(bondStakes.perPost)} ETH per unfinalized post, returned after `
+      + `finalization — plus gas) and has ${ethText(balance)} ETH` };
   } catch (e) {
     settlementFunding = { ok: false, reason: "could not check the operator's funds for L1 settlement: " + String((e && e.message) || e).split('\n')[0] };
   }

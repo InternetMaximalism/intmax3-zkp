@@ -26,6 +26,18 @@ Legend: [ ] todo · [~] in progress · [x] modeled+proved
 - [x] `fraudProof()` (:1153)      → IntmaxRollupOptimistic (rollback floor; finalized roots permanent)
 - [x] `withdraw()` (:1212)        → IntmaxRollupWithdraw (claimWithdraw_no_double, CEI)
 - [x] reclaimStake/_slashStake/_refundStake → IntmaxRollupStake (single-resolution + conservation)
+- [ ] **STALE since the prepaid posting bond (2026-10-05): re-model and re-prove IntmaxRollupStake.**
+      The per-submission stake (`stakeInfo`, `reclaimStake`, `_refundStake`, `_slashStake`,
+      `postBlockStake`) was replaced by a per-producer bond `bonds[producer] = {balance, posted,
+      released}` with immutable `baseStake` / `postStake`, `depositBond` / `withdrawBond` /
+      `releaseBond`, `Submission.postIndex`, finalize releasing `postIndex`, and
+      `_truncateSubmissions(target, reporter, forfeit)` / `_forfeitBond` (capped). The proofs in
+      `Zkp/Contracts/IntmaxRollupStake.lean` (and its `Assumptions`/`Coverage` references) describe the
+      removed scheme. To prove for the bond: a post is accepted only if `balance >= baseStake +
+      (posted - released) * postStake` after it; `withdrawBond` never leaves `balance` below that lock
+      while anything is unfinalized; `released <= posted` (truncation only uncounts posts above the
+      finalized height); forfeiture never exceeds the bond and its split conserves it; a timeout
+      removal forfeits nothing; a proven fraud forfeits also after the deadline. Deferred by the owner.
 - [x] claimAuthorizedWithdrawal → IntmaxRollupWithdraw (`claimAuthorized_escrow_conservation`, renamed 2026-07-28 from the misleading `claimAuthorized_safe`: it proves escrow conservation + nullifier consumption + an authorization read-back, NOT economic soundness — the DERIVATION of the digest's fields was always out of model scope). **The contract function itself was DELETED 2026-07-28** (doc/tasks/pw-auth-threat-model.md); the model transition is retained so the solvency inductions cover a superset of deployed operations. authorizePartialWithdrawal → IntmaxRollupDeposit (access control)
 - [x] helpers (hash/crypto) → Coverage.lean (structural keccak_det + crypto oracles)
 - [x] `registerChannel()` (:891)  → Coverage.lean (structural reg keccak chain)

@@ -323,7 +323,8 @@ contract IntmaxRollupTest is Test {
     function setUp() public {
         rollup = new IntmaxRollup(
             fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
@@ -457,7 +458,8 @@ contract IntmaxRollupTest is Test {
     function _registerChannelDiff(uint256 memberCount) internal returns (bytes32) {
         IntmaxRollup fresh = new IntmaxRollup(
             fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
 
         (bytes32[] memory sphincs, bytes32[] memory pkBs, bytes32[] memory regev, address[] memory recipients) =
@@ -488,7 +490,8 @@ contract IntmaxRollupTest is Test {
     function _freshRollup() internal returns (IntmaxRollup) {
         return new IntmaxRollup(
             fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
     }
 
@@ -743,44 +746,8 @@ contract IntmaxRollupTest is Test {
         _mockBlob();
         bytes32 pin = rollup.pendingChainsPin();
         vm.prank(blockProducer);
-        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
+        vm.expectRevert(IntmaxRollup.InsufficientBond.selector);
         rollup.postBlockAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
-    }
-
-    /// The posting bond is a deployment parameter (`postBlockStake`, immutable): a post must carry
-    /// exactly it, and it is what a refund, a reclaim or a slash moves.
-    function test_postBlockStake_isTheDeploymentValue() public {
-        IntmaxRollup cheap = new IntmaxRollup(
-            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0), 0.1 ether
-        );
-        cheap.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
-        cheap.setBlockProducer(blockProducer, true);
-        assertEq(cheap.postBlockStake(), 0.1 ether);
-        assertEq(rollup.postBlockStake(), 1 ether);
-
-        uint32[] memory ids = new uint32[](1);
-        ids[0] = 42;
-        IntmaxRollup.SubBlock[] memory batch =
-            _singleBlockBatch(5, ids, uint64(block.timestamp), bytes32(uint256(0x1234)));
-        _mockBlob();
-        bytes32 pin = cheap.pendingChainsPin();
-        vm.prank(blockProducer);
-        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
-        cheap.postBlockAndSubmit{value: 1 ether}(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
-        vm.prank(blockProducer);
-        cheap.postBlockAndSubmit{value: 0.1 ether}(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT, pin);
-        (address bonded, bool spent) = cheap.stakeInfo(cheap.nextSubmissionId() - 1);
-        assertEq(bonded, blockProducer);
-        assertFalse(spent);
-        assertEq(address(cheap).balance, 0.1 ether);
-    }
-
-    /// A zero bond would make posting free and leave fraud unpunished: refused at deployment.
-    function test_postBlockStake_zeroIsRefused() public {
-        MockPinnedMleVerifierV2 validity = new MockPinnedMleVerifierV2(31337);
-        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
-        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -890,7 +857,7 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.getCommitment(0), expectedCommitment);
         assertEq(rollup.nextSubmissionId(), 1);
 
-        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        IntmaxRollup.SubmissionView memory sub = rollup.getSubmission(0);
         assertEq(sub.submitter, submitter);
         assertFalse(sub.finalized);
         assertEq(sub.submittedAtBlock, uint64(block.number));
@@ -1053,7 +1020,7 @@ contract IntmaxRollupTest is Test {
     function test_constructor_rejectsDuplicatePinnedAdapters() public {
         MockPinnedMleVerifierV2 adapter = new MockPinnedMleVerifierV2(31337);
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, adapter, adapter, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, adapter, adapter, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_constructor_rejectsCrossStatementCoreReuse() public {
@@ -1062,7 +1029,7 @@ contract IntmaxRollupTest is Test {
         MockPinnedMleVerifierV2WithCore withdrawal = new MockPinnedMleVerifierV2WithCore(31337, address(sharedCore));
 
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_constructor_rejectsCrossStatementAdapterCoreAlias() public {
@@ -1071,7 +1038,7 @@ contract IntmaxRollupTest is Test {
         MockPinnedMleVerifierV2WithCore validity = new MockPinnedMleVerifierV2WithCore(31337, address(withdrawal));
 
         vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_constructor_rejectsCoreChainMismatch() public {
@@ -1087,13 +1054,13 @@ contract IntmaxRollupTest is Test {
                 uint256(31338)
             )
         );
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_constructor_rejectsPinnedAdapterWithoutCode() public {
         MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
         vm.expectRevert(abi.encodeWithSelector(IntmaxRollup.InvalidPinnedMleVerifier.selector, address(0xBEEF)));
-        new IntmaxRollup(fraudTreasury, IPinnedMleVerifierV2(address(0xBEEF)), withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, IPinnedMleVerifierV2(address(0xBEEF)), withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_constructor_rejectsWrongChainPinnedAdapter() public {
@@ -1107,7 +1074,7 @@ contract IntmaxRollupTest is Test {
                 uint256(31338)
             )
         );
-        new IntmaxRollup(fraudTreasury, wrongChain, withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, wrongChain, withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     /// @notice A local-only verification bypass must not survive a chain-id
@@ -1153,7 +1120,8 @@ contract IntmaxRollupTest is Test {
             new MockPinnedMleVerifierV2(publicChain),
             new MockPinnedMleVerifierV2(publicChain),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         assertEq(pinned.deploymentChainId(), publicChain, "deployment chain pin");
 
@@ -1184,7 +1152,7 @@ contract IntmaxRollupTest is Test {
                 IntmaxRollup.PinnedMleVerifierChainMismatch.selector, address(validity), publicChain, 31337
             )
         );
-        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 1 ether);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0), 0.1 ether, 0.001 ether);
     }
 
     function test_finalize_success() public {
@@ -1206,7 +1174,7 @@ contract IntmaxRollupTest is Test {
 
         uint256 stakeBalanceBefore = submitter.balance;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
-        assertEq(submitter.balance, stakeBalanceBefore - 1 ether, "stake should lock 1 ETH");
+        assertEq(submitter.balance, stakeBalanceBefore - 1 ether, "the post topped the bond up by 1 ETH");
 
         bool ok = rollup.finalize(0, stateRoot, vpis, mleProof);
 
@@ -1217,11 +1185,13 @@ contract IntmaxRollupTest is Test {
         assertFalse(
             rollup.isFinalizedStateRoot(keccak256("unknown_state")), "unknown root must not be reported finalized"
         );
-        // Pull-payment: stake credited to pendingWithdrawals, not pushed
-        assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake should be credited");
+        // The finalization releases the post: nothing of the bond is locked any more.
+        (uint96 bond, uint48 posted, uint48 released) = rollup.bonds(submitter);
+        assertEq(bond, 1 ether);
+        assertEq(released, posted, "the post is released");
         vm.prank(submitter);
-        rollup.withdraw(1 ether);
-        assertEq(submitter.balance, stakeBalanceBefore, "stake should be withdrawn");
+        rollup.withdrawBond(1 ether);
+        assertEq(submitter.balance, stakeBalanceBefore, "the bond should be withdrawn");
     }
 
     function test_finalize_alreadyFinalized() public {
@@ -1343,7 +1313,7 @@ contract IntmaxRollupTest is Test {
     /// supply a proof that (a) carries the CORRECT PI limbs, so the preimage pre-condition passes,
     /// and (b) fails WHIR verification, so fraud is confirmed for the right reason.
     function _newMleEnabledRollup() internal returns (IntmaxRollup r) {
-        r = new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
+        r = new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 0.1 ether, 0.001 ether);
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(address(this), true);
         r.setBlockProducer(submitter, true);
@@ -1390,6 +1360,30 @@ contract IntmaxRollupTest is Test {
         vm.prank(reporter);
         bool fraudConfirmed = r.fraudProof(0, stateRoot, vpis, proofBytes);
         assertTrue(fraudConfirmed, "Fraud should be confirmed for invalid proof");
+    }
+
+    /// A proven fraud forfeits the bond also after the finalization deadline: waiting it out must
+    /// not turn the fraud into a timeout removal, which forfeits nothing.
+    function test_fraudProof_afterDeadline_provenFraudStillForfeits() public {
+        IntmaxRollup r = _newMleEnabledRollup();
+        bytes32 stateRoot = keccak256("bad_state");
+        IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsFor(r, stateRoot);
+        bytes memory proofBytes = _mleProofWithPI(_computePIHash(vpis));
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 21;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(5, ids, 500, bytes32(uint256(0x888)));
+        _postWithKZG_on(r, batch, proofBytes, stateRoot, submitter);
+
+        vm.roll(block.number + 3601);
+        address reporter = makeAddr("reporter");
+        vm.prank(reporter);
+        assertTrue(r.fraudProof(0, stateRoot, vpis, proofBytes), "fraud confirmed after the deadline");
+        uint256 forfeited = r.baseStake() + r.postStake();
+        assertEq(r.pendingWithdrawals(reporter), forfeited * 90 / 100, "the reporter is rewarded");
+        assertEq(r.pendingWithdrawals(fraudTreasury), forfeited - forfeited * 90 / 100, "the treasury share");
+        (uint96 bond, uint48 posted,) = r.bonds(submitter);
+        assertEq(bond, 1 ether - forfeited, "the offender keeps the rest of its bond");
+        assertEq(posted, 0);
     }
 
     function test_fraudProof_validProof_noFraud() public {
@@ -1525,19 +1519,25 @@ contract IntmaxRollupTest is Test {
         uint256 reporterBefore = reporter.balance;
         uint256 treasuryBefore = fraudTreasury.balance;
 
-        assertEq(address(r).balance, 2 ether, "two stakes should be locked");
+        assertEq(address(r).balance, 2 ether, "both posts topped their bonds up by 1 ETH");
 
         vm.prank(reporter);
         bool fraudConfirmed = r.fraudProof(0, badState, vpis, proofBytes);
         assertTrue(fraudConfirmed, "Fraud should be confirmed");
 
-        uint256 expectedReward = 2 * 0.9 ether;
-        uint256 expectedTreasury = 2 * 0.1 ether;
+        // The offender forfeits its base and its post's stake; the later post, truncated with it,
+        // forfeits its post's stake.
+        uint256 forfeited = r.baseStake() + 2 * r.postStake();
+        uint256 expectedReward = forfeited * 90 / 100;
+        uint256 expectedTreasury = forfeited - expectedReward;
         // Pull-payment: rewards credited to pendingWithdrawals
         assertEq(r.pendingWithdrawals(reporter), expectedReward, "Reporter reward mismatch");
         assertEq(r.pendingWithdrawals(fraudTreasury), expectedTreasury, "Treasury share mismatch");
-        // Contract still holds the funds until withdraw(amount)
-        assertEq(address(r).balance, expectedReward + expectedTreasury, "Stakes in escrow");
+        (uint96 offenderBond,,) = r.bonds(submitter);
+        // `_postAndSubmitDefaultOn` posts as this contract: the prank is spent on `pendingChainsPin()`.
+        (uint96 laterBond,,) = r.bonds(address(this));
+        assertEq(offenderBond, 1 ether - r.baseStake() - r.postStake(), "offender keeps the rest of its bond");
+        assertEq(laterBond, 1 ether - r.postStake(), "the later producer lost its truncated post's stake");
         vm.prank(reporter);
         r.withdraw(expectedReward);
         assertEq(reporter.balance, reporterBefore + expectedReward, "Reporter withdrew");
@@ -1545,7 +1545,7 @@ contract IntmaxRollupTest is Test {
         vm.prank(fraudTreasury);
         r.withdraw(expectedTreasury);
         assertEq(fraudTreasury.balance, treasuryBefore + expectedTreasury, "Treasury withdrew");
-        assertEq(address(r).balance, 0, "All funds withdrawn");
+        assertEq(address(r).balance, uint256(offenderBond) + laterBond, "only the remaining bonds are held");
         assertEq(r.blockNumber(), 0, "Blocks should roll back");
         assertEq(r.nextSubmissionId(), 0, "Submissions truncated");
         assertEq(r.postingRound(), 0, "Posting round reset");
@@ -1559,7 +1559,7 @@ contract IntmaxRollupTest is Test {
     function test_fraudProof_e2e_corruptedMleCommitment() public {
         // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
         IntmaxRollup mleRollup =
-            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 0.1 ether, 0.001 ether);
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
         bytes memory mleProof = _defaultMleProof();
@@ -1591,7 +1591,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = mleRollup.fraudProof(0, stateRoot, vpis, proofBytes);
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted whirTranscript (condition c)");
 
-        IntmaxRollup.Submission memory sub = mleRollup.getSubmission(0);
+        IntmaxRollup.SubmissionView memory sub = mleRollup.getSubmission(0);
         assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
@@ -1600,7 +1600,7 @@ contract IntmaxRollupTest is Test {
     function test_fraudProof_e2e_corruptedMleEvals() public {
         // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
         IntmaxRollup mleRollup =
-            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 1 ether);
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0), 0.1 ether, 0.001 ether);
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
         bytes memory mleProof = _defaultMleProof();
@@ -1632,7 +1632,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = mleRollup.fraudProof(0, stateRoot, vpis, proofBytes);
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted proof data (condition c)");
 
-        IntmaxRollup.Submission memory sub = mleRollup.getSubmission(0);
+        IntmaxRollup.SubmissionView memory sub = mleRollup.getSubmission(0);
         assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
@@ -1819,7 +1819,7 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, bytes32(uint256(1)), pin);
 
-        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        IntmaxRollup.SubmissionView memory sub = rollup.getSubmission(0);
         assertEq(sub.submittedAtBlock, 42, "submittedAtBlock should match block.number at submission");
     }
 
@@ -1902,15 +1902,17 @@ contract IntmaxRollupTest is Test {
 
         assertTrue(rollup.finalize(0, stateRoot, vpis, mleProof), "finalize must succeed");
 
-        assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake credited");
         uint256 balBefore = submitter.balance;
         vm.prank(submitter);
-        rollup.withdraw(0.4 ether);
-        assertEq(rollup.pendingWithdrawals(submitter), 0.6 ether, "unselected credit remains scoped on rollup");
+        rollup.withdrawBond(0.4 ether);
+        (uint96 bond,,) = rollup.bonds(submitter);
+        assertEq(bond, 0.6 ether, "the rest stays in the bond");
         vm.prank(submitter);
-        rollup.withdraw(0.6 ether);
-        assertEq(submitter.balance, balBefore + 1 ether, "stake withdrawn in exact slices");
-        assertEq(rollup.pendingWithdrawals(submitter), 0, "no pending after withdraw");
+        rollup.withdrawBond(0.6 ether);
+        assertEq(submitter.balance, balBefore + 1 ether, "bond withdrawn in exact slices");
+        vm.prank(submitter);
+        vm.expectRevert(IntmaxRollup.NothingToWithdraw.selector);
+        rollup.withdrawBond(1);
     }
 
     function test_finalize_succeedsEvenIfSubmitterReverts() public {
@@ -1931,11 +1933,13 @@ contract IntmaxRollupTest is Test {
         bytes memory proofBytes = mleProof;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, address(revSub));
 
-        // Under old push-payment, this would revert because revSub rejects ETH.
-        // Under pull-payment, finalize completes and credits pendingWithdrawals.
+        // Under old push-payment, this would revert because revSub rejects ETH. The finalization
+        // moves no ETH: it only releases the post in the submitter's bond.
         bool ok = rollup.finalize(0, stateRoot, vpis, mleProof);
         assertTrue(ok, "finalize must succeed even with reverting submitter");
-        assertEq(rollup.pendingWithdrawals(address(revSub)), 1 ether, "stake credited to reverting submitter");
+        (uint96 bond, uint48 posted, uint48 released) = rollup.bonds(address(revSub));
+        assertEq(bond, 1 ether, "the bond is untouched");
+        assertEq(released, posted, "the reverting submitter's post is released");
     }
 
     function test_fraudProof_succeedsEvenIfTreasuryReverts() public {
@@ -1949,7 +1953,8 @@ contract IntmaxRollupTest is Test {
             new RejectingMleVerifier(),
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup2.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
@@ -2049,7 +2054,7 @@ contract BlockHashHarness is IntmaxRollup {
         IPinnedMleVerifierV2 validityVerifier_,
         IPinnedMleVerifierV2 withdrawalVerifier_,
         bytes32 genesisStateRoot_
-    ) IntmaxRollup(fraudTreasury_, validityVerifier_, withdrawalVerifier_, genesisStateRoot_, 1 ether) {}
+    ) IntmaxRollup(fraudTreasury_, validityVerifier_, withdrawalVerifier_, genesisStateRoot_, 0.1 ether, 0.001 ether) {}
 
     function computeBlockHashForTest(
         bytes32 prevHash,

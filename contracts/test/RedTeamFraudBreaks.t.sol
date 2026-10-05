@@ -270,7 +270,8 @@ contract RedTeamFraudBreaksTest is Test {
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
             R,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -359,7 +360,8 @@ contract RedTeamFraudBreaksTest is Test {
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
             R0,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -518,7 +520,8 @@ contract RedTeamFraudBreaksTest is Test {
             new RejectingMleVerifier(),
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         // This regression isolates the MLE verdict; ProofDaRollup exercises the production DA
         // satellite with the same pre-timeout conviction route.
@@ -576,7 +579,8 @@ contract RedTeamFraudBreaksTest is Test {
             IPinnedMleVerifierV2(verifierAddr),
             new MockPinnedMleVerifierV2(31337),
             bytes32(0),
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);

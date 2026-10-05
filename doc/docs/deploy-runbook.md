@@ -319,12 +319,17 @@ burn and credits the payout; then the ticket is `claim_pending` until the recipi
 own wallet. A failed step is recorded on the ticket and retried every five minutes; a relay restart
 resumes at the recorded phase. Until the intent is submitted the burn owns the channel head (the
 manager accepts a burn only with its own post-burn signed state), so every other operation on that
-channel answers 409 `SETTLING_WITHDRAWAL`; other channels are unaffected. Each blob post locks the
-rollup's `postBlockStake` bond from the operator until its batch is finalized (then `reclaimStake`
-/ the finalize refund, both pulled back by the relay). The bond is set at deployment
-(`Deploy.s.sol` reads `POST_BLOCK_STAKE_WEI`, default 1 ETH, non-zero; the v3 testnet uses 0.1 ETH)
-and is immutable. The relay offers a withdrawal only while the operator holds one bond per producer
-block not yet finalized plus the burn's own, and a 0.2 ETH gas reserve (`SETTLEMENT_GAS_RESERVE_WEI`).
+channel answers 409 `SETTLING_WITHDRAWAL`; other channels are unaffected. Every blob post is
+backed by the operator's prepaid posting bond in the rollup (`bonds(operator)`): a post is accepted
+only while the bond covers `baseStake` plus `postStake` for each unfinalized post of the operator,
+this one included, and each post tops the bond up with its `msg.value` as needed. The finalization
+releases every post up to the finalized one; the bond stays in the rollup for the next posts and is
+withdrawable with `withdrawBond` whenever no post is unfinalized. A proven fraud forfeits the
+offender's base and `postStake` per truncated post (capped at the bond left); a timeout removal
+forfeits nothing. Both values are set at deployment (`Deploy.s.sol` reads `BASE_STAKE_WEI`, default
+0.1 ETH, and `POST_STAKE_WEI`, default 0.001 ETH; both non-zero) and are immutable. The relay offers
+a withdrawal only while the operator can top the bond up for every producer block not yet on L1
+plus the burn's own, and holds a 0.2 ETH gas reserve (`SETTLEMENT_GAS_RESERVE_WEI`).
 
 **Deposits on a public chain** are consumed by the relay's deposit sequencer
 (`api/lib/deposit-sequencer.js`), not by the depositor's browser. The block producer accepts the

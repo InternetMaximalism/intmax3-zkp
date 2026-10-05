@@ -36,7 +36,8 @@ contract C2CBlockHashTest is Test {
             new MockPinnedMleVerifierV2(31337),
             new MockPinnedMleVerifierV2(31337),
             genesis,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting

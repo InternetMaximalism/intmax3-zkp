@@ -133,7 +133,9 @@ contract IntmaxRollup {
     ///      could not run to completion. Never evidence of fraud — see `_mleVerdict`.
     error FraudProofGasStarved();
     error SubmissionBeforeFinalizedBlock();
-    error NothingToReclaim();
+    /// The producer's posting bond does not cover `baseStake` plus `postStake` for each of its
+    /// unfinalized posts including this one.
+    error InsufficientBond();
     error SubmissionNotYetFinalized();
     // Size-optimized replacements for former require-strings (custom errors are ~4 bytes vs a full
     // string literal duplicated at each use site by via_ir inlining). Behavior is unchanged.
@@ -186,8 +188,15 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
+    /// @param submissionId the submission (posting round) that carries this block, so a block maps
+    ///        straight to its producer through `Submitted`/`getSubmission`.
     event BlockPosted(
-        uint64 indexed blockNumber, uint32 channelId, uint32[] keyIds, bytes32 txTreeRoot, bytes32 newBlockHashChain
+        uint64 indexed blockNumber,
+        uint256 indexed submissionId,
+        uint32 channelId,
+        uint32[] keyIds,
+        bytes32 txTreeRoot,
+        bytes32 newBlockHashChain
     );
 
     event Deposited(
@@ -304,9 +313,13 @@ contract IntmaxRollup {
         // Domain-separated Proof-DA v2 commitment over both blob hashes, exact blob count,
         // keccak256(abi.encode(mleProof)), exact byte length, state root and Eth block number.
         bytes32 commitment;
-        address submitter; // packed with `finalized` into one slot
+        address submitter; // packed with `finalized`, `submittedAtBlock` and `postIndex` into one slot
         bool finalized;
-        uint64 submittedAtBlock; // Eth block number when submitted
+        uint40 submittedAtBlock; // Eth block number when submitted
+        // The submitter's live post count including this post (`Bond.posted` right after it). Every
+        // post of a producer with a lower index has a lower submission id, so finalizing this one
+        // finalizes all of them: the bond releases them by raising `Bond.released` to this index.
+        uint48 postIndex;
         // SECURITY (H-5): the state root THIS submission committed to. `commitment` already binds it,
         // but `finalize` receives only (submissionId, stateRoot, validityPIs, mleProof) — not the
         // blobHash/proofHash/proofLength needed to recompute `commitment` — so it had no way to tell
@@ -314,9 +327,23 @@ contract IntmaxRollup {
         bytes32 stateRoot;
     }
 
-    struct StakeInfo {
+    /// @notice The `getSubmission` view: the stored `Submission` without its bond index. External
+    ///         readers (BlobKZGVerifier, the Rust publisher) decode exactly these five words.
+    struct SubmissionView {
+        bytes32 commitment;
         address submitter;
-        bool spent;
+        bool finalized;
+        uint64 submittedAtBlock;
+        bytes32 stateRoot;
+    }
+
+    /// @notice A block producer's prepaid posting bond. One slot per producer.
+    ///         Locked: `baseStake + (posted - released) * postStake` while any post is unfinalized,
+    ///         nothing once all are; the rest of `balance` is withdrawable.
+    struct Bond {
+        uint96 balance; // ETH held for this producer (wei)
+        uint48 posted; // live posts: every post counts, a truncated one is uncounted
+        uint48 released; // posts known to be finalized history
     }
 
     /// @notice A single fast block (~5 seconds) within a posting-round batch.
@@ -549,8 +576,8 @@ contract IntmaxRollup {
     /// SECURITY: `totalEscrowed` is the global ceiling for all future native payouts
     ///           (Σ payouts ≤ totalEscrowed). It is enforced later by an underflow-revert on every
     ///           decrement at payout time, so no payout path can ever release more ETH than was
-    ///           escrowed here. It is intentionally kept disjoint from the `postBlockStake` ETH
-    ///           tracked by `stakeInfo`/`pendingWithdrawals` (fraud-stake accounting), which is NOT
+    ///           escrowed here. It is intentionally kept disjoint from the posting-bond ETH
+    ///           tracked by `bonds`/`pendingWithdrawals` (fraud-stake accounting), which is NOT
     ///           part of this balance.
     /// @dev Multi-token (§N-7): ETH escrow accounting DELIBERATELY stays on `totalEscrowed` (not
     ///      `escrowedByToken[0]`) — minimal diff, and every existing ETH invariant/test keeps its
@@ -636,10 +663,15 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Fraud/Stake configuration
     // -----------------------------------------------------------------------
-    /// @notice The bond a block producer posts with every batch (`postBlockAndSubmit*`): refunded on
-    ///         finalization or reclaimable once the batch is finalized history, slashed to a fraud
-    ///         reporter and the treasury on fraud. Set at deployment (non-zero) and immutable.
-    uint256 public immutable postBlockStake;
+    /// @notice The posting bond. A block producer prepays it into `bonds` (`depositBond`, or with a
+    ///         post's `msg.value`); a post requires `baseStake` plus `postStake` for each of the
+    ///         producer's unfinalized posts including itself. A finalization releases every post of
+    ///         its submitter up to the finalized one; with no unfinalized post the whole bond is
+    ///         withdrawable. A proven fraud forfeits the offender's `baseStake` and `postStake` per
+    ///         truncated post (each capped at the remaining bond) to the reporter and the treasury;
+    ///         a timeout removal forfeits nothing. Both set at deployment (non-zero), immutable.
+    uint256 public immutable baseStake;
+    uint256 public immutable postStake;
     uint256 private constant FRAUD_REWARD_PERCENT = 90;
     uint256 private constant FRAUD_TREASURY_PERCENT = 10;
 
@@ -661,7 +693,7 @@ contract IntmaxRollup {
     uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
 
-    mapping(uint256 => StakeInfo) public stakeInfo;
+    mapping(address => Bond) public bonds;
     mapping(address => uint256) public pendingWithdrawals;
     mapping(uint64 => DepositRecord) internal _depositRecords;
     mapping(uint256 => BatchMetadata) internal _batchMetadata;
@@ -678,10 +710,12 @@ contract IntmaxRollup {
         IPinnedMleVerifierV2 _validityMleVerifier,
         IPinnedMleVerifierV2 _withdrawalMleVerifier,
         bytes32 _genesisStateRoot,
-        uint256 _postBlockStake
+        uint256 _baseStake,
+        uint256 _postStake
     ) {
-        if (_postBlockStake == 0) revert InvalidStakeAmount();
-        postBlockStake = _postBlockStake;
+        if (_baseStake == 0 || _postStake == 0) revert InvalidStakeAmount();
+        baseStake = _baseStake;
+        postStake = _postStake;
         address validityAdapter = address(_validityMleVerifier);
         address withdrawalAdapter = address(_withdrawalMleVerifier);
         if (validityAdapter == withdrawalAdapter) {
@@ -1031,13 +1065,25 @@ contract IntmaxRollup {
         if (!isBlockProducer[msg.sender] && msg.sender != blockProducerAdmin) {
             revert NotAuthorizedBlockProducer();
         }
-        if (msg.value != postBlockStake) revert InvalidStakeAmount();
         BatchMetadata memory meta =
             _postBlock(subBlocks, checkpointDepositChain, checkpointRegistrationChain, checkpointDepositCount);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
-
-        stakeInfo[submissionId] = StakeInfo({submitter: msg.sender, spent: false});
         _batchMetadata[submissionId] = meta;
+        _submissions[submissionId].postIndex = _chargeBond();
+    }
+
+    /// @dev Count the post on the sender's bond, topped up by `msg.value`; the bond must cover the
+    ///      base plus one `postStake` for each unfinalized post of the sender, this one included.
+    ///      Reverting undoes the whole post.
+    function _chargeBond() private returns (uint48 postIndex) {
+        Bond memory bond = bonds[msg.sender];
+        uint256 balance = uint256(bond.balance) + msg.value;
+        uint256 posted = uint256(bond.posted) + 1;
+        if (balance > type(uint96).max || balance < baseStake + (posted - bond.released) * postStake) {
+            revert InsufficientBond();
+        }
+        postIndex = uint48(posted);
+        bonds[msg.sender] = Bond({balance: uint96(balance), posted: postIndex, released: bond.released});
     }
 
     function _postBlock(
@@ -1134,7 +1180,12 @@ contract IntmaxRollup {
             blockChannelRegHash[currentBlockNumber] = regHash;
 
             emit BlockPosted(
-                currentBlockNumber, subBlocks[i].channelId, subBlocks[i].keyIds, subBlocks[i].txTreeRoot, currentHash
+                currentBlockNumber,
+                nextSubmissionId, // the id `_submit` assigns to this batch right after `_postBlock`
+                subBlocks[i].channelId,
+                subBlocks[i].keyIds,
+                subBlocks[i].txTreeRoot,
+                currentHash
             );
         }
 
@@ -1434,7 +1485,7 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     function _submit(bytes32 proofHash, uint32 proofLength, bytes32 stateRoot) internal returns (uint256 submissionId) {
         submissionId = nextSubmissionId++;
-        uint64 ethBlock = uint64(block.number);
+        uint40 ethBlock = uint40(block.number);
         bytes32 commitment = kzgVerifier.postCommitment(stateRoot, ethBlock, submissionId);
 
         _submissions[submissionId] = Submission({
@@ -1442,6 +1493,7 @@ contract IntmaxRollup {
             submitter: msg.sender,
             finalized: false,
             submittedAtBlock: ethBlock,
+            postIndex: 0, // set by `_chargeBond` in the same post
             stateRoot: stateRoot
         });
 
@@ -1537,7 +1589,9 @@ contract IntmaxRollup {
         latestFinalizedBlockNumber = validityPIs.finalBlockNumber;
 
         emit Finalized(submissionId, stateRoot);
-        _refundStake(submissionId);
+        // The proof covers every block up to this batch's end, so every earlier post of the
+        // submitter (all with lower submission ids) is finalized history too.
+        _releaseBond(sub.submitter, sub.postIndex);
         return true;
     }
 
@@ -1590,18 +1644,18 @@ contract IntmaxRollup {
             revert SubmissionBeforeFinalizedBlock();
         }
 
-        // Timeout removal: if the submission was not finalized within
-        // FINALIZE_DEADLINE_BLOCKS Eth blocks, remove it unconditionally.
-        if (block.number > uint256(sub.submittedAtBlock) + FINALIZE_DEADLINE_BLOCKS) {
-            _truncateSubmissions(submissionId, msg.sender);
-            emit FraudConfirmed(submissionId, msg.sender);
-            return true;
+        // Timeout removal: a submission not finalized within FINALIZE_DEADLINE_BLOCKS Eth blocks is
+        // removed without a proof (empty `proofBytes`) and forfeits nothing. It never evaluates the
+        // proof, so a submission nobody can evaluate is still removable. A fraud proof supplied
+        // after the deadline is still verified first, and a proven fraud forfeits the bond.
+        bool timedOut = block.number > uint256(sub.submittedAtBlock) + FINALIZE_DEADLINE_BLOCKS;
+        bool confirmed;
+        if (!timedOut || proofBytes.length != 0) {
+            confirmed = _verifyFraud(submissionId, stateRoot, validityPIs, proofBytes);
         }
+        if (!confirmed && !timedOut) return false;
 
-        bool confirmed = _verifyFraud(submissionId, stateRoot, validityPIs, proofBytes);
-        if (!confirmed) return false;
-
-        _truncateSubmissions(submissionId, msg.sender);
+        _truncateSubmissions(submissionId, msg.sender, confirmed);
         emit FraudConfirmed(submissionId, msg.sender);
         return true;
     }
@@ -1619,8 +1673,9 @@ contract IntmaxRollup {
     // View helpers
     // -----------------------------------------------------------------------
 
-    function getSubmission(uint256 id) external view returns (Submission memory) {
-        return _submissions[id];
+    function getSubmission(uint256 id) external view returns (SubmissionView memory) {
+        Submission storage sub = _submissions[id];
+        return SubmissionView(sub.commitment, sub.submitter, sub.finalized, sub.submittedAtBlock, sub.stateRoot);
     }
 
     function getCommitment(uint256 id) external view returns (bytes32) {
@@ -1643,69 +1698,56 @@ contract IntmaxRollup {
         if (!ok) revert WithdrawTransferFailed();
     }
 
-    /// @notice Reclaim a `postBlockStake` bond once its submission's batch is part of canonical
-    ///         FINALIZED history. Permissionless caller; the bond is always credited to the recorded
-    ///         submitter (a helper may sweep on their behalf with no benefit to itself).
-    ///
-    /// ## Why this is needed
-    ///   `_refundStake` (the finalize path) is otherwise the ONLY way a bond returns. But `finalize`
-    ///   advances a single global `latestFinalizedStateRoot` monotonically and refunds exactly ONE
-    ///   submission, so when one aggregate validity proof finalizes many posted blocks at once, every
-    ///   other posting round in that range is permanently stranded: it can never be finalized (no
-    ///   proof chains backwards) and `fraudProof` refuses it (`startBlockNumber <= latestFinalized`,
-    ///   so it can no longer be slashed either). The bond is then dead weight with no exit. This is
-    ///   the protocol's normal flow (aggregate finalization), so on mainnet it leaks a real-ETH bond
-    ///   per un-finalized posting round. `reclaimStake` is the missing exit.
-    ///
-    /// ## Why it is sound (bond no longer at risk)
-    ///   A bond exists to back the claim "my committed blob holds a valid proof for this state." Once
-    ///   the batch's blocks are FINALIZED canonical history, (a) a valid proof for that state provably
-    ///   exists (some finalize verified the chain past it) and (b) `fraudProof` can no longer target
-    ///   it. So the bond is settled and must return.
-    ///
-    /// ## Eligibility (ALL required) — see tasks/reclaim-stake-threat-model.md
-    ///   1. The stake exists and was neither refunded (finalize) nor slashed (fraud):
-    ///      `stakeInfo.submitter != 0 && !stakeInfo.spent`. An unknown / truncated id has
-    ///      `submitter == 0` and is rejected here.
-    ///   2. The whole batch is finalized: `meta.endBlockNumber <= latestFinalizedBlockNumber`. Uses the
-    ///      LAST block of the batch — strictly stronger than the fraud-exclusion guard's
-    ///      `startBlockNumber <= latestFinalizedBlockNumber`, so a batch straddling the finalized
-    ///      boundary is NOT reclaimable until its tail finalizes too.
-    ///
-    /// ## SECURITY: why a height comparison alone is sufficient (no per-batch hash binding needed)
-    ///   An adversarial review noted `finalize` does not bind `submissionId` to the verified proof, and
-    ///   worried a non-canonical batch at a finalized height could be reclaimed. That cannot happen,
-    ///   from two invariants of the fraud/rollback machinery:
-    ///     (a) ROLLBACK FLOOR: `fraudProof` refuses any submission with
-    ///         `startBlockNumber <= latestFinalizedBlockNumber` (the guard above), and
-    ///         `_truncateSubmissions`/`_rollbackBatch` only rewind from the fraud target upward — so
-    ///         `blockNumber` can never be rewound below `latestFinalizedBlockNumber`. Hence
-    ///         `blockHashChainAt[k]` for every finalized height `k <= latestFinalizedBlockNumber` is
-    ///         IMMUTABLE, and equals the canonical chain `finalize` verified
-    ///         (`finalBlockChain == blockHashChainAt[finalBlockNumber]`).
-    ///     (b) UNIQUE LIVE BATCH PER HEIGHT: posting strictly advances `blockNumber`; the only way two
-    ///         batches share an end height is to rewind and repost, which requires `_truncateSubmissions`
-    ///         to first DELETE the prior submission there (clearing its `stakeInfo`). So at any time at
-    ///         most one *live* submission ends at a given height.
-    ///   Together: if a submission with `endBlockNumber = k <= latestFinalizedBlockNumber` still has a
-    ///   live stake (cond 1), it is THE canonical batch finalized at height k. Releasing its bond is
-    ///   therefore correct. These invariants are pinned by tests
-    ///   (test_reclaim_* in ReclaimStake.t.sol): repost-after-truncate cannot reclaim, and rollback
-    ///   cannot descend below the finalized height.
-    function reclaimStake(uint256 submissionId) external nonReentrant {
-        StakeInfo storage info = stakeInfo[submissionId];
-        address submitter = info.submitter;
-        if (submitter == address(0) || info.spent) revert NothingToReclaim();
+    // -----------------------------------------------------------------------
+    // Posting bond
+    // -----------------------------------------------------------------------
 
-        if (_batchMetadata[submissionId].endBlockNumber > latestFinalizedBlockNumber) {
-            revert SubmissionNotYetFinalized();
-        }
+    /// @notice Prepay the caller's posting bond (see `baseStake`). A post can also top it up with
+    ///         its `msg.value`.
+    function depositBond() external payable releaseRuntime nonReentrant {
+        Bond storage bond = bonds[msg.sender];
+        uint256 balance = uint256(bond.balance) + msg.value;
+        if (msg.value == 0 || balance > type(uint96).max) revert InvalidStakeAmount();
+        bond.balance = uint96(balance);
+    }
 
-        // Effects before credit (CEI); pull-payment only — no external call here.
-        info.spent = true;
-        delete stakeInfo[submissionId];
-        pendingWithdrawals[submitter] += postBlockStake;
-        emit WithdrawalCredited(submitter, postBlockStake);
+    /// @notice Withdraw from the caller's posting bond whatever its unfinalized posts do not lock:
+    ///         `baseStake + unfinalized * postStake` while any is unfinalized, nothing once none is.
+    ///         A post finalized by another producer's batch is released first with `releaseBond`.
+    function withdrawBond(uint256 amount) external releaseRuntime nonReentrant {
+        Bond storage bond = bonds[msg.sender];
+        uint256 balance = bond.balance;
+        uint256 unfinalized = uint256(bond.posted) - bond.released;
+        uint256 locked = unfinalized == 0 ? 0 : baseStake + unfinalized * postStake;
+        if (amount == 0 || amount > balance || balance - amount < locked) revert NothingToWithdraw();
+        bond.balance = uint96(balance - amount);
+        (bool ok,) = msg.sender.call{value: amount}("");
+        if (!ok) revert WithdrawTransferFailed();
+    }
+
+    /// @notice Release `producer`'s posts up to its submission `submissionId` once that batch is
+    ///         finalized history. `finalize` releases its own submitter; this covers a producer
+    ///         whose posts were finalized by a later batch of another producer. Permissionless.
+    /// @dev SECURITY: the height comparison identifies canonical history, as for the former
+    ///      per-submission reclaim: `fraudProof` refuses any submission starting at or below
+    ///      `latestFinalizedBlockNumber` and a rollback never descends below it, so finalized
+    ///      heights are immutable; posting strictly advances `blockNumber`, so at most one live
+    ///      submission ends at a height. A live submission ending at or below the finalized height
+    ///      is therefore THE finalized batch there, and every post of its submitter with a lower
+    ///      `postIndex` has a lower id and an even lower end. A deleted or reused id cannot match:
+    ///      its submitter is zero or another producer's, or its end is above the finalized height.
+    function releaseBond(address producer, uint256 submissionId) external {
+        Submission storage sub = _submissions[submissionId];
+        if (
+            producer == address(0) || sub.submitter != producer
+                || _batchMetadata[submissionId].endBlockNumber > latestFinalizedBlockNumber
+        ) revert SubmissionNotYetFinalized();
+        _releaseBond(producer, sub.postIndex);
+    }
+
+    function _releaseBond(address producer, uint48 postIndex) private {
+        Bond storage bond = bonds[producer];
+        if (postIndex > bond.released) bond.released = postIndex;
     }
 
     // -----------------------------------------------------------------------
@@ -2138,20 +2180,49 @@ contract IntmaxRollup {
     // Internal — Stake + rollback helpers
     // -----------------------------------------------------------------------
 
-    function _truncateSubmissions(uint256 targetId, address reporter) internal {
+    /// @dev Remove `targetId` and every later submission. Each removed post is uncounted from its
+    ///      producer's bond. With `forfeit` (a proven fraud) each removed post forfeits `postStake`
+    ///      from its producer and the offender (the target's submitter) forfeits `baseStake`, each
+    ///      capped at the bond left, credited 90% to the reporter and the rest to the treasury
+    ///      (pull-payment: a reverting recipient cannot block `fraudProof`). A timeout removal
+    ///      forfeits nothing.
+    function _truncateSubmissions(uint256 targetId, address reporter, bool forfeit) internal {
+        address offender = _submissions[targetId].submitter;
+        uint256 forfeited;
         uint256 currentId = nextSubmissionId;
         while (currentId > targetId) {
             currentId--;
             Submission storage sub = _submissions[currentId];
             if (sub.finalized) revert AlreadyFinalized();
 
-            _slashStake(currentId, reporter);
+            // A removed post lies above the finalized height, so it was never released.
+            Bond storage bond = bonds[sub.submitter];
+            bond.posted -= 1;
+            if (forfeit) forfeited += _forfeitBond(bond, postStake);
             _rollbackBatch(currentId);
 
             delete _submissions[currentId];
             delete _batchMetadata[currentId];
         }
         nextSubmissionId = targetId;
+        if (!forfeit) return;
+        forfeited += _forfeitBond(bonds[offender], baseStake);
+        if (forfeited == 0) return;
+
+        uint256 reward = (forfeited * FRAUD_REWARD_PERCENT) / 100;
+        uint256 treasuryShare = forfeited - reward;
+        pendingWithdrawals[reporter] += reward;
+        pendingWithdrawals[fraudTreasury] += treasuryShare;
+        emit WithdrawalCredited(reporter, reward);
+        emit WithdrawalCredited(fraudTreasury, treasuryShare);
+    }
+
+    /// @dev Take up to `amount` from a bond: a bond whose base was already forfeited keeps only
+    ///      what its remaining posts lock, and nothing more can be taken than it holds.
+    function _forfeitBond(Bond storage bond, uint256 amount) private returns (uint256 taken) {
+        uint256 balance = bond.balance;
+        taken = amount < balance ? amount : balance;
+        bond.balance = uint96(balance - taken);
     }
 
     function _rollbackBatch(uint256 submissionId) internal {
@@ -2210,45 +2281,6 @@ contract IntmaxRollup {
         // the channelId forever, because `channelMemberSetCommitment` is not rolled back either, so
         // the one-time `registerChannel` guard still fires on a retry.
         // Reachable from a genuine fraud proof and from the permissionless proof-free timeout branch.
-    }
-
-    /// @dev Credit fraud reward/treasury share to pendingWithdrawals (pull-payment).
-    ///      Recipients call withdraw(amount) to claim. A reverting recipient cannot block fraudProof().
-    function _slashStake(uint256 submissionId, address reporter) internal {
-        StakeInfo storage info = stakeInfo[submissionId];
-        if (info.submitter == address(0) || info.spent) {
-            delete stakeInfo[submissionId];
-            return;
-        }
-
-        info.spent = true;
-        delete stakeInfo[submissionId];
-
-        uint256 reward = (postBlockStake * FRAUD_REWARD_PERCENT) / 100;
-        uint256 treasuryShare = postBlockStake - reward;
-
-        pendingWithdrawals[reporter] += reward;
-        pendingWithdrawals[fraudTreasury] += treasuryShare;
-
-        emit WithdrawalCredited(reporter, reward);
-        emit WithdrawalCredited(fraudTreasury, treasuryShare);
-    }
-
-    /// @dev Credit stake refund to pendingWithdrawals (pull-payment).
-    ///      Submitter calls withdraw(amount) to claim. A reverting submitter cannot block finalize().
-    function _refundStake(uint256 submissionId) internal {
-        StakeInfo storage info = stakeInfo[submissionId];
-        if (info.submitter == address(0) || info.spent) {
-            delete stakeInfo[submissionId];
-            return;
-        }
-
-        info.spent = true;
-        address recipient = info.submitter;
-        delete stakeInfo[submissionId];
-
-        pendingWithdrawals[recipient] += postBlockStake;
-        emit WithdrawalCredited(recipient, postBlockStake);
     }
 
     // -----------------------------------------------------------------------

@@ -140,9 +140,11 @@ export ROLLUP_ADDR=0x...        # the IntmaxRollup address from the deploy logs
 (If you set `FRAUD_TREASURY` in `.env` it is used; otherwise the broadcaster
 address is used as the fraud treasury.)
 
-### 3. postBlockAndSubmit empty block #1 (blob tx, 1 ether stake)
+### 3. postBlockAndSubmit empty block #1 (blob tx, bond top-up)
 
-`postBlockAndSubmit` is **payable** (requires exactly `1 ether` POST_BLOCK_STAKE)
+`postBlockAndSubmit` is **payable**: its `msg.value` tops up the producer's posting bond, which
+must cover `baseStake` plus `postStake` per unfinalized post including this one (0.1 + 0.001 ETH
+for the first post with the defaults)
 and **requires a blob** — it reads `blobhash(0)` and reverts `NoBlobAttached` if
 zero. Forge scripts cannot attach EIP-4844 blobs, so this step uses `cast send`.
 
@@ -177,7 +179,7 @@ Arg meaning (from `block_fixture.json`):
 - `proofHash  = 0x0000000000000000000000000000000000000000000000004362d402885f19f1`
 - `proofLength = 202704`
 - `stateRoot  = finalStateRoot = 0x2cfa6af8d4c60fb00b2002506dcc5631b06689e74e43cca96730f88058a215b3`
-- `--value 1ether` = the POST_BLOCK_STAKE
+- `--value 0.101ether` = the bond top-up for a first post (base + one post, default values)
 
 Confirm it mined (`status 1`) and the recomputed block-hash chain matches the
 Rust-proved `final_block_chain`:

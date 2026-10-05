@@ -37,7 +37,7 @@ abstract contract WithdrawNativeE2EBase is Test {
     string internal payoutJson;
     bool internal fixturesReady;
 
-    uint256 internal constant STAKE = 1 ether; // POST_BLOCK_STAKE
+    uint256 internal constant STAKE = 1 ether; // each post's bond top-up
 
     /// Which fixture set to load. "" = the default normal-withdrawal set; a subclass overrides it to
     /// load a variant set (e.g. "burn_" for the partial-withdrawal payout suite, whose leaf carries
@@ -92,7 +92,8 @@ abstract contract WithdrawNativeE2EBase is Test {
             IPinnedMleVerifierV2(address(validityAdapter)),
             IPinnedMleVerifierV2(address(withdrawalAdapter)),
             genesis,
-            1 ether
+            0.1 ether,
+            0.001 ether
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
