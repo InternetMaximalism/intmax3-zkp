@@ -177,6 +177,118 @@ contract SignerIndependentExitTest is Test {
         assertEq(materializer.lastPostedBlock(CHANNEL), 1);
     }
 
+    // ── Close-vs-burn ordering ───────────────────────────────────────────────────────────────
+    //
+    // A partial withdrawal (burn) is an ordinary inter-channel send to the BURN channel, paid by
+    // the Rollup on its base withdrawal proof alone once its block is finalized. Nothing in the
+    // Manager authorizes it. What keeps a burn and a close from drawing the same value twice is
+    // this journal: (b) once the burn block N is posted, a close needs backing anchored at or
+    // after N — a pre-burn state (whose fund vector still holds the burned amount) cannot be
+    // backed; (c) once the Manager freezes the channel, a burn block not yet posted can never be
+    // posted, so the burn is never paid and the close returns the amount.
+
+    bytes32 private constant PRE_BURN_SETTLED = keccak256("settled chain before the burn");
+    bytes32 private constant PRE_BURN_TFD = keccak256("fund vector still holding the burned amount");
+    bytes32 private constant POST_BURN_SETTLED = keccak256("settled chain ending in the burn");
+    bytes32 private constant POST_BURN_TFD = keccak256("fund vector without the burned amount");
+    bytes32 private constant LATER_SETTLED = keccak256("settled chain after the burn");
+    bytes32 private constant LATER_TFD = keccak256("fund vector after the burn");
+
+    /// (b) After `recordPost(channel, N)` for the burn block, a close whose backing anchor is < N is
+    /// refused by `requireSignedHeadBacking` while the Manager is ClosePending; a backing anchored
+    /// at N, or above it, is accepted. Materialization enforces the same anchor rule again.
+    function test_burnOrdering_closeBackedBelowPostedBurnBlockIsRefused() external {
+        // An earlier channel block, then the burn block N = 5, both finalized.
+        rollup.post(materializer, CHANNEL, 2);
+        rollup.post(materializer, CHANNEL, 5);
+        rollup.setHead(6, 6);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 5, "the burn block is the channel's last post");
+
+        // The pre-burn head is attested at the newest anchor its Balance proof can have, N - 1.
+        materializer.attestSignedHeadBacking(_m(manager), _proof(4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        // The post-burn head exactly at N, and a later head above N.
+        materializer.attestSignedHeadBacking(_m(manager), _proof(5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
+        materializer.attestSignedHeadBacking(_m(manager), _proof(6, LATER_SETTLED, LATER_TFD, BACKING_ROOT));
+        // The receipt exists — only the anchor rule refuses it.
+        assertTrue(
+            materializer.hasSignedHeadBacking(address(manager), CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD, false),
+            "the pre-burn receipt is recorded"
+        );
+
+        manager.requestClose();
+        assertEq(
+            uint8(manager.channelStatus()),
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
+            "the close lifecycle has started"
+        );
+
+        vm.prank(address(manager));
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.requireSignedHeadBacking(CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD);
+
+        vm.prank(address(manager));
+        materializer.requireSignedHeadBacking(CHANNEL, POST_BURN_SETTLED, POST_BURN_TFD);
+        vm.prank(address(manager));
+        materializer.requireSignedHeadBacking(CHANNEL, LATER_SETTLED, LATER_TFD);
+
+        // Second layer: even a finalized pre-burn close cannot materialize its fund vector.
+        (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, PRE_BURN_SETTLED, PRE_BURN_TFD, tokens, amounts);
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitHasUnfinalizedBlocks.selector);
+        materializer.materializeSignedHead(_m(manager), _proof(4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        _assertNothingMaterialized(11, 29);
+
+        // The post-burn close, backed at N, materializes.
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, tokens, amounts);
+        materializer.materializeSignedHead(_m(manager), _proof(5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST, "the post-burn close exits");
+    }
+
+    /// (c) After the Manager freezes the channel (`requestClose` -> `freezeFromManager`), a burn
+    /// block produced after the freeze cannot be posted for that channel, so it can never be
+    /// finalized and its burn never paid; the close at the last posted head stays backed. Other
+    /// channels keep posting. `cancelClose` (`unfreezeFromManager`) restores posting, and the burn
+    /// block posted then raises the floor every later close must clear.
+    function test_burnOrdering_freezeBlocksUnpostedBurnBlock_cancelRestoresPosting() external {
+        rollup.post(materializer, CHANNEL, 3);
+        rollup.setHead(3, 3);
+        materializer.attestSignedHeadBacking(_m(manager), _proof(3, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        ExitManagerHarness other = _bindExtraManager(8);
+
+        manager.requestClose();
+        assertEq(materializer.frozenGeneration(CHANNEL), 1, "the Manager froze the journal");
+
+        // The burn was signed but its block was not posted before the freeze: it never will be.
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitAlreadyFrozen.selector);
+        rollup.post(materializer, CHANNEL, 4);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 3, "journal unchanged by the refused post");
+        // The freeze is per channel.
+        rollup.post(materializer, 8, 4);
+        assertEq(materializer.lastPostedBlock(8), 4, "other channels keep posting");
+        assertEq(materializer.managerOfChannel(8), address(other));
+
+        // The close at the last posted (pre-burn) head is backed: it returns the unburned amount.
+        vm.prank(address(manager));
+        materializer.requireSignedHeadBacking(CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD);
+
+        // Cancel unfreezes; the burn block can now be posted.
+        manager.cancelClose(1);
+        assertEq(materializer.frozenGeneration(CHANNEL), 0, "unfrozen");
+        rollup.post(materializer, CHANNEL, 5);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 5, "posting restored");
+
+        // A later close can no longer settle at the pre-burn head.
+        rollup.setHead(5, 5);
+        manager.requestClose();
+        assertEq(materializer.frozenGeneration(CHANNEL), 2, "a fresh freeze generation");
+        vm.prank(address(manager));
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.requireSignedHeadBacking(CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD);
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitAlreadyFrozen.selector);
+        rollup.post(materializer, CHANNEL, 6);
+    }
+
     function test_rollbackRestoresExactPerChannelPointer() external {
         rollup.post(materializer, CHANNEL, 1);
         rollup.post(materializer, CHANNEL, 2);
@@ -236,7 +348,9 @@ contract SignerIndependentExitTest is Test {
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), future);
     }
 
-    function test_historicalAttestationRemainsAvailableForAuthenticatedPartialWithdrawal() external {
+    /// A receipt stays recorded at its historical anchor after later posts, but it is no longer
+    /// CURRENT: only the `requireCurrent == false` view sees it.
+    function test_historicalAttestationIsRecordedButNotCurrent() external {
         bytes memory historical = _proof(0, SETTLED, TFD, BACKING_ROOT);
         rollup.post(materializer, CHANNEL, 1);
 

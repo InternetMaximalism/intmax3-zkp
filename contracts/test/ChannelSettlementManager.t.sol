@@ -70,17 +70,6 @@ contract MockChannelRegistry is IChannelRegistry {
         require(ok, "withdraw failed");
     }
 
-    mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
-
-    function authorizePartialWithdrawal(bytes32 authDigest) external override {
-        partialWithdrawalAuthorized[authDigest] = true;
-    }
-
-    function consumePartialWithdrawalAuthorization(bytes32 authDigest) external {
-        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
-        delete partialWithdrawalAuthorized[authDigest];
-    }
-
     // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
     mapping(uint32 => IERC20) public tokenAddressOf;
     mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;

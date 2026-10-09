@@ -756,11 +756,6 @@ pub struct ObservedFinalizedClose {
     pub token_count: u8,
     /// Per-slot view of `finalizedChannelFundAmount[finalizedTokenRegistry[slot]]`.
     pub finalized_fund_caps: [String; 10],
-    pub authorized_burn_snapshot_active: bool,
-    pub authorized_burn_epoch: u64,
-    pub authorized_burn_state_version: u64,
-    /// Per-slot view of `authorizedBurnPostFundAmount[finalizedTokenRegistry[slot]]`.
-    pub authorized_burn_post_funds: [String; 10],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2983,26 +2978,17 @@ fn pending_matches(actual: &ObservedPendingClose, expected: &ExpectedClose) -> b
 }
 
 fn finalized_matches(actual: &ObservedFinalizedClose, expected: &ExpectedClose) -> bool {
-    let burn_is_newer = actual.authorized_burn_snapshot_active
-        && (actual.authorized_burn_epoch > expected.final_epoch
-            || (actual.authorized_burn_epoch == expected.final_epoch
-                && actual.authorized_burn_state_version > expected.final_state_version));
+    // `finalizeClose` accrues exactly the closed state's per-token fund vector. A burn is an
+    // ordinary proof-paid inter-channel send carried by that state, so no manager-side burn
+    // snapshot can lower the cap any more.
     let exact_caps = (0..10).all(|index| {
         if index >= usize::from(expected.token_count) {
             return actual.finalized_fund_caps[index] == "0";
         }
-        let mut cap = match expected.channel_fund_amounts[index].parse::<BigUint>() {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-        if burn_is_newer {
-            let post_burn = match actual.authorized_burn_post_funds[index].parse::<BigUint>() {
-                Ok(value) => value,
-                Err(_) => return false,
-            };
-            cap = cap.min(post_burn);
+        match expected.channel_fund_amounts[index].parse::<BigUint>() {
+            Ok(cap) => actual.finalized_fund_caps[index] == cap.to_string(),
+            Err(_) => false,
         }
-        actual.finalized_fund_caps[index] == cap.to_string()
     });
 
     exact_caps
@@ -7788,23 +7774,7 @@ impl ClosePublisherBackend for CastCloseBackend {
                     "finalizedTokenCount {token_count} is outside 1..=10"
                 )));
             }
-            let authorized_burn_snapshot_active = word_bool(
-                &self.one_word(manager, "authorizedBurnSnapshotActive()", block_number)?,
-                "authorizedBurnSnapshotActive",
-            )?;
-            let authorized_burn_epoch = word_uint(
-                &self.one_word(manager, "authorizedBurnEpoch()", block_number)?,
-                8,
-                "authorizedBurnEpoch",
-            )?;
-            let authorized_burn_state_version = word_uint(
-                &self.one_word(manager, "authorizedBurnStateVersion()", block_number)?,
-                8,
-                "authorizedBurnStateVersion",
-            )?;
             let mut finalized_fund_caps: [String; 10] = std::array::from_fn(|_| "0".to_string());
-            let mut authorized_burn_post_funds: [String; 10] =
-                std::array::from_fn(|_| "0".to_string());
             for index in 0..usize::from(token_count) {
                 let base_token = u64::from(token_registry[index]);
                 let raw_cap = self.one_uint(
@@ -7816,17 +7786,6 @@ impl ClosePublisherBackend for CastCloseBackend {
                 )?;
                 finalized_fund_caps[index] = BigUint::from_bytes_be(
                     &decode_words(&raw_cap, 1, "finalizedChannelFundAmount")?[0],
-                )
-                .to_string();
-                let raw_post = self.one_uint(
-                    manager,
-                    "authorizedBurnPostFundAmount",
-                    32,
-                    base_token,
-                    block_number,
-                )?;
-                authorized_burn_post_funds[index] = BigUint::from_bytes_be(
-                    &decode_words(&raw_post, 1, "authorizedBurnPostFundAmount")?[0],
                 )
                 .to_string();
             }
@@ -7863,10 +7822,6 @@ impl ClosePublisherBackend for CastCloseBackend {
                 token_registry,
                 token_count,
                 finalized_fund_caps,
-                authorized_burn_snapshot_active,
-                authorized_burn_epoch,
-                authorized_burn_state_version,
-                authorized_burn_post_funds,
             })
         } else {
             None
@@ -8767,10 +8722,6 @@ mod tests {
                 token_registry: expected.token_registry,
                 token_count: expected.token_count,
                 finalized_fund_caps: expected.channel_fund_amounts.clone(),
-                authorized_burn_snapshot_active: false,
-                authorized_burn_epoch: 0,
-                authorized_burn_state_version: 0,
-                authorized_burn_post_funds: std::array::from_fn(|_| "0".into()),
             }),
         }
     }

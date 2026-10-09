@@ -20,7 +20,9 @@ import {RegRecordLib} from "./RegRecordLib.sol";
 /// @title Deploy the full partial-withdrawal E2E stack on anvil.
 /// @notice Deploys IntmaxRollup plus six circuit-specific pinned v2 adapters,
 ///         ChannelSettlementVerifier and ChannelSettlementManager. Reads member registration
-///         from `test/data/pw_reg.json` (written by the Rust E2E driver).
+///         from `test/data/pw_reg.json` (written by the Rust E2E driver). The burn itself is paid
+///         by `IntmaxRollup.withdrawNative` / `withdrawERC20` on its base withdrawal proof; the
+///         Manager takes no part in it.
 contract DeployPartialWithdrawalE2E is Script {
     // SECURITY (challenge-period floor): sourced from `DeployConfig` rather than hardcoded, so if
     // the `block.chainid == 31337` guard below is ever loosened, the challenge period hardens
@@ -114,7 +116,7 @@ contract DeployPartialWithdrawalE2E is Script {
         // 5. Deploy ChannelSettlementManager with member bindings.
         //
         // SECURITY (B-2): `activeDelegateCount` is the LIVE count from the record — NOT the zero
-        // registered above — because it is the close/partial-withdrawal delegate floor, and the
+        // registered above — because it is the close delegate floor, and the
         // constructor requires `delegateBindings.length == activeDelegateCount`. This script binds
         // no delegates, so a record with `active_delegate_count > 0` FAILS CLOSED here
         // (`InvalidMemberCount`) rather than deploying a manager whose floor names delegates it
@@ -139,7 +141,9 @@ contract DeployPartialWithdrawalE2E is Script {
             mBind
         );
 
-        // 6. Register settlement manager on rollup (critical for authorizePartialWithdrawal).
+        // 6. Register settlement manager on rollup. This binds it to the close journal, which orders
+        //    a burn (paid by the rollup on its base withdrawal proof alone) against a close: no post
+        //    to a frozen channel, and a close needs backing at or after the last posted block.
         rollup.registerSettlementManager(address(manager));
 
         vm.stopBroadcast();

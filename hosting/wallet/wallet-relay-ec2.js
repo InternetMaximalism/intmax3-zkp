@@ -994,29 +994,25 @@ app.get('/api/settlement', (req, res) => {
   } catch (e) { res.status(404).json({ error: 'no settlement deployed' }); }
 });
 
-app.post('/api/pw-submit', (req, res) => {
-  const ch = reqChannel(req);
-  withLock(ch, async () => {
-    const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
-    if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-      await cli(ch, ['deploy-settlement', RPC]);
-    }
-    const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
-    const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-    await cli(ch, ['pw-submit', RPC], extra);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
-});
-
+// A partial withdrawal is paid on L1 by its base withdrawal proof alone (no settlement-manager
+// submission): prove the payout, publish the validity batch it is anchored at, then pay.
 app.post('/api/pw-finalize', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
+    const live = require('../../api/lib/partial-withdrawal-live');
+    const walletL1 = require('../../api/lib/wallet-l1');
+    let artifacts;
+    try { artifacts = await live.stagePayoutArtifacts(ch); }
+    catch (e) {
+      if (!/validity candidate pending L1 acknowledgement/.test(String(e.stderr || e.message || e))) throw e;
+      await walletL1.publish(ch, { prove: false });
+      artifacts = await live.stagePayoutArtifacts(ch);
+    }
+    await walletL1.publish(ch, { prove: false });
     await cli(ch, ['pw-finalize', RPC]);
-    const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
-    res.json({ ok: true, authDigest: auth.auth_digest });
+    if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now(), nullifier: artifacts.withdrawal.nullifier }; upsertTicket(ch, ticket); }
+    res.json({ ok: true, nullifier: artifacts.withdrawal.nullifier });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 

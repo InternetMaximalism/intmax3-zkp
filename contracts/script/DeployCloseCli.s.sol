@@ -369,7 +369,7 @@ contract DeployCloseCli is Script {
             mBind[i] = ChannelSettlementManager.MemberBinding({pkG: r.pkGs[i], recipient: r.recipients[i]});
         }
         // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `activeDelegateCount` is a FLOOR for
-        // the close/partial-withdrawal bind, not an exact expected count. It is the record's
+        // the close bind, not an exact expected count. It is the record's
         // `active_delegate_count` — DELIBERATELY a different field from the zero registered in
         // step 4, because the two answer different questions ("what did L1 register?" vs "how many
         // delegates must a close at least account for?"). Reading the registration's zero here
@@ -398,32 +398,20 @@ contract DeployCloseCli is Script {
             mBind
         );
 
-        // 6. Register the manager just deployed as an authorized partial-withdrawal authorizer.
+        // 6. Register the manager just deployed on the rollup.
         //
-        // SECURITY / LIVENESS (same defect class as the withdrawal VK and audit622 A-M4 — a
-        // fail-closed check that is soundness-safe while making an HONEST path impossible):
-        // `ChannelSettlementManager.finalizePartialWithdrawal()` ends by calling
-        // `IntmaxRollup.authorizePartialWithdrawal`, which opens with
-        // `if (!isRegisteredSettlementManager[msg.sender]) revert NotRegisteredSettlementManager();`.
-        // Until 2026-08-13 the ONLY callers of `registerSettlementManager` were the two
-        // `chainid == 31337`-gated mock scripts, so on every REAL deployment made with this script
-        // `pw-finalize` (`src/bin/channel_member.rs`, driven by `api/routes/partial-withdrawal.js`)
-        // reverted — AFTER the user had already submitted the intent and waited out the full
-        // challenge period. No fail-closed check is weakened here: the revert stays; we grant the
-        // right it was correctly demanding.
+        // SECURITY / LIVENESS: registration is what binds a real Manager to the rollup's set-once
+        // `CloseFundingMaterializer` (`bindManager`). Without it the channel has no close journal:
+        // `requestClose` reverts `NotBoundManager`, so the channel can never be frozen or closed, and
+        // nothing orders a burn against a close. (Until 2026-10-09 it also gated the IPW2
+        // partial-withdrawal latch the Manager set; that latch and the Manager's partial-withdrawal
+        // path are removed — a burn is paid by `withdrawNative`/`withdrawERC20` on its base
+        // withdrawal proof alone.)
         //
         // WHY THIS IS SAFE — registering the manager THIS script itself constructs, and no other
         // address, is exactly the intended use of the deployer-only, additive `registerSettlementManager`:
-        //   * The right granted is narrow. `authorizePartialWithdrawal` only sets a boolean in
-        //     `partialWithdrawalAuthorized[authDigest]`. It moves no funds and names no amount or
-        //     recipient — `claimAuthorizedWithdrawal`, the proof-free payout door that once consumed
-        //     that flag directly, was REMOVED (see the tombstone above `postBlock` in
-        //     `IntmaxRollup.sol`, doc/tasks/pw-auth-threat-model.md). The flag is now only ever a
-        //     SECOND factor inside `withdrawNative`/`withdrawERC20`, where the economics come from
-        //     the verified withdrawal proof, so it can veto a payout but never supply one.
-        //   * The manager cannot mint an authorization on demand: `finalizePartialWithdrawal` is
-        //     reachable only after `submitPartialWithdrawalIntent` verified an N-of-N close proof
-        //     against `sv`'s close VK and the challenge window elapsed with no `cancelPartialWithdrawal`.
+        //   * The right granted is narrow: the bound Manager can freeze/unfreeze its own channel's
+        //     posting journal through its proof-gated close lifecycle. It moves no funds.
         //   * The address is not attacker-influenced: `manager` is the return of the `new` on the
         //     line above, in the same broadcast, bound by its constructor to THIS `rollup` as its
         //     registry and to this channel's on-chain member-set commitment (Finding E).
@@ -444,11 +432,11 @@ contract DeployCloseCli is Script {
 
         // Read the registration back rather than trusting the call above ran, mirroring
         // `Deploy.s.sol`'s withdrawal-VK read-back: a deploy that reaches the console2 lines below
-        // has a working partial-withdrawal finalize, and one that does not aborts loudly instead of
-        // printing an address an operator would go on to fund.
+        // has a closable channel, and one that does not aborts loudly instead of printing an
+        // address an operator would go on to fund.
         require(
             rollup.isRegisteredSettlementManager(address(manager)),
-            "settlement manager not registered: partial withdrawal cannot finalize"
+            "settlement manager not registered: channel cannot close"
         );
         // The materializer's backing adapter is immutable and constructor-validated; read it back
         // anyway so a deploy that reaches the console2 lines below provably carries a chain-pinned

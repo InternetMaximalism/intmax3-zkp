@@ -5,53 +5,31 @@ import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 
-/// @title Phase 4 adversarial coverage for the partial-withdrawal (BURN) PAYOUT path, against a REAL
-///        proved leaf with `aux_data != 0`.
+/// @title The partial-withdrawal (BURN) payout path, against a REAL proved leaf with `aux_data != 0`.
 ///
-/// @notice WHY THIS FILE EXISTS AND WHAT IT ADDS OVER `PartialWithdrawalPayout.t.sol`
-///         (doc/tasks/partial-withdrawal-payout-design.md Phase 4):
-///         `PartialWithdrawalPayout.t.sol` runs against the DEFAULT fixture, whose leaf is a normal
-///         withdrawal (`aux_data == 0`). It therefore could only assert that a FORGED burn leaf
-///         fails on the proof binding (`test_burnLeafWithoutAuthorization_failsClosed`) — it could
-///         never carry a REAL proof for an `aux != 0` leaf THROUGH the binding and INTO the IPW2
-///         authorization gate. This suite loads the `burn_` fixture set — the repo's first payout
-///         artifact proved with a nonzero burn descriptor (P3 HEAVY) — so every test here exercises
-///         `withdrawNative`'s burn branch with a genuinely proof-verified leaf.
+/// @notice A partial withdrawal is an ordinary inter-channel send whose destination is the reserved
+///         BURN channel with an L1 recipient. It is paid by `withdrawNative` on its base withdrawal
+///         proof alone, exactly as an inter-channel transfer is consumed by a ReceiveTransfer proof:
+///         channel consent is already carried by validity (every channel update binds the whole
+///         registered member set's signatures over a digest including the block's tx tree root), and
+///         close-vs-burn ordering is the `CloseFundingMaterializer` journal's job (covered in
+///         `SignerIndependentExit.t.sol`). There is no settlement-manager step and no IPW2 latch.
 ///
-///         Coverage map:
-///           P4-1  test_burnLeaf_amountAboveBurn_rejected        (the F-AUX-1 `Y > X` shape)
-///           P4-3  test_provenBurnLeaf_withoutAuthorization_...   (reaches the FLAG check, not the
-///                                                                 proof binding — the new evidence)
-///           P4-4  test_provenBurnLeaf_cannotBeRelabelled         (real proof, aux relabelled)
-///           P4-5  testFuzz_onlyExactCosignedPair_payable         (random (amount, recipient) triples)
-///           (T5)  test_provenBurnLeaf_nullifierSingleUse         (the paid leaf cannot be replayed)
-///         plus the honest first-ever `aux != 0` on-chain payout as the control.
+///         This suite loads the `burn_` fixture set — a payout artifact proved with a nonzero burn
+///         descriptor — so every test exercises `withdrawNative` with a genuinely proof-verified
+///         burn leaf:
+///           - test_provenBurnLeaf_paysOnProofAlone           (no manager, no authorization)
+///           - test_provenBurnLeaf_nullifierSingleUse         (paid exactly once)
+///           - test_burnLeaf_amountAboveBurn_rejected         (the F-AUX-1 `Y > X` shape)
+///           - test_provenBurnLeaf_cannotBeRelabelled         (real proof, aux relabelled)
+///           - testFuzz_onlyExactProvedPair_payable           (random (amount, recipient) pairs)
+///           - test_provenBurnLeaf_notPayableViaErc20Path     (asset-class guard)
 ///
 /// @dev Inherits the shared real-fixture lifecycle harness, overriding only the fixture prefix.
 ///      Self-skips if the heavy `burn_` fixtures are absent.
 contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
-    address internal settlementManager = makeAddr("burnSettlementManager");
-
     function _fixturePrefix() internal pure override returns (string memory) {
         return "burn_";
-    }
-
-    /// The IPW2 auth digest, recomputed exactly as `IntmaxRollup._withdrawalAuthDigest`.
-    function _authDigest(IntmaxRollup.Withdrawal memory w) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData));
-    }
-
-    function _registerManager() internal {
-        rollup.registerSettlementManager(settlementManager);
-        assertTrue(rollup.isRegisteredSettlementManager(settlementManager));
-    }
-
-    /// Register the manager and authorize the EXACT proved leaf's digest — the honest second factor.
-    function _authorize(IntmaxRollup.Withdrawal memory w) internal {
-        _registerManager();
-        vm.prank(settlementManager);
-        rollup.authorizePartialWithdrawal(_authDigest(w));
-        assertTrue(rollup.partialWithdrawalAuthorized(_authDigest(w)), "authorization set");
     }
 
     /// Sanity: the fixture really is a burn leaf. If this fails the whole suite is meaningless, so it
@@ -63,17 +41,24 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         assertTrue(ws[0].auxData != bytes32(0), "burn fixture leaf must carry aux_data != 0");
     }
 
-    // ── Control: the honest first-ever aux != 0 payout ───────────────────────────────────────────
+    // ── 4a: a proven burn leaf is paid on its base withdrawal proof alone ────────────────────────
 
-    /// The proof-verified burn leaf, WITH a finalized authorization, pays real ETH. This is the
-    /// positive half of P4-4 (a legitimate burn is payable) and the first on-chain exercise of the
-    /// `withdrawNative` burn branch through a real proof.
-    function test_provenBurnLeaf_paysWithAuthorization() public {
+    /// The proof-verified burn leaf pays real ETH under a finalized root with NO settlement manager
+    /// registered and NO authorization of any kind. The former IPW2 entry points do not exist.
+    function test_provenBurnLeaf_paysOnProofAlone() public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        _authorize(ws[0]);
+        assertTrue(ws[0].auxData != bytes32(0), "precondition: burn leaf");
+
+        // No manager-side authority exists to consult: the IPW2 latch selectors are gone.
+        (bool okAuthorize,) =
+            address(rollup).call(abi.encodeWithSignature("authorizePartialWithdrawal(bytes32)", bytes32(uint256(1))));
+        assertFalse(okAuthorize, "authorizePartialWithdrawal must no longer exist");
+        (bool okLatch,) =
+            address(rollup).call(abi.encodeWithSignature("partialWithdrawalAuthorized(bytes32)", bytes32(uint256(1))));
+        assertFalse(okLatch, "partialWithdrawalAuthorized must no longer exist");
 
         uint256 escrowBefore = rollup.totalEscrowed();
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
@@ -82,108 +67,85 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         assertEq(rollup.pendingWithdrawals(ws[0].recipient), ws[0].amount, "burn leaf paid");
         assertEq(rollup.totalEscrowed(), escrowBefore - ws[0].amount, "escrow debited exactly");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
-        assertFalse(
-            rollup.partialWithdrawalAuthorized(_authDigest(ws[0])),
-            "IPW2 authorization is consumed by the first successful proof-backed payout"
-        );
+
+        // The recipient pulls the payout.
+        uint256 balanceBefore = ws[0].recipient.balance;
+        vm.prank(ws[0].recipient);
+        rollup.withdraw(ws[0].amount);
+        assertEq(ws[0].recipient.balance - balanceBefore, ws[0].amount, "burn payout pulled");
     }
 
-    // ── P4-3: a real burn leaf without an authorization reverts AT the flag check ─────────────────
-
-    /// THE NEW EVIDENCE. The leaf is proof-verified (real `aux != 0` proof), so `_verifyWithdrawalSet`
-    /// PASSES; the revert is therefore `PartialWithdrawalNotAuthorized` from the IPW2 gate itself —
-    /// not `WithdrawalPublicInputsMismatch` from the proof binding, which is all the forged-leaf test
-    /// in `PartialWithdrawalPayout.t.sol` can reach. This proves the second factor actually guards a
-    /// proven leaf: the burn branch is entered, and it fails closed for want of channel consent.
-    function test_provenBurnLeaf_withoutAuthorization_reverts() public {
+    /// Exactly once: after the payout consumes the nullifier, the SAME proof + leaf is dead on every
+    /// remaining path.
+    function test_provenBurnLeaf_nullifierSingleUse() public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        assertTrue(ws[0].auxData != bytes32(0), "precondition: burn leaf");
-        assertFalse(rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "precondition: not authorized");
-
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
-        vm.expectRevert(IntmaxRollup.PartialWithdrawalNotAuthorized.selector);
-        rollup.withdrawNative(ws, prover, wproof);
 
-        assertEq(rollup.pendingWithdrawals(ws[0].recipient), 0, "nothing credited");
-        assertFalse(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier not consumed");
+        rollup.withdrawNative(ws, prover, wproof);
+        assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
+        uint256 escrowAfterFirst = rollup.totalEscrowed();
+
+        vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
+        rollup.withdrawNative(ws, prover, wproof);
+        vm.expectRevert(IntmaxRollup.WithdrawalNotErc20Token.selector);
+        rollup.withdrawERC20(ws, prover, wproof);
+
+        assertEq(rollup.totalEscrowed(), escrowAfterFirst, "no second debit");
+        assertEq(rollup.pendingWithdrawals(ws[0].recipient), ws[0].amount, "credited exactly once");
     }
 
-    /// The ERC-20 entry point is equally closed for this native burn leaf: it dies on the asset-class
-    /// guard before any authorization question, confirming an ETH burn is not payable via that path.
+    /// The ERC-20 entry point is closed for this native burn leaf: it dies on the asset-class guard.
     function test_provenBurnLeaf_notPayableViaErc20Path() public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        _authorize(ws[0]); // even authorized, the wrong asset path must refuse it
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalNotErc20Token.selector);
         rollup.withdrawERC20(ws, prover, wproof);
     }
 
-    // ── P4-1: the F-AUX-1 `Y > X` shape — an amount above the co-signed burn is rejected ──────────
+    // ── the economics are the proof's: nothing above, beside or instead of the proved leaf ──────
 
-    /// An authorization for the tampered `(Y > X)` digest still cannot pay it: the proof binding
-    /// re-folds the REAL leaf, so a leaf claiming more than the proved burn amount fails the pis
-    /// re-fold before the flag is ever consulted. This is exactly the regression the whole phase
-    /// exists to prevent (P0-4 → P4-1).
+    /// A leaf claiming more than the proved burn amount fails the pis re-fold. With no second factor
+    /// left, the proof binding is the whole guard, and it holds.
     function test_burnLeaf_amountAboveBurn_rejected() public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
-        _registerManager();
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         ws[0].amount = ws[0].amount + 1; // Y = X + 1
-
-        // Authorize the tampered digest so the ONLY thing that can stop it is the proof binding.
-        vm.prank(settlementManager);
-        rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
+        uint256 escrowBefore = rollup.totalEscrowed();
 
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
-        assertEq(rollup.totalEscrowed() > 0, true, "escrow untouched");
+        assertEq(rollup.totalEscrowed(), escrowBefore, "escrow untouched");
     }
 
-    // ── P4-4: a proven burn leaf cannot be relabelled ────────────────────────────────────────────
-
-    /// Flipping `aux_data` — whether to 0 (to dodge the flag) or to any other descriptor — breaks the
-    /// pis re-fold. So the burn branch cannot be entered by relabelling a proven leaf, and a proven
-    /// burn leaf cannot be demoted to a normal one to skip the authorization.
+    /// Flipping `aux_data` — to 0 or to any other descriptor — breaks the pis re-fold.
     function test_provenBurnLeaf_cannotBeRelabelled() public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
-        _registerManager();
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
-        // (a) aux -> 0 (demote to normal). Even so, the binding rejects it.
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         ws[0].auxData = bytes32(0);
-        vm.prank(settlementManager);
-        rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
 
-        // (b) aux -> a different burn descriptor.
         (ws, prover) = _parsePayout();
         ws[0].auxData = keccak256("a different burn");
-        vm.prank(settlementManager);
-        rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
 
-    // ── P4-5: only the exact co-signed (amount, recipient) pair is ever payable ───────────────────
-
-    /// Property: for random `(amount, recipient)` substitutions on the proved leaf, none is payable —
-    /// the pis re-fold binds every field, so only the exact proved pair survives. The honest pair
-    /// itself is covered by `test_provenBurnLeaf_paysWithAuthorization`.
-    function testFuzz_onlyExactCosignedPair_payable(uint96 rawAmount, address recipient) public {
+    /// Property: for random `(amount, recipient)` substitutions on the proved leaf, none is payable.
+    function testFuzz_onlyExactProvedPair_payable(uint96 rawAmount, address recipient) public {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
-        _registerManager();
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         // Keep it a genuine substitution of AT LEAST one field.
@@ -193,37 +155,8 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         ws[0].amount = rawAmount;
         ws[0].recipient = recipient;
 
-        // Authorize whatever the attacker asks for, so only the proof binding can stop the payout.
-        vm.prank(settlementManager);
-        rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
-
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
-        rollup.withdrawNative(ws, prover, wproof);
-    }
-
-    // ── T5 (P4-2 replay half): the paid burn leaf cannot be replayed ─────────────────────────────
-
-    /// After the honest payout consumes the nullifier, the SAME proof + leaf is dead across every
-    /// remaining path. (The full P4-2 cross-lane conservation — burn lane vs close lane summing to
-    /// the channel's deposits — additionally needs the close path and is asserted in the close-side
-    /// suites; here we pin the burn lane's single-use guarantee, which is the replay half of T5.)
-    function test_provenBurnLeaf_nullifierSingleUse() public {
-        if (!fixturesReady) { vm.skip(true); return; }
-        _runLifecycleThroughFinalize();
-
-        (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        _authorize(ws[0]);
-        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
-
-        rollup.withdrawNative(ws, prover, wproof);
-        assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
-
-        assertFalse(rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "one-shot IPW2 authorization consumed");
-
-        // Second time: the shared nullifier check is earlier and independently rejects the exact
-        // proof replay; a fresh-nullifier leaf would instead reach the now-cleared IPW2 flag.
-        vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
 }

@@ -61,11 +61,6 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
     }
 
-    /// @dev Historical IPW2 shape. Only used to prove the retired route installs NO rollup flag.
-    function _ipw2(uint32 tokenIndex, uint256 amount, bytes32 auxData) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(bytes4(0x49505732), address(manager), tokenIndex, amount, auxData));
-    }
-
     function _imcf(
         uint256 chainId,
         address rollup,
@@ -145,10 +140,7 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
             "retired selector must fail with the explicit typed error"
         );
 
-        // No historical IPW2 flag was installed and the channel is not materialized.
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "native IPW2 not installed");
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 40, aux)), "token IPW2 not installed");
-        assertEq(registry.partialWithdrawalAuthorizationCalls(_ipw2(0, 75, aux)), 0, "rollup never called");
+        // The channel is not materialized.
         assertEq(materializedChannelExit[uint32(CHANNEL_ID)], bytes32(0), "retired call did not materialize");
     }
 
@@ -205,8 +197,6 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
             "retired selector must fail with the explicit typed error"
         );
 
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "native IPW2 not installed");
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 40, aux)), "token IPW2 not installed");
         assertEq(registry.pendingWithdrawals(address(manager)), 0, "no native credit");
         assertEq(registry.pendingTokenWithdrawals(TOKEN_A, address(manager)), 0, "no token credit");
         assertEq(materializer.materializedChannelExit(uint32(CHANNEL_ID)), bytes32(0), "no exit recorded");
@@ -248,7 +238,6 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         assertEq(tokenA.balanceOf(address(manager)), 0, "manager received no tokens");
         assertEq(manager.receivedChannelFunds(0), 0, "no native channel credit");
         assertEq(manager.receivedChannelFunds(TOKEN_A), 0, "no token channel credit");
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "no IPW2 issued");
 
         // The retired call left the pull gate closed.
         vm.expectRevert(

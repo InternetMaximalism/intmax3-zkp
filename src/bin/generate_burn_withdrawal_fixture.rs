@@ -6,10 +6,11 @@
 //! `c2c_withdrawal_payout.json`, `sepolia_withdrawal_payout.json`) is a NORMAL withdrawal
 //! (`aux_data == 0`). So `contracts/test/PartialWithdrawalPayout.t.sol` could only ever assert that
 //! the burn branch fails on the proof binding (`test_burnLeafWithoutAuthorization_failsClosed`) —
-//! it could never drive a REAL proved burn leaf THROUGH the proof binding and INTO the IPW2
-//! authorization gate. This fixture closes that gap: it is a real 3-block lifecycle whose
-//! withdrawal leaf is proved with a nonzero burn descriptor, so `withdrawNative` verifies the proof
-//! and then reaches `if (w.auxData != 0) require(partialWithdrawalAuthorized[...])`.
+//! it could never drive a REAL proved burn leaf THROUGH the proof binding. This fixture closes that
+//! gap: it is a real 3-block lifecycle whose withdrawal leaf is proved with a nonzero burn
+//! descriptor, so `withdrawNative` verifies the proof and pays the burn leaf from the proof alone
+//! (single-use by its nullifier). The former IPW2 authorization gate on `auxData != 0` leaves was
+//! removed on 2026-10-09: a burn is paid like any proof-backed withdrawal.
 //!
 //! Same rail as `generate_withdrawal_fixture` (the shared `build_channel_withdrawal`), so the
 //! validity/withdrawal proofs, block-hash chain and keccak re-fold are validated identically; only

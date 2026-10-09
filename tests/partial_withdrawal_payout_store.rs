@@ -13,13 +13,12 @@ use intmax3_zkp::{
     },
     l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
     partial_withdrawal_payout::{
-        BroadcastIntent, FinalizeConfirmation, L1CallKind, L1TransactionReceipt,
-        PartialWithdrawalOnchainState, PartialWithdrawalPayoutError, PartialWithdrawalPayoutStore,
+        BroadcastIntent, L1CallKind, L1TransactionReceipt, PartialWithdrawalOnchainState,
+        PartialWithdrawalPayoutError, PartialWithdrawalPayoutStore,
         PartialWithdrawalProofArtifacts, PartialWithdrawalProofMetrics,
         PartialWithdrawalResumeAction, PayoutConfirmation, PreparePartialWithdrawalPayout,
         PullConfirmation, partial_withdrawal_resume_action,
     },
-    wallet_core::partial_withdrawal_auth_digest,
 };
 
 static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
@@ -95,7 +94,6 @@ fn request(token_index: u32, amount: u64, nullifier: u32) -> PreparePartialWithd
     PreparePartialWithdrawalPayout {
         chain_id: 31337,
         rollup: addr(0x42),
-        manager: addr(0x43),
         channel_id,
         signed_head_digest: b32(nullifier + 100),
         burn_base_nonce: nullifier,
@@ -108,7 +106,6 @@ fn request(token_index: u32, amount: u64, nullifier: u32) -> PreparePartialWithd
             extended_state_commitment: b32(0xdd),
             bp_sig_chain: b32(0xba),
         },
-        auth_digest: partial_withdrawal_auth_digest(&withdrawal),
         artifacts: PartialWithdrawalProofArtifacts {
             withdrawal,
             withdrawal_prover: addr(0x99),
@@ -159,41 +156,13 @@ fn receipt(kind: L1CallKind, token: u32) -> L1TransactionReceipt {
             parent_hash: b32(0x2ff + token),
             source: L1FinalitySource::DevnetLatest,
         },
-        manager_finalized_auth_digest: None,
     }
-}
-
-fn finalize_receipt(auth_digest: Bytes32, token: u32) -> L1TransactionReceipt {
-    let mut receipt = receipt(L1CallKind::FinalizePartialWithdrawal, token);
-    receipt.tx_hash = b32(0xf000 + token);
-    receipt.to = addr(0x43);
-    receipt.manager_finalized_auth_digest = Some(auth_digest);
-    receipt
-}
-
-fn finalize_candidate(store: &mut PartialWithdrawalPayoutStore, candidate_id: Bytes32) {
-    let auth_digest = store.active().unwrap().unwrap().auth_digest;
-    store
-        .mark_finalize_broadcast(candidate_id, intent())
-        .unwrap();
-    store
-        .confirm_finalize(
-            candidate_id,
-            FinalizeConfirmation {
-                receipt: finalize_receipt(auth_digest, 0),
-                manager_pending_observed: false,
-                authorization_observed: true,
-                nullifier_used_observed: false,
-            },
-        )
-        .unwrap();
 }
 
 fn complete(store: &mut PartialWithdrawalPayoutStore, request: PreparePartialWithdrawalPayout) {
     let amount = request.artifacts.withdrawal.amount;
     let token = request.artifacts.withdrawal.token_index;
     let candidate = store.prepare(request).unwrap();
-    finalize_candidate(store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
@@ -209,7 +178,6 @@ fn complete(store: &mut PartialWithdrawalPayoutStore, request: PreparePartialWit
                     },
                     token,
                 ),
-                authorization_observed: false,
                 finalized_anchor_observed: true,
                 nullifier_used_observed: true,
                 credit_before: U256::default(),
@@ -274,14 +242,12 @@ fn native_and_erc20_require_success_receipts_and_recipient_pull() {
         let amount = request.artifacts.withdrawal.amount;
         let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
         let candidate = store.prepare(request).unwrap();
-        finalize_candidate(&mut store, candidate.candidate_id);
         store
             .mark_payout_broadcast(candidate.candidate_id, intent())
             .unwrap();
 
         let wrong = PayoutConfirmation {
             receipt: receipt(L1CallKind::WithdrawNative, token),
-            authorization_observed: false,
             finalized_anchor_observed: true,
             nullifier_used_observed: true,
             credit_before: U256::default(),
@@ -300,7 +266,6 @@ fn native_and_erc20_require_success_receipts_and_recipient_pull() {
                 candidate.candidate_id,
                 PayoutConfirmation {
                     receipt: receipt(kind, token),
-                    authorization_observed: false,
                     finalized_anchor_observed: true,
                     nullifier_used_observed: true,
                     credit_before: U256::default(),
@@ -342,67 +307,62 @@ fn native_and_erc20_require_success_receipts_and_recipient_pull() {
 }
 
 #[test]
-fn manager_finalize_requires_exact_finalized_canonical_receipt_before_payout() {
-    let path = TempSnapshot::new("manager-finalize-finality");
+fn payout_needs_only_its_own_journaled_intent() {
+    // No settlement-manager stage exists: the proof payout is the first irreversible L1 call.
+    let path = TempSnapshot::new("payout-first");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 19)).unwrap();
-
-    assert!(
-        store
-            .mark_payout_broadcast(candidate.candidate_id, intent())
-            .is_err()
-    );
-    store
-        .mark_finalize_broadcast(candidate.candidate_id, intent())
-        .unwrap();
-
-    let confirmation = |receipt| FinalizeConfirmation {
-        receipt,
-        manager_pending_observed: false,
-        authorization_observed: true,
-        nullifier_used_observed: false,
+    let amount = candidate.artifacts.withdrawal.amount;
+    let confirmation = PayoutConfirmation {
+        receipt: receipt(L1CallKind::WithdrawNative, 0),
+        finalized_anchor_observed: true,
+        nullifier_used_observed: true,
+        credit_before: U256::default(),
+        credit_after: amount,
     };
-    let mut unfinalized = finalize_receipt(candidate.auth_digest, 0);
-    unfinalized.finalized_checkpoint.block_number = unfinalized.block_number - 1;
+
+    // A receipt is never adopted without the send-before-persist intent that pins it.
     assert!(
         store
-            .confirm_finalize(candidate.candidate_id, confirmation(unfinalized))
+            .confirm_payout(candidate.candidate_id, confirmation.clone())
             .is_err()
     );
-
-    let mut wrong_manager = finalize_receipt(candidate.auth_digest, 0);
-    wrong_manager.to = addr(0x44);
     assert!(
         store
-            .confirm_finalize(candidate.candidate_id, confirmation(wrong_manager))
+            .record_payout_tx_hash(candidate.candidate_id, b32(0x100))
             .is_err()
     );
-
-    let wrong_auth = finalize_receipt(b32(0xbad), 0);
+    // The intent must name a real caller and exact calldata.
     assert!(
         store
-            .confirm_finalize(candidate.candidate_id, confirmation(wrong_auth))
-            .is_err(),
-        "a zero-argument manager call must be bound to this candidate by its finalized event"
-    );
-
-    let mut replaced = finalize_receipt(candidate.auth_digest, 0);
-    replaced.finalized_checkpoint.block_number = replaced.block_number;
-    replaced.finalized_checkpoint.block_hash = b32(0xdead);
-    assert!(
-        store
-            .confirm_finalize(candidate.candidate_id, confirmation(replaced))
+            .mark_payout_broadcast(
+                candidate.candidate_id,
+                BroadcastIntent {
+                    caller: Address::default(),
+                    ..intent()
+                }
+            )
             .is_err()
     );
-
-    store
-        .confirm_finalize(
-            candidate.candidate_id,
-            confirmation(finalize_receipt(candidate.auth_digest, 0)),
-        )
-        .unwrap();
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+    // Re-journaling the identical intent is idempotent; a different one is a conflict.
+    store
+        .mark_payout_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+    assert!(matches!(
+        store.mark_payout_broadcast(
+            candidate.candidate_id,
+            BroadcastIntent {
+                caller_nonce: 4,
+                ..intent()
+            }
+        ),
+        Err(PartialWithdrawalPayoutError::Conflict(_))
+    ));
+    store
+        .confirm_payout(candidate.candidate_id, confirmation)
         .unwrap();
 }
 
@@ -413,7 +373,6 @@ fn orphaned_or_unfinalized_payout_receipt_cannot_be_adopted() {
     let amount = request.artifacts.withdrawal.amount;
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request).unwrap();
-    finalize_candidate(&mut store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
@@ -422,7 +381,6 @@ fn orphaned_or_unfinalized_payout_receipt_cannot_be_adopted() {
     unfinalized.finalized_checkpoint.block_number = unfinalized.block_number - 1;
     let confirmation = |receipt| PayoutConfirmation {
         receipt,
-        authorization_observed: false,
         finalized_anchor_observed: true,
         nullifier_used_observed: true,
         credit_before: U256::default(),
@@ -486,13 +444,9 @@ fn two_consecutive_partial_withdrawals_and_replay_are_fail_closed() {
 }
 
 #[test]
-fn mutated_auth_payout_leaf_and_corrupt_snapshot_are_rejected() {
+fn mutated_payout_leaf_and_corrupt_snapshot_are_rejected() {
     let path = TempSnapshot::new("negative");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
-    let mut bad_auth = request(0, 3, 1);
-    bad_auth.auth_digest = b32(123);
-    assert!(store.prepare(bad_auth).is_err());
-
     let mut bad_leaf = request(0, 3, 1);
     let mut json: serde_json::Value =
         serde_json::from_str(&bad_leaf.artifacts.payout_json).unwrap();
@@ -512,120 +466,56 @@ fn mutated_auth_payout_leaf_and_corrupt_snapshot_are_rejected() {
     ));
 }
 
-fn onchain(
-    candidate_auth: Bytes32,
-    manager_pending: bool,
-    authorization: bool,
-    nullifier_used: bool,
-) -> PartialWithdrawalOnchainState {
-    PartialWithdrawalOnchainState {
-        manager_pending,
-        pending_auth_digest: if manager_pending {
-            candidate_auth
-        } else {
-            Bytes32::default()
-        },
-        authorization,
-        nullifier_used,
-    }
+fn onchain(nullifier_used: bool) -> PartialWithdrawalOnchainState {
+    PartialWithdrawalOnchainState { nullifier_used }
 }
 
 #[test]
-fn resume_state_machine_distinguishes_pending_authorized_and_consumed() {
+fn resume_state_machine_distinguishes_unpaid_journaled_and_consumed() {
     let path = TempSnapshot::new("resume-state");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 11)).unwrap();
 
     assert_eq!(
-        partial_withdrawal_resume_action(
-            &candidate,
-            onchain(candidate.auth_digest, true, false, false),
-        )
-        .unwrap(),
-        PartialWithdrawalResumeAction::FinalizePending
-    );
-    // An authorization without our pre-broadcast journal is not adopted as local recovery
-    // evidence; it could come from an orphaned or unrelated manager transaction.
-    assert!(
-        partial_withdrawal_resume_action(
-            &candidate,
-            onchain(candidate.auth_digest, false, true, false),
-        )
-        .is_err()
-    );
-    assert!(
-        partial_withdrawal_resume_action(
-            &candidate,
-            PartialWithdrawalOnchainState {
-                manager_pending: true,
-                pending_auth_digest: b32(0xbad),
-                authorization: false,
-                nullifier_used: false,
-            },
-        )
-        .is_err()
-    );
-    assert!(
-        partial_withdrawal_resume_action(
-            &candidate,
-            onchain(candidate.auth_digest, false, false, true),
-        )
-        .is_err()
-    );
-    assert!(
-        partial_withdrawal_resume_action(
-            &candidate,
-            onchain(candidate.auth_digest, false, true, true),
-        )
-        .is_err()
-    );
-
-    store
-        .mark_finalize_broadcast(candidate.candidate_id, intent())
-        .unwrap();
-    let journaled = store.active().unwrap().unwrap();
-    assert_eq!(
-        partial_withdrawal_resume_action(
-            &journaled,
-            onchain(journaled.auth_digest, false, true, false),
-        )
-        .unwrap(),
-        PartialWithdrawalResumeAction::FinalizePending
-    );
-    store
-        .confirm_finalize(
-            candidate.candidate_id,
-            FinalizeConfirmation {
-                receipt: finalize_receipt(candidate.auth_digest, 0),
-                manager_pending_observed: false,
-                authorization_observed: true,
-                nullifier_used_observed: false,
-            },
-        )
-        .unwrap();
-    let finalized = store.active().unwrap().unwrap();
-    assert_eq!(
-        partial_withdrawal_resume_action(
-            &finalized,
-            onchain(finalized.auth_digest, false, true, false),
-        )
-        .unwrap(),
+        partial_withdrawal_resume_action(&candidate, onchain(false)).unwrap(),
         PartialWithdrawalResumeAction::BroadcastPayout
     );
-    assert_eq!(
-        partial_withdrawal_resume_action(
-            &finalized,
-            PartialWithdrawalOnchainState {
-                manager_pending: true,
-                pending_auth_digest: b32(0xbeef),
-                authorization: true,
-                nullifier_used: false,
+    // A consumed nullifier without our pre-broadcast journal is not adopted as local recovery
+    // evidence: anyone holding the public proof may have submitted it.
+    assert!(matches!(
+        partial_withdrawal_resume_action(&candidate, onchain(true)),
+        Err(PartialWithdrawalPayoutError::Conflict(_))
+    ));
+
+    store
+        .mark_payout_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+    let journaled = store.active().unwrap().unwrap();
+    for used in [false, true] {
+        assert_eq!(
+            partial_withdrawal_resume_action(&journaled, onchain(used)).unwrap(),
+            PartialWithdrawalResumeAction::ReconcilePayout
+        );
+    }
+
+    let paid = store
+        .confirm_payout(
+            candidate.candidate_id,
+            PayoutConfirmation {
+                receipt: receipt(L1CallKind::WithdrawNative, 0),
+                finalized_anchor_observed: true,
+                nullifier_used_observed: true,
+                credit_before: U256::default(),
+                credit_after: U256::from(6u64),
             },
         )
-        .unwrap(),
-        PartialWithdrawalResumeAction::BroadcastPayout,
-        "a later manager request must not invalidate this candidate's finalized authorization"
+        .unwrap();
+    assert_eq!(
+        partial_withdrawal_resume_action(&paid, onchain(true)).unwrap(),
+        PartialWithdrawalResumeAction::ContinueAfterPayout
     );
+    // A stored confirmation that L1 no longer reflects is a fail-closed conflict.
+    assert!(partial_withdrawal_resume_action(&paid, onchain(false)).is_err());
 }
 
 #[test]
@@ -633,45 +523,15 @@ fn crash_boundaries_reopen_broadcast_hash_and_consumed_confirmation() {
     let path = TempSnapshot::new("crash-boundaries");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 12)).unwrap();
-    store
-        .mark_finalize_broadcast(candidate.candidate_id, intent())
-        .unwrap();
-    drop(store); // crash after manager-finalization intent, before send/hash persistence
+    drop(store); // crash after prepare, before any L1 call
 
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let resumed = store.active().unwrap().unwrap();
+    assert_eq!(resumed.candidate_id, candidate.candidate_id);
     assert_eq!(
-        partial_withdrawal_resume_action(
-            &resumed,
-            onchain(resumed.auth_digest, true, false, false),
-        )
-        .unwrap(),
-        PartialWithdrawalResumeAction::FinalizePending
+        partial_withdrawal_resume_action(&resumed, onchain(false)).unwrap(),
+        PartialWithdrawalResumeAction::BroadcastPayout
     );
-    let finalize_hash = finalize_receipt(resumed.auth_digest, 0).tx_hash;
-    store
-        .record_finalize_tx_hash(resumed.candidate_id, finalize_hash)
-        .unwrap();
-    drop(store); // crash after manager send returned, before finalized receipt adoption
-
-    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
-    let resumed = store.active().unwrap().unwrap();
-    assert_eq!(resumed.finalize_tx_hashes, [finalize_hash]);
-    store
-        .confirm_finalize(
-            resumed.candidate_id,
-            FinalizeConfirmation {
-                receipt: finalize_receipt(resumed.auth_digest, 0),
-                manager_pending_observed: false,
-                authorization_observed: true,
-                nullifier_used_observed: false,
-            },
-        )
-        .unwrap();
-    drop(store); // crash after finalized manager receipt, before proof-payout intent
-
-    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
-    let resumed = store.active().unwrap().unwrap();
     store
         .mark_payout_broadcast(resumed.candidate_id, intent())
         .unwrap();
@@ -680,22 +540,14 @@ fn crash_boundaries_reopen_broadcast_hash_and_consumed_confirmation() {
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let resumed = store.active().unwrap().unwrap();
     assert_eq!(
-        partial_withdrawal_resume_action(
-            &resumed,
-            onchain(resumed.auth_digest, false, true, false),
-        )
-        .unwrap(),
+        partial_withdrawal_resume_action(&resumed, onchain(false)).unwrap(),
         PartialWithdrawalResumeAction::ReconcilePayout
     );
     // The process may also die after the payout is mined but before cast returns a hash. The
-    // one-shot authorization is then gone and the manager is non-pending; the durable intent is
-    // still sufficient to enter sender/nonce canonical-receipt reconciliation.
+    // nullifier is then used; the durable intent is still sufficient to enter sender/nonce
+    // canonical-receipt reconciliation.
     assert_eq!(
-        partial_withdrawal_resume_action(
-            &resumed,
-            onchain(resumed.auth_digest, false, false, true),
-        )
-        .unwrap(),
+        partial_withdrawal_resume_action(&resumed, onchain(true)).unwrap(),
         PartialWithdrawalResumeAction::ReconcilePayout
     );
     let tx_hash = receipt(L1CallKind::WithdrawNative, 0).tx_hash;
@@ -712,7 +564,6 @@ fn crash_boundaries_reopen_broadcast_hash_and_consumed_confirmation() {
             resumed.candidate_id,
             PayoutConfirmation {
                 receipt: receipt(L1CallKind::WithdrawNative, 0),
-                authorization_observed: false,
                 finalized_anchor_observed: true,
                 nullifier_used_observed: true,
                 credit_before: U256::default(),
@@ -725,40 +576,44 @@ fn crash_boundaries_reopen_broadcast_hash_and_consumed_confirmation() {
     let store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let resumed = store.active().unwrap().unwrap();
     assert_eq!(
-        partial_withdrawal_resume_action(
-            &resumed,
-            onchain(resumed.auth_digest, false, false, true),
-        )
-        .unwrap(),
+        partial_withdrawal_resume_action(&resumed, onchain(true)).unwrap(),
         PartialWithdrawalResumeAction::ContinueAfterPayout
     );
 }
 
 #[test]
-fn payout_confirmation_requires_the_authorization_to_be_consumed() {
-    let path = TempSnapshot::new("auth-consumed");
+fn payout_confirmation_requires_a_finalized_anchor_and_a_consumed_nullifier() {
+    let path = TempSnapshot::new("payout-postconditions");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 13)).unwrap();
-    finalize_candidate(&mut store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
-    let rejected = store.confirm_payout(
-        candidate.candidate_id,
-        PayoutConfirmation {
+    let confirmation =
+        |finalized_anchor_observed, nullifier_used_observed, credit_after| PayoutConfirmation {
             receipt: receipt(L1CallKind::WithdrawNative, 0),
-            authorization_observed: true,
-            finalized_anchor_observed: true,
-            nullifier_used_observed: true,
+            finalized_anchor_observed,
+            nullifier_used_observed,
             credit_before: U256::default(),
-            credit_after: U256::from(6u64),
-        },
-    );
-    assert!(matches!(
-        rejected,
-        Err(PartialWithdrawalPayoutError::InvalidRequest(message))
-            if message.contains("consume authorization")
-    ));
+            credit_after,
+        };
+    for rejected in [
+        confirmation(false, true, U256::from(6u64)),
+        confirmation(true, false, U256::from(6u64)),
+        // The credit must rise by exactly the proof-committed amount.
+        confirmation(true, true, U256::from(5u64)),
+    ] {
+        assert!(matches!(
+            store.confirm_payout(candidate.candidate_id, rejected),
+            Err(PartialWithdrawalPayoutError::InvalidRequest(_))
+        ));
+    }
+    store
+        .confirm_payout(
+            candidate.candidate_id,
+            confirmation(true, true, U256::from(6u64)),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -771,7 +626,6 @@ fn external_recipient_handoff_completes_workflow_without_a_fake_pull_receipt() {
             .mark_recipient_pull_delegated(candidate.candidate_id)
             .is_err()
     );
-    finalize_candidate(&mut store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
@@ -780,7 +634,6 @@ fn external_recipient_handoff_completes_workflow_without_a_fake_pull_receipt() {
             candidate.candidate_id,
             PayoutConfirmation {
                 receipt: receipt(L1CallKind::WithdrawNative, 0),
-                authorization_observed: false,
                 finalized_anchor_observed: true,
                 nullifier_used_observed: true,
                 credit_before: U256::default(),

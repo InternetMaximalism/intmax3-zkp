@@ -205,7 +205,7 @@ function sendRouteError(res, e) {
   console.error(error);
   const status = e && Number.isInteger(e.status) && e.status >= 400 && e.status <= 599
     ? e.status : (e && e.staleAnchor ? 409 : 500);
-  res.status(status).json(e && ['SETTLING_WITHDRAWAL', 'NOT_AVAILABLE'].includes(e.code) ? { error, code: e.code } : { error });
+  res.status(status).json(e && e.code === 'NOT_AVAILABLE' ? { error, code: e.code } : { error });
 }
 // The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
 // for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
@@ -233,23 +233,13 @@ function cli(ch, args, extraEnv) {
 }
 
 // Per-channel mutex: serialize all mutating CLI calls to prevent concurrent state corruption.
+// A partial withdrawal never holds its channel: the burn is an inter-channel send, paid on L1 by
+// its withdrawal proof, and the channel keeps advancing meanwhile (hosting/wallet/pw-settlement.js).
 const _chLocks = {};
-// A partial withdrawal being settled owns its channel head until its intent is on L1
-// (pw-settlement.js `frozen`): every other operation is refused at once, not queued behind it.
-function refuseIfSettling(ch, owner) {
-  const ticket = pwSettlement.frozen(ch);
-  if (!ticket || ticket.id === owner) return;
-  const phase = (ticket.steps && ticket.steps.settle && ticket.steps.settle.phase) || 'starting';
-  throw Object.assign(new Error(`Channel ${ch} is settling a partial withdrawal on L1 (${phase}). `
-    + 'Other operations on this channel are paused until its withdrawal intent is submitted, so the '
-    + 'burned funds stay withdrawable. Retry later.'), { status: 409, code: 'SETTLING_WITHDRAWAL' });
-}
-function withLock(ch, fn, { owner } = {}) {
-  try { refuseIfSettling(ch, owner); } catch (e) { return Promise.reject(e); }
+function withLock(ch, fn) {
   if (!_chLocks[ch]) _chLocks[ch] = Promise.resolve();
   const prev = _chLocks[ch];
   const run = async () => {
-    refuseIfSettling(ch, owner);
     // A pending burn owns this head. Finish its exact request before any later mutation can
     // invalidate the saved proof, including an incoming transfer targeting this channel.
     if (burnOperations.pending(ch)) await burnOperations.run(ch, {}, {
@@ -408,7 +398,7 @@ function rollupOf(ch) {
 // L1 settlement of partial withdrawals: in the background on a public chain, inside the wallet's
 // Step 2 requests on the devnet (hosting/wallet/pw-settlement.js).
 const pwSettlement = createPwSettlement({
-  cli: require('../../api/lib/cli'), producer, walletL1: require('../../api/lib/wallet-l1'),
+  cli: require('../../api/lib/cli'), walletL1: require('../../api/lib/wallet-l1'),
   live: require('../../api/lib/partial-withdrawal-live'), pull: require('../../node/common/partial-withdrawal-pull'),
   withLock, findActiveTicket, upsertTicket,
   enabled: settlementEnabled, background: () => !isDevnet(),
@@ -1135,8 +1125,6 @@ const cosignBatcher = createBatchWindow({
 
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
-  // Refused at once, not batched, while a withdrawal being settled owns the channel head.
-  try { refuseIfSettling(ch); } catch (e) { return sendRouteError(res, e); }
   cosignBatcher.enqueue(ch, req.body).then(
     (result) => res.json(result),
     (e) => {
@@ -1538,9 +1526,9 @@ app.post('/api/cosign-burn', (req, res) => {
     }
     const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
     res.json(cosignedHead);
-    // Public chain: settle it on L1 in the background, starting now (the channel waits for it).
+    // Public chain: settle it on L1 in the background, starting now; the channel stays open.
     pwSettlement.start(ch);
-  }, { owner: active && active.id }).catch((e) => sendRouteError(res, e));
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
@@ -1576,71 +1564,24 @@ app.get('/api/settlement', (req, res) => {
   } catch (e) { res.status(404).json({ error: 'no settlement deployed yet' }); }
 });
 
-// POST /api/pw-submit?channel=N
-// Submit partial withdrawal intent on-chain.
-app.post('/api/pw-submit', (req, res) => {
+// POST /api/pw-finalize?channel=N
+// Step 2 of a partial withdrawal: prove its payout, publish the validity batch it is anchored at,
+// and credit it on the rollup (hosting/wallet/pw-settlement.js). On a public chain the relay runs
+// these steps in the background from the burn on; this answers where it is.
+app.post('/api/pw-finalize', (req, res) => {
   if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
   const ch = reqChannel(req);
   const active = findActiveTicket(ch, 'partial_withdrawal');
-  if (active && active.status === 'claim_pending') {
-    return res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  }
-  // Public chain: settlement runs in the background from the burn on; report where it is.
+  if (active && active.status === 'claim_pending') return res.json({ ok: true, claim: active.params.claim });
   if (!isDevnet()) {
     if (!active) return res.status(404).json({ error: 'no partial withdrawal to settle on this channel' });
     pwSettlement.start(ch);
     return res.status(202).json({ settling: true, ticket: active });
   }
-  withLock(ch, async () => {
-    const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    if (ticket && ticket.status === 'claim_pending') {
-      return res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-    }
-    const submitted = require('../../api/lib/partial-withdrawal-live').resumeSubmittedAuth(ch);
-    if (submitted) return res.json(submitted);
-    const before = ticket && ticket.status;
-    if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
-    try {
-      if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-        cli(ch, ['deploy-settlement', RPC]);
-      }
-      const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
-      if (ticket && pwRecipient) ticket.params.recipient = pwRecipient;
-      await pwSettlement.publish(ch);
-      const out = await pwSettlement.submit(ch, ticket || { params: { recipient: pwRecipient } });
-      if (ticket) {
-        ticket.steps.settle = { ...(ticket.steps.settle || {}), phase: 'challenge', deadline: out.deadline, authDigest: out.authDigest };
-        upsertTicket(ch, ticket);
-      }
-    } catch (e) {
-      // A failed submit is retryable: put the ticket back instead of leaving it settle_pending.
-      if (ticket) { ticket.status = before; upsertTicket(ch, ticket); }
-      throw e;
-    }
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  }, { owner: active && active.id }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 500).json({ error: String(e.stderr || e.message || e) }); });
-});
-
-// POST /api/pw-finalize?channel=N
-// Finalize partial withdrawal (advance time + finalize on-chain).
-app.post('/api/pw-finalize', (req, res) => {
-  if (!requireCapability(res, 'partialWithdrawal', 'Withdrawal (burn and settle on L1)')) return;
-  const ch = reqChannel(req);
-  const active = findActiveTicket(ch, 'partial_withdrawal');
-  if (active && active.status === 'claim_pending') {
-    const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
-    return res.json({ ok: true, authDigest: auth.auth_digest, claim: active.params.claim });
-  }
-  // Public chain: the background settlement finalizes once the challenge period has passed.
-  if (!isDevnet()) {
-    const settle = (active && active.steps && active.steps.settle) || {};
-    return res.status(409).json({ code: 'SETTLING', error: active ? `withdrawal is settling on L1 (${settle.phase || active.status})` : 'no partial withdrawal to finalize', ticket: active || null });
-  }
-  withLock(ch, async () => {
-    const ticket = findActiveTicket(ch, 'partial_withdrawal');
-    const out = await pwSettlement.finalize(ch, ticket || { params: {}, steps: {} });
-    res.json({ ok: true, authDigest: out.authDigest, claim: out.claim });
-  }, { owner: active && active.id }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  if (!active) return res.status(404).json({ error: 'no partial withdrawal to settle on this channel' });
+  pwSettlement.settleNow(ch).then((ticket) => {
+    res.json({ ok: true, claim: (ticket && ticket.params && ticket.params.claim) || null });
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // The receiver pulls the credited amount through MetaMask; verify that exact mined call.

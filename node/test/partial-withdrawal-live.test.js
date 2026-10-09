@@ -1,4 +1,8 @@
 'use strict';
+// A burn is an inter-channel send to the reserved burn channel, paid on L1 by its base withdrawal
+// proof alone. The channel keeps advancing after the burn, so the live staging resumes the exact
+// signed burn (never the current head) and accepts only the payout proof of THAT burn, anchored at
+// a producer head at or after the burn's block.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('fs'), os = require('os'), path = require('path');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-live-'));
@@ -6,184 +10,222 @@ process.env.INTMAX_WORK_DIR = root;
 const cli = require('../../api/lib/cli'), producer = require('../../api/lib/block-producer');
 const live = require('../../api/lib/partial-withdrawal-live');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+// The burn's producer block: the earliest head a payout proof may be anchored at.
+const BURN_BLOCK = { requestId: 'receipt', blockNumber: 5, generation: 6, extendedStateCommitment: '0xburnroot' };
+// last_burn.json as the CLI writes it at co-sign time (mixed-case hex, as serialized).
+const BURN = { withdrawal_nullifier: '0xABCDEF01', aux_data: '0xA0B1C2', withdrawal_recipient: '0x00000000000000000000000000000000000000Ab', token_index: 55 };
+
 function fixture(ch) {
   const head = { channelId: ch, digest: 'burn', balanceState: { settledTxChain: 'post-burn' } };
   cli.writeJson(cli.wc(ch, 'burn_cosigned.json'), head);
   cli.writeJson(cli.wc(ch, 'burn_payload.json'), { proposedNextState: head });
   cli.writeJson(cli.wc(ch, 'burn_descriptor.json'), { token: 'descriptor' });
   cli.writeJson(cli.wc(ch, 'channel_snapshot.json'), { state: head });
-  fs.writeFileSync(cli.wc(ch, 'balance_vd.bin'), Buffer.from([1, 2]));
-  fs.writeFileSync(cli.wc(ch, 'channel_attestation.bin'), Buffer.from([9]));
-  const events = [];
-  producer.postInterChannel = async () => { events.push('post'); return { requestId: 'receipt' }; };
+  cli.writeJson(cli.wc(ch, 'last_burn.json'), BURN);
+  const events = [], requests = [];
+  producer.postInterChannel = async (_head, _payload, _descriptor, id) => { events.push('post'); requests.push(id); return { ...BURN_BLOCK }; };
   producer.liveSettleInterChannel = async () => { events.push('settle'); return { baseNonce: 1 }; };
-  const backing = { signedHead: head, baseHead: { channelId: ch, settledTxChain: 'post-burn' },
-    signedHeadExitKit: { backingPublicInputs: { channelId: ch, settledTxChain: 'post-burn', anchorBlockNumber: 5, finalizedExtendedStateCommitment: 'root' } },
-    balanceVerifierData: [1, 2], balanceAttestation: { balanceProof: [3, 4] } };
-  producer.liveBackingArtifact = async () => backing;
-  cli.rollupOf = () => 'rollup';
-  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'true' : '5';
-  return { events, backing };
+  producer.liveBurnPayoutArtifacts = async () => { throw new Error('no payout proof expected'); };
+  cli.l1SignerAddress = () => '0x00000000000000000000000000000000000000Ef';
+  return { events, requests, head };
 }
-test('stages the exact live proof without replacing genesis; restores producer receipt on retry', async () => {
+
+// The daemon's payout artifacts for the fixture's burn (lower-case hex, as the daemon serializes).
+function payout({ anchor = {}, withdrawal = {}, ...rest } = {}) {
+  return {
+    withdrawal: { amount: '18446744073709551615', recipient: BURN.withdrawal_recipient.toLowerCase(), tokenIndex: 55,
+      nullifier: BURN.withdrawal_nullifier.toLowerCase(), auxData: BURN.aux_data.toLowerCase(), ...withdrawal },
+    withdrawalProver: '0x00000000000000000000000000000000000000ef',
+    producerAnchor: { blockNumber: 9, generation: 10, bpSigChain: 'bp', entryHash: 'entry', extendedStateCommitment: '0xanchorroot', timestamp: 100, ...anchor },
+    proof: 'verified-artifacts', ...rest,
+  };
+}
+
+// ── prepareLiveBurn: the burn's own block and live settlement ───────────────────────────────────
+test('the burn block and its live settlement are recorded once; a complete pw_producer.json is never replayed', async () => {
   const h = fixture(7);
-  const env = await live.stageSubmitProof(7);
-  assert.equal(env.PW_BALANCE_PROOF_FILE, 'pw_balance_attestation.bin');
-  assert.equal(env.PW_BACKING_ARTIFACT_FILE, 'pw_live_backing.json');
-  assert.deepEqual(cli.readJson(cli.wc(7, env.PW_BACKING_ARTIFACT_FILE)), h.backing);
-  assert.deepEqual([...fs.readFileSync(cli.wc(7, env.PW_BALANCE_PROOF_FILE))], [3, 4]);
-  assert.deepEqual([...fs.readFileSync(cli.wc(7, 'channel_attestation.bin'))], [9]);
-  assert.equal(cli.readJson(cli.wc(7, 'pw_producer.json')).liveReceipt.baseNonce, 1);
-  await live.stageSubmitProof(7);
-  assert.deepEqual(h.events, ['post', 'settle', 'post', 'settle']);
+  const first = await live.prepareLiveBurn(7);
+  assert.deepEqual(first.blockReceipt, BURN_BLOCK);
+  assert.ok(first.producerRequestId.startsWith('burn:'));
+  const saved = cli.readJson(cli.wc(7, 'pw_producer.json'));
+  assert.equal(saved.producerRequestId, first.producerRequestId);
+  assert.equal(saved.liveReceipt.baseNonce, 1);
+  const again = await live.prepareLiveBurn(7);
+  assert.deepEqual(h.events, ['post', 'settle'], 'the recorded burn is resumed, not posted or settled again');
+  assert.deepEqual(again.blockReceipt, BURN_BLOCK);
+  assert.equal(again.producerRequestId, first.producerRequestId);
+  assert.equal(again.head.digest, 'burn');
 });
-test('a later signed head cannot silently replace the burn', async () => {
+
+test('a burn recorded by the burn operation itself is resumed without any producer call', async () => {
   const h = fixture(8);
-  cli.writeJson(cli.wc(8, 'channel_snapshot.json'), { state: { digest: 'other' } });
-  await assert.rejects(live.stageSubmitProof(8), /exact signed burn/);
+  // burn-operation.js writes pw_producer.json with both receipts as it completes the burn.
+  const id = producer.stableRequestId('burn', { ch: 8, debitPayload: cli.readJson(cli.wc(8, 'burn_payload.json')),
+    transferDescriptor: cli.readJson(cli.wc(8, 'burn_descriptor.json')) });
+  cli.writeJson(cli.wc(8, 'pw_producer.json'), { producerRequestId: id, blockReceipt: { ...BURN_BLOCK, blockNumber: 3 }, liveReceipt: { baseNonce: 4 } });
+  const out = await live.prepareLiveBurn(8);
   assert.deepEqual(h.events, []);
+  assert.equal(out.producerRequestId, id);
+  assert.equal(out.blockReceipt.blockNumber, 3, 'the recorded burn block, not a new one');
 });
-test('wrong live chain or verifier is rejected before staging proof bytes', async () => {
+
+test('the exact signed burn is resumed after the channel advanced past it', async () => {
   const h = fixture(9);
-  h.backing.baseHead.settledTxChain = 'genesis';
-  await assert.rejects(live.stageSubmitProof(9), /post-burn head/);
-  h.backing.baseHead.settledTxChain = 'post-burn';
-  h.backing.balanceVerifierData = [8];
-  await assert.rejects(live.stageSubmitProof(9), /pinned channel verifier/);
-  assert.equal(fs.existsSync(cli.wc(9, 'pw_balance_attestation.bin')), false);
-});
-test('payout uses recovered exact producer identity and writes artifacts for the native driver', async () => {
-  fixture(10);
-  const anchor = { blockNumber: 5, bpSigChain: 'bp', entryHash: 'entry', extendedStateCommitment: 'root', generation: 6, timestamp: 100 };
-  producer.postInterChannel = async () => ({ ...anchor, requestId: 'receipt' });
-  const withdrawal = { amount: '5', recipient: 'recipient', tokenIndex: 0, nullifier: 'nullifier', auxData: 'aux' };
-  cli.writeJson(cli.wc(10, 'pw_auth.json'), { withdrawal_amount: '5', withdrawal_recipient: 'recipient',
-    withdrawal_token_index: 0, withdrawal_nullifier: 'nullifier', withdrawal_aux_data: 'aux' });
-  cli.l1SignerAddress = () => 'operator';
-  let generated = 0;
-  producer.liveBurnPayoutArtifacts = async (ch, id, desc, signer) => {
-    generated++;
-    assert.equal(ch, 10); assert.ok(id.startsWith('burn:')); assert.equal(desc.token, 'descriptor');
-    assert.equal(signer, 'operator'); return { withdrawal, withdrawalProver: signer, producerAnchor: anchor, proof: 'verified-artifacts' };
-  };
-  await live.stagePayoutArtifacts(10);
-  assert.equal(cli.readJson(cli.wc(10, 'pw_artifacts.json')).proof, 'verified-artifacts');
-  await live.stagePayoutArtifacts(10);
-  assert.equal(generated, 1, 'retry must reuse the exact proof pinned by the native payout journal');
-  anchor.entryHash = 'different-entry';
-  await live.stagePayoutArtifacts(10);
-  assert.equal(generated, 2, 'a different producer anchor must not reuse the saved proof');
-});
-
-test('unfinalized burn fails before expensive close proving and remains retryable', async () => {
-  fixture(11);
-  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'false' : '0';
-  await assert.rejects(live.stageSubmitProof(11), e => e.status === 409 && /burn block 5, L1 finalized block 0/.test(e.message));
-  assert.equal(fs.existsSync(cli.wc(11, 'pw_balance_attestation.bin')), false);
-});
-
-test('submit resumes the same on-chain pending, authorized or paid burn; never a different burn', () => {
-  const ch = 12;
-  const auth = { manager: 'manager', auth_digest: 'auth', withdrawal_nullifier: 'nullifier',
-    withdrawal_aux_data: 'aux', withdrawal_recipient: 'recipient', withdrawal_token_index: 0 };
-  const burn = { withdrawal_nullifier: 'nullifier', aux_data: 'aux', withdrawal_recipient: 'recipient', token_index: 0 };
-  cli.writeJson(cli.wc(ch, 'pw_auth.json'), auth);
-  cli.writeJson(cli.wc(ch, 'last_burn.json'), burn);
-  cli.writeJson(cli.wc(ch, 'settlement.json'), { manager: 'manager' });
-  cli.rollupOf = () => 'rollup';
-  let phase = 'pending', reads = 0;
-  cli.sh = (_, args) => {
-    reads++;
-    if (args[2].startsWith('pendingPartialWithdrawalAuthDigest')) return 'auth';
-    return String((phase === 'pending' && args[2].startsWith('partialWithdrawalPending'))
-      || (phase === 'authorized' && args[2].startsWith('partialWithdrawalAuthorized'))
-      || (phase === 'paid' && args[2].startsWith('withdrawalNullifierUsed')));
-  };
-  for (phase of ['pending', 'authorized', 'paid']) assert.deepEqual(live.resumeSubmittedAuth(ch), auth);
-  phase = 'absent'; assert.equal(live.resumeSubmittedAuth(ch), null);
-  cli.writeJson(cli.wc(ch, 'last_burn.json'), { ...burn, withdrawal_nullifier: 'new-burn' });
-  reads = 0; assert.equal(live.resumeSubmittedAuth(ch), null); assert.equal(reads, 0);
-});
-
-test('settlement interruption preserves receipt and retries the identical producer request', async () => {
-  fixture(20);
-  const requests = [];
-  let fail = true;
-  producer.postInterChannel = async (_head, _payload, _descriptor, id) => {
-    requests.push(id); return { requestId: id, blockNumber: 5 };
-  };
-  producer.liveSettleInterChannel = async () => {
-    if (fail) throw new Error('injected settlement interruption');
-    return { baseNonce: 2 };
-  };
-  await assert.rejects(live.stageSubmitProof(20), /injected settlement/);
-  assert.equal(cli.readJson(cli.wc(20, 'pw_producer.json')).liveReceipt, null);
-  assert.equal(fs.existsSync(cli.wc(20, 'pw_balance_attestation.bin')), false);
-  fail = false;
-  await live.stageSubmitProof(20);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[0], requests[1]);
-  assert.equal(cli.readJson(cli.wc(20, 'pw_producer.json')).liveReceipt.baseNonce, 2);
+  // Later sends moved the channel head on; the burn is no longer the head.
+  cli.writeJson(cli.wc(9, 'channel_snapshot.json'), { state: { channelId: 9, digest: 'later-head' } });
+  const out = await live.prepareLiveBurn(9);
+  assert.equal(out.head.digest, 'burn');
+  assert.deepEqual(h.events, ['post', 'settle']);
 });
 
 for (const [name, change] of [
-  ['missing exit kit', backing => { delete backing.signedHeadExitKit; }],
-  ['wrong exit channel', backing => { backing.signedHeadExitKit.backingPublicInputs.channelId++; }],
-  ['wrong exit chain', backing => { backing.signedHeadExitKit.backingPublicInputs.settledTxChain = 'other'; }],
-  ['wrong signed head', backing => { backing.signedHead = { ...backing.signedHead, digest: 'other' }; }],
-  ['wrong base channel', backing => { backing.baseHead.channelId++; }],
+  ['a signed head that is not its payload\'s next state', ch => cli.writeJson(cli.wc(ch, 'burn_cosigned.json'), { channelId: ch, digest: 'other' })],
+  ['a signed head of another channel', ch => cli.writeJson(cli.wc(ch, 'burn_cosigned.json'), { channelId: ch + 1, digest: 'burn' })],
 ]) {
-  test(`submit rejects ${name} without replacing already staged artifacts`, async () => {
-    const { backing } = fixture(21);
-    const proofPath = cli.wc(21, 'pw_balance_attestation.bin');
-    const backingPath = cli.wc(21, 'pw_live_backing.json');
-    fs.writeFileSync(proofPath, Buffer.from([91, 92]));
-    cli.writeJson(backingPath, { previous: true });
-    change(backing);
-    await assert.rejects(live.stageSubmitProof(21));
-    assert.deepEqual([...fs.readFileSync(proofPath)], [91, 92]);
-    assert.deepEqual(cli.readJson(backingPath), { previous: true });
+  test(`${name} is refused before any producer call`, async () => {
+    const h = fixture(10);
+    change(10);
+    await assert.rejects(live.prepareLiveBurn(10), /exact signed burn/);
+    await assert.rejects(live.stagePayoutArtifacts(10), /exact signed burn/);
+    assert.deepEqual(h.events, []);
   });
 }
 
-test('finalized root alone is insufficient until its anchor height is finalized', async () => {
-  fixture(22);
-  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'true' : '4';
-  await assert.rejects(live.stageSubmitProof(22), error => error.status === 409);
-  assert.equal(fs.existsSync(cli.wc(22, 'pw_balance_attestation.bin')), false);
-  cli.sh = (_, args) => args[2].startsWith('isFinalized') ? 'true' : '5';
-  await live.stageSubmitProof(22);
-  assert.deepEqual([...fs.readFileSync(cli.wc(22, 'pw_balance_attestation.bin'))], [3, 4]);
+test('an interrupted live settlement retries the identical producer request, then is not replayed', async () => {
+  const h = fixture(11);
+  let fail = true;
+  producer.liveSettleInterChannel = async () => {
+    h.events.push('settle');
+    if (fail) throw new Error('injected settlement interruption');
+    return { baseNonce: 2 };
+  };
+  await assert.rejects(live.prepareLiveBurn(11), /injected settlement/);
+  assert.equal(cli.readJson(cli.wc(11, 'pw_producer.json')).liveReceipt, null, 'the block receipt is kept, the settlement is not');
+  fail = false;
+  await live.prepareLiveBurn(11);
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[0], h.requests[1], 'the same idempotent producer request id');
+  assert.equal(cli.readJson(cli.wc(11, 'pw_producer.json')).liveReceipt.baseNonce, 2);
+  await live.prepareLiveBurn(11);
+  assert.equal(h.requests.length, 2, 'complete now: nothing is replayed');
 });
 
-function payoutFixture(ch) {
-  fixture(ch);
-  const anchor = { blockNumber: 5, bpSigChain: 'bp', entryHash: 'entry', extendedStateCommitment: 'root', generation: 6, timestamp: 100 };
-  producer.postInterChannel = async () => ({ ...anchor });
-  cli.l1SignerAddress = () => 'operator';
-  const withdrawal = { amount: '18446744073709551615', recipient: 'recipient', tokenIndex: 55, nullifier: 'nf', auxData: 'aux' };
-  cli.writeJson(cli.wc(ch, 'pw_auth.json'), { withdrawal_amount: withdrawal.amount, withdrawal_recipient: withdrawal.recipient,
-    withdrawal_token_index: withdrawal.tokenIndex, withdrawal_nullifier: withdrawal.nullifier, withdrawal_aux_data: withdrawal.auxData });
-  return { withdrawal, producerAnchor: anchor, withdrawalProver: 'operator' };
-}
-for (const field of ['amount', 'recipient', 'tokenIndex', 'nullifier', 'auxData', 'withdrawalProver', 'entryHash', 'generation']) {
-  test(`payout rejects a regenerated artifact with changed ${field} and retains saved evidence`, async () => {
-    const correct = payoutFixture(23);
+test('a pw_producer.json of another burn is never taken for this one', async () => {
+  const h = fixture(12);
+  cli.writeJson(cli.wc(12, 'pw_producer.json'), { producerRequestId: 'burn:an-earlier-burn', blockReceipt: { blockNumber: 1 }, liveReceipt: { baseNonce: 0 } });
+  const out = await live.prepareLiveBurn(12);
+  assert.deepEqual(h.events, ['post', 'settle']);
+  assert.notEqual(out.producerRequestId, 'burn:an-earlier-burn');
+  assert.deepEqual(out.blockReceipt, BURN_BLOCK);
+});
+
+// ── stagePayoutArtifacts: the payout proof of exactly this burn ─────────────────────────────────
+test('the payout proof is written for the native driver and reused on retry', async () => {
+  fixture(20);
+  let generated = 0;
+  producer.liveBurnPayoutArtifacts = async (ch, id, desc, signer) => {
+    generated++;
+    assert.equal(ch, 20); assert.ok(id.startsWith('burn:')); assert.equal(desc.token, 'descriptor');
+    assert.equal(signer, '0x00000000000000000000000000000000000000Ef', 'the L1 signer proves the payout');
+    return payout();
+  };
+  assert.deepEqual(await live.stagePayoutArtifacts(20), payout());
+  assert.deepEqual(cli.readJson(cli.wc(20, 'pw_artifacts.json')), payout());
+  assert.deepEqual(await live.stagePayoutArtifacts(20), payout());
+  assert.equal(generated, 1, 'a retry reuses the exact proof pinned by the native payout journal');
+});
+
+test('a payout anchored after the burn block is accepted (the channel kept advancing)', async () => {
+  fixture(21);
+  // Anchored well after the burn block, at the head a validity candidate ends at.
+  const later = payout({ anchor: { blockNumber: 40, generation: 41 } });
+  producer.liveBurnPayoutArtifacts = async () => later;
+  assert.deepEqual(await live.stagePayoutArtifacts(21), later);
+  assert.deepEqual(cli.readJson(cli.wc(21, 'pw_artifacts.json')), later);
+});
+
+test('a payout anchored exactly at the burn block is accepted', async () => {
+  fixture(22);
+  const atBurn = payout({ anchor: { blockNumber: BURN_BLOCK.blockNumber, generation: BURN_BLOCK.generation } });
+  producer.liveBurnPayoutArtifacts = async () => atBurn;
+  assert.deepEqual(await live.stagePayoutArtifacts(22), atBurn);
+});
+
+for (const [name, change] of [
+  ['an anchor block before the burn block', p => { p.producerAnchor.blockNumber = BURN_BLOCK.blockNumber - 1; }],
+  ['an anchor generation before the burn', p => { p.producerAnchor.generation = BURN_BLOCK.generation - 1; }],
+  ['a different nullifier', p => { p.withdrawal.nullifier = '0xabcdef02'; }],
+  ['a different aux commitment', p => { p.withdrawal.auxData = '0xa0b1c3'; }],
+  ['a different recipient', p => { p.withdrawal.recipient = '0x00000000000000000000000000000000000000ac'; }],
+  ['a different token', p => { p.withdrawal.tokenIndex = 0; }],
+  ['a different prover', p => { p.withdrawalProver = '0x00000000000000000000000000000000000000aa'; }],
+  ['a zero amount', p => { p.withdrawal.amount = '0'; }],
+  ['a non-decimal amount', p => { p.withdrawal.amount = '0x10'; }],
+  ['a negative amount', p => { p.withdrawal.amount = '-5'; }],
+  ['no producer anchor', p => { delete p.producerAnchor; }],
+]) {
+  test(`a payout proof with ${name} is refused and the saved evidence is kept`, async () => {
+    fixture(23);
     const file = cli.wc(23, 'pw_artifacts.json');
-    const stale = { ...structuredClone(correct), withdrawalProver: 'old-operator' };
+    // A saved, non-matching proof (an earlier prover): regenerated, never reused.
+    const stale = payout({ withdrawalProver: 'old-operator' });
     cli.writeJson(file, stale);
-    const changed = structuredClone(correct);
-    if (field === 'withdrawalProver') changed.withdrawalProver = 'attacker';
-    else if (field === 'entryHash' || field === 'generation') changed.producerAnchor[field] = 'other';
-    else changed.withdrawal[field] = field === 'amount' ? '18446744073709551614' : 'other';
+    const changed = payout();
+    change(changed);
     producer.liveBurnPayoutArtifacts = async () => changed;
-    await assert.rejects(live.stagePayoutArtifacts(23), /does not match/);
-    assert.deepEqual(cli.readJson(file), stale);
-    producer.liveBurnPayoutArtifacts = async () => correct;
-    assert.deepEqual(await live.stagePayoutArtifacts(23), correct);
+    await assert.rejects(live.stagePayoutArtifacts(23), /payout proof does not match the burn/);
+    assert.deepEqual(cli.readJson(file), stale, 'a refused proof never overwrites the saved file');
+    producer.liveBurnPayoutArtifacts = async () => payout();
+    assert.deepEqual(await live.stagePayoutArtifacts(23), payout());
+    assert.deepEqual(cli.readJson(file), payout());
   });
 }
 
+test('a saved payout proof of an earlier burn is not reused for a new burn', async () => {
+  fixture(24);
+  cli.writeJson(cli.wc(24, 'pw_artifacts.json'), payout({ withdrawal: { nullifier: '0x01d' } }));
+  let generated = 0;
+  producer.liveBurnPayoutArtifacts = async () => { generated++; return payout(); };
+  assert.deepEqual(await live.stagePayoutArtifacts(24), payout());
+  assert.equal(generated, 1);
+});
+
+test('only the saved payout proof of the current burn is reported as saved, without proving', async () => {
+  fixture(125);
+  producer.liveBurnPayoutArtifacts = async () => { throw new Error('savedPayoutArtifacts must never prove'); };
+  assert.equal(live.savedPayoutArtifacts(125), null, 'nothing saved yet');
+  cli.writeJson(cli.wc(125, 'pw_producer.json'), { producerRequestId: 'x', blockReceipt: { ...BURN_BLOCK }, liveReceipt: { baseNonce: 1 } });
+  cli.writeJson(cli.wc(125, 'pw_artifacts.json'), payout({ withdrawal: { nullifier: '0x01d' } }));
+  assert.equal(live.savedPayoutArtifacts(125), null, 'a proof left by an earlier burn');
+  cli.writeJson(cli.wc(125, 'pw_artifacts.json'), payout({ anchor: { blockNumber: 4 } }));
+  assert.equal(live.savedPayoutArtifacts(125), null, 'anchored before the burn block');
+  cli.writeJson(cli.wc(125, 'pw_artifacts.json'), payout());
+  assert.deepEqual(live.savedPayoutArtifacts(125), payout());
+});
+
+test('hex fields match the burn whatever their case', async () => {
+  fixture(25);
+  const upper = payout({ withdrawal: { nullifier: BURN.withdrawal_nullifier, auxData: BURN.aux_data.toUpperCase().replace('0X', '0x'),
+    recipient: BURN.withdrawal_recipient } });
+  producer.liveBurnPayoutArtifacts = async () => upper;
+  assert.deepEqual(await live.stagePayoutArtifacts(25), upper);
+});
+
+test('the daemon\'s refusal while an older validity candidate awaits L1 reaches the caller and stages nothing', async () => {
+  fixture(26);
+  producer.liveBurnPayoutArtifacts = async () => {
+    throw Object.assign(new Error('exit status 1'), { stderr: 'validity candidate pending L1 acknowledgement' });
+  };
+  await assert.rejects(live.stagePayoutArtifacts(26), e => /validity candidate pending L1 acknowledgement/.test(e.stderr));
+  assert.equal(fs.existsSync(cli.wc(26, 'pw_artifacts.json')), false);
+});
+
+test('the removed manager settlement entry points are gone', () => {
+  assert.deepEqual(Object.keys(live).sort(), ['finalizeSavedPayout', 'prepareLiveBurn', 'savedPayoutArtifacts', 'stagePayoutArtifacts']);
+});
+
+// ── finalizeSavedPayout: the journaled native payout driver ─────────────────────────────────────
 test('historical-state retry is bounded and preserves calldata arguments and environment', async () => {
   const historical = new Error('cast ["call","contract","--block","10"] BlockOutOfRangeError');
   const calls = [], waits = [], env = { INTMAX_WALLET_ANVIL_MINE: '1', PROOF: 'unchanged' };

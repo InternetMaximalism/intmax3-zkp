@@ -1,13 +1,19 @@
 //! Crash-safe orchestration state for proof-backed partial withdrawals.
 //!
+//! A partial withdrawal is an inter-channel send to the reserved BURN channel whose base transfer
+//! names an L1 recipient. L1 pays it from the base withdrawal proof alone
+//! (`IntmaxRollup.withdrawNative`/`withdrawERC20`), exactly as an inter-channel transfer is
+//! consumed by a receive proof: the members' consent is the validity of the N-of-N signed channel
+//! update that carries the burn, and the rollup's single-use nullifier is the only payout latch.
+//! There is no settlement-manager stage and no separate L1 authorization.
+//!
 //! The balance/withdrawal prover owns private witness material; this module deliberately accepts
-//! only its public proof artefacts.  It then records the irreversible L1 boundary in three durable
-//! phases: prepared proof, settlement-manager finalization (`finalizePartialWithdrawal`), proof
-//! payout (`withdrawNative`/`withdrawERC20`) and recipient pull (`withdraw`/`withdrawToken`). If
-//! the proved recipient is external to the local signer, a durable handoff completes the local
-//! workflow at the proof-payout boundary without claiming the recipient pulled. A caller may
-//! resume any phase after a crash, but it may never replace an in-flight withdrawal or mark it
-//! complete from an authorization alone.
+//! only its public proof artefacts. It then records the irreversible L1 boundary in durable
+//! phases: prepared proof, proof payout (`withdrawNative`/`withdrawERC20`) and recipient pull
+//! (`withdraw`/`withdrawToken`). If the proved recipient is external to the local signer, a
+//! durable handoff completes the local workflow at the proof-payout boundary without claiming the
+//! recipient pulled. A caller may resume any phase after a crash, but it may never replace an
+//! in-flight withdrawal or adopt an L1 effect it did not journal before sending.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -30,11 +36,15 @@ use crate::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
     l1_finality::L1FinalizedCheckpoint,
-    wallet_core::partial_withdrawal_auth_digest,
 };
 
-const SNAPSHOT_MAGIC: &[u8; 16] = b"INTMAX_PAYOUT_03";
-pub const PARTIAL_WITHDRAWAL_PAYOUT_VERSION: u32 = 3;
+const SNAPSHOT_MAGIC: &[u8; 16] = b"INTMAX_PAYOUT_04";
+/// Every payout snapshot header starts with this family prefix followed by two version digits.
+const SNAPSHOT_MAGIC_FAMILY: &[u8; 14] = b"INTMAX_PAYOUT_";
+/// Version 4: the burn is paid by its withdrawal proof alone. Versions <= 3 journaled the retired
+/// settlement-manager path (`submitPartialWithdrawalIntent` -> `finalizePartialWithdrawal` -> IPW2
+/// authorization) and are refused rather than reinterpreted.
+pub const PARTIAL_WITHDRAWAL_PAYOUT_VERSION: u32 = 4;
 const HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -91,14 +101,11 @@ pub struct PartialWithdrawalProofArtifacts {
 pub struct PreparePartialWithdrawalPayout {
     pub chain_id: u64,
     pub rollup: Address,
-    /// Settlement manager whose pending request creates this candidate's one-shot authorization.
-    pub manager: Address,
     pub channel_id: ChannelId,
     pub signed_head_digest: Bytes32,
     /// The nonce consumed by the burn.  The live receipt carries the post-burn cursor separately.
     pub burn_base_nonce: u32,
     pub producer_receipt: BlockProducerReceipt,
-    pub auth_digest: Bytes32,
     pub artifacts: PartialWithdrawalProofArtifacts,
 }
 
@@ -109,7 +116,6 @@ pub enum L1CallKind {
     /// It reuses the canonical receipt reader so settlement activation gets the same exact
     /// transaction/reorg/finality checks as fund-moving calls.
     RegisterSettlementManager,
-    FinalizePartialWithdrawal,
     WithdrawNative,
     WithdrawErc20,
     PullNative,
@@ -134,12 +140,6 @@ pub struct L1TransactionReceipt {
     /// Independently read durable head that covered this receipt when it was adopted.  The CLI
     /// revalidates both this checkpoint and the receipt block on every resume.
     pub finalized_checkpoint: L1FinalizedCheckpoint,
-    /// The authorization digest emitted by `ChannelSettlementManager` for a successful
-    /// `finalizePartialWithdrawal()` call.  The function has no calldata arguments, so its
-    /// canonical receipt must carry this event binding; post-state alone cannot prove which
-    /// pending request the zero-argument call finalized.
-    #[serde(default)]
-    pub manager_finalized_auth_digest: Option<Bytes32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,11 +160,10 @@ pub struct BroadcastIntent {
 #[serde(rename_all = "camelCase")]
 pub struct PayoutConfirmation {
     pub receipt: L1TransactionReceipt,
-    /// Exact value of `partialWithdrawalAuthorized(authDigest)` observed after the successful
-    /// payout receipt. IPW2 is one-shot, so this MUST be false: a true value would leave the same
-    /// proof-independent authorization reusable with another proof-valid nullifier.
-    pub authorization_observed: bool,
+    /// `isFinalizedStateRoot(proof anchor)` observed at the receipt's finalized checkpoint.
     pub finalized_anchor_observed: bool,
+    /// `withdrawalNullifierUsed(nullifier)` observed at the receipt's finalized checkpoint: the
+    /// rollup's single-use latch for this proof-committed leaf.
     pub nullifier_used_observed: bool,
     pub credit_before: U256,
     pub credit_after: U256,
@@ -178,37 +177,18 @@ pub struct PullConfirmation {
     pub credit_after: U256,
 }
 
-/// Canonical finalized evidence for the manager transition from pending request to the one-shot
-/// rollup authorization.  Persisting this separately from the payout receipt prevents a restart
-/// from treating an orphaned `finalizePartialWithdrawal` as an authorized fund transition.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FinalizeConfirmation {
-    pub receipt: L1TransactionReceipt,
-    pub manager_pending_observed: bool,
-    pub authorization_observed: bool,
-    pub nullifier_used_observed: bool,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialWithdrawalCandidate {
     pub candidate_id: Bytes32,
     pub chain_id: u64,
     pub rollup: Address,
-    pub manager: Address,
     pub channel_id: ChannelId,
     pub signed_head_digest: Bytes32,
     pub burn_base_nonce: u32,
     pub producer_receipt: BlockProducerReceipt,
-    pub auth_digest: Bytes32,
     pub lane: PartialWithdrawalLane,
     pub artifacts: PartialWithdrawalProofArtifacts,
-    pub finalize_broadcast: Option<BroadcastIntent>,
-    /// Append-only replacement hashes for the exact manager-finalization sender/nonce/calldata.
-    #[serde(default)]
-    pub finalize_tx_hashes: Vec<Bytes32>,
-    pub finalize_confirmation: Option<FinalizeConfirmation>,
     pub payout_broadcast: Option<BroadcastIntent>,
     /// Every transaction hash returned while (re)broadcasting the exact persisted payout intent.
     /// The vector is append-only because a dropped transaction may be replaced at the same nonce;
@@ -229,25 +209,20 @@ pub struct PartialWithdrawalCandidate {
 
 impl PartialWithdrawalCandidate {
     pub fn is_complete(&self) -> bool {
-        self.finalize_confirmation.is_some()
-            && self.payout_confirmation.is_some()
+        self.payout_confirmation.is_some()
             && (self.pull_confirmation.is_some() || self.recipient_pull_delegated)
     }
 }
 
-/// The four on-chain facts needed to resume a partial withdrawal without accidentally calling
-/// `finalizePartialWithdrawal` after its one-shot IPW2 authorization has already been consumed.
+/// The on-chain fact needed to resume a partial withdrawal: whether the rollup has consumed the
+/// proof-committed nullifier. It is the only payout latch left on L1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PartialWithdrawalOnchainState {
-    pub manager_pending: bool,
-    pub pending_auth_digest: Bytes32,
-    pub authorization: bool,
     pub nullifier_used: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartialWithdrawalResumeAction {
-    FinalizePending,
     BroadcastPayout,
     ReconcilePayout,
     ContinueAfterPayout,
@@ -255,90 +230,33 @@ pub enum PartialWithdrawalResumeAction {
 
 /// Decide the only safe next irreversible action from the durable journal and live L1 state.
 ///
-/// `authorization == false && nullifier_used == true` is the normal post-payout state under IPW2,
-/// not evidence that finalization is missing. Conversely, an already-used nullifier without a
-/// pre-broadcast journal cannot be adopted: the operator would have no pinned caller/nonce/calldata
-/// from which to prove that the observed state transition belongs to this candidate.
+/// A used nullifier without a pre-broadcast journal cannot be adopted: the operator would have no
+/// pinned caller/nonce/calldata from which to prove that the observed state transition belongs to
+/// this candidate (anyone holding the public proof may submit it, and its credit still goes to the
+/// proved recipient, so the local workflow must stop rather than claim the payout as its own).
 pub fn partial_withdrawal_resume_action(
     candidate: &PartialWithdrawalCandidate,
     state: PartialWithdrawalOnchainState,
 ) -> Result<PartialWithdrawalResumeAction, PartialWithdrawalPayoutError> {
-    if state.authorization && state.nullifier_used {
-        return Err(PartialWithdrawalPayoutError::Conflict(
-            "IPW2 authorization is still live after the withdrawal nullifier was consumed".into(),
-        ));
-    }
-
-    // An authorization is not self-authenticating local recovery evidence.  Before payout, the
-    // exact manager call must have a send-before-persisted intent and a canonical finalized
-    // receipt.  If a broadcast was recorded, FinalizePending means reconcile that exact nonce;
-    // it never means blindly send a second transaction.
-    if candidate.finalize_confirmation.is_none() {
-        if candidate.payout_broadcast.is_some() || candidate.payout_confirmation.is_some() {
-            return Err(PartialWithdrawalPayoutError::Conflict(
-                "payout began without a finalized manager-finalization receipt".into(),
-            ));
-        }
-        if state.manager_pending {
-            if state.pending_auth_digest != candidate.auth_digest {
-                return Err(PartialWithdrawalPayoutError::Conflict(
-                    "settlement manager is pending a different partial-withdrawal authorization"
-                        .into(),
-                ));
-            }
-            return Ok(PartialWithdrawalResumeAction::FinalizePending);
-        }
-        if state.authorization && candidate.finalize_broadcast.is_some() {
-            return Ok(PartialWithdrawalResumeAction::FinalizePending);
-        }
-        return Err(PartialWithdrawalPayoutError::Conflict(
-            if state.authorization {
-                "one-shot authorization exists without a durable manager-finalization intent"
-            } else if state.nullifier_used {
-                "withdrawal nullifier is used without a finalized manager-finalization receipt"
-            } else {
-                "partial withdrawal is neither manager-pending, authorized, nor already paid"
-            }
-            .into(),
-        ));
-    }
-
     if candidate.payout_confirmation.is_some() {
-        if !state.nullifier_used || state.authorization {
+        if !state.nullifier_used {
             return Err(PartialWithdrawalPayoutError::Conflict(
-                "stored payout confirmation disagrees with one-shot authorization/nullifier state"
-                    .into(),
+                "stored payout confirmation disagrees with an unused withdrawal nullifier".into(),
             ));
         }
         return Ok(PartialWithdrawalResumeAction::ContinueAfterPayout);
     }
-
-    if state.nullifier_used {
-        if candidate.payout_broadcast.is_none() {
-            return Err(PartialWithdrawalPayoutError::Conflict(
-                "withdrawal nullifier is used but no durable payout broadcast intent exists".into(),
-            ));
-        }
+    if candidate.payout_broadcast.is_some() {
+        // Whether or not the nullifier is used yet, the journaled exact call must be reconciled
+        // by stored hash or pinned sender/nonce before anything else is sent.
         return Ok(PartialWithdrawalResumeAction::ReconcilePayout);
     }
-
-    if state.authorization {
-        return Ok(if candidate.payout_broadcast.is_some() {
-            PartialWithdrawalResumeAction::ReconcilePayout
-        } else {
-            PartialWithdrawalResumeAction::BroadcastPayout
-        });
-    }
-
-    if candidate.payout_broadcast.is_some() {
+    if state.nullifier_used {
         return Err(PartialWithdrawalPayoutError::Conflict(
-            "payout was journaled for broadcast, but neither authorization nor used nullifier is present"
-                .into(),
+            "withdrawal nullifier is used but no durable payout broadcast intent exists".into(),
         ));
     }
-    Err(PartialWithdrawalPayoutError::Conflict(
-        "partial withdrawal is neither authorized nor already paid".into(),
-    ))
+    Ok(PartialWithdrawalResumeAction::BroadcastPayout)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -354,12 +272,10 @@ struct PayoutSnapshot {
 struct CandidateIdentity<'a> {
     chain_id: u64,
     rollup: Address,
-    manager: Address,
     channel_id: ChannelId,
     signed_head_digest: Bytes32,
     burn_base_nonce: u32,
     producer_receipt: &'a BlockProducerReceipt,
-    auth_digest: Bytes32,
     withdrawal: &'a Withdrawal,
     withdrawal_prover: Address,
     producer_anchor: &'a BlockProducerAnchor,
@@ -439,17 +355,12 @@ impl PartialWithdrawalPayoutStore {
             candidate_id,
             chain_id: request.chain_id,
             rollup: request.rollup,
-            manager: request.manager,
             channel_id: request.channel_id,
             signed_head_digest: request.signed_head_digest,
             burn_base_nonce: request.burn_base_nonce,
             producer_receipt: request.producer_receipt,
-            auth_digest: request.auth_digest,
             lane,
             artifacts: request.artifacts,
-            finalize_broadcast: None,
-            finalize_tx_hashes: Vec::new(),
-            finalize_confirmation: None,
             payout_broadcast: None,
             payout_tx_hashes: Vec::new(),
             payout_confirmation: None,
@@ -464,111 +375,12 @@ impl PartialWithdrawalPayoutStore {
         Ok(candidate)
     }
 
-    /// Persist the exact manager-finalization call before sending it.  This is intentionally a
-    /// distinct phase from the proof payout: the one-shot authorization may be visible at `latest`
-    /// while the creating receipt is not yet finalized and therefore must not authorize funds.
-    pub fn mark_finalize_broadcast(
-        &mut self,
-        candidate_id: Bytes32,
-        intent: BroadcastIntent,
-    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
-        self.mutate_candidate(candidate_id, |candidate| {
-            if candidate.finalize_confirmation.is_some() {
-                return Ok(());
-            }
-            if candidate.payout_broadcast.is_some() || candidate.payout_confirmation.is_some() {
-                return Err(PartialWithdrawalPayoutError::Conflict(
-                    "cannot begin manager finalization after the proof payout began".into(),
-                ));
-            }
-            if intent.caller == Address::default()
-                || intent.calldata_hash == Bytes32::default()
-                || intent.credit_before != U256::default()
-            {
-                return Err(PartialWithdrawalPayoutError::InvalidRequest(
-                    "manager-finalization intent requires a non-zero caller/calldata and zero credit"
-                        .into(),
-                ));
-            }
-            match &candidate.finalize_broadcast {
-                Some(existing) if existing != &intent => {
-                    Err(PartialWithdrawalPayoutError::Conflict(
-                        "manager finalization already began with a different caller/block/nonce"
-                            .into(),
-                    ))
-                }
-                Some(_) => Ok(()),
-                None => {
-                    candidate.finalize_broadcast = Some(intent);
-                    Ok(())
-                }
-            }
-        })
-    }
-
-    pub fn record_finalize_tx_hash(
-        &mut self,
-        candidate_id: Bytes32,
-        tx_hash: Bytes32,
-    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
-        self.mutate_candidate(candidate_id, |candidate| {
-            if candidate.finalize_broadcast.is_none() {
-                return Err(PartialWithdrawalPayoutError::InvalidRequest(
-                    "cannot record manager-finalization transaction before its broadcast intent"
-                        .into(),
-                ));
-            }
-            if let Some(confirmation) = &candidate.finalize_confirmation {
-                if confirmation.receipt.tx_hash != tx_hash {
-                    return Err(PartialWithdrawalPayoutError::Conflict(
-                        "cannot append a replacement hash after manager-finalization confirmation"
-                            .into(),
-                    ));
-                }
-                return Ok(());
-            }
-            push_tx_hash(&mut candidate.finalize_tx_hashes, tx_hash)
-        })
-    }
-
-    pub fn confirm_finalize(
-        &mut self,
-        candidate_id: Bytes32,
-        confirmation: FinalizeConfirmation,
-    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
-        self.mutate_candidate(candidate_id, |candidate| {
-            validate_finalize_confirmation(candidate, &confirmation)?;
-            match &candidate.finalize_confirmation {
-                Some(existing) if existing != &confirmation => {
-                    Err(PartialWithdrawalPayoutError::Conflict(
-                        "manager finalization was already confirmed by a different receipt".into(),
-                    ))
-                }
-                Some(_) => Ok(()),
-                None => {
-                    push_tx_hash(
-                        &mut candidate.finalize_tx_hashes,
-                        confirmation.receipt.tx_hash,
-                    )?;
-                    candidate.finalize_confirmation = Some(confirmation);
-                    Ok(())
-                }
-            }
-        })
-    }
-
     pub fn mark_payout_broadcast(
         &mut self,
         candidate_id: Bytes32,
         intent: BroadcastIntent,
     ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
         self.mutate_candidate(candidate_id, |candidate| {
-            if candidate.finalize_confirmation.is_none() {
-                return Err(PartialWithdrawalPayoutError::InvalidRequest(
-                    "cannot begin proof payout before manager finalization has a finalized receipt"
-                        .into(),
-                ));
-            }
             if candidate.payout_confirmation.is_some() {
                 return Ok(());
             }
@@ -814,12 +626,9 @@ fn validate_prepare(
     request: &PreparePartialWithdrawalPayout,
 ) -> Result<(), PartialWithdrawalPayoutError> {
     let withdrawal = &request.artifacts.withdrawal;
-    if request.chain_id == 0
-        || request.rollup == Address::default()
-        || request.manager == Address::default()
-    {
+    if request.chain_id == 0 || request.rollup == Address::default() {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "chain id, rollup and settlement manager must be non-zero".into(),
+            "chain id and rollup must be non-zero".into(),
         ));
     }
     if withdrawal.recipient == Address::default()
@@ -842,13 +651,6 @@ fn validate_prepare(
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
             "signed head, exact producer receipt and proof anchor must all be non-zero".into(),
         ));
-    }
-    let derived_auth = partial_withdrawal_auth_digest(withdrawal);
-    if derived_auth != request.auth_digest {
-        return Err(PartialWithdrawalPayoutError::InvalidRequest(format!(
-            "auth digest {} differs from proof-committed withdrawal digest {}",
-            request.auth_digest, derived_auth
-        )));
     }
     if request.producer_receipt.generation > request.artifacts.producer_anchor.generation
         || request.producer_receipt.block_number > request.artifacts.producer_anchor.block_number
@@ -935,12 +737,10 @@ fn candidate_id(
     let identity = CandidateIdentity {
         chain_id: request.chain_id,
         rollup: request.rollup,
-        manager: request.manager,
         channel_id: request.channel_id,
         signed_head_digest: request.signed_head_digest,
         burn_base_nonce: request.burn_base_nonce,
         producer_receipt: &request.producer_receipt,
-        auth_digest: request.auth_digest,
         withdrawal: &request.artifacts.withdrawal,
         withdrawal_prover: request.artifacts.withdrawal_prover,
         producer_anchor: &request.artifacts.producer_anchor,
@@ -990,54 +790,6 @@ fn push_tx_hash(
     Ok(())
 }
 
-fn validate_finalize_confirmation(
-    candidate: &PartialWithdrawalCandidate,
-    confirmation: &FinalizeConfirmation,
-) -> Result<(), PartialWithdrawalPayoutError> {
-    let intent = candidate.finalize_broadcast.as_ref().ok_or_else(|| {
-        PartialWithdrawalPayoutError::InvalidRequest(
-            "persist a manager-finalization broadcast intent before accepting its receipt".into(),
-        )
-    })?;
-    let receipt = &confirmation.receipt;
-    receipt
-        .finalized_checkpoint
-        .covers_receipt(receipt.block_number, receipt.block_hash)
-        .map_err(|error| {
-            PartialWithdrawalPayoutError::InvalidRequest(format!(
-                "manager-finalization receipt is not covered by a durable L1 checkpoint: {error}"
-            ))
-        })?;
-    if receipt.tx_hash == Bytes32::default()
-        || receipt.block_hash == Bytes32::default()
-        || !receipt.success
-        || receipt.chain_id != candidate.chain_id
-        || receipt.finalized_checkpoint.chain_id != candidate.chain_id
-        || receipt.from != intent.caller
-        || receipt.to != candidate.manager
-        || receipt.block_number < intent.start_block
-        || receipt.transaction_nonce != intent.caller_nonce
-        || receipt.calldata_hash != intent.calldata_hash
-        || receipt.call_kind != L1CallKind::FinalizePartialWithdrawal
-        || receipt.manager_finalized_auth_digest != Some(candidate.auth_digest)
-    {
-        return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "manager-finalization receipt failed or targets the wrong chain/manager/function/auth digest"
-                .into(),
-        ));
-    }
-    if confirmation.manager_pending_observed
-        || !confirmation.authorization_observed
-        || confirmation.nullifier_used_observed
-    {
-        return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "manager finalization must clear pending state, create this authorization and leave the nullifier unused"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_payout_confirmation(
     candidate: &PartialWithdrawalCandidate,
     confirmation: &PayoutConfirmation,
@@ -1072,18 +824,14 @@ fn validate_payout_confirmation(
         || receipt.transaction_nonce != intent.caller_nonce
         || receipt.calldata_hash != intent.calldata_hash
         || receipt.call_kind != expected_payout_kind(candidate.lane)
-        || receipt.manager_finalized_auth_digest.is_some()
     {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
             "payout receipt failed or targets the wrong chain/rollup/function".into(),
         ));
     }
-    if confirmation.authorization_observed
-        || !confirmation.finalized_anchor_observed
-        || !confirmation.nullifier_used_observed
-    {
+    if !confirmation.finalized_anchor_observed || !confirmation.nullifier_used_observed {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "successful payout must consume authorization, retain the finalized anchor, and use the nullifier"
+            "successful payout must be anchored at a finalized root and consume the nullifier"
                 .into(),
         ));
     }
@@ -1141,7 +889,6 @@ fn validate_pull_confirmation(
         || receipt.transaction_nonce != intent.caller_nonce
         || receipt.calldata_hash != intent.calldata_hash
         || receipt.call_kind != expected_pull_kind(candidate.lane)
-        || receipt.manager_finalized_auth_digest.is_some()
     {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
             "pull receipt failed or targets the wrong chain/rollup/caller/function".into(),
@@ -1174,12 +921,10 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
         let request = PreparePartialWithdrawalPayout {
             chain_id: active.chain_id,
             rollup: active.rollup,
-            manager: active.manager,
             channel_id: active.channel_id,
             signed_head_digest: active.signed_head_digest,
             burn_base_nonce: active.burn_base_nonce,
             producer_receipt: active.producer_receipt.clone(),
-            auth_digest: active.auth_digest,
             artifacts: active.artifacts.clone(),
         };
         validate_prepare(&request).map_err(|e| {
@@ -1197,33 +942,6 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
         {
             return Err(PartialWithdrawalPayoutError::Snapshot(
                 "active candidate id or asset lane differs from its proof artefacts".into(),
-            ));
-        }
-        if active.finalize_confirmation.is_some() && active.finalize_broadcast.is_none() {
-            return Err(PartialWithdrawalPayoutError::Snapshot(
-                "snapshot confirms manager finalization without its broadcast intent".into(),
-            ));
-        }
-        verify_tx_hashes(
-            &active.finalize_tx_hashes,
-            active.finalize_broadcast.is_some(),
-            "manager-finalization",
-        )?;
-        if active.finalize_broadcast.as_ref().is_some_and(|intent| {
-            intent.caller == Address::default()
-                || intent.calldata_hash == Bytes32::default()
-                || intent.credit_before != U256::default()
-        }) {
-            return Err(PartialWithdrawalPayoutError::Snapshot(
-                "snapshot contains an invalid manager-finalization intent".into(),
-            ));
-        }
-        if (active.payout_broadcast.is_some() || active.payout_confirmation.is_some())
-            && active.finalize_confirmation.is_none()
-        {
-            return Err(PartialWithdrawalPayoutError::Snapshot(
-                "snapshot begins a proof payout without finalized manager authorization evidence"
-                    .into(),
             ));
         }
         if active.payout_confirmation.is_some() && active.payout_broadcast.is_none() {
@@ -1297,22 +1015,6 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
             validate_payout_confirmation(active, confirmation).map_err(|e| {
                 PartialWithdrawalPayoutError::Snapshot(format!(
                     "stored payout confirmation is invalid: {e}"
-                ))
-            })?;
-        }
-        if let Some(confirmation) = &active.finalize_confirmation {
-            if !active
-                .finalize_tx_hashes
-                .contains(&confirmation.receipt.tx_hash)
-            {
-                return Err(PartialWithdrawalPayoutError::Snapshot(
-                    "manager-finalization receipt is absent from its transaction-hash journal"
-                        .into(),
-                ));
-            }
-            validate_finalize_confirmation(active, confirmation).map_err(|e| {
-                PartialWithdrawalPayoutError::Snapshot(format!(
-                    "stored manager-finalization confirmation is invalid: {e}"
                 ))
             })?;
         }
@@ -1449,12 +1151,17 @@ fn read_snapshot(path: &Path) -> Result<PayoutSnapshot, PartialWithdrawalPayoutE
     file.read_to_end(&mut bytes).map_err(|e| {
         PartialWithdrawalPayoutError::Snapshot(format!("read {}: {e}", path.display()))
     })?;
+    let version = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
     if &bytes[..16] != SNAPSHOT_MAGIC {
+        if bytes[..14] == SNAPSHOT_MAGIC_FAMILY[..] && version < PARTIAL_WITHDRAWAL_PAYOUT_VERSION {
+            return Err(PartialWithdrawalPayoutError::Snapshot(
+                retired_flow_snapshot_message(path, version),
+            ));
+        }
         return Err(PartialWithdrawalPayoutError::Snapshot(
             "bad snapshot magic".into(),
         ));
     }
-    let version = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
     if version != PARTIAL_WITHDRAWAL_PAYOUT_VERSION {
         return Err(PartialWithdrawalPayoutError::Snapshot(format!(
             "unsupported snapshot version {version}"
@@ -1475,6 +1182,21 @@ fn read_snapshot(path: &Path) -> Result<PayoutSnapshot, PartialWithdrawalPayoutE
     serde_json::from_slice(payload).map_err(|e| {
         PartialWithdrawalPayoutError::Snapshot(format!("decode snapshot payload: {e}"))
     })
+}
+
+/// The refusal for a journal written by the retired settlement-manager flow. Its candidate
+/// identity, phases and stored receipts (manager finalization, IPW2 authorization observations)
+/// have no meaning under proof-only payout, so it is never reinterpreted.
+fn retired_flow_snapshot_message(path: &Path, version: u32) -> String {
+    format!(
+        "{} is a version-{version} payout journal written by the retired settlement-manager \
+         partial-withdrawal flow (pw-submit / finalizePartialWithdrawal / IPW2 authorization); \
+         this build (version {PARTIAL_WITHDRAWAL_PAYOUT_VERSION}) pays a burn with its withdrawal \
+         proof alone and refuses to reinterpret that journal. Reconcile its L1 state by hand \
+         (withdrawalNullifierUsed for its nullifier, the recipient's pending credit), then move \
+         the file aside before re-running pw-finalize",
+        path.display()
+    )
 }
 
 fn persist_snapshot(
@@ -1576,5 +1298,144 @@ impl Drop for SnapshotLock {
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn anchor() -> BlockProducerAnchor {
+        BlockProducerAnchor {
+            generation: 1,
+            entry_hash: Bytes32::default(),
+            block_number: 1,
+            timestamp: 1,
+            extended_state_commitment: Bytes32::default(),
+            bp_sig_chain: Bytes32::default(),
+        }
+    }
+
+    /// The resume decision does not validate artefacts, so a structurally minimal candidate is
+    /// enough to pin the journal x nullifier state machine.
+    fn candidate() -> PartialWithdrawalCandidate {
+        PartialWithdrawalCandidate {
+            candidate_id: Bytes32::default(),
+            chain_id: 31337,
+            rollup: Address::default(),
+            channel_id: ChannelId::default(),
+            signed_head_digest: Bytes32::default(),
+            burn_base_nonce: 1,
+            producer_receipt: BlockProducerReceipt {
+                request_id: "burn".into(),
+                generation: 1,
+                entry_hash: Bytes32::default(),
+                block_number: 1,
+                timestamp: 1,
+                extended_state_commitment: Bytes32::default(),
+                bp_sig_chain: Bytes32::default(),
+            },
+            lane: PartialWithdrawalLane::Native,
+            artifacts: PartialWithdrawalProofArtifacts {
+                withdrawal: Withdrawal::default(),
+                withdrawal_prover: Address::default(),
+                payout_json: String::new(),
+                withdrawal_mle_json: String::new(),
+                producer_anchor: anchor(),
+                metrics: PartialWithdrawalProofMetrics {
+                    single_withdrawal_millis: 0,
+                    withdrawal_chain_millis: 0,
+                    withdrawal_final_millis: 0,
+                    wrap_mle_millis: 0,
+                    single_withdrawal_proof_bytes: 0,
+                    withdrawal_chain_proof_bytes: 0,
+                    withdrawal_final_proof_bytes: 0,
+                    mle_json_bytes: 0,
+                    peak_rss_bytes: None,
+                },
+            },
+            payout_broadcast: None,
+            payout_tx_hashes: Vec::new(),
+            payout_confirmation: None,
+            recipient_pull_delegated: false,
+            pull_broadcast: None,
+            pull_tx_hashes: Vec::new(),
+            pull_confirmation: None,
+        }
+    }
+
+    fn intent() -> BroadcastIntent {
+        BroadcastIntent {
+            caller: Address::default(),
+            start_block: 1,
+            caller_nonce: 0,
+            calldata_hash: Bytes32::default(),
+            credit_before: U256::default(),
+        }
+    }
+
+    fn state(nullifier_used: bool) -> PartialWithdrawalOnchainState {
+        PartialWithdrawalOnchainState { nullifier_used }
+    }
+
+    #[test]
+    fn partial_withdrawal_payout_resume_is_proof_only() {
+        let fresh = candidate();
+        // Nothing journaled and the nullifier unused: the only safe action is a fresh payout.
+        assert_eq!(
+            partial_withdrawal_resume_action(&fresh, state(false)).unwrap(),
+            PartialWithdrawalResumeAction::BroadcastPayout
+        );
+        // A used nullifier with no pre-broadcast journal is never adopted as this candidate's.
+        assert!(matches!(
+            partial_withdrawal_resume_action(&fresh, state(true)),
+            Err(PartialWithdrawalPayoutError::Conflict(_))
+        ));
+
+        // A journaled intent is reconciled whether or not it has been mined yet.
+        let mut journaled = candidate();
+        journaled.payout_broadcast = Some(intent());
+        for used in [false, true] {
+            assert_eq!(
+                partial_withdrawal_resume_action(&journaled, state(used)).unwrap(),
+                PartialWithdrawalResumeAction::ReconcilePayout
+            );
+        }
+    }
+
+    #[test]
+    fn partial_withdrawal_payout_refuses_a_retired_manager_flow_journal() {
+        let dir = std::env::temp_dir().join(format!(
+            "intmax-pw-payout-legacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pw_payout_store.bin");
+        // Exactly the v3 header the manager-finalization flow wrote.
+        let payload = br#"{"version":3,"active":null,"completedNullifiers":[]}"#;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"INTMAX_PAYOUT_03");
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&keccak_hash::keccak(payload).0);
+        bytes.extend_from_slice(payload);
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = match PartialWithdrawalPayoutStore::open(&path) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a retired manager-flow journal must not open"),
+        };
+        assert!(
+            error.contains("retired settlement-manager") && error.contains("version-3"),
+            "unexpected refusal: {error}"
+        );
+        // Refusal is read-only: the old journal is left byte-for-byte for manual reconciliation.
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

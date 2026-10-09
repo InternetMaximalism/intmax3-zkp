@@ -12,7 +12,6 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 contract RetiredMsuRegistry is IChannelRegistry {
-    mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
     mapping(uint32 => bytes32) public channelMemberSetCommitment;
     mapping(uint32 => uint8) public channelBpMemberSlot;
     mapping(uint32 => bytes32) public channelBpPkG;
@@ -31,7 +30,6 @@ contract RetiredMsuRegistry is IChannelRegistry {
     function tokenAddressOf(uint32) external pure returns (IERC20) {
         return IERC20(address(0));
     }
-    function authorizePartialWithdrawal(bytes32) external {}
 }
 
 /// The direct in-place MSU prototype is retired. Its legacy selector is absent from production;

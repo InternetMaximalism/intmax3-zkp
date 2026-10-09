@@ -253,12 +253,11 @@ contract IntmaxRollup {
 
     event WithdrawalCredited(address indexed recipient, uint256 amount);
 
-    /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
-    event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager);
     event SettlementManagerRegistered(address indexed manager);
     event BlockProducerSet(address indexed producer, bool allowed);
     event BlockProducerAdminSet(address indexed admin);
 
+    /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
     event NativeWithdrawn(address indexed recipient, uint256 amount, bytes32 indexed nullifier, uint64 blockNumber);
 
     error WithdrawalExtCommitmentMismatch();
@@ -267,8 +266,6 @@ contract IntmaxRollup {
     error WithdrawalNullifierUsed();
     error WithdrawalNotEthToken();
     error WithdrawalEmptySet();
-    error PartialWithdrawalNotAuthorized();
-    error NotRegisteredSettlementManager();
     // --- Multi-token ERC-20 escrow (multitoken Phase 3, detail2 §N-7, TM-1/4/10) ---
     /// Token index 0 is permanently reserved for native ETH and can never map to an ERC-20.
     error TokenIndexZeroReservedForEth();
@@ -429,13 +426,10 @@ contract IntmaxRollup {
     ///           most once. Checked-then-set (CEI) before any value is credited.
     mapping(bytes32 => bool) public withdrawalNullifierUsed;
 
-    /// @notice Authorized partial-withdrawal auth digests.
-    /// SECURITY: a burn withdrawal (auxData != 0) is only paid out if the auth digest
-    ///           keccak256("IPW2" || recipient || tokenIndex || amount || auxData)
-    ///           was authorized by a registered settlement manager via a finalized close proof.
-    mapping(bytes32 => bool) public partialWithdrawalAuthorized;
-
-    /// @notice Registered settlement managers that may call `authorizePartialWithdrawal`.
+    /// @notice Settlement managers registered by the deployer (`registerSettlementManager`).
+    /// @dev Registration record only: no payout path reads it. A partial withdrawal (burn) is an
+    ///      ordinary inter-channel send to `BURN_CHANNEL_ID` and is paid by `withdrawNative` /
+    ///      `withdrawERC20` on its base withdrawal proof alone; see `_consumeWithdrawalGuard`.
     mapping(address => bool) public isRegisteredSettlementManager;
 
     /// @dev One audited close materializer per Rollup. It stores exact channel→Manager bindings
@@ -782,9 +776,9 @@ contract IntmaxRollup {
         }
     }
 
-    /// @notice Register a settlement Manager. Legacy partial-withdrawal mocks without the immutable
-    ///         `closeFundingMaterializer()` getter retain their historical authorization behavior;
-    ///         a real Manager is additionally bound atomically to the set-once close satellite.
+    /// @notice Register a settlement Manager. A real Manager (one exposing the immutable
+    ///         `closeFundingMaterializer()` getter) is bound atomically to the set-once close
+    ///         satellite; an address without that getter is only recorded.
     function registerSettlementManager(address manager) external {
         _requireDeployer();
         isRegisteredSettlementManager[manager] = true;
@@ -882,36 +876,29 @@ contract IntmaxRollup {
         kzgVerifier = v;
     }
 
-    /// @notice Authorize a partial-withdrawal auth digest. Only callable by registered settlement
-    ///         managers after a close proof (proving N-of-N channel consent) has been verified and
-    ///         the challenge period has elapsed.
-    /// @param authDigest keccak256("IPW2" || recipient || tokenIndex || amount || auxData)
-    function authorizePartialWithdrawal(bytes32 authDigest) external {
-        if (!isRegisteredSettlementManager[msg.sender]) revert NotRegisteredSettlementManager();
-        partialWithdrawalAuthorized[authDigest] = true;
-        emit PartialWithdrawalAuthorized(authDigest, msg.sender);
-    }
-
     // REMOVED (2026-07-28, doc/tasks/pw-auth-threat-model.md): `claimAuthorizedWithdrawal(Withdrawal)`.
     //
     // SECURITY (why it is gone, so it is never re-added): it paid native ETH out of the GLOBAL
-    // `totalEscrowed` after checking ONLY `partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]`.
-    // It never called `_verifyWithdrawalSet`, so NOTHING proved the withdrawal's economics. The
-    // historical v1 authorization bound only `withdrawal.auxData` to the cosigned close state;
-    // caller-supplied economics then flowed into the digest. IPW2/IMD2 now authenticate source
-    // channel, base nonce, recipient, token, and amount, but intentionally do not authenticate the
-    // proof-derived nullifier. A proof-free payout would therefore still omit the base withdrawal
-    // proof that establishes entitlement and single-use identity, so it must not be restored.
+    // `totalEscrowed` without calling `_verifyWithdrawalSet`, so NOTHING proved the withdrawal's
+    // economics, entitlement or single-use identity. Every payout must go through `withdrawNative` /
+    // `withdrawERC20`, where the economics come from the VERIFIED base withdrawal proof.
     //
-    // The IPW2 authorization is a SECOND FACTOR (channel consent), not a payout authority. It is
-    // used correctly in `withdrawNative` / `withdrawERC20`, where the economics come from the
-    // VERIFIED withdrawal proof and the flag can only veto, never supply, a field. Burn payouts must
-    // go through those entry points. Consequently a forged authorization is inert — exactly as it
-    // already was for ERC-20, which never had a proof-free door.
-    //
-    // CONSEQUENCE, ACCEPTED: the proof-backed base half of partial withdrawal was never built
-    // (`cmd_partial_withdraw`, doc/tasks/todo.md:90), so PW payout is NOT functional end to end
-    // until it lands. A correct incomplete implementation beats an incorrect complete one.
+    // REMOVED (2026-10-09): the IPW2 partial-withdrawal latch (`authorizePartialWithdrawal`,
+    // `partialWithdrawalAuthorized`) and the settlement-manager partial-withdrawal path that set it.
+    // A partial withdrawal (burn) is an ordinary inter-channel send whose destination is the
+    // reserved `BURN_CHANNEL_ID` with an L1 recipient, and it is paid by the base withdrawal proof
+    // alone, exactly as an inter-channel transfer is consumed by a ReceiveTransfer proof:
+    //   - Channel consent is already enforced by validity. Every channel update binds the WHOLE
+    //     registered member set's signatures over a digest that includes the block's tx tree root
+    //     (`update_channel_tree.rs`), so a withdrawal proof anchored on a finalized root already
+    //     implies N-of-N consent for that exact transfer; a second, manager-issued flag added
+    //     nothing.
+    //   - Close-vs-burn ordering (no double draw) is enforced by the `CloseFundingMaterializer`
+    //     journal: a post to a frozen channel reverts (`recordPost`), and a close requires backing
+    //     anchored at or after the channel's last posted block (`requireSignedHeadBacking`). Either
+    //     the burn block is posted first (a close at a pre-burn state cannot be backed) or the close
+    //     freezes first (the burn block can never be posted, the burn is never paid, and the close
+    //     returns the amount).
 
     // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
@@ -1795,9 +1782,8 @@ contract IntmaxRollup {
     /// @notice Pay out ERC-20 leaves for a wrapped `WithdrawalCircuit` proof (multitoken Phase 3,
     ///         §N-7). MIRRORS `withdrawNative` exactly — the SAME withdrawal-set verification
     ///         (`_verifyWithdrawalSet`: real MLE/WHIR under the withdrawal VK, finalized-root
-    ///         anchor, chain re-fold → pis_hash binding), the SAME per-leaf nullifier single-use,
-    ///         and the SAME IPW2 partial-withdrawal authorization gate (the auth digest already
-    ///         binds `tokenIndex`) — only the asset dispatch differs.
+    ///         anchor, chain re-fold → pis_hash binding) and the SAME per-leaf nullifier
+    ///         single-use — only the asset dispatch differs.
     ///
     /// SECURITY:
     ///   • Per leaf: `tokenIndex != 0` AND registered (TM-10b) — the ETH guard in `withdrawNative`
@@ -1860,41 +1846,15 @@ contract IntmaxRollup {
         }
     }
 
-    /// @dev IPW2 partial-withdrawal auth digest over the proof-verified withdrawal economics and
-    ///      IMD2 descriptor. The proof-only nullifier is deliberately excluded: the manager cannot
-    ///      authenticate it, while the payout path separately enforces its single use. Shared by
-    ///      the ETH and ERC-20 payout paths. The proof-free consumer of this digest
-    ///      (`claimAuthorizedWithdrawal`) was removed 2026-07-28.
-    function _withdrawalAuthDigest(Withdrawal calldata w) private pure returns (bytes32) {
-        address recipient = w.recipient;
-        uint32 tokenIndex = w.tokenIndex;
-        uint256 amount = w.amount;
-        bytes32 auxData = w.auxData;
-        bytes32 result;
-        assembly ("memory-safe") {
-            let ptr := mload(0x40)
-            mstore(ptr, shl(224, 0x49505732)) // "IPW2"
-            mstore(add(ptr, 4), shl(96, recipient))
-            mstore(add(ptr, 24), shl(224, tokenIndex))
-            mstore(add(ptr, 28), amount)
-            mstore(add(ptr, 60), auxData)
-            result := keccak256(ptr, 92)
-            mstore(0x40, add(ptr, 96))
-        }
-        return result;
-    }
-
-    /// @dev Shared native/ERC-20 single-use guard. IPW2 commits recipient, token, amount and aux;
-    ///      the already-verified withdrawal proof supplies those economics and the independent
-    ///      nullifier. The authorization is consumed before accounting, with transaction rollback
-    ///      restoring both writes if a later escrow ceiling fails.
+    /// @dev Shared native/ERC-20 single-use guard: the proof-derived nullifier is checked then set
+    ///      before accounting, and transaction rollback restores it if a later escrow ceiling fails.
+    ///      A burn leaf (`auxData != 0`, the IMD2 partial-withdrawal descriptor) needs nothing more:
+    ///      its economics come from the verified base withdrawal proof on a finalized root, whose
+    ///      validity already carries the channel's N-of-N consent to the burn transfer. Ordering
+    ///      against a channel close is the `CloseFundingMaterializer` journal's job (see the
+    ///      REMOVED (2026-10-09) note above `postBlock`).
     function _consumeWithdrawalGuard(Withdrawal calldata w) private {
         if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
-        if (w.auxData != bytes32(0)) {
-            bytes32 authDigest = _withdrawalAuthDigest(w);
-            if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
-            delete partialWithdrawalAuthorized[authDigest];
-        }
         withdrawalNullifierUsed[w.nullifier] = true;
     }
 

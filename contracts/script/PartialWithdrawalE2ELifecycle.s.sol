@@ -3,14 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title PartialWithdrawalE2ELifecycle
 /// @notice Local-devnet steps of `tests/partial_withdrawal_e2e.rs` that need a Solidity ABI
-///         encoder for large calldata (a 130 KB compact validity proof, its KZG sidecars and the
-///         whole-vector backing proof cannot be passed as `cast` argv on every platform).
+///         encoder for large calldata (a 130 KB compact validity proof and its KZG sidecars cannot
+///         be passed as `cast` argv on every platform). The burn itself is then paid by
+///         `IntmaxRollup.withdrawNative` / `withdrawERC20` on its base withdrawal proof alone
+///         (`RunPartialWithdrawalPayout.s.sol`); no settlement-manager step exists.
 /// @dev The blob-carrying `postBlockAndSubmit` transactions are sent by the Rust test with
 ///      `cast mktx --blob` (EIP-4844 blobs cannot be attached by a forge script). Every artifact is
 ///      read from `PW_E2E_DIR`, a directory the test writes under the gitignored
@@ -65,19 +65,5 @@ contract PartialWithdrawalE2ELifecycle is Script {
         require(ok, "finalize returned false (validity MLE verification or PI binding failed)");
         require(_rollup().latestFinalizedStateRoot() == finalRoot, "finalized root mismatch");
         console2.log("PW_E2E_FINALIZED_BLOCK:", _rollup().latestFinalizedBlockNumber());
-    }
-
-    /// @notice Attest the whole-vector CloseAssetBacking proof of the post-burn head, which
-    ///         `submitPartialWithdrawalIntent` requires through `requireSignedHeadBacking`.
-    function attestBacking() external {
-        require(block.chainid == 31337, "local-devnet only: partial-withdrawal E2E");
-        ChannelSettlementManager manager = ChannelSettlementManager(payable(vm.envAddress("MANAGER")));
-        CloseFundingMaterializer materializer = CloseFundingMaterializer(address(manager.closeFundingMaterializer()));
-        bytes memory backingProof = FixtureLib.parseCompactProofV2(_artifact("pw_backing_mle.json"));
-
-        vm.startBroadcast();
-        materializer.attestSignedHeadBacking(manager, backingProof);
-        vm.stopBroadcast();
-        console2.log("PW_E2E_BACKING_ATTESTED materializer:", address(materializer));
     }
 }

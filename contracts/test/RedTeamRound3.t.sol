@@ -6,16 +6,16 @@ import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
 /// @title RedTeamRound3
-/// @notice ROUND-3 adversarial probes against the ROUND-2 guards A1 / A2 / A4 in
+/// @notice ROUND-3 adversarial probes against the ROUND-2 guards A1 / A2 in
 ///         `ChannelSettlementManager`. Every `test_R3_BREAK_*` PASSES by demonstrating an attack
 ///         the round-2 guard does NOT stop (the assertion IS the exploit). Every `test_R3_REFUTED_*`
 ///         PASSES by confirming a guard holds against an attack that was tried and failed.
+///         The A3 (authorized-burn high-water) and A4 (partial-withdrawal cancel) probes were
+///         removed on 2026-10-09 together with the Manager's partial-withdrawal path: a burn is paid
+///         by the rollup on its base withdrawal proof alone and ordered against a close by the
+///         `CloseFundingMaterializer` journal (see `SignerIndependentExit.t.sol`).
 contract RedTeamRound3Test is CloseSettlementBase {
-    bytes32 internal constant TX_LEAF = keccak256("r3_burn_tx_leaf");
-    bytes32 internal constant PREV_CHAIN = keccak256("r3_prev_settled_tx_chain");
-    bytes32 internal constant PW_NULLIFIER = keccak256("r3_pw_nullifier");
     uint32 internal constant TOKEN_INDEX = 0;
-    uint256 internal constant PW_AMOUNT = 5;
 
     address internal eve = makeAddr("eve_withholding_coordinator");
 
@@ -27,7 +27,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
             ? pending.finalStateVersion
-            : manager.pendingPartialWithdrawalStateVersion();
+            : 0;
         return CloseTestLib.proofWithLimbs(
             verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
@@ -58,199 +58,20 @@ contract RedTeamRound3Test is CloseSettlementBase {
         intent.finalChannelStateDigest = keccak256(abi.encodePacked("final_state", epoch, stateVersion));
     }
 
-    function _baseRecipient(address recipient) internal pure returns (bytes32) {
-        return bytes32((uint256(2) << 248) | uint256(uint160(recipient)));
-    }
-
-    function _burnDescriptor() internal view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(0x494d4432),
-                uint32(CHANNEL_ID),
-                PW_BASE_NONCE,
-                TX_LEAF,
-                _baseRecipient(alice),
-                TOKEN_INDEX,
-                PW_AMOUNT
-            )
-        );
-    }
-
-    function _authorizedWithdrawal()
-        internal view returns (ChannelSettlementManager.AuthorizedWithdrawal memory)
-    {
-        return ChannelSettlementManager.AuthorizedWithdrawal({
-            recipient: alice,
-            tokenIndex: TOKEN_INDEX,
-            amount: PW_AMOUNT,
-            baseNonce: PW_BASE_NONCE,
-            nullifier: PW_NULLIFIER,
-            auxData: _burnDescriptor(),
-            txLeaf: TX_LEAF
-        });
-    }
-
-    function _expectedAuthDigest() internal view returns (bytes32) {
-        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
-        return keccak256(
-            abi.encodePacked(
-                bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData
-            )
-        );
-    }
-
-    function _pwIntent(uint64 epoch, uint64 stateVersion)
-        internal view returns (ChannelSettlementManager.CloseIntent memory intent)
-    {
-        intent = _intentAt(epoch, stateVersion);
-        intent.channelFundAmounts[0] = DEFAULT_FUND_AMOUNT - PW_AMOUNT;
-        intent.finalSettledTxChain =
-            keccak256(abi.encodePacked(uint32(0x494d5443), PREV_CHAIN, _burnDescriptor()));
-    }
-
-    function _submitPw(uint64 epoch, uint64 stateVersion) internal {
-        ChannelSettlementManager.CloseIntent memory intent = _pwIntent(epoch, stateVersion);
-        manager.submitPartialWithdrawalIntent(
-            intent, _closeProof(intent), PREV_CHAIN, _authorizedWithdrawal()
-        );
-    }
-
-    function _submitPwAndElapse(uint64 epoch, uint64 stateVersion) internal {
-        _submitPw(epoch, stateVersion);
-        vm.warp(vm.getBlockTimestamp() + CHALLENGE_PERIOD + 1);
-    }
-
     // ════════════════════════════════════════════════════════════════════════
-    // BREAK 1 — A1 x A3: the C-3 permanent brick, reintroduced.  *** FIXED ***
+    // BREAK 1 — A1 x A3: the C-3 permanent brick.  *** MOOT (2026-10-09) ***
     //
-    //   THE ATTACK AS FOUND. A3's non-brick argument was "two permissionless
-    //   remedies remain open ... challenge-replace it while the window is open,
-    //   or `cancelClose` it, which has no window bound at all ... the material
-    //   they need provably exists". A1's manager-lifetime floor CONSUMES exactly
-    //   that material: once a cancel has been spent at version v, no later cancel
-    //   at v is admissible EVER. Combined with an A3 refusal after the replacement
-    //   window shut, every exit from `ClosePending` closed simultaneously.
-    //
-    //   THE FIX, round 3 (R3-1): `finalizeClose` settled the stale close and
-    //   deducted the burn from its cap. THE FIX NOW (exact-vector exit): the
-    //   version-dependent refusal lives at ADMISSION only. `submitCloseIntent`
-    //   refuses a close below the authorized burn state before anything is
-    //   installed (`CloseOlderThanAuthorizedBurn`), so the latch that made
-    //   `ClosePending` terminal can never be armed; the burn state itself (or a
-    //   strictly newer whole state) is admissible, and `finalizeClose` keeps NO
-    //   version-dependent revert. The four latches cannot conjoin, and no cap is
-    //   ever synthesized from two state generations.
+    //   A3 was the Manager's authorized-burn high-water mark; combined with A1's
+    //   spent cancel floor it could make `ClosePending` terminal. The Manager no
+    //   longer has a partial-withdrawal path or any burn mark, so no
+    //   version-dependent refusal exists at close admission or finalization. The
+    //   two controls below pin that the A1 floor alone never blocks an exit and
+    //   that a close settles at its own whole-state vector.
     // ════════════════════════════════════════════════════════════════════════
 
-    /// BLOCKED (passes = the attack no longer works). The setup that used to wedge the channel is
-    /// preserved; only step ORDER and verdict changed, because a v28 close can no longer be
-    /// installed once the v30 burn exists — so the A1 floor must be spent first.
-    ///
-    /// ACTORS: `alice` (any `isMemberRecipient` party). SUPPLY MODEL: the newest N-of-N-signed
-    /// state in existence is v30, and v28 is an older signed state every member retains. No party
-    /// can manufacture v31.
-    ///
-    /// ORDERING:
-    ///   1. a stale close at v28 is submitted and cancelled with the head v30
-    ///      -> `highestCancelledRevivedStateVersion = 30`      [A1's floor, AT the supply top]
-    ///   2. a burn committed in the head state v30 is authorized while the channel is Active
-    ///      -> `authorizedBurn{Epoch,StateVersion} = (9, 30)`  [A3's high-water mark]
-    ///   3. the SAME stale close at v28 is submitted again -> REFUSED at admission, nothing installed
-    ///   4. the burn state v30 — the only material at the top — is installed and left to run out
-    ///
-    /// RESULT: the three OTHER latches are exactly as armed as when the attack landed --
-    /// `cancelClose(v30)` reverts (`CloseNotNewer`: v30 is not newer than the pending v30),
-    /// `submitCloseIntent(v30)` reverts `ChallengeWindowClosed`, `requestClose` reverts
-    /// `ChannelAlreadyFrozen` -- and it does not matter, because `finalizeClose` SETTLES the one
-    /// authenticated whole state, whose vector already excludes the burn.
-    function test_R3_BREAK_A1xA3_staleCloseNeverInstallsSoClosePendingIsNotTerminal() external {
-        // ── 1. a stale close at v28; the honest holder of v30 cancels it. This is the NORMAL,
-        //      intended use of `cancelClose` -- and it spends the top of the version supply.
-        _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory stale1 = _intentAt(9, 28);
-        manager.submitCloseIntent(stale1, _closeProof(stale1));
-        bytes32 d1 = manager.computeCloseIntentDigest(stale1);
-        manager.cancelClose(_cancelRequest(d1, 30), _cancelProof(_cancelRequest(d1, 30)));
-        assertEq(manager.highestCancelledRevivedStateVersion(), 30, "A1 floor now at the supply top");
-        assertEq(
-            uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active),
-            "channel revived"
-        );
-
-        // ── 2. the honest burn at the head state v30 is authorized (channel Active).
-        _submitPwAndElapse(9, 30);
-        manager.finalizePartialWithdrawal();
-        assertEq(manager.authorizedBurnStateVersion(), 30, "A3 mark at the head");
-        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
-
-        // ── 3. the identical stale close is submitted again: refused before it is installed.
-        _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory stale2 = _intentAt(9, 28);
-        bytes memory stale2Proof = _closeProof(stale2);
-        vm.expectRevert(ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
-        manager.submitCloseIntent(stale2, stale2Proof);
-        assertFalse(manager.getPendingClose().active, "the latch is never armed: nothing installed");
-        assertEq(
-            uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
-            "era open, no pending close"
-        );
-        assertEq(manager.finalizedChannelFundAmount(TOKEN_INDEX), 0, "no stale cap created");
-
-        // ── 4. the burn state itself is admissible, and the window is allowed to expire.
-        ChannelSettlementManager.CloseIntent memory head = _pwIntent(9, 30);
-        manager.submitCloseIntent(head, _closeProof(head));
-        bytes32 d2 = manager.computeCloseIntentDigest(head);
-        uint64 horizon = manager.closeChallengeHorizon();
-        uint64 absoluteEnd = horizon + manager.MIN_CLOSE_RESPONSE_SECS();
-        vm.warp(uint256(absoluteEnd) + 1);
-
-        // ── the three OTHER latches remain exactly as armed as when the attack landed. ──────
-        // (b) the newest material that exists cannot cancel a close AT that same state.
-        ChannelSettlementManager.CancelCloseRequest memory rescue = _cancelRequest(d2, 30);
-        bytes memory rescueProof = _cancelProof(rescue);
-        vm.expectRevert(ChannelSettlementManager.CloseNotNewer.selector);
-        manager.cancelClose(rescue, rescueProof);
-
-        // (c) the replacement lane is shut past the fixed response-tail end -- even with the head.
-        ChannelSettlementManager.CloseIntent memory again = _pwIntent(9, 30);
-        bytes memory againProof = _closeProof(again);
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(again, againProof);
-
-        // (d) no new era can be opened.
-        uint64 freezeNonce = manager.currentCloseFreezeNonce();
-        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
-        vm.prank(alice);
-        vm.expectRevert(ChannelSettlementManager.ChannelAlreadyFrozen.selector);
-        manager.requestClose(freezeNonce, cancellationFloor);
-
-        // ── (a) THE EXIT. `finalizeClose` has no version-dependent revert: it settles.
-        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-        assertEq(
-            uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "ClosePending is NOT terminal; finalizeClose is always a reachable exit"
-        );
-        assertEq(manager.finalizedStateVersion(), 30, "the whole burn state settled");
-        assertFalse(manager.getPendingClose().active, "pendingClose consumed");
-
-        // ── and the double-draw A3 existed to stop is STILL stopped: the settled cap is the burn
-        //    state's own post-burn vector, not a pre-burn vector with a deduction bolted on.
-        assertEq(
-            manager.finalizedChannelFundAmount(TOKEN_INDEX),
-            DEFAULT_FUND_AMOUNT - PW_AMOUNT,
-            "the settled vector already excludes the authorized burn"
-        );
-        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
-    }
-
-    /// MUTATION PIN for the R3-1 fix. The deduction must be REAL, not a no-op: with the same facts
-    /// but NO authorized burn, the very same stale close settles at the FULL declared cap. The
-    /// difference between the two caps is exactly the burn amount, so a deduction that silently did
-    /// nothing (or that deducted from the wrong base token) fails here.
-    function test_R3_FIXED_A1xA3_deductionIsExactlyTheAuthorizedBurn() external {
+    /// A stale close with no other activity settles at its own FULL declared cap: the Manager never
+    /// adjusts a settled vector.
+    function test_R3_A1_staleCloseSettlesAtItsOwnFullDeclaredCap() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 28);
         manager.submitCloseIntent(stale, _closeProof(stale));
@@ -259,45 +80,11 @@ contract RedTeamRound3Test is CloseSettlementBase {
         assertEq(
             manager.finalizedChannelFundAmount(TOKEN_INDEX),
             DEFAULT_FUND_AMOUNT,
-            "no burn authorized => no deduction"
+            "the settled cap is the close state's own vector"
         );
     }
 
-    /// CONTROL for BREAK 1, isolating A1. Identical facts, except the A1 floor is never spent.
-    ///
-    /// Round 2 used this control to argue "the A3 refusal IS a deferral because `cancelClose` at
-    /// v30 rescues the channel" -- which A1 then falsified. Under the exact-vector exit the premise
-    /// is moot in the other direction: the stale close is refused at admission REGARDLESS of the
-    /// floor (it reads nothing A1 writes), so there is never a pending stale close to rescue, and
-    /// the era still has its exit without any cancel -- the burn state itself settles.
-    function test_R3_BREAK_A1xA3_control_refusalIsIndependentOfTheSpentFloor() external {
-        _submitPwAndElapse(9, 30);
-        manager.finalizePartialWithdrawal();
-
-        _requestCloseAndElapseGrace();
-        assertEq(manager.highestCancelledRevivedStateVersion(), 0, "floor unspent");
-        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 28);
-        bytes memory staleProof = _closeProof(stale);
-        vm.expectRevert(ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
-        manager.submitCloseIntent(stale, staleProof);
-        assertFalse(manager.getPendingClose().active, "refused with the floor unspent too");
-        assertEq(manager.highestCancelledRevivedStateVersion(), 0, "the refusal touches no floor");
-
-        // No cancel is needed for the exit: the burn state is admitted and settles.
-        ChannelSettlementManager.CloseIntent memory head = _pwIntent(9, 30);
-        manager.submitCloseIntent(head, _closeProof(head));
-        vm.warp(uint256(manager.closeChallengeHorizon()) + manager.MIN_CLOSE_RESPONSE_SECS() + 1);
-        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-        assertEq(
-            uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "the era exits through the one authenticated whole state"
-        );
-        assertEq(manager.finalizedChannelFundAmount(TOKEN_INDEX), DEFAULT_FUND_AMOUNT - PW_AMOUNT);
-    }
-
-    /// CONTROL for BREAK 1, isolating A3. Identical facts, except no burn is ever authorized. The
-    /// spent A1 floor alone is harmless: the stale close simply settles.
+    /// CONTROL for BREAK 1: the spent A1 floor alone is harmless; the stale close simply settles.
     function test_R3_BREAK_A1xA3_control_withoutTheBurnMarkTheCloseSettles() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory stale1 = _intentAt(9, 28);
@@ -534,162 +321,6 @@ contract RedTeamRound3Test is CloseSettlementBase {
         );
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // BREAK 3 — A4: the per-burn mark disarms the DEFENDER, not the attacker.
-    //           *** MITIGATED (R3-3) ***
-    //
-    //   THE ATTACK AS FOUND. Before A4, `cancelPartialWithdrawal` compared only
-    //   against the PENDING record, so an honest member could replay ONE cancel
-    //   proof against every re-submission of the same stale burn. A4 removed
-    //   exactly that replay -- while re-submitting the burn intent stayed free
-    //   (the single-use chainKey guard was deliberately deleted). The attrition
-    //   was therefore inverted: the attacker needed no new material, the defender
-    //   needed a strictly newer N-of-N-signed state EVERY round.
-    //
-    //   THE FIX (round 3, R3-3), and its honest limit. A permanent bar on
-    //   re-submitting a cancelled burn is NOT available: a burn can only ever be
-    //   submitted at its own state version (the descriptor must be the LAST push
-    //   in the proof-bound settled-tx chain), so such a bar permanently strands an
-    //   already-debited burn -- the R3-1 lock class in a new lane. Instead the
-    //   re-submission is ADMITTED but carries a LONGER window: a cancel arms
-    //   `cancelledPartialWithdrawalReviewUntil[burnKey] = now + 2*challengePeriod`,
-    //   and a re-submission of that logical burn takes it as the floor on its deadline.
-    //   Nothing is refused, nothing is stranded, and each attrition round is paid
-    //   for in the ATTACKER's wall-clock instead of the DEFENDER's material.
-    //
-    //   It is a mitigation, not a block, and that is correct: authorizing a
-    //   chain-bound burn is the RIGHT outcome. See the corrected claim in
-    //   `cancelPartialWithdrawal` -- source channel/base nonce/recipient/token/amount are
-    //   IMD2-pinned to the
-    //   N-of-N-signed chain, an append-only entry is not un-committed by a later
-    //   state, and an authorization pays nothing on its own (every payout needs a
-    //   real withdrawal proof and a single-use proof-derived nullifier). The cancel
-    //   lane is a LIVENESS aid against a griefer's wrong-nullifier submission, not
-    //   a soundness gate. What made R3-3 dangerous was that the forced burn raised
-    //   A3's mark and armed R3-1; R3-1's deduction removes that entirely.
-    // ════════════════════════════════════════════════════════════════════════
-
-    /// BLOCKED-IN-ROUND-2 (passes = the round-2 attrition no longer runs at round-2 speed). Body
-    /// preserved VERBATIM through the setup; only the verdict changed.
-    ///
-    /// ACTORS: `eve` pushing a stale burn at v20, the honest members holding the head v30.
-    ///
-    /// ORDERING: eve submits the stale burn; the honest side cancels it with v30 (the ONLY material
-    /// they have). Eve re-submits the byte-identical intent -- same `closeIntentDigest`, same
-    /// `authDigest`. The honest cancel at v30 is still refused by A4's own mark. But the
-    /// re-submission now inherits the review deadline the cancel armed, so eve does NOT get the burn
-    /// authorized one challenge period later: the defender has `2 * challengePeriod` from the cancel
-    /// to obtain newer material, and with it the veto lands.
-    function test_R3_BREAK_A4_attritionForcesTheStaleBurnThrough() external {
-        uint256 t0 = vm.getBlockTimestamp();
-
-        // Round 1: eve's stale burn, vetoed by the honest head state.
-        vm.prank(eve);
-        _submitPw(9, 20);
-        bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
-
-        ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
-        manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
-        assertFalse(manager.partialWithdrawalPending(), "round 1: the stale burn is vetoed");
-        assertEq(
-            manager.cancelledPartialWithdrawalRevivedVersion(burnKey),
-            30,
-            "A4 consumed the DEFENDER's material"
-        );
-        // R3-3: and it armed the review window on the logical burn key.
-        assertEq(
-            manager.cancelledPartialWithdrawalReviewUntil(burnKey),
-            t0 + 2 * CHALLENGE_PERIOD,
-            "R3-3: the cancel arms a review deadline for this logical burn"
-        );
-
-        // Round 2: the identical intent, re-submitted for free.
-        vm.prank(eve);
-        _submitPw(9, 20);
-        assertEq(manager.pendingPartialWithdrawalBurnKey(), burnKey, "logical burn key is stable");
-        assertEq(
-            manager.pendingPartialWithdrawalCloseIntentDigest(),
-            pwDigest,
-            "a burn is a historical fact: byte-identical digest"
-        );
-        // R3-3: it is ADMITTED (refusing it would strand an already-debited burn) but it inherits
-        // the review deadline instead of the ordinary one-period window.
-        assertEq(
-            manager.pendingPartialWithdrawalDeadline(),
-            t0 + 2 * CHALLENGE_PERIOD,
-            "R3-3: the re-submission carries the extended window, not a fresh short one"
-        );
-
-        // The honest side still has nothing newer than v30 right now, and A4 still refuses.
-        ChannelSettlementManager.CancelCloseRequest memory veto2 = _cancelRequest(pwDigest, 30);
-        bytes memory veto2Proof = _cancelProof(veto2);
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCancelReplay.selector);
-        manager.cancelPartialWithdrawal(veto2, veto2Proof);
-
-        // Round 2's finalize at one challenge period -- the moment the attack used to win -- is now
-        // refused: the window has not run out.
-        vm.warp(t0 + CHALLENGE_PERIOD + 1);
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizePartialWithdrawal();
-        assertFalse(
-            registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
-            "BLOCKED: the stale burn is NOT authorized on eve's schedule"
-        );
-
-        // The defender spends the extra window obtaining a strictly newer signed state (an ordinary
-        // event in a live channel) and the veto lands.
-        vm.warp(t0 + CHALLENGE_PERIOD + 2);
-        ChannelSettlementManager.CancelCloseRequest memory veto3 = _cancelRequest(pwDigest, 31);
-        manager.cancelPartialWithdrawal(veto3, _cancelProof(veto3));
-        assertFalse(manager.partialWithdrawalPending(), "round 2: the veto lands after all");
-        assertEq(manager.authorizedBurnStateVersion(), 0, "A3's mark was never raised");
-    }
-
-    /// CONTROL for BREAK 3: with A4's mark not yet set for this burn, the SAME veto succeeds, and
-    /// the FIRST submission of a burn is never delayed -- the review floor is armed only by a cancel.
-    function test_R3_BREAK_A4_control_theFirstVetoAlwaysWorks() external {
-        uint256 t0 = vm.getBlockTimestamp();
-        vm.prank(eve);
-        _submitPw(9, 20);
-        bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
-        assertEq(manager.cancelledPartialWithdrawalRevivedVersion(burnKey), 0, "mark unset");
-        assertEq(
-            manager.pendingPartialWithdrawalDeadline(),
-            t0 + CHALLENGE_PERIOD,
-            "R3-3 never delays a first submission"
-        );
-        ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
-        manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
-        assertFalse(manager.partialWithdrawalPending(), "vetoed");
-    }
-
-    /// R3-3 must not become the strand it replaces. However long the attrition runs, the burn stays
-    /// SUBMITTABLE and, absent a veto, AUTHORIZABLE: the review window only delays, it never refuses.
-    /// This is the anti-lock pin for the R3-3 guard.
-    function test_R3_FIXED_A4_reviewWindowDelaysButNeverStrands() external {
-        uint256 t0 = vm.getBlockTimestamp();
-        vm.prank(eve);
-        _submitPw(9, 20);
-        bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
-        manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
-
-        // Re-submission is ADMITTED -- never refused, whatever the cancel history.
-        vm.prank(eve);
-        _submitPw(9, 20);
-        assertTrue(manager.partialWithdrawalPending(), "the burn is re-submittable, not stranded");
-
-        // Past the extended window, with no veto, it authorizes normally.
-        vm.warp(t0 + 2 * CHALLENGE_PERIOD + 1);
-        manager.finalizePartialWithdrawal();
-        assertTrue(
-            registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
-            "the burn's L1 authorization is delayed, never denied"
-        );
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     // REFUTATIONS — attacks that were tried and FAILED. These pass by confirming
     // the round-2 guard holds.
@@ -713,7 +344,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
     }
 
     /// REFUTED (A1 holds). The A1 floor is genuinely read nowhere on a close/exit path: with the
-    /// floor at 30 and the A3 mark unset, a v20 close still requests, submits and finalizes.
+    /// floor at 30, a v20 close still requests, submits and finalizes.
     function test_R3_REFUTED_A1_floorAloneNeverBlocksAnExit() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory a = _intentAt(9, 10);
@@ -730,31 +361,4 @@ contract RedTeamRound3Test is CloseSettlementBase {
         assertEq(manager.finalizedStateVersion(), 20, "exit liveness is unconditional in A1 alone");
     }
 
-    /// REFUTED (A4 holds against replay). The attack A4 was written for is genuinely dead: one
-    /// cancel proof cannot veto the same burn twice.
-    function test_R3_REFUTED_A4_replayIsDead() external {
-        _submitPw(9, 20);
-        bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        ChannelSettlementManager.CancelCloseRequest memory v = _cancelRequest(pwDigest, 30);
-        manager.cancelPartialWithdrawal(v, _cancelProof(v));
-
-        _submitPw(9, 20);
-        bytes memory p = _cancelProof(v);
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCancelReplay.selector);
-        manager.cancelPartialWithdrawal(v, p);
-    }
-
-    /// REFUTED (A3 holds in its own direction). A close at EXACTLY the burn's version is not
-    /// refused -- the guard is strict, so an honest head-of-chain close still settles.
-    function test_R3_REFUTED_A3_closeAtTheBurnVersionIsNotRefused() external {
-        _submitPwAndElapse(9, 30);
-        manager.finalizePartialWithdrawal();
-
-        _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 30);
-        manager.submitCloseIntent(head, _closeProof(head));
-        vm.warp(vm.getBlockTimestamp() + CHALLENGE_PERIOD + 1);
-        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-        assertEq(manager.finalizedStateVersion(), 30, "A3 is strict, not >=");
-    }
 }

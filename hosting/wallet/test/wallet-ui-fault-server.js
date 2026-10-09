@@ -38,10 +38,9 @@ http.createServer(async(req,res)=>{
   if(scenario==='lose-burn-response'){scenario='';return json(res,{error:'response lost after burn'},503);}
   return json(res,snapshot().state);
  }
- if(u.pathname==='/api/pw-submit')return json(res,{auth_digest:'fixture-auth',withdrawal_token_index:0});
  if(u.pathname==='/api/pw-finalize'){
   if(scenario==='settle-offline'){scenario='';return json(res,{error:'settlement temporarily unavailable'},503);}
-  const t=tickets.find(t=>t.type==='partial_withdrawal'&&t.status!=='settle_done');if(t)t.status='settle_done';return json(res,{authDigest:'fixture-auth'});
+  const t=tickets.find(t=>t.type==='partial_withdrawal'&&t.status!=='settle_done');if(t)t.status='settle_done';return json(res,{ok:true,claim:null});
  }
  if(u.pathname==='/api/inter/send'){
   const key=JSON.stringify(data);if(!sendRequests.has(key)){sends++;version++;sendRequests.set(key,{sourceHead:snapshot().state});}

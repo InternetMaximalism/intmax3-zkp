@@ -3223,7 +3223,7 @@ pub fn build_burn_send(
 /// debits the sender's balance + the channel fund at the LOCAL slot A's registry resolves for
 /// `token_index`, and the base `Transfer` (→ the burn `Withdrawal`) carries that SAME base
 /// index, so the L1 leg pays out via `withdrawERC20`/`withdrawNative` in the burned asset (the
-/// IPW2 authDigest already binds `tokenIndex`).
+/// proof-committed leaf binds `tokenIndex`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_burn_send_token(
     keys: &MemberKeys,
@@ -3387,7 +3387,8 @@ pub const INTER_CHANNEL_TRANSFER_INDEX: u32 = 0;
 /// satisfy while permanently consuming the channel's single-use chain key: the burn's value was
 /// debited in-channel and became unreachable on L1. There is now ONE construction of this
 /// `Transfer` (this function) feeding BOTH the tx tree the co-signers sign and the withdrawal
-/// leaf the CLI authorizes, so they cannot silently disagree again.
+/// leaf L1 pays, so they cannot silently disagree again. (The manager-side authorization path was
+/// removed on 2026-10-09: L1 now pays the burn from its withdrawal proof alone.)
 pub fn inter_channel_base_transfer(
     recipient_pk_g: Bytes32,
     token_index: u32,
@@ -4503,12 +4504,17 @@ pub fn burn_withdrawal_leaf(
     })
 }
 
-/// IPW2 domain prefix for partial-withdrawal authDigest (matches Solidity `bytes4(0x49505732)`).
+/// IPW2 domain prefix for partial-withdrawal authDigest (formerly Solidity `bytes4(0x49505732)`).
 pub const PARTIAL_WITHDRAWAL_DOMAIN: u32 = 0x49505732;
 
-/// Compute the `authDigest` that the on-chain `withdrawNative` gate checks for burn withdrawals
-/// (`auxData != 0`). Must be byte-identical to the Solidity encoding:
+/// The retired IPW2 `authDigest`:
 /// `keccak256(abi.encodePacked(bytes4(0x49505732), recipient, tokenIndex, amount, auxData))`.
+///
+/// NO LONGER CHECKED ON L1: the rollup's IPW2 latch (`authorizePartialWithdrawal` /
+/// `partialWithdrawalAuthorized`) was removed on 2026-10-09 and a burn leaf is paid by its
+/// withdrawal proof alone. The digest survives only as a stable leaf identity inside the retired
+/// cooperative close-funding plan (`close_funding_publisher`, whose binding digest pins it) and
+/// in the domain-separation registry; no caller may treat it as payout authority.
 ///
 /// The proof-only withdrawal nullifier is deliberately excluded: the signed IMD2 `aux_data`
 /// carries the stable source-channel/base-nonce burn identity, while the withdrawal proof remains
@@ -6762,15 +6768,15 @@ pub struct ChannelWithdrawalParams {
     /// artifact the partial-withdrawal PAYOUT path needs and the repo previously lacked: every
     /// committed payout fixture was a normal (`aux_data == 0`) withdrawal, so
     /// `PartialWithdrawalPayout.t.sol` could only assert the burn branch fails on proof
-    /// binding, never REACH the IPW2 authorization gate with a real proof
+    /// binding, never pay a real proved burn leaf
     /// (doc/tasks/partial-withdrawal-payout-design.md P3 HEAVY note / P4-3).
     ///
-    /// SCOPE: this exercises the payout side only — `withdrawNative`'s `aux != 0 ⇒ requires a
-    /// finalized IPW2 authorization` conjunction over a REAL proof-committed leaf.  The IMD2
-    /// descriptor's binding to a co-signed inter-channel burn (`amount == X`, recipient, token) is
-    /// enforced at SUBMIT time by the Manager (Phase 0/2, covered by `PartialWithdrawal.t.sol`);
-    /// `withdrawNative` never re-derives it, so any fixed nonzero `aux_data` faithfully drives the
-    /// payout-side checks.  `None` = a normal withdrawal (legacy behavior, unchanged).
+    /// SCOPE: this exercises the payout side only — `withdrawNative` over a REAL proof-committed
+    /// `aux != 0` leaf, which L1 now pays from the proof alone (the IPW2 gate was removed on
+    /// 2026-10-09).  The IMD2 descriptor's binding to a co-signed inter-channel burn is the
+    /// validity of the N-of-N signed update that carries the burn; `withdrawNative` never
+    /// re-derives it, so any fixed nonzero `aux_data` faithfully drives the payout-side checks.
+    /// `None` = a normal withdrawal (legacy behavior, unchanged).
     pub burn_aux_data: Option<Bytes32>,
 }
 
@@ -7241,8 +7247,8 @@ pub fn build_channel_withdrawal(
         None => Address::rand(&mut rng),
     };
     // Partial-withdrawal (burn) mode stamps the leaf's `aux_data` with a nonzero burn descriptor so
-    // the proved leaf enters `withdrawNative`'s burn branch (needs a finalized IPW2 authorization);
-    // a normal withdrawal keeps `aux_data == 0`. See `ChannelWithdrawalParams::burn_aux_data`.
+    // the proved leaf is a burn leaf (paid from the proof alone); a normal withdrawal keeps
+    // `aux_data == 0`. See `ChannelWithdrawalParams::burn_aux_data`.
     let withdrawal_transfer = Transfer {
         recipient: calculate_recipient_from_address(withdrawal_address),
         token_index: 0,

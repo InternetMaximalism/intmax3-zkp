@@ -20,10 +20,11 @@ import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 import {MockRollupRegistry} from "./CloseSettlementBase.sol";
 
 /// @notice Production-shape gas guard for the value-bearing Manager close path.
-/// @dev Uses the real 103-PI partial-withdrawal close proof and real pinned adapter. Only the three
+/// @dev Uses a real 103-PI close proof (the `pw_` fixture: a signed state whose settled-tx chain
+///      ends in a burn, closed like any other state) and the real pinned adapter. Only the three
 ///      unrelated statement adapters and finalized-root registry response are test doubles. The
-///      measured call is the exact `submitPartialWithdrawalIntent` ABI, including its state writes;
-///      calldata intrinsic gas is added explicitly to the measured execution cost.
+///      measured call is the exact `submitCloseIntent` ABI, including its state writes; calldata
+///      intrinsic gas is added explicitly to the measured execution cost.
 contract ManagerCloseGasTest is Test {
     uint256 private constant MAX_PRODUCTION_TRANSACTION_GAS = 20_000_000;
 
@@ -32,10 +33,11 @@ contract ManagerCloseGasTest is Test {
     PinnedMleVerifierV2 private closeAdapter;
     MockRollupRegistry private rollup;
     address private closeCore;
+    address private closeRequester;
 
     // ── close-satellite surface (this test contract is the Manager's `closeFundingMaterializer`) ──
     //
-    // Signer-independent exit: `submitPartialWithdrawalIntent` -> `_checkCloseProof` ends with
+    // Signer-independent exit: `submitCloseIntent` -> `_checkCloseProof` ends with
     // `requireSignedHeadBacking` on the satellite, and `requestClose`/`cancelClose` drive its
     // freeze journal. The stub below is cost-shaped like the real `CloseFundingMaterializer`
     // check (one `channelStatus()` call back into the Manager, the statement-key hash, and cold
@@ -72,6 +74,11 @@ contract ManagerCloseGasTest is Test {
     /// account/storage access, like a production transaction rather than a deploy-and-call bundle.
     function setUp() public {
         _deployManager(_read("pw_close_intent_mle.json"));
+        // Freeze (era 0 -> 1, the fixture's `close_freeze_nonce`) and pass the grace window here,
+        // so the measured submit is the era's first close intent.
+        vm.prank(closeRequester);
+        manager.requestClose(0, 0);
+        vm.warp(block.timestamp + manager.GRACE_BEFORE_PROCESS_SECS());
     }
 
     function _read(string memory name) private view returns (string memory) {
@@ -119,22 +126,6 @@ contract ManagerCloseGasTest is Test {
         });
     }
 
-    function _parseWithdrawal(string memory json)
-        private
-        pure
-        returns (ChannelSettlementManager.AuthorizedWithdrawal memory withdrawal)
-    {
-        withdrawal = ChannelSettlementManager.AuthorizedWithdrawal({
-            recipient: vm.parseJsonAddress(json, ".withdrawal_recipient"),
-            tokenIndex: uint32(vm.parseJsonUint(json, ".withdrawal_token_index")),
-            amount: vm.parseJsonUint(json, ".withdrawal_amount"),
-            baseNonce: uint32(vm.parseJsonUint(json, ".withdrawal_base_nonce")),
-            nullifier: vm.parseJsonBytes32(json, ".withdrawal_nullifier"),
-            auxData: vm.parseJsonBytes32(json, ".withdrawal_aux_data"),
-            txLeaf: vm.parseJsonBytes32(json, ".burn_tx_leaf")
-        });
-    }
-
     function _deployManager(string memory proofJson) private {
         (, closeAdapter) = FixtureLib.deployPinnedMleV2(proofJson);
         closeCore = address(closeAdapter.core());
@@ -154,6 +145,7 @@ contract ManagerCloseGasTest is Test {
         for (uint256 i = 0; i < record.memberCount; ++i) {
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: record.pkGs[i], recipient: record.recipients[i]});
         }
+        closeRequester = record.recipients[0];
 
         manager = new ChannelSettlementManager(
             bytes4(record.channelId),
@@ -172,18 +164,13 @@ contract ManagerCloseGasTest is Test {
         assertEq(address(manager.closeMleVerifier()), address(closeAdapter), "manager did not pin real close adapter");
     }
 
-    function test_realPartialWithdrawalManagerSubmitFitsProductionGasEnvelope() public {
+    function test_realManagerCloseSubmitFitsProductionGasEnvelope() public {
         assertEq(block.chainid, 31337, "gas fixture is local-devnet contained");
         string memory proofJson = _read("pw_close_intent_mle.json");
         string memory submitJson = _read("pw_submit.json");
         ChannelSettlementManager.CloseIntent memory intent = _parseIntent(submitJson);
-        ChannelSettlementManager.AuthorizedWithdrawal memory withdrawal = _parseWithdrawal(submitJson);
-        bytes32 prevSettledTxChain = vm.parseJsonBytes32(submitJson, ".prev_settled_tx_chain");
         bytes memory compactProof = FixtureLib.parseCompactProofV2(proofJson);
-        bytes memory callData = abi.encodeCall(
-            ChannelSettlementManager.submitPartialWithdrawalIntent,
-            (intent, compactProof, prevSettledTxChain, withdrawal)
-        );
+        bytes memory callData = abi.encodeCall(ChannelSettlementManager.submitCloseIntent, (intent, compactProof));
 
         // Be explicit even though setUp and this test execute as separate calls: all parent/core
         // accounts start cold. The Manager is a transaction destination in production (therefore
@@ -205,12 +192,16 @@ contract ManagerCloseGasTest is Test {
         (bool success,) = address(manager).call{gas: managerExecutionBudget}(callData);
         uint256 harnessCallGasSpent = gasBefore - gasleft();
 
-        emit log_named_uint("partial-withdrawal compact bytes", compactProof.length);
+        emit log_named_uint("close compact bytes", compactProof.length);
         emit log_named_uint("transaction intrinsic gas", intrinsicGas);
         emit log_named_uint("Manager execution budget at 20M", managerExecutionBudget);
         emit log_named_uint("cold harness CALL gas spent", harnessCallGasSpent);
-        assertTrue(success, "real Manager partial-withdrawal submit does not execute within 20M transaction budget");
-        assertTrue(manager.partialWithdrawalPending(), "real partial withdrawal was not recorded");
+        assertTrue(success, "real Manager close submit does not execute within 20M transaction budget");
+        assertEq(
+            manager.getPendingClose().closeIntentDigest,
+            manager.computeCloseIntentDigest(intent),
+            "real close intent was not recorded"
+        );
     }
 
     function _calldataIntrinsicGas(bytes memory callData) private pure returns (uint256 gasCost) {

@@ -99,8 +99,9 @@ test('the relay\'s reason (the operator cannot fund a settlement) is shown, and 
 test('a burn already settling keeps showing its progress while new burns are not offered', () => {
   const $ = render({ status: 'settle_pending', params: {}, steps: { settle: { phase: 'publishing' } } }, false,
     { partialWithdrawal: false, settlement: 'background' });
-  assert.match($('pwRecoveryStatus').textContent, /publishing the channel history/);
+  assert.match($('pwRecoveryStatus').textContent, /publishing the validity proof that covers it/);
   assert.equal($('btnBurnSend').disabled, true);
+  assert.equal($('btnPwSettle').textContent, 'Step 2 -- Settling on L1 automatically...');
 });
 test('a saved burn on such a deployment is reported as kept, and nothing can be burned again', () => {
   const $ = render({ status: 'burn_done', params: { recipient: '0xrecipient' } }, false, { partialWithdrawal: false });
@@ -116,24 +117,107 @@ test('unknown capabilities (health not loaded) fail closed', () => {
 // Public chain: the relay settles the burn on L1 in the background; the wallet shows where it is
 // and offers Step 2 only to receive the payout.
 const BACKGROUND = { partialWithdrawal: true, channelClose: false, settlement: 'background' };
-test('a burn settling in the background shows its phase and offers nothing to click', () => {
+const DEVNET = { partialWithdrawal: true, channelClose: true, settlement: 'interactive' };
+test('a burn settling in the background shows its phase, keeps the channel usable and offers nothing to click', () => {
   const $ = render({ status: 'settle_pending', params: { recipient: '0xr' },
-    steps: { settle: { phase: 'challenge', deadline: 1790900000 } } }, false, BACKGROUND);
-  assert.match($('pwRecoveryStatus').textContent, /one-day challenge period until/);
-  assert.doesNotMatch($('pwRecoveryStatus').textContent, /channel is paused/, 'the channel is free once submitted');
+    steps: { settle: { phase: 'paying' } } }, false, BACKGROUND);
+  const text = $('pwRecoveryStatus').textContent;
+  assert.equal(text, 'Your withdrawal of 0.005 ETH is being paid out on L1. You can keep using the channel meanwhile. Do not burn again.');
+  assert.doesNotMatch(text, /paused|challenge/);
   assert.equal($('btnPwSettle').disabled, true);
+  assert.equal($('btnPwSettle').textContent, 'Step 2 -- Settling on L1 automatically...');
   assert.equal($('btnBurnSend').disabled, true);
 });
-test('before its intent is submitted, a background settlement says the channel is paused and shows a retried error', () => {
+test('a burn just made is shown proving its payout, with a retried error, and never pauses the channel', () => {
   const $ = render({ status: 'burn_done', params: { recipient: '0xr' },
     steps: { settle: { error: 'rpc unavailable' } } }, false, BACKGROUND);
-  assert.match($('pwRecoveryStatus').textContent, /publishing the channel history/);
-  assert.match($('pwRecoveryStatus').textContent, /retried automatically: rpc unavailable/);
-  assert.match($('pwRecoveryStatus').textContent, /channel is paused/);
+  const text = $('pwRecoveryStatus').textContent;
+  assert.match(text, /^Your withdrawal of 0.005 ETH is being settled on L1: proving its payout\./);
+  assert.match(text, /retried automatically: rpc unavailable/);
+  assert.match(text, /You can keep using the channel meanwhile\. Do not burn again\.$/);
+  assert.doesNotMatch(text, /paused/);
   assert.equal($('btnPwSettle').disabled, true);
 });
 test('a background settlement whose payout is credited offers Step 2 to receive it', () => {
   const $ = render({ status: 'claim_pending', params: { recipient: '0xr', claim: {} } }, false, BACKGROUND);
   assert.equal($('btnPwSettle').disabled, false);
+  assert.equal($('btnPwSettle').textContent, 'Step 2 -- Receive on L1');
   assert.match($('pwRecoveryStatus').textContent, /receive the funds/);
+});
+
+test('settlement progress names each phase, what it waits for, and never a pause', () => {
+  const ctx = render(null, false, BACKGROUND).context;
+  const progress = (status, settle) => ctx.settlementProgress({ status, params: {}, steps: { settle } });
+  const tail = ' You can keep using the channel meanwhile. Do not burn again.';
+  assert.equal(progress('burn_done', null), 'Your withdrawal of 0.005 ETH is being settled on L1: proving its payout.' + tail);
+  assert.equal(progress('settle_pending', { phase: 'proving' }), 'Your withdrawal of 0.005 ETH is being settled on L1: proving its payout.' + tail);
+  assert.equal(progress('settle_pending', { phase: 'publishing', waiting: 'L1 finality' }),
+    'Your withdrawal of 0.005 ETH is being settled on L1: publishing the validity proof that covers it. Every L1 step waits for finality, so this can take up to an hour. Waiting for L1 finality.' + tail);
+  assert.equal(progress('settle_pending', { phase: 'proving', waiting: 'an earlier validity batch on L1' }),
+    'Your withdrawal of 0.005 ETH is being settled on L1: proving its payout. Waiting for an earlier validity batch on L1.' + tail);
+  assert.equal(progress('settle_pending', { phase: 'paying' }), 'Your withdrawal of 0.005 ETH is being paid out on L1.' + tail);
+  // A ticket saved by the earlier settlement flow, until the relay restarts it at proving.
+  assert.equal(progress('settle_pending', { phase: 'challenge', deadline: 1790900000 }),
+    'Your withdrawal of 0.005 ETH is being settled on L1 (challenge).' + tail);
+  assert.equal(progress('settle_pending', {}), 'Your withdrawal of 0.005 ETH is being settled on L1 (settle_pending).' + tail);
+});
+
+test('Step 2 is labelled with what it does now', () => {
+  for (const [capabilities, ticket, label] of [
+    [BACKGROUND, { status: 'burn_done' }, 'Step 2 -- Settling on L1 automatically...'],
+    [BACKGROUND, { status: 'settle_pending' }, 'Step 2 -- Settling on L1 automatically...'],
+    [BACKGROUND, { status: 'claim_pending' }, 'Step 2 -- Receive on L1'],
+    [BACKGROUND, null, 'Step 2 -- Settle on L1'],
+    [DEVNET, { status: 'burn_done' }, 'Step 2 -- Settle on L1'],
+    [DEVNET, { status: 'settle_pending' }, 'Step 2 -- Settle on L1'],
+    [DEVNET, { status: 'claim_pending' }, 'Step 2 -- Receive on L1'],
+    [DEVNET, null, 'Step 2 -- Settle on L1'],
+  ]) {
+    const $ = render(ticket && { ...ticket, params: {} }, false, capabilities);
+    assert.equal($.context.settleButtonLabel(ticket), label, JSON.stringify([capabilities.settlement, ticket]));
+    assert.equal($('btnPwSettle').textContent, label, 'restored on the button');
+  }
+  // A settlement in flight keeps its running label.
+  const $ = render({ status: 'burn_done', params: {} }, false, DEVNET);
+  $('btnPwSettle').textContent = 'Settling... 3s';
+  $.context._inflight.add('settle');
+  $.context.restorePartialWithdrawalControls();
+  assert.equal($('btnPwSettle').textContent, 'Settling... 3s');
+});
+
+// The Step 2 button handler itself, run against a stub relay.
+const handler = html.slice(html.indexOf("$('btnPwSettle').onclick = guard('settle'"), html.indexOf('// ---- FULL WITHDRAWAL'));
+function step2(ticket, capabilities, reply) {
+  const $ = render(ticket, false, capabilities), ctx = $.context;
+  const requests = [], logs = [];
+  Object.assign(ctx, {
+    api: async (url, body) => { requests.push([url, body]); return JSON.stringify(reply(url)); },
+    log: (message, level) => logs.push([message, level]),
+    fetchTickets: async () => {}, applyTicketState: () => ctx.restorePartialWithdrawalControls(),
+    clearInterval: () => {}, Date,
+  });
+  vm.runInContext(handler, ctx);
+  return { $, ctx, requests, logs, click: () => $('btnPwSettle').onclick() };
+}
+
+test('Step 2 on a public chain asks pw-finalize only, and shows the background progress', async () => {
+  const ticket = { status: 'burn_done', params: { recipient: '0x00000000000000000000000000000000000000ab' }, steps: {} };
+  const s = step2(ticket, { ...BACKGROUND }, () => ({ settling: true, ticket: { ...ticket, status: 'settle_pending', steps: { settle: { phase: 'publishing' } } } }));
+  await s.click();
+  assert.deepEqual(s.requests, [['/api/pw-finalize', '{}']]);
+  assert.ok(s.logs.some(([m]) => /publishing the validity proof that covers it/.test(m)));
+  assert.ok(!s.logs.some(([, level]) => level === 'err'), JSON.stringify(s.logs));
+  assert.equal(s.$('btnPwSettle').textContent, 'Step 2 -- Settling on L1 automatically...');
+});
+
+test('Step 2 on the devnet settles through pw-finalize alone; a payout to the operator completes without a wallet claim', async () => {
+  const ticket = { status: 'burn_done', params: { recipient: '0x00000000000000000000000000000000000000ab' }, steps: {} };
+  const s = step2(ticket, { ...DEVNET }, () => ({ ok: true, claim: null }));
+  await s.click();
+  assert.deepEqual(s.requests, [['/api/pw-finalize', '{}']]);
+  assert.ok(s.logs.some(([m, level]) => m === 'partial withdrawal complete' && level === 'ok'), JSON.stringify(s.logs));
+});
+
+test('the wallet never calls the removed pw-submit route', () => {
+  assert.doesNotMatch(html, /pw-submit/);
 });

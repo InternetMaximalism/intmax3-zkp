@@ -341,8 +341,6 @@ contract DeployGuardsTest is Test {
         vm.expectRevert(expected);
         m.finalizeCloseGuarded(closeIntentDigest, generation);
         vm.expectRevert(expected);
-        m.finalizePartialWithdrawal();
-        vm.expectRevert(expected);
         m.pullChannelFunds();
         vm.expectRevert(expected);
         m.pullChannelTokenFunds(7);
@@ -529,56 +527,30 @@ contract DeployGuardsTest is Test {
 
     // ── (3) HOLE 1 — the settlement manager must be REGISTERED on the rollup ───────────────────
     //
-    // WHAT THESE PROVE ABOUT SECURITY. `ChannelSettlementManager.finalizePartialWithdrawal()` ends
-    // by calling `IntmaxRollup.authorizePartialWithdrawal`, which is gated on
-    // `isRegisteredSettlementManager[msg.sender]`. `registerSettlementManager` is deployer-only, so
-    // only the deploying EOA can ever grant it. Until this fix its only callers were the two
-    // `chainid == 31337` mock scripts, so on every REAL deployment a member's partial withdrawal
-    // reverted `NotRegisteredSettlementManager` at FINALIZE — after they had submitted the intent
-    // and waited out the entire challenge period. That path is live: `pw-submit` / `pw-finalize`
-    // (`src/bin/channel_member.rs`) are implemented and driven by `api/routes/partial-withdrawal.js`.
+    // WHAT THESE PROVE ABOUT SECURITY. `registerSettlementManager` is deployer-only and is what binds
+    // a real Manager to the rollup's set-once `CloseFundingMaterializer`. Without it the channel has
+    // no close journal: every `requestClose` reverts `NotBoundManager`, so the channel can never be
+    // frozen or closed. (It historically also gated the retired IPW2 partial-withdrawal latch; a
+    // partial withdrawal is now paid by the rollup on its base withdrawal proof alone.)
 
-    /// THE guard for HOLE 1: deploy the production settlement stack at a PUBLIC chain id and assert
-    /// the rollup knows about the manager the very same script deployed. Deleting the
-    /// `registerSettlementManager` call fails this assertion (and trips the script's own read-back
-    /// `require` first).
+    /// THE guard for HOLE 1: deploy the production settlement stack and assert the rollup knows about
+    /// the manager the very same script deployed. Deleting the `registerSettlementManager` call fails
+    /// this assertion (and trips the script's own read-back `require` first).
     function test_deployCloseCliScript_localDevnet_registersSettlementManager() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
         assertTrue(
             rollup.isRegisteredSettlementManager(address(manager)),
-            "a real-chain settlement deploy must register its own manager, or partial withdrawal cannot finalize"
+            "a settlement deploy must register its own manager, or the channel can never close"
         );
-    }
-
-    /// The property that actually matters, exercised rather than inferred: the deployed manager can
-    /// perform the ONE rollup call `finalizePartialWithdrawal` makes. Asserting the mapping alone
-    /// would pass even if the gate later moved to a different predicate.
-    function test_deployCloseCliScript_localDevnet_managerCanAuthorizePartialWithdrawal() public {
-        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (IntmaxRollup rollup,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
-        bytes32 authDigest = keccak256("guards_auth_digest");
-        vm.prank(address(manager));
-        rollup.authorizePartialWithdrawal(authDigest);
-        assertTrue(
-            rollup.partialWithdrawalAuthorized(authDigest),
-            "the deployed manager must be able to authorize a partial withdrawal"
+        CloseFundingMaterializer materializer = CloseFundingMaterializer(manager.closeFundingMaterializer());
+        assertEq(
+            materializer.managerOfChannel(uint32(manager.channelId())),
+            address(manager),
+            "registration must bind the manager to the close journal"
         );
-    }
-
-    /// NOTHING IS WEAKENED: the fail-closed check still fires for everyone else. Registration is a
-    /// per-address grant to the manager this deploy created, not a hole in the gate. If a future
-    /// edit made `authorizePartialWithdrawal` permissive (or registered a wildcard), this fails.
-    function test_deployCloseCliScript_localDevnet_strangerStillRefusedAuthorization() public {
-        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (IntmaxRollup rollup,,) = new DeployCloseCliHarness().run();
         assertFalse(rollup.isRegisteredSettlementManager(alice), "registration must be per-address, not blanket");
-        vm.prank(alice);
-        vm.expectRevert(IntmaxRollup.NotRegisteredSettlementManager.selector);
-        rollup.authorizePartialWithdrawal(keccak256("stranger_digest"));
     }
 
     /// ... and it is still deployer-only, so an unregistered party cannot register itself.
@@ -1140,7 +1112,7 @@ contract DeployGuardsTest is Test {
     /// rollup), the materializer is bound to the manager and constructor-pinned to the REAL
     /// CloseAssetBacking adapter built from the authenticated bundle's configuration (a distinct
     /// circuit from every settlement/rollup adapter this deploy created), and the manager is
-    /// registered so partial withdrawals can finalize. Deleting the backing-adapter construction
+    /// registered so its channel can close. Deleting the backing-adapter construction
     /// (or the manifest checks that gate it) fails this.
     function test_deployCloseCliScript_attach_pinsRealBackingAdapterOnExistingRollup() public {
         (IntmaxRollup existing, address broadcaster) = _deployExistingRollup();
@@ -1355,11 +1327,12 @@ contract SetOnceMockManager {
 ///      fixed by sequencing the call first; these tests are its regression suite. Every earlier
 ///      `requestClose` test drove a stub materializer, which is why the suite had stayed green.
 contract MaterializerSetOnceTest is Test {
-    /// `forge inspect IntmaxRollup storage-layout`: `_channelExitMaterializer` lives at slot 3 now
+    /// `forge inspect IntmaxRollup storage-layout`: `_channelExitMaterializer` lives at slot 2 now
     /// that the Rollup carries no on-chain VK storage (every statement verifier is a
-    /// constructor-pinned adapter). `test_creditChannelExitIsMaterializerOnly` validates the slot:
-    /// a wrong slot leaves the gate closed to `m1` and fails the test loudly.
-    uint256 internal constant CHANNEL_EXIT_MATERIALIZER_SLOT = 3;
+    /// constructor-pinned adapter) and no `partialWithdrawalAuthorized` mapping (IPW2 latch removed
+    /// 2026-10-09). `test_creditChannelExitIsMaterializerOnly` validates the slot: a wrong slot
+    /// leaves the gate closed to `m1` and fails the test loudly.
+    uint256 internal constant CHANNEL_EXIT_MATERIALIZER_SLOT = 2;
 
     IntmaxRollup internal rollup;
     SetOnceMockMaterializer internal m1;

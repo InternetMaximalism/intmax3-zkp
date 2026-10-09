@@ -2476,25 +2476,21 @@ async function loadRelayCapabilities() {
   return relayCapabilities;
 }
 const withdrawalAvailable = () => !!(relayCapabilities && relayCapabilities.partialWithdrawal);
-// Public chain: the relay settles a burn on L1 in the background (its steps wait for L1 finality
-// and the manager's one-day challenge period); the wallet follows the ticket.
+// Public chain: the relay settles a burn on L1 in the background (its steps wait for L1 finality);
+// the wallet follows the ticket.
 const backgroundSettlement = () => !!(relayCapabilities && relayCapabilities.settlement === 'background');
 function settlementProgress(ticket) {
   const settle = (ticket.steps && ticket.steps.settle) || {};
   const amount = ticketAmountLabel(ticket);
-  const phase = ticket.status === 'burn_done' ? 'publishing' : settle.phase;
+  const phase = ticket.status === 'burn_done' ? 'proving' : settle.phase;
   let text = {
-    publishing: 'Your burn of ' + amount + ' is being settled on L1: publishing the channel history to the rollup. Every L1 step waits for finality, so this can take an hour.',
-    submitting: 'Your burn of ' + amount + ' is being settled on L1: submitting the withdrawal to the channel\'s settlement contract.',
-    challenge: 'Your withdrawal of ' + amount + ' is in the one-day challenge period'
-      + (settle.deadline ? ' until ' + new Date(Number(settle.deadline) * 1000).toLocaleString() : '') + '. It is paid out after that.',
-    finalizing: 'Your withdrawal of ' + amount + ' is being paid out on L1.',
-  }[phase] || ('Your burn of ' + amount + ' is being settled on L1 (' + (phase || ticket.status) + ').');
+    proving: 'Your withdrawal of ' + amount + ' is being settled on L1: proving its payout.',
+    publishing: 'Your withdrawal of ' + amount + ' is being settled on L1: publishing the validity proof that covers it. Every L1 step waits for finality, so this can take up to an hour.',
+    paying: 'Your withdrawal of ' + amount + ' is being paid out on L1.',
+  }[phase] || ('Your withdrawal of ' + amount + ' is being settled on L1 (' + (phase || ticket.status) + ').');
   if (settle.waiting) text += ' Waiting for ' + settle.waiting + '.';
   if (settle.error) text += ' The last attempt failed and is retried automatically: ' + settle.error;
-  const holding = phase === 'publishing' || phase === 'submitting';
-  return text + (holding ? ' The channel is paused for other operations until the withdrawal is submitted.' : '')
-    + ' Do not burn again.';
+  return text + ' You can keep using the channel meanwhile. Do not burn again.';
 }
 const depositAvailable = () => !!(relayCapabilities && relayCapabilities.deposit);
 function depositUnavailableMessage() {
@@ -2503,10 +2499,20 @@ function depositUnavailableMessage() {
     + '. A deposit is offered only into a rollup verified to settle withdrawals.';
 }
 
+// Step 2 names what it does now: settle (devnet), wait for the relay (public chain), or receive.
+function settleButtonLabel(ticket) {
+  if (ticket && ticket.status === 'claim_pending') return 'Step 2 -- Receive on L1';
+  if (ticket && backgroundSettlement() && ['burn_done', 'settle_pending'].includes(ticket.status)) {
+    return 'Step 2 -- Settling on L1 automatically...';
+  }
+  return 'Step 2 -- Settle on L1';
+}
+
 // Restore the withdrawal controls on BOTH automatic account restore and Withdraw navigation.
 function restorePartialWithdrawalControls() {
   const status = $('pwRecoveryStatus');
   const ticket = ticketOfType('partial_withdrawal');
+  if (!_inflight.has('settle')) $('btnPwSettle').textContent = settleButtonLabel(ticket);
   // A burn already being settled in the background is shown below even while new burns are not
   // offered (the operator's funds only gate new ones).
   if (!withdrawalAvailable() && !(backgroundSettlement() && ticket)) {
@@ -2548,7 +2554,7 @@ function restorePartialWithdrawalControls() {
   if (ticket.params && ticket.params.recipient) $('pwAddress').value = ticket.params.recipient;
   if (backgroundSettlement() && ticket.status !== 'claim_pending') {
     // Public chain: the relay settles the burn on L1 by itself; there is nothing to click until
-    // the payout can be received.
+    // the payout can be received. Say so on the button itself.
     $('btnPwSettle').disabled = true;
     status.textContent = settlementProgress(ticket);
     return;
@@ -3378,19 +3384,15 @@ $('btnPwSettle').onclick = guard('settle', async () => {
       if (pwTicket && pwTicket.params && pwTicket.params.recipient) recipient = pwTicket.params.recipient;
       else { log('enter a valid L1 recipient address', 'err'); throw new Error('invalid recipient'); }
     }
-    log('submitting partial withdrawal...');
-    const submit = JSON.parse(await api('/api/pw-submit', JSON.stringify({ recipient })));
-    if (submit.settling) {
+    log('settling partial withdrawal on L1...');
+    const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
+    if (fin.settling) {
       // Public chain: the relay is settling it on L1; this button is for receiving the payout.
-      log(settlementProgress(submit.ticket));
+      log(settlementProgress(fin.ticket));
       clearInterval(tick);
-      $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
       await fetchTickets(); applyTicketState();
       return;
     }
-    log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
-    log('finalizing...');
-    const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
     if (fin.claim) {
       const c = fin.claim;
       const info = await fetchDeploymentInfo();
@@ -3399,9 +3401,10 @@ $('btnPwSettle').onclick = guard('settle', async () => {
       const word = n => BigInt(n).toString(16).padStart(64, '0');
       const expected = token === 0 ? '0x2e1a7d4d' + word(amount) : '0xcf2cd298' + word(token) + word(amount);
       if (c.to.toLowerCase() !== info.rollup.toLowerCase() || c.recipient.toLowerCase() !== recipient.toLowerCase()
-          || walletAccount.toLowerCase() !== recipient.toLowerCase() || token !== Number(submit.withdrawal_token_index)
+          || walletAccount.toLowerCase() !== recipient.toLowerCase()
           || c.data.toLowerCase() !== expected || c.value !== '0x0') throw new Error('wallet payout details do not match');
       const ticket = ticketOfType('partial_withdrawal');
+      if (!ticket || token !== Number(ticket.params.tokenIndex || 0)) throw new Error('wallet payout token differs from saved burn');
       if (!ticket || amount.toString() !== String(ticket.params.amount)) throw new Error('wallet payout amount differs from saved burn');
       const key = 'pw-pull:' + info.chainId + ':' + c.to.toLowerCase() + ':' + ticket.id;
       let txHash = localStorage.getItem(key);
@@ -3423,7 +3426,7 @@ $('btnPwSettle').onclick = guard('settle', async () => {
       await api('/api/pw-claim-confirm', JSON.stringify({ txHash }));
       localStorage.removeItem(key); walletTransactions.clear(key);
     }
-    log('partial withdrawal complete -- authDigest ' + (fin.authDigest || '?'), 'ok');
+    log('partial withdrawal complete', 'ok');
     $('btnBurnSend').disabled = false;
     await fetchTickets(); applyTicketState();
   } catch (e) {
@@ -3431,7 +3434,7 @@ $('btnPwSettle').onclick = guard('settle', async () => {
     await fetchTickets(); applyTicketState();
   }
   clearInterval(tick);
-  $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
+  $('btnPwSettle').textContent = settleButtonLabel(ticketOfType('partial_withdrawal'));
 });
 
 // ---- FULL WITHDRAWAL (withdraw view) -------------------------------------------------------

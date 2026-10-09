@@ -6,37 +6,6 @@ import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {RegisterTokens} from "../script/RegisterTokens.s.sol";
-import {SubmitPartialWithdrawal} from "../script/SubmitPartialWithdrawal.s.sol";
-
-contract SubmitPartialWithdrawalNoReadHarness is SubmitPartialWithdrawal {
-    error FixtureReadAttempted();
-
-    bool internal failReads = true;
-
-    function _read(string memory) internal view override returns (string memory) {
-        if (failReads) revert FixtureReadAttempted();
-        return "{}";
-    }
-}
-
-contract SubmitPartialWithdrawalScriptGuardTest is Test {
-    function test_run_publicChainRevertsBeforeReadingFixtures() public {
-        uint256 publicChainId = 11155111;
-        vm.chainId(publicChainId);
-
-        SubmitPartialWithdrawalNoReadHarness script = new SubmitPartialWithdrawalNoReadHarness();
-        vm.expectRevert(abi.encodeWithSelector(SubmitPartialWithdrawal.LocalDevnetOnly.selector, publicChainId));
-        script.run();
-    }
-
-    function test_run_anvilPassesTheChainGateBeforeReadingFixture() public {
-        vm.chainId(31337);
-
-        SubmitPartialWithdrawalNoReadHarness script = new SubmitPartialWithdrawalNoReadHarness();
-        vm.expectRevert(SubmitPartialWithdrawalNoReadHarness.FixtureReadAttempted.selector);
-        script.run();
-    }
-}
 
 /// @title RegisterTokens deploy-script logic (multitoken §N-7, TM-1/TM-10b).
 /// @notice Exercises `RegisterTokens.registerAll` — the script's core logic — against a REAL

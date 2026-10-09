@@ -12,16 +12,14 @@
 //     relay's devnet-only deposit helper is not used;
 //   * the relay is restarted mid-run and the flow continues;
 //   * a partial withdrawal is settled on L1 by the relay in the background: the producer history
-//     is published and finalized, the intent is submitted from the post-burn head (the channel is
-//     refused other operations until then), the manager's one-day challenge period passes, and
-//     the recipient pulls the payout with its own account. Advancing anvil's clock past the
-//     challenge deadline is this harness's only shortcut (REHEARSAL_ANVIL_RPC).
+//     is published and finalized up to the head the payout proof is anchored at, the rollup credits
+//     the payout on that proof, and the recipient pulls it with its own account. The burner keeps
+//     sending in and out of the channel meanwhile: nothing holds the channel.
 // It follows the browser's API sequence (wallet-live.html): init → deposit-info → L1 deposit →
 // ticket → import-deposit (retrying only on the confirmation refusal) → cosign / inter/send.
 //
 // Env: WALLET_E2E_DIR (state, resumable), RPC (the proxy), WALLET_E2E_URL (relay HTTP base),
-//      REHEARSAL_RESTART (command that restarts the relay; optional), REHEARSAL_ANVIL_RPC (anvil
-//      itself, for advancing its clock; default http://127.0.0.1:8597).
+//      REHEARSAL_RESTART (command that restarts the relay; optional).
 const fs = require('fs'), path = require('path'), cp = require('child_process'), crypto = require('crypto');
 const { Wallet } = require('../../../node/common/wallet');
 
@@ -134,7 +132,7 @@ async function waitWithdrawal(ch, done, what) {
 }
 
 async function withdraw(user, amount, tag) {
-  const u = USERS[user], anvil = process.env.REHEARSAL_ANVIL_RPC || 'http://127.0.0.1:8597';
+  const u = USERS[user];
   const t0 = Date.now();
   await once(tag + '-burn', async () => {
     await load(user);
@@ -144,29 +142,12 @@ async function withdraw(user, amount, tag) {
     log(`withdraw ${tag}: ${user} burned ${amount} to ${u.address}`);
     return { at: Date.now() };
   });
-  // Until the intent is on L1 the burn owns the channel: anything else is refused at once.
-  await once(tag + '-frozen', async () => {
-    const ticket = (await api(u.ch, '/api/tickets')).find(t => t.type === 'partial_withdrawal');
-    const phase = ticket && ticket.steps && ticket.steps.settle && ticket.steps.settle.phase;
-    if (ticket && ['challenge', 'finalizing'].includes(phase)) return { skipped: phase };
-    const t1 = Date.now();
-    try { await api(u.ch, '/api/cosign', {}); throw Error('a send was accepted while the burn owns the channel'); }
-    catch (e) { if (e.status !== 409 || !/SETTLING_WITHDRAWAL/.test(e.body || '')) throw e; }
-    if (Date.now() - t1 > 5000) throw Error('the refusal waited behind the settlement instead of answering at once');
-    return { refused: true };
-  });
-  const submitted = await waitWithdrawal(u.ch, t => t.steps && t.steps.settle && ['challenge', 'finalizing', 'done'].includes(t.steps.settle.phase), 'its L1 intent');
-  log(`withdraw ${tag}: intent on L1 after ${((Date.now() - t0) / 60000).toFixed(1)} min, deadline ${submitted.steps.settle.deadline}`);
-  // The manager's challenge period is a day of L1 time; pass it on the local chain.
-  await once(tag + '-challenge-passed', async () => {
-    const deadline = Number(submitted.steps.settle.deadline);
-    const now = Number(cp.execFileSync('cast', ['block', 'latest', '-f', 'timestamp', '--rpc-url', anvil], { encoding: 'utf8' }).trim());
-    if (now <= deadline) {
-      cp.execFileSync('cast', ['rpc', 'evm_increaseTime', String(deadline - now + 1), '--rpc-url', anvil]);
-      cp.execFileSync('cast', ['rpc', 'evm_mine', '--rpc-url', anvil]);
-    }
-    return { deadline, advancedFrom: now };
-  });
+  // A burn is an inter-channel send: the channel is never held. The burner keeps sending right
+  // away, in the channel and to another channel, while the burn is being settled on L1; the payout
+  // proof is then anchored at a later head than the burn block.
+  const during = USERS[user].ch === 7 ? { intra: 'C', inter: 'B' } : { intra: null, inter: 'A' };
+  if (during.intra) await sendIntra(user, during.intra, ETH(0.001), tag + '-during-intra');
+  await sendInter(user, during.inter, ETH(0.001), tag + '-during-inter');
   const ready = await waitWithdrawal(u.ch, t => ['claim_pending', 'settle_done'].includes(t.status), 'its payout');
   const claim = ready.params.claim;
   if (!claim || claim.recipient.toLowerCase() !== u.address || claim.amount !== amount) throw Error('unexpected payout claim ' + JSON.stringify(claim));
@@ -308,11 +289,11 @@ async function restartRelay() {
   await sendIntra('C', 'A', ETH(0.001), 'c-a');
   await sendInter('B', 'C', ETH(0.002), 'b-c');
   await expectBalances({ A: ETH(0.008), B: ETH(0.011), C: ETH(0.008) }, 'balances-3');
+  // A burns 0.002 and, while it settles, sends 0.001 to C and 0.001 to B.
   await withdraw('A', ETH(0.002), 'pw-A');
-  await expectBalances({ A: ETH(0.006), B: ETH(0.011), C: ETH(0.008) }, 'balances-4');
-  // The channel is free again once the intent is on L1.
+  await expectBalances({ A: ETH(0.004), B: ETH(0.012), C: ETH(0.009) }, 'balances-4');
   await sendIntra('C', 'A', ETH(0.001), 'c-a-2');
-  await expectBalances({ A: ETH(0.007), B: ETH(0.011), C: ETH(0.007) }, 'balances-5');
+  await expectBalances({ A: ETH(0.005), B: ETH(0.012), C: ETH(0.008) }, 'balances-5');
   save('success', { at: new Date().toISOString() });
-  log('SUCCESS: joins onto bound channels, in-order deposits with abandoned/foreign/outsider ones, intra/inter sends, receive-after-send, restart, partial withdrawal settled on L1');
+  log('SUCCESS: joins onto bound channels, in-order deposits with abandoned/foreign/outsider ones, intra/inter sends, receive-after-send, restart, partial withdrawal paid on L1 while its channel kept sending');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

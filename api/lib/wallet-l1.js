@@ -1,12 +1,11 @@
 'use strict';
-// The wallet relay's L1 settlement steps: publishing the producer's validity history to the rollup
-// and attesting a signed head's backing. On the devnet the CLI mines Anvil blocks to reach
+// The wallet relay's L1 settlement step: publishing the producer's validity history to the rollup.
+// On the devnet the CLI mines Anvil blocks to reach
 // finality; on a public chain every L1 step waits for the RPC's finalized head (minutes per
 // transaction), so commands run asynchronously and never stall the relay.
-const fs = require('fs'), path = require('path'), crypto = require('crypto');
+const fs = require('fs'), path = require('path');
 const { isDeepStrictEqual } = require('util');
 const cli = require('./cli'), producer = require('./block-producer');
-const { envelopeFor } = require('./exit-kit');
 const { exportedConfig: deploymentConfig } = require('./validity-deployment');
 let queue = Promise.resolve();
 const devnet = () => cli.chainId() === cli.DEVNET_CHAIN_ID;
@@ -63,17 +62,19 @@ async function acknowledge(candidateId, transactionHash) {
 
 // Each post tops the operator's prepaid posting bond up as it needs; the finalization releases
 // every post up to the finalized one, and the bond stays in the rollup for the next posts.
-function publish(ch) {
-  const run = queue.then(() => publishCandidate(ch));
+// `prove: false` only publishes a candidate already proven (a burn payout proves its own, anchored
+// at the head the candidate ends at), and never proves a new one past it.
+function publish(ch, { prove = true } = {}) {
+  const run = queue.then(() => publishCandidate(ch, prove));
   queue = run.catch(() => {});
   return run;
 }
 
-async function publishCandidate(ch) {
+async function publishCandidate(ch, prove) {
     await producer.enableLocalValidity();
     const state = await producer.validityStatus();
     const head = await producer.status();
-    if (!state.candidate && Number(state.finalizedBlockNumber) === Number(head.blockNumber)) return;
+    if (!state.candidate && (!prove || Number(state.finalizedBlockNumber) === Number(head.blockNumber))) return;
     if (!state.candidate) await producer.proveValidity(producer.stableRequestId('wallet-validity', {generation: head.generation, root: head.extendedStateCommitment}));
     const posting = await producer.validityPostingArtifact();
     if (!posting || !/^0x[0-9a-f]{64}$/i.test(posting.receipt.candidateId)) throw new Error('validity candidate missing');
@@ -103,22 +104,4 @@ async function publishCandidate(ch) {
     await acknowledge(receipt.candidateId, receipt.transactionHash);
 }
 
-async function attest(ch, backing) {
-  const dir = path.join(proofDaDir(), 'wallet-backing-' + ch + '-' + backing.signedHead.digest.slice(2));
-  const input = cli.wc(ch, 'wallet_backing.json');
-  cli.writeJson(input, envelopeFor(ch, backing));
-  const manifest = path.join(dir, 'public_close_manifest.json');
-  const timeout = Math.max(1_200_000, Number(process.env.INTMAX_CLI_TIMEOUT_MS || 0));
-  // The balance verifier is pinned by the channel's own verifier data, as at bootstrap.
-  const balanceVdSha256 = crypto.createHash('sha256').update(fs.readFileSync(cli.wc(ch, 'balance_vd.bin'))).digest('hex');
-  if (!fs.existsSync(manifest)) await cli.shAsync(process.env.PUBLIC_CLOSE_PROVER_BIN || path.join(cli.REPO, 'target/release/public_close_prover'), [
-    '--input', input, '--output-dir', dir, '--expected-channel-id', String(ch), '--expected-chain-id', String(cli.chainId()),
-    '--expected-rollup', cli.rollupOf(ch), '--expected-balance-vd-sha256', balanceVdSha256,
-  ], { timeout });
-  const settlement = cli.readJson(cli.wc(ch, 'settlement.json'));
-  // Idempotent on L1: an already attested proof is accepted again without effect.
-  await cli.shAsync('forge', ['script', 'script/WalletL1Lifecycle.s.sol', '--sig', 'attestBacking()', '--rpc-url', cli.RPC,
-    '--broadcast', '--slow', ...cli.l1SignerArgs()], { cwd: contractsDir(), timeout,
-    env: { ...process.env, MANAGER: settlement.manager, WALLET_BACKING_PATH: path.join(dir, 'backing_mle.json') } });
-}
-module.exports = { deploymentConfig, configure, publish, attest };
+module.exports = { deploymentConfig, configure, publish };

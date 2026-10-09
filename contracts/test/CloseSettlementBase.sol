@@ -58,70 +58,6 @@ contract MockRollupRegistry is IChannelRegistry {
         require(ok, "withdraw failed");
     }
 
-    mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
-    mapping(bytes32 => uint256) public partialWithdrawalAuthorizationCalls;
-    bool public rejectAtomicWithdrawal;
-
-    function authorizePartialWithdrawal(bytes32 authDigest) external override {
-        partialWithdrawalAuthorized[authDigest] = true;
-        partialWithdrawalAuthorizationCalls[authDigest] += 1;
-    }
-
-    /// Test-only image of the Rollup withdrawal proof consuming its one-shot IPW2 latch.
-    function consumePartialWithdrawalAuthorization(bytes32 authDigest) external {
-        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
-        delete partialWithdrawalAuthorized[authDigest];
-    }
-
-    function setRejectAtomicWithdrawal(bool reject_) external {
-        rejectAtomicWithdrawal = reject_;
-    }
-
-    function withdrawNative(
-        IntmaxRollup.Withdrawal[] calldata withdrawals,
-        address,
-        bytes calldata
-    ) external {
-        if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
-        for (uint256 i = 0; i < withdrawals.length; ++i) {
-            IntmaxRollup.Withdrawal calldata withdrawal = withdrawals[i];
-            require(withdrawal.tokenIndex == 0, "not native");
-            _consumeAndCredit(withdrawal);
-        }
-    }
-
-    function withdrawERC20(
-        IntmaxRollup.Withdrawal[] calldata withdrawals,
-        address,
-        bytes calldata
-    ) external {
-        if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
-        for (uint256 i = 0; i < withdrawals.length; ++i) {
-            IntmaxRollup.Withdrawal calldata withdrawal = withdrawals[i];
-            require(withdrawal.tokenIndex != 0, "not ERC-20");
-            _consumeAndCredit(withdrawal);
-        }
-    }
-
-    function _consumeAndCredit(IntmaxRollup.Withdrawal calldata withdrawal) private {
-        bytes32 authDigest = keccak256(
-            abi.encodePacked(
-                bytes4(0x49505732),
-                withdrawal.recipient,
-                withdrawal.tokenIndex,
-                withdrawal.amount,
-                withdrawal.auxData
-            )
-        );
-        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
-        delete partialWithdrawalAuthorized[authDigest];
-        if (withdrawal.tokenIndex == 0) {
-            pendingWithdrawals[withdrawal.recipient] += withdrawal.amount;
-        } else {
-            pendingTokenWithdrawals[withdrawal.tokenIndex][withdrawal.recipient] += withdrawal.amount;
-        }
-    }
-
     // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
     mapping(uint32 => IERC20) public tokenAddressOf;
     mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;
@@ -165,7 +101,6 @@ abstract contract CloseSettlementBase is Test {
     address internal mallory = makeAddr("mallory");
 
     bytes4 internal constant CHANNEL_ID = hex"00000009";
-    uint32 internal constant PW_BASE_NONCE = 9;
     uint8 internal constant BP_MEMBER_SLOT = 0;
     bytes32 internal constant USER_A = keccak256("member_a_sphincs_pubkey_hash");
     bytes32 internal constant USER_B = keccak256("member_b_sphincs_pubkey_hash");

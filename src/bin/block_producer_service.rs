@@ -6,7 +6,8 @@ use clap::Parser;
 use intmax3_zkp::{
     block_producer::ProductionDepositRequest,
     block_producer_service::{
-        BlockProducerCommand, BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
+        BlockProducerAnchor, BlockProducerCommand, BlockProducerReceipt, BlockProducerService,
+        BlockProducerServiceError,
     },
     close_funding::CloseFundingPlan,
     common::{
@@ -21,7 +22,8 @@ use intmax3_zkp::{
     },
     regev::RegevSecurityLevel,
     validity_prover_service::{
-        L1FinalizationRpcConfig, ValidityProverService, ValidityProverServiceError,
+        L1FinalizationRpcConfig, ValidityCandidateReceipt, ValidityProverService,
+        ValidityProverServiceError, ValidityProverStatus,
     },
     wallet_core::{
         ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
@@ -255,7 +257,9 @@ enum LiveCommand {
         withdrawal_prover: String,
     },
     /// Prove + wrap the L1 payout artifacts for a SETTLED burn. Read-only on live state; the
-    /// heavy MLE wrap runs in this resident process so the circuits stay warm.
+    /// heavy MLE wrap runs in this resident process so the circuits stay warm. With the resident
+    /// validity prover configured (public chain) the proof is anchored at an L1-finalizable root;
+    /// see [`burn_payout_anchor_plan`].
     LiveBurnPayoutArtifacts {
         channel_id: ChannelId,
         producer_request_id: String,
@@ -835,8 +839,29 @@ fn execute_command(
                     "start the daemon with --live-root to enable live-balance commands".to_string(),
                 )
             })?;
-            execute_live_command(command, live, producer)
-                .map_err(|error| (error.code(), error.to_string()))
+            match (command, validity) {
+                (
+                    LiveCommand::LiveBurnPayoutArtifacts {
+                        channel_id,
+                        producer_request_id,
+                        descriptor,
+                        withdrawal_prover,
+                    },
+                    Some(validity),
+                ) => execute_finalizable_burn_payout(
+                    live,
+                    producer,
+                    validity,
+                    l1,
+                    channel_id,
+                    &producer_request_id,
+                    &descriptor,
+                    &withdrawal_prover,
+                ),
+                // Without the resident validity prover (devnet): prove at the current head.
+                (command, _) => execute_live_command(command, live, producer)
+                    .map_err(|error| (error.code(), error.to_string())),
+            }
         }
         ServiceCommand::Producer(command) => {
             // A terminal close-funding block irreversibly zeroes the live private-asset vector.
@@ -924,10 +949,7 @@ fn require_terminal_close_funding_readiness(
         ));
     }
     let producer_anchor = producer.current_anchor()?;
-    if status.finalized_anchor != producer_anchor
-        || status.finalized_block_number != producer_anchor.block_number
-        || status.finalized_extended_state_commitment != producer_anchor.extended_state_commitment
-    {
+    if !finalized_at(&status, &producer_anchor) {
         return Err(ValidityProverServiceError::ProducerReconciliation(format!(
             "terminal close funding requires a fully finalized producer head; L1-bound anchor is generation {} block {}, producer is generation {} block {}",
             status.finalized_anchor.generation,
@@ -937,6 +959,150 @@ fn require_terminal_close_funding_readiness(
         )));
     }
     Ok(())
+}
+
+/// The L1-finalized validity cursor IS this producer anchor.
+fn finalized_at(status: &ValidityProverStatus, anchor: &BlockProducerAnchor) -> bool {
+    status.finalized_anchor == *anchor
+        && status.finalized_block_number == anchor.block_number
+        && status.finalized_extended_state_commitment == anchor.extended_state_commitment
+}
+
+/// This validity candidate ends exactly at the producer anchor, so acknowledging it on L1 makes
+/// the anchor's extended state commitment an `isFinalizedStateRoot`.
+fn candidate_ends_at(candidate: &ValidityCandidateReceipt, anchor: &BlockProducerAnchor) -> bool {
+    candidate.producer_anchor == *anchor
+        && candidate.final_block_number == anchor.block_number
+        && candidate.final_extended_state_commitment == anchor.extended_state_commitment
+}
+
+/// Stable message fragment of the one burn-payout refusal a relay resolves by publishing: an
+/// older validity candidate must be acknowledged on L1 before a new one can cover the burn.
+const BURN_PAYOUT_PENDING_CANDIDATE: &str = "validity candidate pending L1 acknowledgement";
+
+#[derive(Debug, PartialEq, Eq)]
+enum BurnPayoutAnchorPlan {
+    /// The current head is the L1-finalized cursor: its root is already payable.
+    Finalized,
+    /// The pending candidate ends at the current head: its root becomes payable on acknowledgement.
+    PendingCandidate,
+    /// Prove a new candidate ending at the current head under this deterministic request id.
+    ProveCandidate { request_id: String },
+}
+
+/// Decide how a burn payout proved at `head` becomes payable on L1.
+///
+/// L1 pays a withdrawal proof only against a root that ends a finalized validity batch
+/// (`IntmaxRollup.isFinalizedStateRoot`), while the live prover anchors the payout at the
+/// producer's current head. So the head must be the finalized cursor, or the end of the one
+/// pending candidate, or become the end of a new candidate proved in the same daemon command (the
+/// daemon is single-threaded, so no block can be admitted in between). A pending candidate that
+/// ends elsewhere blocks a new one; the relay publishes it and retries.
+fn burn_payout_anchor_plan(
+    status: &ValidityProverStatus,
+    head: &BlockProducerAnchor,
+    prepared: Option<&BlockProducerAnchor>,
+) -> Result<BurnPayoutAnchorPlan, ValidityProverServiceError> {
+    if finalized_at(status, head) {
+        return Ok(BurnPayoutAnchorPlan::Finalized);
+    }
+    if let Some(candidate) = &status.candidate {
+        if candidate_ends_at(candidate, head) {
+            return Ok(BurnPayoutAnchorPlan::PendingCandidate);
+        }
+        return Err(ValidityProverServiceError::Conflict(format!(
+            "{BURN_PAYOUT_PENDING_CANDIDATE}: candidate {:?} ends at producer generation {} \
+             block {}, but the burn payout is proved at the head, generation {} block {}; \
+             publish and acknowledge that candidate, then retry",
+            candidate.request_id,
+            candidate.producer_anchor.generation,
+            candidate.producer_anchor.block_number,
+            head.generation,
+            head.block_number
+        )));
+    }
+    if let Some(prepared) = prepared {
+        // `prove_candidate` would target the non-authoritative staged block, whose root is not
+        // the head the payout is proved against (and may never be committed).
+        return Err(ValidityProverServiceError::Conflict(format!(
+            "a staged producer block (generation {} block {}) freezes the authoritative head; \
+             retry the burn payout after it is committed or abandoned",
+            prepared.generation, prepared.block_number
+        )));
+    }
+    Ok(BurnPayoutAnchorPlan::ProveCandidate {
+        request_id: format!("burn-payout:{}:{}", head.generation, head.block_number),
+    })
+}
+
+/// `liveBurnPayoutArtifacts` with the resident validity prover: anchor the payout proof at an
+/// L1-finalizable root, atomically with respect to the producer. The response is the unchanged
+/// artifacts JSON; its `producerAnchor` is the finalized or candidate head (>= the burn block).
+#[allow(clippy::too_many_arguments)]
+fn execute_finalizable_burn_payout(
+    live: &mut LiveState,
+    producer: &mut BlockProducerService,
+    validity: &mut ValidityProverService,
+    l1: Option<&L1FinalizationRpcConfig>,
+    channel_id: ChannelId,
+    producer_request_id: &str,
+    descriptor: &InterChannelTransferDescriptor,
+    withdrawal_prover: &str,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    let validity_error = |error: ValidityProverServiceError| (error.code(), error.to_string());
+    let live_error = |error: LiveBalanceServiceError| (error.code(), error.to_string());
+    let prover = withdrawal_prover.parse::<Address>().map_err(|e| {
+        live_error(LiveBalanceServiceError::InvalidRequest(format!(
+            "parse withdrawal_prover: {e}"
+        )))
+    })?;
+    let l1 = l1.ok_or_else(|| {
+        validity_error(ValidityProverServiceError::InvalidConfiguration(
+            "a burn payout on a public chain requires operator-owned L1 finality configuration"
+                .into(),
+        ))
+    })?;
+    let producer: &BlockProducerService = producer;
+    let head = (|| {
+        validity.bind_or_revalidate_l1_authority(l1)?;
+        validity.reconcile(producer)?;
+        let status = validity.status()?;
+        let head = producer.current_anchor()?;
+        let prepared = producer.prepared_anchor()?;
+        match burn_payout_anchor_plan(&status, &head, prepared.as_ref())? {
+            BurnPayoutAnchorPlan::Finalized | BurnPayoutAnchorPlan::PendingCandidate => {}
+            BurnPayoutAnchorPlan::ProveCandidate { request_id } => {
+                let candidate = validity.prove_candidate(request_id, producer)?;
+                if !candidate_ends_at(&candidate, &head) {
+                    return Err(ValidityProverServiceError::ProducerReconciliation(format!(
+                        "validity candidate {:?} does not end at the producer head (generation {} \
+                         block {}) the burn payout is proved against",
+                        candidate.request_id, head.generation, head.block_number
+                    )));
+                }
+            }
+        }
+        Ok(head)
+    })()
+    .map_err(validity_error)?;
+    let artifacts = live
+        .service(channel_id, producer)
+        .and_then(|service| {
+            service.burn_payout_artifacts(producer, producer_request_id, descriptor, prover)
+        })
+        .map_err(live_error)?;
+    if artifacts.producer_anchor != head {
+        return Err(validity_error(
+            ValidityProverServiceError::ProducerReconciliation(
+                "burn payout proof is not anchored at the L1-finalizable producer head".into(),
+            ),
+        ));
+    }
+    serde_json::to_value(artifacts).map_err(|e| {
+        live_error(LiveBalanceServiceError::Snapshot(format!(
+            "serialize live response: {e}"
+        )))
+    })
 }
 
 fn execute_validity_command(
@@ -1110,6 +1276,118 @@ mod tests {
             serde_json::from_str::<ServiceCommand>(&forged).is_err(),
             "the JSONL boundary must never deserialize caller-asserted L1 evidence"
         );
+    }
+
+    fn anchor(generation: u64) -> BlockProducerAnchor {
+        let tag = |offset: u32| {
+            use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+            Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, offset, generation as u32]).unwrap()
+        };
+        BlockProducerAnchor {
+            generation,
+            entry_hash: tag(1),
+            block_number: generation,
+            timestamp: 100 + generation,
+            extended_state_commitment: tag(2),
+            bp_sig_chain: tag(3),
+        }
+    }
+
+    fn candidate(request_id: &str, end: &BlockProducerAnchor) -> ValidityCandidateReceipt {
+        ValidityCandidateReceipt {
+            request_id: request_id.into(),
+            candidate_id: Bytes32::default(),
+            producer_anchor: end.clone(),
+            initial_block_number: 0,
+            final_block_number: end.block_number,
+            initial_extended_state_commitment: Bytes32::default(),
+            final_extended_state_commitment: end.extended_state_commitment,
+            signature_event_count: 0,
+            metrics: intmax3_zkp::validity_prover_service::ValidityProofMetrics {
+                block_count: 0,
+                appended_signature_event_count: 0,
+                block_chain_elapsed_ms: 0,
+                aggregate_list_elapsed_ms: 0,
+                validity_elapsed_ms: 0,
+                total_elapsed_ms: 0,
+                block_chain_proof_bytes: 0,
+                aggregate_list_proof_bytes: 0,
+                validity_proof_bytes: 0,
+                block_chain_public_inputs: 0,
+                aggregate_list_public_inputs: 0,
+                validity_public_inputs: 0,
+                peak_rss_bytes: 0,
+            },
+        }
+    }
+
+    fn status(
+        finalized: &BlockProducerAnchor,
+        pending: Option<ValidityCandidateReceipt>,
+    ) -> ValidityProverStatus {
+        ValidityProverStatus {
+            snapshot_version: 3,
+            circuit_fingerprint: Bytes32::default(),
+            circuit_construction_count: 1,
+            circuit_build_elapsed_ms: 0,
+            circuit_build_peak_rss_bytes: 0,
+            prover: Address::default(),
+            finalized_anchor: finalized.clone(),
+            finalized_block_number: finalized.block_number,
+            finalized_extended_state_commitment: finalized.extended_state_commitment,
+            finalized_signature_event_count: 0,
+            candidate: pending,
+            acknowledgement_count: 0,
+        }
+    }
+
+    #[test]
+    fn burn_payout_is_anchored_only_at_an_l1_finalizable_head() {
+        let finalized = anchor(4);
+        let head = anchor(7);
+
+        // The head is the finalized cursor: payable now, nothing to prove.
+        assert_eq!(
+            burn_payout_anchor_plan(&status(&head, None), &head, None).unwrap(),
+            BurnPayoutAnchorPlan::Finalized
+        );
+        // The pending candidate ends at the head: payable once it is acknowledged.
+        assert_eq!(
+            burn_payout_anchor_plan(
+                &status(&finalized, Some(candidate("relay-7", &head))),
+                &head,
+                None
+            )
+            .unwrap(),
+            BurnPayoutAnchorPlan::PendingCandidate
+        );
+        // A pending candidate ending elsewhere blocks: the relay publishes it and retries.
+        let error = burn_payout_anchor_plan(
+            &status(&finalized, Some(candidate("relay-5", &anchor(5)))),
+            &head,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "validity_conflict");
+        assert!(
+            error
+                .to_string()
+                .contains("validity candidate pending L1 acknowledgement"),
+            "{error}"
+        );
+        // Nothing pending: prove a candidate ending at the head under a deterministic id.
+        assert_eq!(
+            burn_payout_anchor_plan(&status(&finalized, None), &head, None).unwrap(),
+            BurnPayoutAnchorPlan::ProveCandidate {
+                request_id: "burn-payout:7:7".into()
+            }
+        );
+        // A staged (non-authoritative) block would become the candidate target instead: refuse.
+        let staged = anchor(8);
+        assert!(matches!(
+            burn_payout_anchor_plan(&status(&finalized, None), &head, Some(&staged)),
+            Err(ValidityProverServiceError::Conflict(_))
+        ));
     }
 
     #[test]

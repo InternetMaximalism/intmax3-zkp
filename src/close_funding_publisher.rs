@@ -2080,7 +2080,6 @@ struct TokenChainState {
     cap: String,
     received: String,
     total_credited_out: String,
-    authorization: bool,
     nullifier_used: bool,
     pending_rollup_credit: String,
     manager_asset_balance: String,
@@ -2341,7 +2340,7 @@ fn validate_preflight_action(
         assert_backing_invariant(state)?;
         match spec.action {
             PublicationAction::MaterializeNative | PublicationAction::MaterializeErc20 => {
-                if state.received != "0" || state.authorization || state.nullifier_used {
+                if state.received != "0" || state.nullifier_used {
                     return Err(format!(
                         "token {token_index} is not in pristine pre-materialization state; missing/sibling WAL"
                     ));
@@ -2351,7 +2350,7 @@ fn validate_preflight_action(
                 let pending =
                     quantity_biguint(&state.pending_rollup_credit, "pending Rollup credit")?;
                 let amount = quantity_biguint(&plan.amount, "payout amount")?;
-                if state.received != "0" || state.authorization || pending < amount {
+                if state.received != "0" || pending < amount {
                     return Err(format!(
                         "token {token_index} is not atomically materialized with enough pending credit for exact pull"
                     ));
@@ -2743,13 +2742,6 @@ fn read_chain_snapshot_at(
             &[&token_arg],
             block,
         )?;
-        let authorization = view_bool_at(
-            &config.rpc_url,
-            &prepared.envelope.rollup,
-            "partialWithdrawalAuthorized(bytes32)(bool)",
-            &[&plan.auth_digest],
-            block,
-        )?;
         let nullifier_used = view_bool_at(
             &config.rpc_url,
             &prepared.envelope.rollup,
@@ -2783,7 +2775,6 @@ fn read_chain_snapshot_at(
                 cap: cap.to_string(),
                 received: received.to_string(),
                 total_credited_out: total_credited_out.to_string(),
-                authorization,
                 nullifier_used,
                 pending_rollup_credit: pending_rollup_credit.to_string(),
                 manager_asset_balance: manager_asset_balance.to_string(),
@@ -4067,8 +4058,9 @@ fn materialization_lane(action: &PublicationAction) -> std::result::Result<(bool
 
 /// Validate the pinned materializer's terminal marker and return its receipt-log position.
 ///
-/// `withdrawalSetDigest` is deliberately diagnostic: IPW2 authenticates the complete terminal
-/// economics but not a proof-private nullifier or withdrawal order. A different valid proof may
+/// `withdrawalSetDigest` is deliberately diagnostic: the Manager's per-token close-funding gate
+/// authenticated the complete terminal economics but not a proof-private nullifier or withdrawal
+/// order (that cooperative route is now deprecated on L1: `authorizeCloseFunding` reverts). A different valid proof may
 /// therefore win the permissionless race safely. Manager/lane/IMCF are exact indexed authority;
 /// the receipt-block complete-lane state below proves the resulting credits.
 fn validate_materialization_event(
@@ -4250,11 +4242,6 @@ fn validate_post_state(
         assert_backing_invariant(state)?;
         match spec.action {
             PublicationAction::MaterializeNative | PublicationAction::MaterializeErc20 => {
-                if state.authorization {
-                    return Err(format!(
-                        "token {token_index} materialization left its one-shot authorization live"
-                    ));
-                }
                 if received == BigUint::from(0u8)
                     && quantity_biguint(&state.pending_rollup_credit, "pending Rollup credit")?
                         < amount
@@ -4265,7 +4252,7 @@ fn validate_post_state(
                 }
             }
             PublicationAction::PullNative | PublicationAction::PullErc20 { .. } => {
-                if state.authorization || received != cap {
+                if received != cap {
                     return Err(format!(
                         "token {token_index} exact pull did not set received cap"
                     ));
@@ -4846,7 +4833,6 @@ fn validate_completed_state(
         let amount = quantity_biguint(&plan.amount, "payout amount")?;
         if quantity_biguint(&state.cap, "manager cap")? != amount
             || quantity_biguint(&state.received, "manager received")? != amount
-            || state.authorization
         {
             return Err(format!(
                 "token {token_index} is not atomically materialized and cap-funded"
@@ -5624,7 +5610,6 @@ mod tests {
     fn token_state(
         token_index: u32,
         amount: u64,
-        authorization: bool,
         nullifier_used: bool,
         received: u64,
         pending: u64,
@@ -5635,7 +5620,6 @@ mod tests {
             cap: amount.to_string(),
             received: received.to_string(),
             total_credited_out: "0".into(),
-            authorization,
             nullifier_used,
             pending_rollup_credit: pending.to_string(),
             manager_asset_balance: balance.to_string(),
@@ -6223,8 +6207,8 @@ mod tests {
                 &prepared,
                 &materialize,
                 &snapshot(vec![
-                    token_state(7, 40, false, false, 0, 40, 0),
-                    token_state(8, 30, false, false, 0, 0, 0),
+                    token_state(7, 40, false, 0, 40, 0),
+                    token_state(8, 30, false, 0, 0, 0),
                 ]),
             )
             .is_err()
@@ -6233,8 +6217,8 @@ mod tests {
             &prepared,
             &materialize,
             &snapshot(vec![
-                token_state(7, 40, false, false, 0, 140, 0),
-                token_state(8, 30, false, false, 0, 30, 0),
+                token_state(7, 40, false, 0, 140, 0),
+                token_state(8, 30, false, 0, 30, 0),
             ]),
         )
         .unwrap();
@@ -6249,7 +6233,7 @@ mod tests {
             &payout,
             // A winning proof may use a different nullifier than the local artifact. The pinned
             // materializer event plus complete-lane credits are the authority.
-            &snapshot(vec![token_state(7, 40, false, false, 0, 140, 0)]),
+            &snapshot(vec![token_state(7, 40, false, 0, 140, 0)]),
         )
         .unwrap();
         let pull = spec(PublicationAction::PullErc20 { token_index: 7 }, vec![7]);
@@ -6257,14 +6241,14 @@ mod tests {
         validate_post_state(
             &prepared,
             &pull,
-            &snapshot(vec![token_state(7, 40, false, true, 40, 100, 40)]),
+            &snapshot(vec![token_state(7, 40, true, 40, 100, 40)]),
         )
         .unwrap();
         assert!(
             validate_post_state(
                 &prepared,
                 &pull,
-                &snapshot(vec![token_state(7, 40, false, true, 20, 120, 20)]),
+                &snapshot(vec![token_state(7, 40, true, 20, 120, 20)]),
             )
             .is_err()
         );
@@ -6272,7 +6256,7 @@ mod tests {
             validate_post_state(
                 &prepared,
                 &pull,
-                &snapshot(vec![token_state(7, 40, false, true, 40, 100, 39)]),
+                &snapshot(vec![token_state(7, 40, true, 40, 100, 39)]),
             )
             .is_err()
         );
@@ -6506,7 +6490,7 @@ mod tests {
         validate_journal_prerequisites(&journal, &prepared, &action).unwrap();
         validate_preflight_action(
             &action,
-            &snapshot(vec![token_state(7, 40, false, false, 0, 400, 0)]),
+            &snapshot(vec![token_state(7, 40, false, 0, 400, 0)]),
             &prepared,
         )
         .unwrap();
@@ -6613,9 +6597,10 @@ mod tests {
     fn wrong_getter_or_anchor_state_fails_closed() {
         let prepared = parsed_test_prepared();
         let materialize = spec(PublicationAction::MaterializeNative, vec![0]);
-        let mut wrong = snapshot(vec![token_state(0, 30, true, false, 0, 30, 0)]);
+        // A materialization getter view without the pending Rollup credit it must have created.
+        let mut wrong = snapshot(vec![token_state(0, 30, false, 0, 29, 0)]);
         assert!(validate_post_state(&prepared, &materialize, &wrong).is_err());
-        wrong.tokens.get_mut(&0).unwrap().authorization = false;
+        wrong.tokens.get_mut(&0).unwrap().pending_rollup_credit = "30".into();
         wrong.anchor_finalized = false;
         assert!(validate_post_state(&prepared, &materialize, &wrong).is_err());
     }

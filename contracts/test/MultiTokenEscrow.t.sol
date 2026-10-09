@@ -193,10 +193,6 @@ contract MultiTokenEscrowTest is Test {
         });
     }
 
-    function _authDigest(IntmaxRollup.Withdrawal memory w) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData));
-    }
-
     function _depositToken(SimpleERC20 token, uint32 tokenIndex, address from, uint256 amount)
         internal
     {
@@ -366,20 +362,19 @@ contract MultiTokenEscrowTest is Test {
         rollup.withdrawERC20(ws, wdProver, proof);
     }
 
-    function test_withdrawERC20_authorizationIsOneShotThroughPull() public {
-        _depositToken(tokenA, TOKEN_A, makeAddr("authorizedTokenDepositor"), 100);
-        rollup.registerSettlementManager(address(this));
+    /// A burn leaf (`auxData != 0`, an ERC-20 partial withdrawal) is paid on its withdrawal proof
+    /// alone — no settlement manager is registered and nothing is authorized — exactly once.
+    function test_withdrawERC20_burnLeafPaysOnProofAloneOnceThroughPull() public {
+        _depositToken(tokenA, TOKEN_A, makeAddr("burnTokenDepositor"), 100);
 
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
-        ws[0] = _leaf(recipient1, TOKEN_A, 40, keccak256("authorized-token-nullifier"));
-        ws[0].auxData = keccak256("token-close-funding-aux");
-        bytes32 authDigest = _authDigest(ws[0]);
-        rollup.authorizePartialWithdrawal(authDigest);
+        ws[0] = _leaf(recipient1, TOKEN_A, 40, keccak256("burn-token-nullifier"));
+        ws[0].auxData = keccak256("token-burn-descriptor");
 
         bytes memory proof = _withdrawalProof(ws);
         rollup.withdrawERC20(ws, wdProver, proof);
-        assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 token authorization consumed");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "token nullifier consumed");
+        assertEq(rollup.escrowedByToken(TOKEN_A), 60, "token escrow debited exactly once");
         assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 40, "token pull credit installed");
 
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
@@ -387,7 +382,7 @@ contract MultiTokenEscrowTest is Test {
 
         vm.prank(recipient1);
         rollup.withdrawToken(TOKEN_A, 40);
-        assertEq(tokenA.balanceOf(recipient1), 40, "authorized token payout pulled once");
+        assertEq(tokenA.balanceOf(recipient1), 40, "burn token payout pulled once");
         assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 0, "token pull credit consumed");
     }
 
@@ -530,21 +525,20 @@ contract MultiTokenEscrowTest is Test {
         assertEq(rollup.pendingWithdrawals(recipient1), 1 ether, "ETH pull credit");
     }
 
-    function test_withdrawNative_authorizationIsOneShotThroughPull() public {
+    /// A native burn leaf (`auxData != 0`) is paid on its withdrawal proof alone — no settlement
+    /// manager is registered and nothing is authorized — exactly once.
+    function test_withdrawNative_burnLeafPaysOnProofAloneOnceThroughPull() public {
         vm.deal(address(this), 1 ether);
         rollup.deposit{value: 1 ether}(bytes32(uint256(0xE1)), 0, 1 ether, bytes32(0));
-        rollup.registerSettlementManager(address(this));
 
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
-        ws[0] = _leaf(recipient1, 0, 0.4 ether, keccak256("authorized-native-nullifier"));
-        ws[0].auxData = keccak256("native-close-funding-aux");
-        bytes32 authDigest = _authDigest(ws[0]);
-        rollup.authorizePartialWithdrawal(authDigest);
+        ws[0] = _leaf(recipient1, 0, 0.4 ether, keccak256("burn-native-nullifier"));
+        ws[0].auxData = keccak256("native-burn-descriptor");
 
         bytes memory proof = _withdrawalProof(ws);
         rollup.withdrawNative(ws, wdProver, proof);
-        assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 native authorization consumed");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "native nullifier consumed");
+        assertEq(rollup.totalEscrowed(), 0.6 ether, "native escrow debited exactly once");
         assertEq(rollup.pendingWithdrawals(recipient1), 0.4 ether, "native pull credit installed");
 
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
@@ -553,7 +547,7 @@ contract MultiTokenEscrowTest is Test {
         uint256 before = recipient1.balance;
         vm.prank(recipient1);
         rollup.withdraw(0.4 ether);
-        assertEq(recipient1.balance - before, 0.4 ether, "authorized native payout pulled once");
+        assertEq(recipient1.balance - before, 0.4 ether, "burn native payout pulled once");
         assertEq(rollup.pendingWithdrawals(recipient1), 0, "native pull credit consumed");
     }
 

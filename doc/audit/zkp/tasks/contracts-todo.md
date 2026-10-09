@@ -38,6 +38,26 @@ Legend: [ ] todo · [~] in progress · [x] modeled+proved
       while anything is unfinalized; `released <= posted` (truncation only uncounts posts above the
       finalized height); forfeiture never exceeds the bond and its split conserves it; a timeout
       removal forfeits nothing; a proven fraud forfeits also after the deadline. Deferred by the owner.
+- [ ] **STALE since the partial-withdrawal simplification (2026-10-09): re-model the burn payout and
+      the IPW2 removal.** A partial withdrawal is now an ordinary inter-channel send to the reserved
+      BURN channel, paid by `withdrawNative` / `withdrawERC20` on its base withdrawal proof alone:
+      `_consumeWithdrawalGuard` keeps only the nullifier single-use check (no `auxData != 0` IPW2
+      branch), and `authorizePartialWithdrawal`, `partialWithdrawalAuthorized`,
+      `PartialWithdrawalNotAuthorized`, `NotRegisteredSettlementManager` and `_withdrawalAuthDigest`
+      are gone from IntmaxRollup; ChannelSettlementManager lost its whole partial-withdrawal section
+      (`submitPartialWithdrawalIntent` / `finalizePartialWithdrawal` / `cancelPartialWithdrawal`,
+      the `authorizedBurn*` snapshot and the `CloseOlderThanAuthorizedBurn` /
+      `CloseForksAuthorizedBurn` close-admission checks). Stale models: the IPW2 branch of
+      `withdrawNative` and `authDigest` in `Zkp/Contracts/IntmaxRollupWithdraw.lean` (and
+      `claimAuthorized`), `authorizePartial` / `partialWithdrawalAuthorized` in
+      `IntmaxRollupDeposit.lean`, the `partialWithdrawalAuthorized` field in
+      `IntmaxRollupSolvency.lean`, the burn-path trust surface (`BurnAuthorizationsLegitimate`,
+      `burn_drain_satisfiable`) in `Assumptions.lean`, and their `Coverage.lean` rows. To prove
+      instead: a burn leaf pays exactly like any leaf (proof-bound economics, finalized root,
+      single-use nullifier, escrow ceiling), and close-vs-burn ordering from the
+      `CloseFundingMaterializer` journal — `recordPost` reverts for a frozen/exited bound channel,
+      and close admission/materialization require a backing anchor `>= lastPostedBlock` — so no
+      settled close vector still contains a burn the rollup pays. Deferred by the owner.
 - [x] claimAuthorizedWithdrawal → IntmaxRollupWithdraw (`claimAuthorized_escrow_conservation`, renamed 2026-07-28 from the misleading `claimAuthorized_safe`: it proves escrow conservation + nullifier consumption + an authorization read-back, NOT economic soundness — the DERIVATION of the digest's fields was always out of model scope). **The contract function itself was DELETED 2026-07-28** (doc/tasks/pw-auth-threat-model.md); the model transition is retained so the solvency inductions cover a superset of deployed operations. authorizePartialWithdrawal → IntmaxRollupDeposit (access control)
 - [x] helpers (hash/crypto) → Coverage.lean (structural keccak_det + crypto oracles)
 - [x] `registerChannel()` (:891)  → Coverage.lean (structural reg keccak chain)

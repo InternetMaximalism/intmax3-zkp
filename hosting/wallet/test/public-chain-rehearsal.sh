@@ -12,7 +12,7 @@
 # Usage: public-chain-rehearsal.sh <step>   (run the steps in order; each is re-runnable)
 #   build      build the binaries exactly as deploy-relay-host.sh does (a no-op when fresh): a
 #              rehearsal of a stale build rehearses something that will not be deployed
-#   chain      start anvil (chain id 11155111) + the limits proxy, pre-mine history, operator keystore
+#   chain      start anvil (chain id REHEARSAL_CHAIN_ID, default 11155111) + the limits proxy, pre-mine history, operator keystore
 #   rollup     feature-config contracts copy + Deploy.s.sol, its validity verifier pinned to the
 #              producer's own exported configuration (never the arity-[2] test fixture)
 #   backing    setup-backing (empty genesis) for every channel
@@ -30,7 +30,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 R="${REHEARSAL_DIR:?set REHEARSAL_DIR to an empty scratch directory}"
 CHANNELS="${REHEARSAL_CHANNELS:-7 8}"
-CHAIN_ID=11155111
+CHAIN_ID="${REHEARSAL_CHAIN_ID:-11155111}"
 ANVIL_PORT="${ANVIL_PORT:-8597}"
 PROXY_PORT="${PROXY_PORT:-8598}"
 RELAY_PORT="${RELAY_PORT:-8610}"

@@ -268,8 +268,8 @@ contract CloseFundingMaterializer {
         _;
     }
 
-    /// @notice Called by the Rollup while registering a real settlement Manager. Legacy partial-
-    ///         withdrawal mocks that do not expose `channelId()` never reach this method.
+    /// @notice Called by the Rollup while registering a real settlement Manager. An address that
+    ///         does not expose `closeFundingMaterializer()` never reaches this method.
     function bindManager(address manager) external onlyRollup {
         if (manager.code.length == 0) revert InvalidManager();
         ChannelSettlementManager m = ChannelSettlementManager(payable(manager));
@@ -322,6 +322,12 @@ contract CloseFundingMaterializer {
 
     /// @dev Unbound channels need no journal. Binding is allowed only at a globally finalized
     ///      head, so no earlier pending block for a newly bound channel can be missed.
+    ///      SECURITY (close-vs-burn ordering): refusing a post to a frozen or exited channel is what
+    ///      orders a partial withdrawal against a close. A burn is paid by the Rollup on its base
+    ///      withdrawal proof alone, so once the Manager freezes the channel a burn block that was
+    ///      not yet posted can never be posted, and therefore never paid; the close returns that
+    ///      amount instead. A burn block posted before the freeze raises `lastPostedBlock`, which
+    ///      `requireSignedHeadBacking` then demands of every close backing.
     function recordPost(uint32 channelId, uint64 blockNumber) external onlyRollup {
         if (managerOfChannel[channelId] == address(0)) return;
         if (materializedChannelExit[channelId] != bytes32(0)) revert ChannelAlreadyExited();
@@ -343,7 +349,7 @@ contract CloseFundingMaterializer {
     }
 
     /// @notice Verify and durably register an exact signed-head backing statement before it is
-    ///         allowed to become the Manager's close or partial-withdrawal high-water mark.
+    ///         allowed to become the Manager's close state.
     /// @dev Permissionless and idempotent. Splitting this expensive verification from close
     ///      submission keeps the Manager ABI and challenge transaction bounded while preventing a
     ///      valid but unavailable backing proof from permanently displacing an exit-capable head.
@@ -381,6 +387,11 @@ contract CloseFundingMaterializer {
 
     /// @notice Manager-only admission check. Keeping the branch and error in this satellite saves
     ///         scarce ChannelSettlementManager runtime bytes while preserving the submit ABI.
+    /// @dev Once a close is requested the backing must be anchored at or after the channel's last
+    ///      posted block. Its settled-tx chain comes from the base Balance proof at that anchor, so
+    ///      a state that predates a posted burn block cannot be backed: no close can settle a fund
+    ///      vector that still contains an amount the Rollup pays out as a burn. (While `Active`,
+    ///      the only caller, `submitCloseIntent`, reverts `CloseNotRequested` after this check.)
     function requireSignedHeadBacking(uint32 channelId, bytes32 settledTxChain, bytes32 tokenFundsDigest)
         external
         view
@@ -554,9 +565,9 @@ contract CloseFundingMaterializer {
             balanceStateCommitment: _limbsToBytes32(pi, 26)
         });
         if (!rollup.isFinalizedStateRoot(statement.backingRoot)) revert BackingPublicInputsMismatch();
-        // Historical exact backing remains usable for a previously signed partial-withdrawal burn
-        // even after later channel posts. Terminal close/materialization independently requires a
-        // current anchor, so accepting the receipt here cannot close from a stale economic state.
+        // A receipt may be attested at any finalized anchor. Close admission
+        // (`requireSignedHeadBacking`) and materialization independently require a current anchor,
+        // so accepting the receipt here cannot close from a stale economic state.
         if (statement.anchorBlockNumber > rollup.latestFinalizedBlockNumber()) {
             revert ChannelExitHasUnfinalizedBlocks();
         }

@@ -308,18 +308,23 @@ with no record (the first Sepolia rollup) keeps deposits off.
 
 **Partial withdrawals on a public chain** are settled by the relay in the background
 (`hosting/wallet/pw-settlement.js`), starting right after the burn; the wallet follows the ticket.
-Phases (`steps.settle.phase` of the `partial_withdrawal` ticket): `publishing` — the producer's
-validity history up to its head is proven by the resident validity prover (the daemon starts with
-it on a verified rollup) and posted with `postBlockAndSubmitGuarded`, one blob post per producer
-block, each waiting for L1 finality, then attested and finalized (`publish-wallet-validity`);
-`submitting` — the post-burn head's backing is attested and the intent is submitted with a close
-proof of that head (`pw-submit`); `challenge` — the manager's challenge period (one day, the
-contract's floor off the devnet) runs until `deadline`; `finalizing` — `pw-finalize` authorizes the
-burn and credits the payout; then the ticket is `claim_pending` until the recipient pulls it with its
-own wallet. A failed step is recorded on the ticket and retried every five minutes; a relay restart
-resumes at the recorded phase. Until the intent is submitted the burn owns the channel head (the
-manager accepts a burn only with its own post-burn signed state), so every other operation on that
-channel answers 409 `SETTLING_WITHDRAWAL`; other channels are unaffected. Every blob post is
+A burn is an inter-channel send to the reserved burn channel, and the rollup pays it on its base
+withdrawal proof alone (`withdrawNative`/`withdrawERC20`; the validity circuit already binds every
+member's signature to the block that carries it). There is no settlement-manager submission,
+challenge period or cancellation, and the channel is never held: it keeps sending and receiving
+while its burn settles. A close cannot double-draw a burn: a close needs backing anchored at or
+after the channel's last posted block (`CloseFundingMaterializer`), so once the burn block is posted
+no pre-burn state can close, and once a close freezes the channel the burn block can no longer be
+posted (that burn is then never paid and the close returns the amount). Phases
+(`steps.settle.phase` of the `partial_withdrawal` ticket): `proving` — the daemon builds the payout
+proof anchored at the head a validity candidate ends at, proving that candidate in the same command
+when none is pending (an older pending candidate is published first; block production waits while
+the daemon proves, as for any validity proof); `publishing` — that candidate is posted with
+`postBlockAndSubmitGuarded`, one blob post per producer block, each waiting for L1 finality, then
+finalized (`publish-wallet-validity`), until the payout anchor's root is finalized on the rollup;
+`paying` — `pw-finalize` pays the withdrawal proof on the rollup; then the ticket is
+`claim_pending` until the recipient pulls it with its own wallet. A failed step is recorded on the
+ticket and retried every five minutes; a relay restart resumes at the recorded phase. Every blob post is
 backed by the operator's prepaid posting bond in the rollup (`bonds(operator)`): a post is accepted
 only while the bond covers `baseStake` plus `postStake` for each unfinalized post of the operator,
 this one included, and each post tops the bond up with its `msg.value` as needed. The finalization

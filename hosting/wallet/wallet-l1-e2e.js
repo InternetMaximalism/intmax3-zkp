@@ -42,14 +42,8 @@ async function api(route,body){return new Promise((resolve,reject)=>{
  if(!exists('burn-payload.json')){console.log('Proving burn');const h=await api('/api/base-head');save('burn-payload.json',wallet.burnSend('5000000000000000',recipient,0,h.nonce));}
  if(!exists('burned.json')){console.log('Co-signing burn');const b=read('burn-payload.json');save('burned.json',await api('/api/cosign-burn',{...b,amount:'5000000000000000',recipient}));}
  console.log('Burned',wallet.finalize(read('burned.json')));
- if(!exists('submitted.json')){console.log('Submitting, with real L1 validity publication');save('submitted.json',await api('/api/pw-submit',{recipient}));}
- if(process.env.WALLET_E2E_VERIFY_RESUME==='1' && !exists('resumed.json')){
-  const operator='0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
-  const before=cast('rpc','eth_getTransactionCount',operator,'latest');
-  const resumed=await api('/api/pw-submit',{recipient});
-  if(resumed.auth_digest!==read('submitted.json').auth_digest || cast('rpc','eth_getTransactionCount',operator,'latest')!==before)throw new Error('submit retry did not resume the exact existing authorization');
-  save('resumed.json',resumed);console.log('Submit retry resumed without another transaction');
- }
+ // No settlement-manager submission: Step 2 proves the payout, publishes the validity batch it is
+ // anchored at, and pays on the withdrawal proof alone.
  console.log('Finalizing payout');save('finalized.json',await api('/api/pw-finalize',{}));
  const claim=read('finalized.json').claim;
  if(claim){
@@ -63,7 +57,7 @@ async function api(route,body){return new Promise((resolve,reject)=>{
   }
   save('claim-confirmed.json',await api('/api/pw-claim-confirm',{txHash:read('pull.json').transactionHash}));
  }
- const auth=read('work/ch7/pw_auth.json'),backing=read('work/ch7/channel_backing.json');
- if(cast('call',backing.rollup,'withdrawalNullifierUsed(bytes32)(bool)',auth.withdrawal_nullifier)!=='true')throw new Error('payout nullifier was not consumed on L1');
+ const artifacts=read('work/ch7/pw_artifacts.json'),backing=read('work/ch7/channel_backing.json');
+ if(cast('call',backing.rollup,'withdrawalNullifierUsed(bytes32)(bool)',artifacts.withdrawal.nullifier)!=='true')throw new Error('payout nullifier was not consumed on L1');
  console.log('SUCCESS',read('finalized.json'));
 })().catch(e=>{console.error(e.stack);process.exit(1)});

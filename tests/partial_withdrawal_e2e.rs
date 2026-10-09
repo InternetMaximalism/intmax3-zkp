@@ -1,44 +1,55 @@
-//! GAP2 partial withdrawal anvil E2E: Rust wallet `build_burn_send` → on-chain
-//! `submitPartialWithdrawalIntent` → `finalizePartialWithdrawal` → `withdrawNative` authorization.
+//! Partial-withdrawal anvil E2E: a burn is paid on L1 by its base withdrawal proof alone, through
+//! the real `channel_member pw-finalize`.
 //!
-//! Cross-boundary parity: the test's primary value is verifying that Rust-computed
-//! `settled_tx_chain_push`, `partial_withdrawal_auth_digest`, and `build_burn_send` outputs feed
-//! correctly into the deployed Solidity contracts (same hash chains, same authDigest, same
-//! encoding).
+//! A partial withdrawal is an inter-channel send to the reserved BURN channel whose base transfer
+//! names an L1 recipient. Like an inter-channel transfer consumed by a receive proof, it is paid by
+//! `IntmaxRollup.withdrawNative` from the base withdrawal proof: the members' consent is the
+//! validity of the N-of-N signed update that carried it. No settlement manager is deployed here;
+//! the rollup alone (`script/Deploy.s.sol`) verifies and pays.
+//!
+//! Flow: Rust wallet `build_burn_send` → N-of-N co-signed post-burn head → the burn's base
+//! transfer settled into the base balance IVC head → registration, deposit, bootstrap and burn
+//! blocks posted to anvil as EIP-4844 blob transactions (`cast mktx --blob`, validated with
+//! `proof_da::validate_decoded_blob_transaction` exactly like the production CLI) and finalized
+//! with their real 4-block validity MLE proof → the burn's single-withdrawal → withdrawal-chain →
+//! final withdrawal proof wrapped into the deployed withdrawal adapter's MLE format, staged exactly
+//! as the relay stages the daemon's `liveBurnPayoutArtifacts` response (with `channel_backing.json`
+//! naming the rollup) → `pw-finalize`:
+//!   * while the proof's anchor root is posted but not finalized it refuses with `payout anchor is
+//!     not L1-finalized` and journals no payout transaction;
+//!   * once the root is finalized it pays with `withdrawNative` and, the signer being the proved
+//!     recipient, pulls the credit; the escrow drops by exactly the burned amount;
+//!   * a re-run is idempotent, and a replayed payout reverts on the used nullifier.
 //!
 //! Release-gate execution requires foundry (anvil/forge/cast); missing tooling is a hard failure so
 //! CI cannot silently report an unexecuted payout path as passing.
-//!
-//! Signer-independent exit: `submitPartialWithdrawalIntent` requires an ATTESTED whole-vector
-//! `CloseAssetBacking` proof for the post-burn head (`requireSignedHeadBacking`), i.e. a backing
-//! statement whose `finalized_extended_state_commitment` the live Rollup has finalized and whose
-//! anchor is `<= latestFinalizedBlockNumber()`. The test therefore drives the real chain the
-//! Rust-side `BlockWitnessGenerator` mirrors: registration block, deposit block, bootstrap block
-//! and burn block are posted to anvil as EIP-4844 blob transactions (`cast mktx --blob`, validated
-//! with `proof_da::validate_decoded_blob_transaction` exactly like `channel_member withdraw`),
-//! the 4-block validity MLE proof is attested (`attestProofData`) and finalized, the backing proof
-//! over the burn-send balance proof is attested through `CloseFundingMaterializer`, and only then
-//! is the partial-withdrawal intent submitted.
 #![cfg(not(debug_assertions))]
 
 use intmax3_zkp::{
+    block_producer_service::{BlockProducerAnchor, BlockProducerReceipt},
     circuits::{
         balance::{
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
-        channel::{
-            close_asset_backing_circuit::{CloseAssetBackingCircuit, CloseAssetBackingWitness},
-            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
-        },
         test_utils::{
-            balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData, SendTxData},
+            balance_witness_generator::{
+                BalanceWitnessGenerator, ReceiveDepositData, SendTxData, SingleWithdrawalData,
+            },
             block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
         validity::block_hash_chain::{
             block_chain_pis::BlockChainPublicInputs,
             block_hash_chain_processor::BlockHashChainProcessor,
             validity_circuit::{ValidityCircuit, ValidityPublicInputs},
+        },
+        withdraw::{
+            single_withdrawal_circuit::{
+                SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN, SingleWithdawalCircuit,
+                SingleWithdawalPublicInputs,
+            },
+            withdrawal_processor::WithdrawalProcessor,
+            withdrawal_step::WithdrawalStepWitness,
         },
         witness::block_witness_generator::{BlockTxV2Witness, ChannelMemberKeys},
     },
@@ -55,8 +66,11 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
+    partial_withdrawal_payout::{
+        PartialWithdrawalPayoutStore, PartialWithdrawalProofArtifacts,
+        PartialWithdrawalProofMetrics,
+    },
     proof_da::{DecodedBlobTransaction, ValidatedBlobSidecars, validate_decoded_blob_transaction},
-    public_close_prover::wrap_and_export_backing_mle,
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::{
         conversion::ToU64 as _,
@@ -67,10 +81,10 @@ use intmax3_zkp::{
         wrapper::WrapperCircuit,
     },
     wallet_core::{
-        ChannelBalanceAttestation, CloseProver, MemberInfo, MemberKeys, add_signature,
+        ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
-        inter_channel_base_transfer, partial_withdrawal_auth_digest, sign_state,
-        sign_state_if_backed, verify_all_signatures, verify_channel_backing,
+        inter_channel_base_transfer, sign_state, sign_state_if_backed, verify_all_signatures,
+        verify_channel_backing,
     },
 };
 use plonky2::{
@@ -93,13 +107,14 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-/// The account behind `ANVIL0`: deployer, block producer, depositor and submitter of this E2E.
+/// The account behind `ANVIL0`: deployer, block producer and depositor of this E2E.
 const ANVIL0_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+/// Anvil account 1 (`PW_RECIPIENTS[0]`): the burn's proved L1 recipient and the `pw-finalize`
+/// signer, so the CLI runs the recipient pull leg as well.
+const RECIPIENT_KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const PORT: u16 = 8553;
-/// The submit transaction's fixed gas limit and the envelope its receipt must respect.
-const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 20_000_000;
-/// The node's block gas limit. Proof-DA attestation (KZG openings over two blobs) and the
-/// multi-block validity finalization are separate transactions above the 20M submit envelope.
+/// The node's block gas limit. Proof-DA attestation (KZG openings over two blobs), the
+/// multi-block validity finalization and the proof payout are each large single transactions.
 const ANVIL_BLOCK_GAS_LIMIT: u64 = 30_000_000;
 /// Each post's `msg.value`: it tops the producer's posting bond up by more than a post needs
 /// (`baseStake` + `postStake` per unfinalized post); the surplus stays in the bond.
@@ -189,13 +204,21 @@ fn post_block_with_blob(
     proof_length: u32,
     state_root: &str,
 ) -> (u64, ValidatedBlobSidecars) {
-    let submission_id: u64 = cast(rpc, &["call", rollup, "nextSubmissionId()(uint256)"], "next sub id")
-        .trim()
-        .parse()
-        .expect("nextSubmissionId");
-    let pending_pin = cast(rpc, &["call", rollup, "pendingChainsPin()(bytes32)"], "pending pin")
-        .trim()
-        .to_string();
+    let submission_id: u64 = cast(
+        rpc,
+        &["call", rollup, "nextSubmissionId()(uint256)"],
+        "next sub id",
+    )
+    .trim()
+    .parse()
+    .expect("nextSubmissionId");
+    let pending_pin = cast(
+        rpc,
+        &["call", rollup, "pendingChainsPin()(bytes32)"],
+        "pending pin",
+    )
+    .trim()
+    .to_string();
     let proof_length_s = proof_length.to_string();
     let calldata = run_capture(
         Command::new("cast").args([
@@ -280,18 +303,30 @@ fn post_block_with_blob(
         "published hash {published} != signed hash {}",
         validated.transaction_hash
     );
-    let receipt = cast(rpc, &["receipt", &validated.transaction_hash, "--json"], "blob post receipt");
+    let receipt = cast(
+        rpc,
+        &["receipt", &validated.transaction_hash, "--json"],
+        "blob post receipt",
+    );
     let receipt: serde_json::Value = serde_json::from_str(&receipt).expect("receipt JSON");
     assert_eq!(
         json_hex_quantity(&receipt["status"], "blob post status"),
         1,
         "postBlockAndSubmit reverted for submission {submission_id}"
     );
-    let next: u64 = cast(rpc, &["call", rollup, "nextSubmissionId()(uint256)"], "next sub id")
-        .trim()
-        .parse()
-        .expect("nextSubmissionId");
-    assert_eq!(next, submission_id + 1, "exactly one submission must have been recorded");
+    let next: u64 = cast(
+        rpc,
+        &["call", rollup, "nextSubmissionId()(uint256)"],
+        "next sub id",
+    )
+    .trim()
+    .parse()
+    .expect("nextSubmissionId");
+    assert_eq!(
+        next,
+        submission_id + 1,
+        "exactly one submission must have been recorded"
+    );
     (submission_id, validated)
 }
 
@@ -314,7 +349,10 @@ fn lifecycle_script(contracts: &Path, rpc: &str, sig: &str, envs: &[(&str, &str)
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    run_capture(&mut cmd, &format!("forge PartialWithdrawalE2ELifecycle {sig}"))
+    run_capture(
+        &mut cmd,
+        &format!("forge PartialWithdrawalE2ELifecycle {sig}"),
+    )
 }
 
 /// The lifecycle-descriptor view of one posted block, formatted for `cast`:
@@ -471,7 +509,8 @@ fn partial_withdrawal_e2e_anvil() {
     // (`generate_e2e_fixture`: `supported_user_counts = [2]`), so the 4-block validity proof below
     // verifies against `mle_fixture_config.json`.
     let supported_user_counts = vec![2u32];
-    let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
+    let bwgen =
+        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
     let initial_ext_state = bwgen.borrow().current_extended_public_state();
     let balance_vd = bp.balance_vd();
 
@@ -486,48 +525,17 @@ fn partial_withdrawal_e2e_anvil() {
     let record = build_record(42, &members, 0, 0).expect("channel record");
     let all_pks = pks_array(&keys);
 
-    // ── Phase B: Write pw_reg.json + deploy ──────────────────────────────────────────────────
+    // ── Phase B: deploy the ROLLUP ONLY and register the channel ────────────────────────────
+    // A burn is paid by the rollup's withdrawal verifier alone; no settlement manager, settlement
+    // verifier or close-funding materializer is deployed.
     let contracts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts");
     let data_dir = contracts.join("test").join("data");
-    std::fs::create_dir_all(&data_dir).unwrap();
-    {
-        let pk_gs: Vec<String> = keys.iter().map(|k| k.pk_g().to_hex()).collect();
-        let pk_bs: Vec<String> = keys.iter().map(|k| k.pk_b().to_hex()).collect();
-        let regev_digests: Vec<String> = keys
-            .iter()
-            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()).to_hex())
-            .collect();
-        // Use anvil default addresses as recipients.
-        let recipients = PW_RECIPIENTS.to_vec();
-        let reg = serde_json::json!({
-            "channel_id": 42,
-            "bp_member_slot": 0,
-            "member_count": 3,
-            // Two INDEPENDENT counts (see `settlement_reg_json` in src/bin/channel_member.rs and
-            // contracts/script/RegRecordLib.sol): `reg_delegate_count` is the L1 registration
-            // record's — always 0, cosigner-only registration is a circuit constraint;
-            // `active_delegate_count` is the live count the settlement manager binds. This driver's
-            // channel has no delegates, so both are 0 here — for different reasons.
-            "reg_delegate_count": 0,
-            "active_delegate_count": 0,
-            "member_pk_gs": pk_gs,
-            "member_pk_bs": pk_bs,
-            "regev_pk_digests": regev_digests,
-            "recipients": recipients,
-        });
-        std::fs::write(
-            data_dir.join("pw_reg.json"),
-            serde_json::to_string_pretty(&reg).unwrap(),
-        )
-        .unwrap();
-    }
-
     let deploy = run_capture(
         Command::new("forge").current_dir(&contracts).args([
             "script",
-            "script/DeployPartialWithdrawalE2E.s.sol",
+            "script/Deploy.s.sol",
             "--tc",
-            "DeployPartialWithdrawalE2E",
+            "Deploy",
             "--rpc-url",
             &rpc,
             "--private-key",
@@ -542,18 +550,45 @@ fn partial_withdrawal_e2e_anvil() {
             "--code-size-limit",
             "50000",
         ]),
-        "forge deploy PW E2E",
+        "forge deploy rollup",
     );
-    let rollup = find_addr(&deploy, "IntmaxRollup:");
-    let manager = find_addr(&deploy, "MANAGER:");
-    let verifier_addr = find_addr(&deploy, "SettlementVerifier:");
-    eprintln!("[PW E2E] rollup={rollup} manager={manager} verifier={verifier_addr}");
+    let rollup = find_addr(&deploy, "IntmaxRollup  :");
+    eprintln!("[PW E2E] rollup={rollup} (no settlement manager deployed)");
+    {
+        let list = |items: Vec<String>| format!("[{}]", items.join(","));
+        let pk_gs = list(keys.iter().map(|k| k.pk_g().to_hex()).collect());
+        let pk_bs = list(keys.iter().map(|k| k.pk_b().to_hex()).collect());
+        let regev_digests = list(
+            keys.iter()
+                .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()).to_hex())
+                .collect(),
+        );
+        let recipients = list(PW_RECIPIENTS.iter().map(|r| r.to_string()).collect());
+        // Cosigners only: the registration record's delegate count is a constant zero (the
+        // validity `channel_reg_step` circuit constrains it), exactly as the deploy scripts send.
+        run_capture(
+            Command::new("cast").args([
+                "send",
+                &rollup,
+                "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
+                "42",
+                "0",
+                "0",
+                &pk_gs,
+                &pk_bs,
+                &regev_digests,
+                &recipients,
+                "--private-key",
+                ANVIL0,
+                "--rpc-url",
+                &rpc,
+            ]),
+            "cast registerChannel",
+        );
+    }
 
-    // The Manager deliberately refuses a close whose ChannelFund anchor is not a state root the
-    // Rollup has finalized. Read the anchor from the LIVE deployment rather than using a fixture
-    // placeholder: the constructor marks its nonzero genesis root finalized, and every member
-    // below signs this exact value into ChannelState/close PIs. This does not weaken the separate
-    // proof-backed payout requirement (withdrawNative still verifies its own finalized root).
+    // The deployed genesis root must be the Rust generator's initial extended state: every block
+    // below is proved from it, and the payout proof is anchored at the root they finalize.
     let finalized_state_root = Bytes32::from_hex(
         cast(
             &rpc,
@@ -563,33 +598,13 @@ fn partial_withdrawal_e2e_anvil() {
         .trim(),
     )
     .expect("parse live latestFinalizedStateRoot");
-    assert_ne!(
-        finalized_state_root,
-        Bytes32::default(),
-        "PW E2E deployment must install a nonzero finalized genesis root"
-    );
-    let finalized_membership = cast(
-        &rpc,
-        &[
-            "call",
-            &rollup,
-            "isFinalizedStateRoot(bytes32)",
-            &finalized_state_root.to_hex(),
-        ],
-        "check live finalized state-root membership",
-    );
-    assert!(
-        finalized_membership.contains("true") || finalized_membership.trim().ends_with("01"),
-        "latestFinalizedStateRoot must be present in isFinalizedStateRoot, got: {finalized_membership}"
-    );
-
     assert_eq!(
         initial_ext_state.commitment(),
         finalized_state_root,
         "the deployed genesis root must be the Rust generator's initial extended state"
     );
 
-    // ── Phase B': mirror the live `registerChannel` (deploy script, pw_reg.json) in the Rust
+    // ── Phase B': mirror the live `registerChannel` (Phase B's cast send) in the Rust
     // block generator and fold it as block 1, exactly as the posted registration block will.
     {
         let member_keys = ChannelMemberKeys::from_member_keys(&keys);
@@ -850,9 +865,8 @@ fn partial_withdrawal_e2e_anvil() {
     );
     eprintln!("[PW E2E] settled_tx_chain OK");
 
-    // Settle the exact burn transfer into the persisted base balance IVC head. This is the proof
-    // the close circuit recursively verifies; using the genesis attestation here would fail the
-    // finalSettledTxChain equality and was the hidden reason the old E2E used mock close limbs.
+    // Settle the exact burn transfer into the persisted base balance IVC head. The burn's
+    // withdrawal proof (Phase F) opens its sent-tx slot from this head.
     assert_eq!(
         bwg.full_private_state.nonce, desc.tx_v2.nonce,
         "P2-4: base next nonce and burn TxV2 nonce must be in lockstep"
@@ -906,6 +920,18 @@ fn partial_withdrawal_e2e_anvil() {
             }),
         )
         .unwrap();
+    // The burn's withdrawal leg opens the SAME transfer in the SAME block the send settles: the
+    // extraction recipe `LiveBalanceService::prove_burn_withdrawal` uses.
+    let burn_withdrawal_data = SingleWithdrawalData {
+        tx_tree_root: burn_root,
+        tx: burn_tx,
+        tx_merkle_proof: burn_tx_proof.clone(),
+        tx_v2: Some(desc.tx_v2),
+        tx_v2_merkle_proof: Some(burn_tx_v2_proof.clone()),
+        transfer: base_transfer.clone(),
+        transfer_index: 0,
+        transfer_merkle_proof: burn_transfer_proof.clone(),
+    };
     let burn_send_data = SendTxData {
         spend_proof: burn_spend_proof,
         tx_tree_root: burn_root,
@@ -932,9 +958,7 @@ fn partial_withdrawal_e2e_anvil() {
         "base balance IVC and N-of-N channel head must pin the same burn descriptor chain"
     );
 
-    // ── Phase D': the 4-block validity proof of the mirrored chain, posted and finalized on
-    // anvil with the same blob/attest/finalize sequence as the production CLI, then the
-    // whole-vector backing proof of the post-burn head, attested through the materializer. ──
+    // ── Phase E: the 4-block validity proof of the mirrored chain (local) ──────────────────
     let final_ext_state = bwgen.borrow().current_extended_public_state();
     let pw_e2e_dir = contracts
         .parent()
@@ -949,7 +973,10 @@ fn partial_withdrawal_e2e_anvil() {
         let (blocks, final_block_chain_proof) = {
             let guard = bwgen.borrow();
             let total_blocks = guard.block_number.as_u64();
-            assert_eq!(total_blocks, 4, "registration, deposit, bootstrap and burn blocks");
+            assert_eq!(
+                total_blocks, 4,
+                "registration, deposit, bootstrap and burn blocks"
+            );
             let mut blocks = Vec::new();
             let mut prev_block_proof = None;
             for block_idx in 1..=total_blocks {
@@ -982,7 +1009,11 @@ fn partial_withdrawal_e2e_anvil() {
             ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
         let validity_prover = Address::default();
         let validity_proof = validity_circuit
-            .prove(&final_block_chain_proof, list_proof.as_ref(), validity_prover)
+            .prove(
+                &final_block_chain_proof,
+                list_proof.as_ref(),
+                validity_prover,
+            )
             .expect("validity proof");
         validity_circuit
             .data
@@ -1009,7 +1040,10 @@ fn partial_withdrawal_e2e_anvil() {
         let timer = Instant::now();
         let wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
         let wrapped = wrapper.prove(&validity_proof).expect("wrap validity proof");
-        wrapper.data.verify(wrapped).expect("wrapped validity proof verifies");
+        wrapper
+            .data
+            .verify(wrapped)
+            .expect("wrapped validity proof verifies");
         let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
         let mut pw = PartialWitness::new();
         pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof)
@@ -1062,52 +1096,196 @@ fn partial_withdrawal_e2e_anvil() {
     std::fs::write(&validity_payload_path, &validity_payload).unwrap();
     let final_state_root_hex = final_ext_state.commitment().to_hex();
 
-    // The whole-vector CloseAssetBacking proof over the SAME burn-send balance proof, private
-    // state and extended state; its statement key is the post-burn head's.
-    let backing_pis = {
+    // ── Phase F: the burn's withdrawal proof (local), anchored at the root Phase E ends at ──
+    // Exactly the live prover's recipe (`LiveBalanceService::burn_payout_artifacts`): the leaf is
+    // READ OUT OF the single-withdrawal proof's public inputs, never recomputed by the payer.
+    let payout_signer = Address::from_hex(PW_RECIPIENTS[0]).expect("payout signer");
+    let artifacts = {
         let timer = Instant::now();
-        let backing_circuit = CloseAssetBackingCircuit::<F, C, D>::new(&balance_vd);
-        let backing_witness =
-            CloseAssetBackingWitness::<F, C, D>::from_full_private_state_and_channel_state(
-                &bwg.full_private_state,
-                &next_state,
-                live_balance_proof.clone(),
-                final_ext_state.clone(),
-                &balance_vd,
-            )
-            .expect("backing witness over the burn-send balance proof");
-        let backing_proof = backing_circuit
-            .prove(&backing_witness)
-            .expect("backing proof");
-        backing_circuit
+        let witness = bwg
+            .single_withdrawal_witness(&burn_withdrawal_data)
+            .expect("burn single-withdrawal witness");
+        let single_circuit = SingleWithdawalCircuit::<F, C, D>::new(&balance_vd);
+        let single_proof = single_circuit
+            .prove(&witness)
+            .expect("single withdrawal proof");
+        single_circuit
             .data
-            .verify(backing_proof.clone())
-            .expect("backing proof verifies");
-        let artifacts =
-            wrap_and_export_backing_mle(&backing_circuit, &backing_proof).expect("backing MLE");
-        let deployed_backing_config =
-            std::fs::read_to_string(data_dir.join("close_asset_backing_mle_config.json"))
-                .expect("read the deployed backing config");
-        validate_mle_v2_full_against_config_json(&artifacts.mle_json, &deployed_backing_config)
-            .expect("PW backing proof must match the deployed backing adapter config");
-        std::fs::write(pw_e2e_dir.join("pw_backing_mle.json"), &artifacts.mle_json).unwrap();
-        let pis = backing_witness
-            .public_inputs(&balance_vd)
-            .expect("backing public inputs");
-        eprintln!(
-            "[PW BENCH] backing prove+wrap+MLE={:?} compact={} bytes anchor={}",
-            timer.elapsed(),
-            artifacts.compact_proof.len(),
-            pis.anchor_block_number.as_u64()
+            .verify(single_proof.clone())
+            .expect("single withdrawal proof verifies");
+        let single_millis = timer.elapsed().as_millis() as u64;
+        let single_proof_bytes = single_proof.to_bytes().len();
+        let withdrawal = SingleWithdawalPublicInputs::from_u64_slice(
+            &single_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN].to_u64_vec(),
+        )
+        .expect("single withdrawal PIs")
+        .withdrawal;
+        // The PI-decoded leaf is the one `cosign-burn-send` records at burn time.
+        let expected = burn_withdrawal_leaf(
+            desc.source_channel_id,
+            desc.receiver_pk_g,
+            desc.inter_channel_tx.token_index,
+            burn_amount,
+            burn_aux_data,
+            desc.tx_v2.nonce,
+        )
+        .expect("burn withdrawal leaf");
+        assert_eq!(withdrawal.recipient, withdrawal_addr, "proved recipient");
+        assert_eq!(withdrawal.recipient, expected.recipient);
+        assert_eq!(withdrawal.token_index, expected.token_index);
+        assert_eq!(withdrawal.amount, u256(burn_amount), "proved amount");
+        assert_eq!(withdrawal.nullifier, expected.nullifier, "proved nullifier");
+        assert_eq!(
+            withdrawal.aux_data, burn_aux_data,
+            "proved IMD2 burn descriptor"
         );
-        pis
+
+        let timer = Instant::now();
+        let processor = WithdrawalProcessor::<F, C, D>::new(&single_circuit.data.verifier_data());
+        let chain_proof = processor
+            .prove_step(&WithdrawalStepWitness::<F, C, D> {
+                prev_withdrawal_chain_proof: None,
+                single_withdrawal_proof: single_proof,
+                update_public_state: witness.update_public_state.clone(),
+            })
+            .expect("withdrawal chain proof");
+        let chain_millis = timer.elapsed().as_millis() as u64;
+        let chain_proof_bytes = chain_proof.to_bytes().len();
+        let timer = Instant::now();
+        let final_proof = processor
+            .prove_final(&chain_proof, payout_signer, &final_ext_state)
+            .expect("final withdrawal proof");
+        processor
+            .withdrawal_vd()
+            .verify(final_proof.clone())
+            .expect("final withdrawal proof verifies");
+        let final_millis = timer.elapsed().as_millis() as u64;
+        let final_proof_bytes = final_proof.to_bytes().len();
+
+        let timer = Instant::now();
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&processor.withdrawal_vd());
+        let wrapped = wrapper.prove(&final_proof).expect("wrap withdrawal proof");
+        wrapper
+            .data
+            .verify(wrapped)
+            .expect("wrapped withdrawal proof verifies");
+        let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&wrapper.wrap_proof, &final_proof)
+            .expect("withdrawal wrap witness");
+        let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw).expect("withdrawal MLE proof");
+        verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof).expect("withdrawal MLE verifies");
+        let withdrawal_mle_json =
+            export_mle_v2_json(&mle.proof, &vk, &wrapper.data).expect("export withdrawal MLE");
+        let deployed = std::fs::read_to_string(data_dir.join("withdrawal_mle_config.json"))
+            .expect("read the deployed withdrawal config");
+        validate_mle_v2_full_against_config_json(&withdrawal_mle_json, &deployed).expect(
+            "the burn's payout proof must match the deployed withdrawal adapter config \
+             (Deploy.s.sol pins test/data/withdrawal_mle_config.json). The balance circuit, \
+             hence the withdrawal VK, depends on the `authenticated-tail-receive` feature: the \
+             config fixtures must come from a build with this test's feature set",
+        );
+        let wrap_millis = timer.elapsed().as_millis() as u64;
+        eprintln!(
+            "[PW BENCH] withdrawal single={single_millis}ms chain={chain_millis}ms \
+             final={final_millis}ms wrap+MLE={wrap_millis}ms MLE JSON={} bytes",
+            withdrawal_mle_json.len()
+        );
+
+        // This test has no producer journal; the anchor's journal-only fields are tags. The
+        // payout-relevant fields (block number, extended state commitment) are the real ones the
+        // proof is bound to and Phase I finalizes.
+        let anchor = BlockProducerAnchor {
+            generation: 4,
+            entry_hash: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0xE2E, 4]).unwrap(),
+            block_number: final_ext_state.inner.block_number.as_u64(),
+            timestamp: pw_lifecycle_json.last().expect("burn block").timestamp,
+            extended_state_commitment: final_ext_state.commitment(),
+            bp_sig_chain: final_ext_state.bp_sig_chain,
+        };
+        assert_eq!(anchor.block_number, 4);
+        let payout_json = serde_json::to_string_pretty(&serde_json::json!({
+            "withdrawals": [{
+                "recipient": withdrawal.recipient.to_string(),
+                "token_index": withdrawal.token_index,
+                "amount": withdrawal.amount.to_string(),
+                "nullifier": withdrawal.nullifier.to_string(),
+                "aux_data": withdrawal.aux_data.to_string(),
+            }],
+            "withdrawal_prover": payout_signer.to_string(),
+            "block_number": anchor.block_number,
+            "ext_commitment": anchor.extended_state_commitment.to_string(),
+        }))
+        .unwrap();
+        PartialWithdrawalProofArtifacts {
+            withdrawal,
+            withdrawal_prover: payout_signer,
+            payout_json,
+            metrics: PartialWithdrawalProofMetrics {
+                single_withdrawal_millis: single_millis,
+                withdrawal_chain_millis: chain_millis,
+                withdrawal_final_millis: final_millis,
+                wrap_mle_millis: wrap_millis,
+                single_withdrawal_proof_bytes: single_proof_bytes,
+                withdrawal_chain_proof_bytes: chain_proof_bytes,
+                withdrawal_final_proof_bytes: final_proof_bytes,
+                mle_json_bytes: withdrawal_mle_json.len(),
+                peak_rss_bytes: None,
+            },
+            withdrawal_mle_json,
+            producer_anchor: anchor,
+        }
     };
-    assert_eq!(backing_pis.settled_tx_chain, expected_chain);
-    assert_eq!(
-        backing_pis.finalized_extended_state_commitment,
-        final_ext_state.commitment()
+
+    // Stage the channel working directory exactly as the relay does before `pw-finalize`.
+    let workdir = pw_e2e_dir.join("ch42");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).unwrap();
+    let write = |name: &str, value: &serde_json::Value| {
+        std::fs::write(
+            workdir.join(name),
+            serde_json::to_string_pretty(value).unwrap(),
+        )
+        .unwrap()
+    };
+    // The channel's backing record names the rollup that pays; no settlement manager exists.
+    write(
+        "channel_backing.json",
+        &serde_json::json!({
+            "settled_tx_chain": genesis_chain.to_hex(),
+            "intmax_state_root": finalized_state_root.to_hex(),
+            "fund": fund,
+            "rollup": rollup,
+        }),
+    );
+    write(
+        "burn_cosigned.json",
+        &serde_json::to_value(&next_state).expect("signed burn head JSON"),
+    );
+    let burn_receipt = BlockProducerReceipt {
+        request_id: "pw-e2e-burn".into(),
+        generation: artifacts.producer_anchor.generation,
+        entry_hash: artifacts.producer_anchor.entry_hash,
+        block_number: artifacts.producer_anchor.block_number,
+        timestamp: artifacts.producer_anchor.timestamp,
+        extended_state_commitment: artifacts.producer_anchor.extended_state_commitment,
+        bp_sig_chain: artifacts.producer_anchor.bp_sig_chain,
+    };
+    write(
+        "pw_producer.json",
+        &serde_json::json!({
+            "producerRequestId": burn_receipt.request_id,
+            "blockReceipt": burn_receipt,
+            // The live settle reports the post-burn cursor; the burn consumed the one before it.
+            "liveReceipt": { "baseNonce": desc.tx_v2.nonce + 1 },
+        }),
+    );
+    write(
+        "pw_artifacts.json",
+        &serde_json::to_value(&artifacts).expect("artifacts JSON"),
     );
 
+    // ── Phase G: post the four blocks and attest their proof data ──────────────────────────
     // On chain: registration block, then the real deposit, then the remaining blocks; every
     // post is an EIP-4844 blob transaction carrying the validity proof-DA payload.
     let mut final_submission = None;
@@ -1115,7 +1293,10 @@ fn partial_withdrawal_e2e_anvil() {
         if i == 1 {
             let onchain_depositor =
                 real_onchain_deposit(&rpc, &rollup, recipient, fund, Bytes32::default());
-            assert_eq!(onchain_depositor, depositor, "the deposit mirror named the depositor");
+            assert_eq!(
+                onchain_depositor, depositor,
+                "the deposit mirror named the depositor"
+            );
             eprintln!("[PW E2E] real deposit of {fund} wei landed after the registration block");
         }
         let (submission_id, sidecars) = post_block_with_blob(
@@ -1128,7 +1309,10 @@ fn partial_withdrawal_e2e_anvil() {
             validity_proof_length,
             &final_state_root_hex,
         );
-        assert_eq!(submission_id as usize, i, "submissions are posted in block order");
+        assert_eq!(
+            submission_id as usize, i,
+            "submissions are posted in block order"
+        );
         eprintln!(
             "[PW E2E] posted block {} as submission {submission_id} ({} blob(s))",
             i + 1,
@@ -1150,6 +1334,38 @@ fn partial_withdrawal_e2e_anvil() {
             ("PW_E2E_DIR", pw_e2e_dir_s.as_str()),
         ],
     );
+
+    // ── Phase H: before L1 finalizes the anchor root, pw-finalize refuses and journals nothing
+    let (ok, stdout, stderr) = pw_finalize(&workdir, &contracts, &rpc);
+    assert!(
+        !ok && stderr.contains("payout anchor is not L1-finalized")
+            && stderr.contains("retry after the finalized head advances"),
+        "pw-finalize must refuse a proof anchored at an unfinalized root\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    {
+        let store = PartialWithdrawalPayoutStore::open(workdir.join("pw_payout_store.bin"))
+            .expect("payout journal after refusal");
+        let candidate = store
+            .active()
+            .unwrap()
+            .expect("candidate prepared before the gate");
+        assert!(
+            candidate.payout_broadcast.is_none() && candidate.payout_tx_hashes.is_empty(),
+            "the anchor gate must refuse before any payout intent is journaled"
+        );
+    }
+    assert!(
+        !bool_view(
+            &rpc,
+            &rollup,
+            "withdrawalNullifierUsed(bytes32)",
+            &artifacts.withdrawal.nullifier.to_hex()
+        ),
+        "nothing was paid before finalization"
+    );
+    eprintln!("[PW E2E] pw-finalize refused the unfinalized anchor without journaling a payout");
+
+    // ── Phase I: finalize the 4-block chain on L1 ─────────────────────────────────────────
     let finalize_out = lifecycle_script(
         &contracts,
         &rpc,
@@ -1164,374 +1380,169 @@ fn partial_withdrawal_e2e_anvil() {
         finalize_out.contains("PW_E2E_FINALIZED_BLOCK: 4"),
         "finalize must land the 4-block chain:\n{finalize_out}"
     );
-    let latest_root = cast(&rpc, &["call", &rollup, "latestFinalizedStateRoot()(bytes32)"], "root")
-        .trim()
-        .to_string();
     assert!(
-        latest_root.eq_ignore_ascii_case(&final_state_root_hex),
-        "latestFinalizedStateRoot {latest_root} != {final_state_root_hex}"
+        bool_view(
+            &rpc,
+            &rollup,
+            "isFinalizedStateRoot(bytes32)",
+            &final_state_root_hex
+        ),
+        "the burn block's root must now be a finalized state root"
     );
     eprintln!("[PW E2E] 4-block chain finalized on anvil at {final_state_root_hex}");
 
-    let attest_out = lifecycle_script(
-        &contracts,
-        &rpc,
-        "attestBacking()",
-        &[("MANAGER", manager.as_str()), ("PW_E2E_DIR", pw_e2e_dir_s.as_str())],
+    // ── Phase J: pw-finalize pays the burn by its proof and the recipient pulls ─────────────
+    let recipient_hex = format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()));
+    let escrow_before = u256_view(&rpc, &rollup, "totalEscrowed()(uint256)", &[]);
+    let (ok, stdout, stderr) = pw_finalize(&workdir, &contracts, &rpc);
+    assert!(
+        ok,
+        "pw-finalize must pay the finalized burn\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let result: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("pw-finalize stdout must be one JSON line ({e}): {stdout}"));
+    assert_eq!(result["complete"], true, "{result}");
+    assert_eq!(result["recipientPullDelegated"], false, "{result}");
+    assert!(
+        result["payoutTxHash"].is_string() && result["pullTxHash"].is_string(),
+        "{result}"
+    );
+    assert_eq!(result["amount"], burn_amount.to_string(), "{result}");
+    assert_eq!(
+        result["nullifier"].as_str().map(str::to_lowercase),
+        Some(artifacts.withdrawal.nullifier.to_hex().to_lowercase()),
+        "{result}"
     );
     assert!(
-        attest_out.contains("PW_E2E_BACKING_ATTESTED"),
-        "backing attestation must land:\n{attest_out}"
+        bool_view(
+            &rpc,
+            &rollup,
+            "withdrawalNullifierUsed(bytes32)",
+            &artifacts.withdrawal.nullifier.to_hex()
+        ),
+        "the proof-committed nullifier is consumed"
     );
-    eprintln!("[PW E2E] whole-vector backing attested for the post-burn head");
-
-    // P1: a real close proof and its real wrapped MLE/WHIR proof — no synthesized publicInputs.
-    let timer = Instant::now();
-    let close_prover = CloseProver::new(&balance_vd);
-    eprintln!(
-        "[PW BENCH] close circuit construction={:?}",
-        timer.elapsed()
-    );
-    let timer = Instant::now();
-    let close_witness = close_prover
-        .build_full_witness_from_signatures(
-            &record,
-            &next_state,
-            &next_state.member_signatures,
-            live_balance_proof.clone(),
-        )
-        .expect("real PW close witness");
-    eprintln!(
-        "[PW BENCH] close signature aggregation+witness={:?}",
-        timer.elapsed()
-    );
-    let timer = Instant::now();
-    let close_proof = close_prover
-        .prove(&close_witness)
-        .expect("real PW close proof");
-    eprintln!(
-        "[PW BENCH] close Plonky2 prove={:?} proof={} bytes",
-        timer.elapsed(),
-        close_proof.to_bytes().len()
-    );
-    let timer = Instant::now();
-    let close_mle = close_prover
-        .prove_mle(&close_proof)
-        .expect("real PW close MLE");
-    eprintln!(
-        "[PW BENCH] close wrap+MLE+self-verify={:?} JSON={} bytes",
-        timer.elapsed(),
-        close_mle.len()
-    );
-    let close_pis = ChannelClosePublicInputs::from_u64_slice(
-        &close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec(),
-    )
-    .expect("decode real close PIs");
-    let close_config = std::fs::read_to_string(data_dir.join("close_intent_mle_config.json"))
-        .expect("read proof-free close MLE V2 config");
-    validate_mle_v2_full_against_config_json(&close_mle, &close_config)
-        .expect("PW close full proof must strictly match the deployed config and compact bytes");
-    std::fs::write(data_dir.join("pw_close_intent_mle.json"), &close_mle).unwrap();
-
-    // ── Phase E: Write pw_submit.json + on-chain settlement ─────────────────────────────────
-    // The Withdrawal struct for authDigest computation.
-    //
-    // SECURITY (2026-08-13): this used to authorize a LITERAL `nullifier = 0xBEEF`, the third of
-    // three disagreeing derivations (CLI `keccak(tx_leaf ‖ pre_burn_chain)`, this literal, and the
-    // only real one — `SettledTransfer::nullifier()` in the withdrawal circuit). An E2E that
-    // authorizes a nullifier no provable leaf carries cannot detect the stranding bug it walks
-    // straight through, so it now derives the leaf from the burn artefact with the one shared
-    // `burn_withdrawal_leaf`, exactly as `pw-submit` does.
-    let withdrawal = burn_withdrawal_leaf(
-        desc.source_channel_id,
-        desc.receiver_pk_g,
-        desc.inter_channel_tx.token_index,
-        burn_amount,
-        burn_aux_data,
-        desc.tx_v2.nonce,
-    )
-    .expect("burn withdrawal leaf");
+    let escrow_after = u256_view(&rpc, &rollup, "totalEscrowed()(uint256)", &[]);
     assert_eq!(
-        withdrawal.recipient, withdrawal_addr,
-        "the burn's baked ADDRESS_TAG recipient must recover the L1 address it was built for"
+        escrow_before - escrow_after,
+        u128::from(burn_amount),
+        "the escrow pays exactly the burned amount"
     );
-    assert_eq!(withdrawal.amount, u256(burn_amount));
-    assert_eq!(withdrawal.aux_data, burn_aux_data);
-    let rust_auth_digest = partial_withdrawal_auth_digest(&withdrawal);
-    eprintln!("[PW E2E] Rust authDigest = {}", rust_auth_digest.to_hex());
+    assert_eq!(
+        u256_view(
+            &rpc,
+            &rollup,
+            "pendingWithdrawals(address)(uint256)",
+            &[&recipient_hex]
+        ),
+        0,
+        "the recipient pulled its whole credit"
+    );
+    eprintln!(
+        "[PW E2E] burn of {burn_amount} wei paid to {recipient_hex} by its withdrawal proof and pulled"
+    );
 
-    {
-        let submit = serde_json::json!({
-            "manager": manager,
-            "verifier": verifier_addr,
-            // CloseIntent fields decoded from the REAL close proof public inputs.
-            "close_nonce": close_pis.close_nonce,
-            "final_epoch": close_pis.final_epoch,
-            "final_small_block_number": close_pis.final_small_block_number,
-            "close_freeze_nonce": close_pis.close_freeze_nonce,
-            "final_channel_state_digest": close_pis.final_channel_state_digest.to_hex(),
-            "final_balance_state_h1": close_pis.final_balance_state_h1.to_hex(),
-            "channel_fund_amounts": next_state.channel_fund.amounts.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
-            "token_registry": next_state.balance_state.token_registry.to_vec(),
-            "token_count": next_state.balance_state.token_count,
-            "channel_fund_intmax_state_root": close_pis.channel_fund_intmax_state_root.to_hex(),
-            "burn_tx_hash": close_pis.burn_tx_hash.to_hex(),
-            "close_withdrawal_digest": close_pis.close_withdrawal_digest.to_hex(),
-            "snapshot_medium_block_number": close_pis.snapshot_medium_block_number,
-            "final_state_version": close_pis.final_state_version,
-            "final_settled_tx_chain": close_pis.final_settled_tx_chain.to_hex(),
-            "final_settled_tx_acc_root": close_pis.final_settled_tx_accumulator_root.to_hex(),
-            // prevSettledTxChain (genesis chain before the burn push).
-            "prev_settled_tx_chain": genesis_chain.to_hex(),
-            // AuthorizedWithdrawal fields.
-            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal.recipient.to_bytes_be())),
-            "withdrawal_token_index": withdrawal.token_index,
-            "withdrawal_amount": burn_amount,
-            "withdrawal_nullifier": withdrawal.nullifier.to_hex(),
-            "withdrawal_aux_data": burn_aux_data.to_hex(),
-            "withdrawal_base_nonce": desc.inter_channel_tx.base_nonce,
-            "burn_tx_leaf": tx_leaf.to_hex(),
-        });
-        std::fs::write(
-            data_dir.join("pw_submit.json"),
-            serde_json::to_string_pretty(&submit).unwrap(),
-        )
-        .unwrap();
-    }
-
-    let submit_out = run_capture(
-        Command::new("forge").current_dir(&contracts).args([
+    // ── Phase K: idempotent re-run, and the nullifier makes the payout single-use ───────────
+    let (ok, rerun_stdout, stderr) = pw_finalize(&workdir, &contracts, &rpc);
+    assert!(
+        ok,
+        "a re-run after completion is a no-op success\nstderr: {stderr}"
+    );
+    let rerun: serde_json::Value = serde_json::from_str(rerun_stdout.trim()).expect("re-run JSON");
+    assert_eq!(rerun["payoutTxHash"], result["payoutTxHash"]);
+    assert_eq!(rerun["pullTxHash"], result["pullTxHash"]);
+    // Replay the exact script inputs pw-finalize staged for this candidate.
+    let staged = contracts
+        .parent()
+        .expect("repo root")
+        .join("proof-da-output")
+        .join(format!(
+            "pw-payout-{}",
+            result["candidateId"].as_str().expect("candidateId")
+        ));
+    let replay = Command::new("forge")
+        .current_dir(&contracts)
+        .env("ROLLUP", &rollup)
+        .env("PW_PAYOUT_PATH", staged.join("payout.json"))
+        .env("PW_MLE_PATH", staged.join("withdrawal_mle.json"))
+        .args([
             "script",
-            "script/SubmitPartialWithdrawal.s.sol",
+            "script/RunPartialWithdrawalPayout.s.sol",
+            "--sig",
+            "withdrawNativeStep()",
             "--rpc-url",
             &rpc,
             "--private-key",
             ANVIL0,
             "--broadcast",
-            "--slow",
-            "--offline",
-        ]),
-        "forge submit PW intent",
+            "--code-size-limit",
+            "50000",
+        ])
+        .output()
+        .expect("spawn replayed payout");
+    let replay_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
     );
-    eprintln!("[PW E2E] submitPartialWithdrawalIntent succeeded");
-
-    // Pin the operational liveness claim to the actual transaction, not Forge's in-process trace.
-    // The script must bypass Foundry's conservative estimator with its explicit 20M limit, and the
-    // node receipt must show that the real cold transaction consumed no more than that envelope.
-    {
-        let artifact_path = contracts
-            .join("broadcast")
-            .join("SubmitPartialWithdrawal.s.sol")
-            .join("31337")
-            .join("run-latest.json");
-        let artifact: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&artifact_path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", artifact_path.display())),
-        )
-        .unwrap_or_else(|e| panic!("parse {}: {e}", artifact_path.display()));
-        let tx = artifact["transactions"]
-            .as_array()
-            .and_then(|transactions| transactions.first())
-            .expect("submit broadcast must contain one transaction");
-        let receipt = artifact["receipts"]
-            .as_array()
-            .and_then(|receipts| receipts.first())
-            .expect("submit broadcast must contain one receipt");
-        let gas_limit = json_hex_quantity(&tx["transaction"]["gas"], "transaction gas limit");
-        let gas_used = json_hex_quantity(&receipt["gasUsed"], "receipt gasUsed");
-        let receipt_status = json_hex_quantity(&receipt["status"], "receipt status");
-        assert_eq!(
-            tx["isFixedGasLimit"].as_bool(),
-            Some(true),
-            "submit script must retain its explicit gas limit instead of estimator headroom"
-        );
-        assert_eq!(
-            gas_limit, PRODUCTION_BLOCK_GAS_LIMIT,
-            "submit transaction limit must equal the production block envelope"
-        );
-        assert_eq!(receipt_status, 1, "submit transaction reverted");
-        assert!(
-            gas_used <= PRODUCTION_BLOCK_GAS_LIMIT,
-            "submit used {gas_used} gas, above the production envelope"
-        );
-        eprintln!(
-            "[PW E2E] real submit gas: used={gas_used} limit={gas_limit} margin={}",
-            gas_limit - gas_used
-        );
-    }
-
-    // Extract on-chain authDigest from the script's console2.logBytes32 output.
-    let onchain_auth = submit_out
-        .lines()
-        .skip_while(|l| !l.contains("AUTH_DIGEST:"))
-        .nth(1)
-        .and_then(|l| l.trim().strip_prefix("0x").or_else(|| Some(l.trim())))
-        .map(|s| format!("0x{}", s.trim_start_matches("0x")))
-        .unwrap_or_else(|| panic!("could not parse AUTH_DIGEST from:\n{submit_out}"));
-    let onchain_digest =
-        Bytes32::from_hex(&onchain_auth).unwrap_or_else(|_| panic!("bad hex: {onchain_auth}"));
-    assert_eq!(
-        rust_auth_digest, onchain_digest,
-        "CRITICAL: Rust authDigest != Solidity authDigest — cross-boundary hash mismatch"
-    );
-    eprintln!(
-        "[PW E2E] authDigest PARITY OK: {}",
-        rust_auth_digest.to_hex()
-    );
-
-    // ── Phase F: Advance time + finalize ────────────────────────────────────────────────────
-    cast(&rpc, &["rpc", "evm_increaseTime", "2"], "increase time");
-    cast(&rpc, &["rpc", "evm_mine"], "mine");
-
-    run_capture(
-        Command::new("cast").args([
-            "send",
-            &manager,
-            "finalizePartialWithdrawal()",
-            "--private-key",
-            ANVIL0,
-            "--rpc-url",
-            &rpc,
-        ]),
-        "finalize partial withdrawal",
-    );
-
-    // Check on-chain authorization.
-    let auth_check = cast(
-        &rpc,
-        &[
-            "call",
-            &rollup,
-            "partialWithdrawalAuthorized(bytes32)",
-            &rust_auth_digest.to_hex(),
-        ],
-        "check auth",
-    );
-    let auth_result = auth_check.trim();
     assert!(
-        auth_result.contains("true") || auth_result.ends_with("01"),
-        "partialWithdrawalAuthorized must be true, got: {auth_result}"
+        !replay.status.success() && replay_out.contains("WithdrawalNullifierUsed"),
+        "a replayed proof payout must revert on the used nullifier: {replay_out}"
     );
-    eprintln!("[PW E2E] finalize + authorize OK");
-
-    // ── Phase F2: the proof-free claim must FAIL CLOSED ────────────────────────────────────
-    //
-    // REWRITTEN 2026-07-28 (doc/tasks/pw-auth-threat-model.md). This phase used to assert that
-    // `claimAuthorizedWithdrawal` paid `burn_amount` ETH. That function has been REMOVED: it paid
-    // the GLOBAL escrow against the authorization ALONE, with no withdrawal proof, and since
-    // `submitPartialWithdrawalIntent` binds only `auxData`, the amount and recipient were
-    // caller-chosen — one valid close proof for one's OWN channel drained every channel's ETH.
-    //
-    // Coverage is KEPT, not deleted: the phase now proves the payout is unreachable and, crucially,
-    // that the escrow does not move. It is the E2E-level twin of
-    // `contracts/test/PartialWithdrawalPayout.t.sol::test_authorizationAlone_cannotDrainEscrow`.
-    {
-        let recipient_hex = format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()));
-        let before = cast(&rpc, &["balance", &recipient_hex], "balance before claim");
-        let before_wei: u128 = before.trim().parse().unwrap_or(0);
-        let escrow_before = cast(&rpc, &["call", &rollup, "totalEscrowed()"], "escrow before");
-
-        // 1. The selector is gone — a raw call hits the (absent) fallback and reverts.
-        let sig = "claimAuthorizedWithdrawal((address,uint32,uint256,bytes32,bytes32))";
-        let arg = format!(
-            "(0x{},{},{},{},{})",
-            hex::encode(withdrawal_addr.to_bytes_be()),
-            0u32,
-            burn_amount,
-            withdrawal.nullifier.to_hex(),
-            withdrawal.aux_data.to_hex()
-        );
-        let out = Command::new("cast")
-            .args([
-                "send",
-                &rollup,
-                sig,
-                &arg,
-                "--private-key",
-                ANVIL0,
-                "--rpc-url",
-                &rpc,
-            ])
-            .output()
-            .expect("spawn cast send (claim must fail)");
-        assert!(
-            !out.status.success(),
-            "SECURITY REGRESSION: claimAuthorizedWithdrawal succeeded. The proof-free partial-\n\
-             withdrawal payout was removed because it drained the GLOBAL escrow against a\n\
-             caller-chosen amount/recipient. If this call works, the hole is back.\n\
-             stdout: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-
-        // 2. Nothing moved: neither the recipient's balance nor the global escrow.
-        let after = cast(&rpc, &["balance", &recipient_hex], "balance after claim");
-        let after_wei: u128 = after.trim().parse().unwrap_or(0);
-        assert_eq!(
-            after_wei, before_wei,
-            "recipient balance must be unchanged — no proof-free payout may occur"
-        );
-        let escrow_after = cast(&rpc, &["call", &rollup, "totalEscrowed()"], "escrow after");
-        assert_eq!(
-            escrow_before.trim(),
-            escrow_after.trim(),
-            "totalEscrowed must be unchanged — the authorization alone must buy nothing"
-        );
-
-        eprintln!(
-            "[PW E2E] claim correctly FAILED CLOSED: {} received nothing, escrow unchanged.\n\
-             [PW E2E] The proof-backed payout (withdrawNative/withdrawERC20) needs\n\
-             [PW E2E] `cmd_partial_withdraw`, which is not implemented (doc/tasks/todo.md:90).",
-            hex::encode(withdrawal_addr.to_bytes_be())
-        );
-    }
-
-    // ── Phase G: a finalized logical burn is single-use ──────────────────────────────────
-    {
-        // The broad `usedPartialWithdrawalChains[chainKey]` guard remains deleted: the correlation
-        // key is not itself payout authority, and an unfinalized/cancelled burn stays recoverably
-        // re-submittable. Once finalization atomically accounts this exact IMBK logical burn,
-        // however, replay has no recovery purpose and must fail before it can re-enable the
-        // one-shot IPW2 authorization or monopolize the singleton pending slot.
-        let out = Command::new("forge")
-            .current_dir(&contracts)
-            .args([
-                "script",
-                "script/SubmitPartialWithdrawal.s.sol",
-                "--rpc-url",
-                &rpc,
-                "--private-key",
-                ANVIL0,
-                "--broadcast",
-                "--slow",
-                "--offline",
-            ])
-            .output()
-            .expect("re-submit spawn");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            !out.status.success() && stderr.contains("PartialWithdrawalAlreadyAccounted()"),
-            "finalized logical-burn replay must fail with PartialWithdrawalAlreadyAccounted; \
-             status={} stderr={stderr}",
-            out.status
-        );
-
-        let pending = cast(
-            &rpc,
-            &["call", &manager, "partialWithdrawalPending()(bool)"],
-            "pending state after finalized-burn replay",
-        );
-        assert_eq!(
-            pending.trim(),
-            "false",
-            "rejected finalized-burn replay must not recreate pending state"
-        );
-        eprintln!("[PW E2E] finalized logical-burn replay correctly rejected; state unchanged");
-    }
+    assert_eq!(
+        u256_view(&rpc, &rollup, "totalEscrowed()(uint256)", &[]),
+        escrow_after,
+        "the rejected replay moved no escrow"
+    );
 
     eprintln!(
-        "[PW E2E] ALL PASSED: deposit → burn → submit → finalize → authorize, \
-         authDigest cross-boundary parity verified, finalized logical-burn replay rejected."
+        "[PW E2E] ALL PASSED: deposit → burn → validity finalize → proof-only payout → pull, \
+         unfinalized anchor refused, re-run idempotent, replay rejected by the nullifier."
     );
+}
+
+/// `channel_member pw-finalize` in a relay-shaped channel working directory, signed by the proved
+/// recipient (anvil account 1) so the pull leg runs too. Anvil serves `finalized` 64 blocks behind
+/// `latest`; `INTMAX_WALLET_ANVIL_MINE=1` mines real empty blocks so the finalized tag covers each
+/// transaction, as the local wallet runner does. Like the relay, retry only the transient
+/// historical-state error that can follow such mining; every re-run resumes the durable journal.
+fn pw_finalize(workdir: &Path, contracts: &Path, rpc: &str) -> (bool, String, String) {
+    for attempt in 0..3 {
+        let out = Command::new(env!("CARGO_BIN_EXE_channel_member"))
+            .args(["pw-finalize", rpc])
+            .current_dir(workdir)
+            .env("INTMAX_CHANNEL", "42")
+            .env("CONTRACTS_DIR", contracts)
+            .env("INTMAX_DEPOSIT_KEY", RECIPIENT_KEY)
+            .env("INTMAX_WALLET_ANVIL_MINE", "1")
+            .env_remove("INTMAX_L1_ACCOUNT")
+            .env_remove("INTMAX_ALLOW_UNFINALIZED_DEVNET")
+            .output()
+            .expect("spawn channel_member pw-finalize");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if out.status.success() || attempt == 2 || !stderr.contains("BlockOutOfRangeError") {
+            return (out.status.success(), stdout, stderr);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(attempt + 1));
+    }
+    unreachable!()
+}
+
+fn bool_view(rpc: &str, contract: &str, sig: &str, arg: &str) -> bool {
+    let out = cast(rpc, &["call", contract, sig, arg], sig);
+    let out = out.trim();
+    out == "true" || out.ends_with("01")
+}
+
+fn u256_view(rpc: &str, contract: &str, sig: &str, args: &[&str]) -> u128 {
+    let mut argv = vec!["call", contract, sig];
+    argv.extend_from_slice(args);
+    let out = cast(rpc, &argv, sig);
+    out.split_whitespace()
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("{sig}: unparsable {out}"))
 }
 
 /// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
