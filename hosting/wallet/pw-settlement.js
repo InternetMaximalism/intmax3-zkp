@@ -56,7 +56,7 @@ function createPwSettlement({
       '--rpc-url', cli.RPC]).trim() === 'true';
   }
 
-  // Phase `paying`. Caller holds the channel lock. Ends the ticket in claim_pending or settle_done.
+  // Phase `paying`. Ends the ticket in claim_pending or settle_done.
   async function pay(ch, ticket) {
     await live.finalizeSavedPayout(ch, {
       rpc: cli.RPC, run: cli.cliAsync, env: devnet() ? { INTMAX_WALLET_ANVIL_MINE: '1' } : {},
@@ -113,7 +113,8 @@ function createPwSettlement({
           }
           record(ch, ticket, { phase: 'paying', error: null, waiting: null });
         } else {
-          await withLock(ch, () => pay(ch, ticket));
+          // The payout CLI touches no channel state: the channel keeps operating meanwhile.
+          await pay(ch, ticket);
           return ticket;
         }
       } catch (e) {

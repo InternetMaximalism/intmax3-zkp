@@ -9908,17 +9908,25 @@ fn main() {
     }
     let detached_precompute_bypass = cmd == "precompute-falcon-aggregate"
         && std::env::var(DETACHED_PRECOMPUTE_LOCK_BYPASS_ENV).as_deref() == Ok("1");
+    // `publish-wallet-validity` and `pw-finalize` are L1 drivers, not channel transitions: they
+    // read only immutable setup files (`channel_backing.json`) and their own staged inputs, write
+    // only their own receipt and journal files (each journal under its own lock), and never read
+    // or write `cli_state.json`. They wait minutes on L1 finality while the channel keeps
+    // advancing, so they take neither the channel state lock nor run its state recovery.
+    let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize");
     // SECURITY: this lock is deliberately process-wide and acquired before recovery.  Per-file
     // atomic writes prevent torn JSON, but only serialization prevents an older init/cosign image
-    // from overwriting a settlement PREPARED by another process.  The sole bypass is the
-    // digest-keyed detached proof-cache worker described at its spawn site above.
-    let _state_process_lock = (!detached_precompute_bypass).then(CliStateProcessLock::acquire);
+    // from overwriting a settlement PREPARED by another process.  The bypasses are the
+    // digest-keyed detached proof-cache worker described at its spawn site above and the two L1
+    // drivers, none of which touches the channel state.
+    let state_lock_bypass = detached_precompute_bypass || l1_driver;
+    let _state_process_lock = (!state_lock_bypass).then(CliStateProcessLock::acquire);
     // A prepared two-channel transfer is a mutation barrier for either involved channel command,
     // not merely for the next inter-transfer. If the previous process died after replacing A but
     // before replacing B, allowing (for example) a burn or token registration to extend either
     // half-head would make deterministic roll-forward impossible and leave value one-sided.
     // Recovery is idempotent and a no-op when the sibling journal directory does not exist.
-    if !detached_precompute_bypass {
+    if !state_lock_bypass {
         deposit_recovery::recover();
         burn_recovery::recover();
         recover_pending_inter_transfers();
