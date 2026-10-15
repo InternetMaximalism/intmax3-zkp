@@ -133,7 +133,7 @@ async function confirmDeposit(ch, operation, slot, dependencies = {}) {
   // A channel can advance while an L1 deposit is pending. Recheck the exact credited slot before
   // proof generation/import; never turn a refusal here into another L1 payment.
   const artifact = readOptional(cliModule.wc(ch, 'l1_import_cosigned.json'));
-  const locallyImported = artifact && artifact.fundImportState && artifact.bundleApplyState
+  const locallyImported = artifact && artifact.importState
     && String(artifact.txHash).toLowerCase() === operation.txHash.toLowerCase();
   if (operation.status !== 'imported' && !locallyImported) {
     (dependencies.preflight || preflight.preflightDeposit)(ch, selected, operation.tokenIndex,

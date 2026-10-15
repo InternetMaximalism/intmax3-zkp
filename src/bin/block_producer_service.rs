@@ -143,7 +143,7 @@ enum LiveExitKitProposal {
     L1DepositImport {
         record: ChannelRecord,
         members: Vec<MemberInfo>,
-        fund_import_state: ChannelState,
+        import_state: ChannelState,
     },
     InterChannelDebit {
         request_id: String,
@@ -682,9 +682,11 @@ fn execute_live_command(
                 "l1DepositImport" => LiveExitKitProposal::L1DepositImport {
                     record: live_payload("exit-kit record", field("record")?)?,
                     members: live_payload("exit-kit members", field("members")?)?,
-                    fund_import_state: live_payload(
-                        "exit-kit fund-import state",
-                        field("fundImportState")?,
+                    // The ONE signed head of the import; a `fundImportState` is never proposed
+                    // (2026-10-15 review: the fund-import leg is not a signed head).
+                    import_state: live_payload(
+                        "exit-kit deposit import state",
+                        field("importState")?,
                     )?,
                 },
                 "interChannelDebit" => LiveExitKitProposal::InterChannelDebit {
@@ -706,12 +708,12 @@ fn execute_live_command(
                 LiveExitKitProposal::L1DepositImport {
                     record,
                     members,
-                    fund_import_state,
+                    import_state,
                 } => (
                     PreparedExitKitProposal::L1DepositImport {
                         record,
                         members,
-                        fund_import_state,
+                        import_state,
                     },
                     None,
                 ),

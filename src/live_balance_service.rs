@@ -276,11 +276,13 @@ pub enum PreparedExitKitProposal {
     /// H2=0 token registration: the balance proof is unchanged, only the composition moves.
     TokenRegister { successor: ChannelState },
     /// L1 deposit import whose deposit is already folded into the pending (unbound) balance
-    /// proof. The bundle-apply successor shares this statement key and needs no second kit.
+    /// proof. `import_state` is the ONE signed head of the import (fund vector, settle chain and
+    /// depositor ciphertext all moved); the unsigned fund-import leg is never proposed here
+    /// (2026-10-15 review: a signed fund-import head shares this key and strands the deposit).
     L1DepositImport {
         record: ChannelRecord,
         members: Vec<MemberInfo>,
-        fund_import_state: ChannelState,
+        import_state: ChannelState,
     },
     /// Inter-channel or burn debit against the producer's staged exit-kit block
     /// (`BlockProducerService::prepare_inter_channel_exit_kit`).
@@ -944,24 +946,24 @@ impl LiveBalanceService {
             PreparedExitKitProposal::L1DepositImport {
                 record,
                 members,
-                fund_import_state,
+                import_state,
             } => {
                 if !self.disk.awaiting_channel_binding {
                     return Err(LiveBalanceServiceError::InvalidRequest(
                         "no validity-backed deposit proof awaits its channel binding".into(),
                     ));
                 }
-                verify_proposed_successor_shape(fund_import_state, self.disk.channel_id)?;
-                if fund_import_state.h2_tag != Bytes32::default() {
+                verify_proposed_successor_shape(import_state, self.disk.channel_id)?;
+                if import_state.h2_tag != Bytes32::default() {
                     return Err(LiveBalanceServiceError::InvalidRequest(
-                        "a deposit fund-import successor requires h2_tag == 0".into(),
+                        "a deposit import successor requires h2_tag == 0".into(),
                     ));
                 }
                 let proof = decode_balance_proof(&self.disk, &self.circuits.balance)?;
                 let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
-                if pis.settled_tx_chain != fund_import_state.balance_state.settled_tx_chain {
+                if pis.settled_tx_chain != import_state.balance_state.settled_tx_chain {
                     return Err(LiveBalanceServiceError::InvalidRequest(
-                        "proposed fund-import settle chain differs from the pending live balance proof"
+                        "proposed deposit import settle chain differs from the pending live balance proof"
                             .into(),
                     ));
                 }
@@ -983,14 +985,14 @@ impl LiveBalanceService {
                     self.disk.channel_record.as_ref(),
                     self.disk.signed_head.as_ref(),
                     record,
-                    fund_import_state,
+                    import_state,
                     false,
                 )?;
-                verify_close_asset_vector(&self.disk, fund_import_state)?;
+                verify_close_asset_vector(&self.disk, import_state)?;
                 let mut candidate = self.disk.clone();
                 candidate.channel_record = Some(record.clone());
                 candidate.channel_members = Some(members.clone());
-                candidate.signed_head = Some(fund_import_state.clone());
+                candidate.signed_head = Some(import_state.clone());
                 candidate.awaiting_channel_binding = false;
                 candidate.pending_deposit_salt = None;
                 candidate

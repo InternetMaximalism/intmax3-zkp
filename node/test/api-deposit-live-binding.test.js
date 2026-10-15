@@ -32,7 +32,7 @@ cliModule.cli = (ch, args, env) => {
       kind: 'l1DepositImport',
       record: { channelId: ch },
       members: [],
-      fundImportState: { channelId: ch, digest: 'fund' },
+      importState: { channelId: ch, digest: 'import' },
     });
     return '';
   }
@@ -42,7 +42,7 @@ cliModule.cli = (ch, args, env) => {
     const envelope = JSON.parse(fs.readFileSync(path.join(work, `ch${ch}`, 'prepared_exit_kit.json'), 'utf8'));
     assert.equal(envelope.chainId, 31337);
     assert.equal(envelope.rollup, '0x' + '44'.repeat(20));
-    assert.equal(envelope.signedHead.digest, 'fund');
+    assert.equal(envelope.signedHead.digest, 'import');
   }
   if (args[0] === 'inspect-l1-deposit') {
     write(ch, 'producer_deposit.json', {
@@ -58,12 +58,11 @@ cliModule.cli = (ch, args, env) => {
     write(ch, 'l1_import_cosigned.json', {
       txHash: args[2],
       intmaxBlockNumber: 11,
-      fundImportState: { channelId: ch, digest: 'fund' },
-      bundleApplyState: { channelId: ch, digest: 'bundle' },
+      importState: { channelId: ch, digest: 'import' },
     });
     write(ch, 'channel_snapshot.json', {
       record: { channelId: ch },
-      state: { channelId: ch, digest: 'bundle' },
+      state: { channelId: ch, digest: 'import' },
       members: [],
     });
   }
@@ -72,8 +71,8 @@ producerHead.flushPublishedHead = async () => { events.push('flushPublishedHead'
 producer.livePrepareExitKit = async (ch, proposal) => {
   events.push('livePrepareExitKit');
   assert.equal(proposal.kind, 'l1DepositImport');
-  assert.equal(proposal.fundImportState.digest, 'fund');
-  return { signedHead: proposal.fundImportState, signedHeadExitKit: { schemaVersion: 1 } };
+  assert.equal(proposal.importState.digest, 'import');
+  return { signedHead: proposal.importState, signedHeadExitKit: { schemaVersion: 1 } };
 };
 producer.postDeposit = async deposit => {
   events.push('postDeposit');
@@ -133,7 +132,7 @@ test('deposit head is never published before durable live receive and N-of-N bin
     'installHeadExitKit:7',
   ]);
   assert.equal(result.liveReceipt.producerRequestId, 'deposit:4');
-  assert.equal(result.liveStatus.signedHeadDigest, 'bundle');
+  assert.equal(result.liveStatus.signedHeadDigest, 'import');
 });
 test('restart completes an old receive/bind before inspecting the next deposit', async () => {
   events.length = 0;
@@ -146,8 +145,7 @@ test('restart completes an old receive/bind before inspecting the next deposit',
   write(8, 'l1_import_cosigned.json', {
     txHash: oldHash,
     intmaxBlockNumber: 11,
-    fundImportState: { channelId: 8, digest: 'old-fund' },
-    bundleApplyState: { channelId: 8, digest: 'old-bundle' },
+    importState: { channelId: 8, digest: 'old-bundle' },
   });
 
   await importL1Deposit(8, 0, '0x' + 'ef'.repeat(32));

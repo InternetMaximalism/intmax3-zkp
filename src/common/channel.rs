@@ -1141,7 +1141,10 @@ impl CloseIntent {
             )));
         }
         // Imported but unapplied incoming funds remain backed in channel_fund. Their signed
-        // IMUI leaves authorize separate one-shot residual claims after close.
+        // IMUI leaves authorize separate one-shot residual claims after close. This constructor
+        // cannot distinguish a covered residue from an uncovered one (an L1 deposit fund-import
+        // leg); that leg is never a signed head (`wallet_core::build_l1_deposit_import`), so
+        // no such state reaches a close.
         let close_nonce = final_channel_state
             .close_freeze_nonce
             .checked_add(1)

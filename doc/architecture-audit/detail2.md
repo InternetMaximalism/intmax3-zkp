@@ -70,9 +70,17 @@ the one finalized token cap.
 
 **Residual-lane boundary:** this lane covers a C2C delta already imported before the signed
 closing snapshot. A transfer first received afterwards uses the separate continuation below.
-L1-deposit import/application remains the existing atomic wallet operation; callers must not
-publish its intermediate import state as a supported exit head. Direct L1 deposits have no
-recipient Regev delta and are not routed through the C2C claim statement.
+An L1 deposit import is ONE signed head (2026-10-15): `wallet_core::build_l1_deposit_import`
+moves the fund vector, the settle chain and the depositor ciphertext in a single N-of-N state
+linked to the pre-deposit head, and leaves `unallocated_confirmed_incoming` unchanged. Its
+fund-import leg (fund + chain advanced, ciphertexts untouched, deposit held only as an
+unallocated residue) is an unsigned verification step: the co-signer gate derives it itself,
+the CLI signing primitive refuses `L1DepositFundImport`, and the API never syncs or
+acknowledges it as a head. This is enforced, not advisory — a signed fund-import head would
+share the real head's `CloseAssetBacking` key `(channel_id, settled_tx_chain,
+token_funds_digest)` and a close on it would pay nobody for the deposit (no ciphertext, no
+IMUI leaf, late-incoming is ReceiveTransfer-only). Direct L1 deposits have no recipient Regev
+delta and are not routed through the C2C claim statement.
 
 ### Post-close first receipt: ordinary ReceiveTransfer continuation (2026-09-26)
 

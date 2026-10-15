@@ -58,7 +58,7 @@ cliModule.cli = (ch, args) => {
     if (refuseImport) throw new Error('REFUSING: the on-chain depositor is not the bound (B-1b) recipient');
     write(ch, 'l1_import_cosigned.json', {
       txHash: TX, intmaxBlockNumber: 11,
-      fundImportState: { digest: 'fund' }, bundleApplyState: { digest: 'bundle' },
+      importState: { digest: 'import' },
     });
   }
   return '';

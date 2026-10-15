@@ -356,8 +356,16 @@ enum StateSigningPurpose {
     InterChannelBundleApply,
     BurnDebit,
     TokenRegister,
+    /// RETIRED (2026-10-15 review, stranded L1 deposit): the deposit fund-import leg is no
+    /// longer a signed head. It shares the CloseAssetBacking statement key of the real import
+    /// head while carrying the deposit only as an uncovered `unallocated_confirmed_incoming`
+    /// residue, so a close on it pays nobody for the deposit. The variant stays so historical
+    /// ledger entries deserialize; `ledgered_state_signature_with` refuses it before any check.
     L1DepositFundImport,
-    L1DepositBundleApply,
+    /// The ONE signed head of an L1 deposit import (`wallet_core::build_l1_deposit_import`).
+    /// Historical ledgers wrote this head under `l1_deposit_bundle_apply`.
+    #[serde(alias = "l1_deposit_bundle_apply")]
+    L1DepositImport,
     CloseFunding,
 }
 
@@ -380,7 +388,7 @@ impl StateSigningPurpose {
                 | Self::BurnDebit
                 | Self::TokenRegister
                 | Self::L1DepositFundImport
-                | Self::L1DepositBundleApply
+                | Self::L1DepositImport
                 | Self::CloseFunding
         )
     }
@@ -1318,6 +1326,21 @@ where
         return Err(
             "close-funding requires exactly one plan_digest; other purposes forbid it".into(),
         );
+    }
+    // SECURITY (2026-10-15 review, stranded L1 deposit): the deposit fund-import leg is NOT a
+    // signed head. It shares the CloseAssetBacking statement key `(channel_id, settled_tx_chain,
+    // token_funds_digest)` with the real import head but holds the deposit only as an uncovered
+    // `unallocated_confirmed_incoming` residue: no ciphertext, no IMUI leaf, no late-incoming
+    // receipt. An N-of-N signature over it is a closable head that pays nobody for the deposit
+    // (`submitCloseIntent` is permissionless once a close is requested). Refuse before any
+    // ledger lookup or signer call so the signature never exists.
+    if purpose == StateSigningPurpose::L1DepositFundImport {
+        return Err(format!(
+            "NOT A SIGNED HEAD: refusing {purpose:?} for successor {}; the L1 deposit fund-import \
+             leg is an unsigned verification step (wallet_core::BuiltL1DepositImport::fund_import_leg) \
+             — sign only the single import head (L1DepositImport)",
+            successor.digest
+        ));
     }
 
     // SECURITY: this is intentionally before both terminal/anti-equivocation replay lookup and
@@ -17812,19 +17835,21 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("build_l1_deposit_import: {e}")));
 
-    let mut fund_state = built.fund_import_state.clone();
-    let mut bundle_state = built.bundle_apply_state.clone();
+    // The ONE signed head. The fund-import leg (`built.fund_import_leg`) is an unsigned
+    // verification step and is never proposed, signed, synced or acknowledged as a head
+    // (2026-10-15 review: a signed fund-import head shares this head's close backing key and
+    // strands the deposit).
+    let mut import_state = built.import_state.clone();
 
-    // TM-7 (two-step gate): verifies the fund-import witness AND rebuilds the canonical bundle
-    // step (rebuild-equality) from this co-signer's OWN deterministic `recipient_delta`, so a
-    // divergent bundle proposal (wrong credit position / doctored amount) is refused even
-    // though this CLI also happens to be the builder.
+    // TM-7 (two-leg gate): derives and verifies the fund-import leg AND rebuilds the canonical
+    // import head (rebuild-equality) from this co-signer's OWN deterministic `recipient_delta`,
+    // so a divergent proposal (wrong credit position / doctored amount / a head chained onto the
+    // leg) is refused even though this CLI also happens to be the builder.
     verify_l1_deposit_import_transition(
         &state.snapshot.state,
         &state.snapshot.record,
         &deposit,
-        &fund_state,
-        &bundle_state,
+        &import_state,
         recipient_slot,
         &recipient_delta,
     )
@@ -17834,14 +17859,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     admit_credit_safe_successor_excluding(
         &mut state,
         &deposit_predecessor,
-        &fund_state,
-        reservation_id.as_deref(),
-    )
-    .unwrap_or_else(|error| die(error));
-    admit_credit_safe_successor_excluding(
-        &mut state,
-        &fund_state,
-        &bundle_state,
+        &import_state,
         reservation_id.as_deref(),
     )
     .unwrap_or_else(|error| die(error));
@@ -17851,32 +17869,24 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
             "kind": "l1DepositImport",
             "record": state.snapshot.record,
             "members": state.snapshot.members,
-            "fundImportState": fund_state,
+            "importState": import_state,
         }));
     }
 
     ledger_sign_all_controlled(
         &mut state,
-        &mut fund_state,
-        StateSigningPurpose::L1DepositFundImport,
+        &mut import_state,
+        StateSigningPurpose::L1DepositImport,
         None,
     );
-    ledger_sign_all_controlled(
-        &mut state,
-        &mut bundle_state,
-        StateSigningPurpose::L1DepositBundleApply,
-        None,
-    );
-    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &fund_state)
-        .unwrap_or_else(|e| die(format!("L1 fund-import state not N-of-N signed: {e}")));
     verify_all_signatures(
         &state.snapshot.record,
         &state.snapshot.members,
-        &bundle_state,
+        &import_state,
     )
-    .unwrap_or_else(|e| die(format!("L1 bundle-apply state not N-of-N signed: {e}")));
+    .unwrap_or_else(|e| die(format!("L1 deposit import head not N-of-N signed: {e}")));
 
-    adopt_head_with_exit_kit_receipts(&mut state, bundle_state.clone());
+    adopt_head_with_exit_kit_receipts(&mut state, import_state.clone());
     state.snapshot.settled_tx_accumulator = built.settled_tx_accumulator;
     // Consume the deposit in the SAME save as the new snapshot: the credit and the ledger entry
     // land together, so a crash cannot leave a credited-but-unconsumed deposit.
@@ -17890,8 +17900,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     }
 
     let result = serde_json::json!({
-        "fundImportState": fund_state,
-        "bundleApplyState": bundle_state,
+        "importState": import_state,
         "txHash": tx_hash,
         "depositIndex": onchain.deposit_index,
         "intmaxBlockNumber": intmax_block_number,
@@ -17910,7 +17919,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         amount,
         token_index,
         deposit_identity,
-        bundle_state.balance_state.state_version
+        import_state.balance_state.state_version
     );
 }
 
@@ -19895,8 +19904,7 @@ mod signing_ledger_tests {
             StateSigningPurpose::InterChannelBundleApply,
             StateSigningPurpose::BurnDebit,
             StateSigningPurpose::TokenRegister,
-            StateSigningPurpose::L1DepositFundImport,
-            StateSigningPurpose::L1DepositBundleApply,
+            StateSigningPurpose::L1DepositImport,
             StateSigningPurpose::CloseFunding,
         ];
 
@@ -20082,47 +20090,83 @@ mod signing_ledger_tests {
         validate_signing_security_state(&cli).expect("promoted receipt matches the new head");
     }
 
+    /// RED (2026-10-15 review, stranded L1 deposit): the signing primitive must refuse to put
+    /// an N-of-N signature on a deposit fund-import leg. Such a head shares the CloseAssetBacking
+    /// key of the real import head, and a close on it pays nobody for the deposit.
     #[test]
-    fn two_state_import_chain_reuses_one_prepared_kit_for_its_bundle_step() {
+    fn l1_deposit_fund_import_leg_is_refused_at_the_signing_primitive() {
         let mut cli = fixture();
         let record = cli.snapshot.record.clone();
         let controlled = cli.controlled[0].clone();
         let mut fund_import = child_of(&cli.snapshot.state, 1);
         fund_import.channel_fund.amounts[0] = U256::from(5u64);
+        fund_import.unallocated_confirmed_incoming = U256::from(5u64);
         fund_import.balance_state.settled_tx_chain =
             Bytes32::from_hex("0x2222222222222222222222222222222222222222222222222222222222222222")
                 .unwrap();
         let fund_import = fund_import.with_computed_digest();
-        let mut bundle = fund_import.clone();
-        bundle.prev_digest = fund_import.digest;
-        bundle.epoch += 1;
-        bundle.balance_state.state_version += 1;
-        let bundle = bundle.with_computed_digest();
         cli.prepared_exit_kit_receipt = Some(prepared_receipt_for(&cli, &fund_import));
         cli.prepared_exit_kit_receipt_verified = true;
         let before = cli.snapshot.state.clone();
         admit_credit_safe_successor(&mut cli, &before, &fund_import).unwrap();
-        admit_credit_safe_successor(&mut cli, &fund_import, &bundle).unwrap();
 
-        for (state, purpose) in [
-            (&fund_import, StateSigningPurpose::L1DepositFundImport),
-            (&bundle, StateSigningPurpose::L1DepositBundleApply),
-        ] {
-            ledgered_state_signature_with(
-                &mut cli,
-                &record,
-                &controlled,
-                state,
-                purpose,
-                None,
-                None,
-                |keys| sign_state(keys, controlled.slot as u8, state).map_err(|e| e.to_string()),
-            )
-            .unwrap_or_else(|e| panic!("{purpose:?} must sign under the shared kit: {e}"));
-        }
-        adopt_head_with_exit_kit_receipts(&mut cli, bundle.clone());
+        let refusal = ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &fund_import,
+            StateSigningPurpose::L1DepositFundImport,
+            None,
+            None,
+            |_| panic!("FAILING (stranded deposit): a fund-import leg must never be signed"),
+        )
+        .expect_err("FAILING (stranded deposit): L1DepositFundImport must be refused before signing");
+        assert!(refusal.contains("NOT A SIGNED HEAD"), "{refusal}");
+        assert!(cli.state_signing_ledger.is_empty());
+    }
+
+    #[test]
+    fn l1_deposit_import_signs_its_single_head_under_the_prepared_kit() {
+        let mut cli = fixture();
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let mut head = child_of(&cli.snapshot.state, 1);
+        head.channel_fund.amounts[0] = U256::from(5u64);
+        head.balance_state.settled_tx_chain =
+            Bytes32::from_hex("0x2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
+        head.balance_state.state_version += 1;
+        let head = head.with_computed_digest();
+        cli.prepared_exit_kit_receipt = Some(prepared_receipt_for(&cli, &head));
+        cli.prepared_exit_kit_receipt_verified = true;
+        let before = cli.snapshot.state.clone();
+        admit_credit_safe_successor(&mut cli, &before, &head).unwrap();
+
+        ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &head,
+            StateSigningPurpose::L1DepositImport,
+            None,
+            None,
+            |keys| sign_state(keys, controlled.slot as u8, &head).map_err(|e| e.to_string()),
+        )
+        .unwrap_or_else(|e| panic!("the import head must sign under its prepared kit: {e}"));
+        adopt_head_with_exit_kit_receipts(&mut cli, head.clone());
         assert!(cli.signer_exit_kit_receipt.is_some());
-        validate_signing_security_state(&cli).expect("bundle head carries the promoted receipt");
+        validate_signing_security_state(&cli).expect("import head carries the promoted receipt");
+    }
+
+    /// Historical ledgers recorded the import head under the retired purpose name.
+    #[test]
+    fn l1_deposit_import_purpose_deserializes_its_historical_name() {
+        let purpose: StateSigningPurpose =
+            serde_json::from_str("\"l1_deposit_bundle_apply\"").unwrap();
+        assert_eq!(purpose, StateSigningPurpose::L1DepositImport);
+        let retired: StateSigningPurpose =
+            serde_json::from_str("\"l1_deposit_fund_import\"").unwrap();
+        assert_eq!(retired, StateSigningPurpose::L1DepositFundImport);
     }
 
     #[test]

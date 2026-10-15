@@ -20,7 +20,7 @@ Every other transition moves the key:
 | purpose | what moves | who can prove the kit before the signature |
 |---|---|---|
 | `TokenRegister` | `token_funds_digest` (registry, count) | the service, from the unchanged Balance proof |
-| `L1DepositFundImport` / `L1DepositBundleApply` | fund vector + settle chain | the service, from the pending post-deposit Balance proof (`awaiting_channel_binding`) |
+| `L1DepositImport` (one head per deposit; the fund-import leg is never signed) | fund vector + settle chain | the service, from the pending post-deposit Balance proof (`awaiting_channel_binding`) |
 | `BurnDebit` / `InterChannelDebit` | fund vector + settle chain, posts a block | the service, against a **staged** producer block |
 | `InterChannelFundImport` / `InterChannelBundleApply` (destination) | fund vector + settle chain, posts **no** block for this channel | not needed before signing (see below) |
 | `CloseFunding` | terminal | retired on-chain (`CooperativeCloseFundingDeprecated`); stays refused |
@@ -103,7 +103,7 @@ every H2=0 signature stays refused until then.
 ## Daemon commands
 
 - `livePrepareExitKit { channelId, proposal }` — `proposal.kind` ∈ `tokenRegister`
-  (`successor`), `l1DepositImport` (`record`, `members`, `fundImportState`),
+  (`successor`), `l1DepositImport` (`record`, `members`, `importState`),
   `interChannelDebit` (`requestId`, `proposedState`, `debitPayload`, `descriptor`).
 - `liveAbandonPreparedExitKit { channelId, requestId }` — drop a staged debit block whose
   transition will not be signed.

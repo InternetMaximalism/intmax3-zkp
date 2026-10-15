@@ -671,6 +671,10 @@ where
         }
         // Unallocated incoming funds may close: their IMUI leaves remain in signed H1.
         // The aggregate is still authenticated below as part of the signed ChannelState.
+        // The circuit cannot tell an IMUI-covered residue from an uncovered one; the only
+        // transition that produced an uncovered residue (the L1 deposit fund-import leg) is
+        // never N-of-N signed (`wallet_core::build_l1_deposit_import`, 2026-10-15), so no
+        // closable state with an unpayable residue exists.
 
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
         let close_tx_domain = builder.constant(F::from_canonical_u32(CLOSE_TX_DOMAIN));

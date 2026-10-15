@@ -34,7 +34,7 @@ async function flushLastDepositImport(ch) {
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
   if (!fs.existsSync(artifactPath)) return null;
   const artifact = readJson(artifactPath);
-  if (!artifact.fundImportState || !artifact.bundleApplyState) return null;
+  if (!artifact.importState) return null;
   const depositPath = wc(ch, 'producer_deposit.json');
   const snapshotPath = wc(ch, 'channel_snapshot.json');
   if (!fs.existsSync(depositPath) || !fs.existsSync(snapshotPath)) {
@@ -45,11 +45,11 @@ async function flushLastDepositImport(ch) {
   const liveReceipt = await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
   const snapshot = readJson(snapshotPath);
   const liveStatus = await bindDepositSnapshot(ch, snapshot);
-  const headSyncReceipt = await producer.syncOffchainHeads([
-    artifact.fundImportState,
-    artifact.bundleApplyState,
-  ]);
-  acknowledgePreparedExitKit(ch, artifact.fundImportState);
+  // ONE signed head per deposit import. The CLI's unsigned fund-import leg is never synced or
+  // acknowledged as a head (2026-10-15 review: a signed fund-import head shares the import
+  // head's close backing key and strands the deposit).
+  const headSyncReceipt = await producer.syncOffchainHeads([artifact.importState]);
+  acknowledgePreparedExitKit(ch, artifact.importState);
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
@@ -221,16 +221,14 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
     artifact = readJson(artifactPath);
   }
 
-  if (!artifact.fundImportState || !artifact.bundleApplyState) {
-    throw new Error('l1_import_cosigned.json lacks the two N-of-N signed import states');
+  if (!artifact.importState) {
+    throw new Error('l1_import_cosigned.json lacks the N-of-N signed import state');
   }
   const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
   const liveStatus = await bindDepositSnapshot(ch, snapshot);
-  const headSyncReceipt = await producer.syncOffchainHeads([
-    artifact.fundImportState,
-    artifact.bundleApplyState,
-  ]);
-  acknowledgePreparedExitKit(ch, artifact.fundImportState);
+  // ONE signed head per deposit import (see flushLastDepositImport).
+  const headSyncReceipt = await producer.syncOffchainHeads([artifact.importState]);
+  acknowledgePreparedExitKit(ch, artifact.importState);
   // Install the CLI's verified signer exit-kit receipt for the NEW current head. A deposit moves
   // the channel's fund vector and settle chain, so the predecessor's kit no longer backs it; the
   // next value-preserving H2=0 successor (a balance refresh, an intra-channel send) reuses THIS

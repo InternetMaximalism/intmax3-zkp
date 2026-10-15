@@ -1524,13 +1524,17 @@ contract ChannelSettlementManager {
         finalizedTokenFundsDigest =
             verifier.tokenFundsDigest(pendingClose.tokenRegistry, tc, pendingClose.channelFundAmounts);
 
-        // NOTE (Phase 2b review MINOR 3, examined for Phase 3): the Rust-side
+        // NOTE (Phase 2b review MINOR 3; corrected 2026-10-15): the Rust-side
         // `unallocated_confirmed_incoming` scalar is NOT consumed anywhere in this Manager (it is
-        // not a close PI and not part of any L1 accounting variable); the close path additionally
-        // requires it to be ZERO (`CloseIntent::new` fail-closes on a nonzero residue). A per-token
-        // unallocated vector is therefore NOT required for the Manager's per-token settlement
-        // soundness; whether the Rust channel layer wants one for mid-life P2 bookkeeping is a
-        // channel-layer (Phase 4+) question, out of L1 scope.
+        // not a close PI and not part of any L1 accounting variable), and neither
+        // `CloseIntent::new` nor the close circuit refuses a nonzero value: a residue backed by
+        // IMUI-tagged leaves in the signed accumulator is closable and is paid by
+        // `submitPostCloseClaim`. A residue NOT covered by an IMUI leaf would be unpayable
+        // (no ciphertext, no leaf, no late receipt); the only transition that produced one —
+        // the L1 deposit fund-import leg — is no longer a signed head
+        // (`wallet_core::build_l1_deposit_import`: one head per import), so no such closable
+        // state exists. A per-token unallocated vector is therefore NOT required for the
+        // Manager's per-token settlement soundness.
         channelStatus = ChannelLifecycleStatus.Closed;
         closeRequestedAt = 0;
         // H-3: the era's absolute challenge horizon is consumed with it.

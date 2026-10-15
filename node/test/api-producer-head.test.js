@@ -177,20 +177,33 @@ test('interrupted destination receive retries its exact recovery inputs before p
   assert.equal(heads.get(17), bundle.digest);
 });
 
-test('deposit recovery never skips its intermediate fund-import state', async () => {
+test('deposit recovery syncs the one signed import head and never a fund-import head', async () => {
   calls.length = 0;
   heads.set(10, 'before');
-  const fund = { channelId: 10, digest: 'fund' };
-  const bundle = { channelId: 10, digest: 'bundle' };
-  write(10, 'channel_snapshot.json', { state: bundle });
-  write(10, 'l1_import_cosigned.json', {
-    fundImportState: fund,
-    bundleApplyState: bundle,
-  });
+  const head = { channelId: 10, digest: 'import' };
+  write(10, 'channel_snapshot.json', { state: head });
+  write(10, 'l1_import_cosigned.json', { importState: head });
 
   await flushPublishedHead(10);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { kind: 'sync', states: [fund, bundle] });
+  assert.deepEqual(calls[0], { kind: 'sync', states: [head] });
+});
+
+test('a retired two-head deposit artifact is not synced as heads', async () => {
+  calls.length = 0;
+  heads.set(12, 'before');
+  const fund = { channelId: 12, digest: 'fund' };
+  const bundle = { channelId: 12, digest: 'bundle' };
+  write(12, 'channel_snapshot.json', { state: bundle });
+  write(12, 'l1_import_cosigned.json', { fundImportState: fund, bundleApplyState: bundle });
+
+  await flushPublishedHead(12);
+  // The snapshot head itself may still be reconciled; the fund-import head never is.
+  for (const call of calls) {
+    assert.ok(!(call.states || []).some(state => state.digest === 'fund'),
+      'a fund-import head must never reach the producer');
+    assert.notEqual(call.state && call.state.digest, 'fund');
+  }
 });
 
 test('ordinary signed head is bound to backing before its public producer head advances', async () => {

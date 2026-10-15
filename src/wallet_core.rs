@@ -5192,17 +5192,28 @@ pub fn verify_inter_channel_credit_states(
 // --- L1 deposit import (mid-channel top-up) ---
 
 pub struct BuiltL1DepositImport {
-    pub fund_import_state: ChannelState,
-    pub bundle_apply_state: ChannelState,
+    /// The ONE signable head of the import: `channel_fund += amount`, `settled_tx_chain` pushes
+    /// `deposit.nullifier()`, `enc_balances[recipient_slot][token_slot] += delta`, linked
+    /// directly to the pre-deposit snapshot head. `unallocated_confirmed_incoming` is unchanged.
+    pub import_state: ChannelState,
+    /// The UNSIGNED fund-import verification leg (the post-fund, pre-credit intermediate that
+    /// `L1DepositImportUpdateWitness` checks). It is NEVER a head: it shares the CloseAssetBacking
+    /// statement key `(channel_id, settled_tx_chain, token_funds_digest)` with `import_state`
+    /// while carrying the deposit only as an uncovered `unallocated_confirmed_incoming` residue,
+    /// so an N-of-N signature over it would make a close that pays nobody for the deposit
+    /// (2026-10-15 review: stranded L1 deposit). The CLI signing primitive refuses it.
+    pub fund_import_leg: ChannelState,
     pub settled_tx_accumulator: IncrementalMerkleTree<Bytes32>,
 }
 
 /// Build a mid-channel L1 deposit import: fold an L1 deposit into an already-open channel.
 ///
-/// Two-step state transition mirroring `build_inter_channel_credit`:
-///   Step 1 (fund import): `channel_fund += amount`, `unallocated += amount`,
-///          `settled_tx_chain` pushes `deposit.nullifier()`.
-///   Step 2 (bundle apply): `enc_balances[recipient_slot] += delta`, `unallocated -= amount`.
+/// ONE signed head, verified in two legs (the shape `build_inter_channel_credit` signs as two
+/// heads is NOT used here — see `BuiltL1DepositImport::fund_import_leg`):
+///   Leg 1 (fund import, unsigned): `channel_fund += amount`, `unallocated += amount`,
+///          `settled_tx_chain` pushes `deposit.nullifier()` — `L1DepositImportUpdateWitness`.
+///   Leg 2 (credit, the signed head): `enc_balances[recipient_slot] += delta`,
+///          `unallocated -= amount`, linked to the PRE-deposit head — rebuild-equality.
 ///
 /// Trust anchor: the `receive_deposit` balance proof verified externally via
 /// `verify_channel_backing` — no transport proof needed (unlike inter-channel import).
@@ -5228,8 +5239,7 @@ pub fn build_l1_deposit_import(
     // token 0). The witness self-check below re-runs the same resolution adversarially.
     let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
 
-    // ---- Step 1: Fund import ----
-    let import_nullifier = advance_nullifier(prev.shared_native_nullifier_root, deposit_nullifier);
+    // ---- Leg 1: Fund import (unsigned verification leg) ----
     let mut import_accumulator = snapshot.settled_tx_accumulator.clone();
     import_accumulator.push(deposit_nullifier);
     let import_accumulator_root = Bytes32::from(import_accumulator.get_root());
@@ -5239,7 +5249,68 @@ pub fn build_l1_deposit_import(
         import_accumulator_root,
     )
     .map_err(|e| WalletError(format!("l1 deposit fund import accumulator push: {e:?}")))?;
-    let fund_import_state = ChannelState {
+    let fund_import_leg = l1_deposit_fund_import_leg(
+        prev,
+        deposit_nullifier,
+        token_slot,
+        amount_u64,
+        import_accumulator_root,
+    );
+    let mut import_for_check = fund_import_leg.clone();
+    fill_placeholder_sigs(record, &mut import_for_check);
+    let import_witness = L1DepositImportUpdateWitness {
+        channel_record: record.clone(),
+        prev_state: prev.clone(),
+        next_state: import_for_check,
+        amount: amount_u64,
+        deposit_nullifier,
+        // TM-7: the base deposit's token_index is no longer dropped — it rides into the IMLD-v2
+        // digest and the witness verify enforces its registry resolution.
+        token_index: deposit.token_index,
+        depositor_slot: recipient_slot,
+    };
+    import_witness
+        .verify()
+        .map_err(|e| WalletError(format!("l1 deposit fund import self-check failed: {e:?}")))?;
+
+    // ---- Leg 2: the signed head (shared deterministic step — see `l1_deposit_import_head`) ----
+    // One consumed L1 deposit is one settle-history/accumulator event. The fund leg already
+    // inserted it; the head only assigns the confirmed amount to a ciphertext slot and links to
+    // the PRE-deposit head.
+    let import_state = l1_deposit_import_head(
+        prev,
+        &fund_import_leg,
+        recipient_slot,
+        token_slot,
+        recipient_delta,
+        amount_u64,
+    )?;
+
+    Ok(BuiltL1DepositImport {
+        import_state,
+        fund_import_leg,
+        settled_tx_accumulator: import_accumulator,
+    })
+}
+
+/// The deterministic fund-import leg of an L1 deposit import (unsigned; never a head):
+/// `channel_fund[token_slot] += amount`, `unallocated += amount`, chain pushes the deposit
+/// nullifier, the shared nullifier root advances, every leaf bit-identical. Both the proposer
+/// (`build_l1_deposit_import`) and the co-signer gate (`verify_l1_deposit_import_transition`)
+/// derive it from the SAME predecessor, so no proposer-supplied intermediate state exists.
+///
+/// `accumulator_root` is the post-push settled-tx accumulator root; push-faithfulness against
+/// the persisted tree is the builder's obligation (`require_accumulator_push`), exactly as it was
+/// for the former proposer-supplied fund-import state.
+fn l1_deposit_fund_import_leg(
+    prev: &ChannelState,
+    deposit_nullifier: Bytes32,
+    token_slot: usize,
+    amount_u64: u64,
+    accumulator_root: Bytes32,
+) -> ChannelState {
+    let import_nullifier = advance_nullifier(prev.shared_native_nullifier_root, deposit_nullifier);
+    ChannelState {
         epoch: prev.epoch + 1,
         small_block_number: prev.small_block_number + 1,
         channel_fund: ChannelFund {
@@ -5257,7 +5328,7 @@ pub fn build_l1_deposit_import(
                 prev.balance_state.settled_tx_chain,
                 deposit_nullifier,
             ),
-            settled_tx_accumulator_root: import_accumulator_root,
+            settled_tx_accumulator_root: accumulator_root,
             state_version: prev.balance_state.state_version + 1,
             ..prev.balance_state.clone()
         },
@@ -5269,121 +5340,95 @@ pub fn build_l1_deposit_import(
         h2_tag: Bytes32::default(),
         ..prev.clone()
     }
-    .with_computed_digest();
-    let mut import_for_check = fund_import_state.clone();
-    fill_placeholder_sigs(record, &mut import_for_check);
-    let import_witness = L1DepositImportUpdateWitness {
-        channel_record: record.clone(),
-        prev_state: prev.clone(),
-        next_state: import_for_check,
-        amount: amount_u64,
-        deposit_nullifier,
-        // TM-7: the base deposit's token_index is no longer dropped — it rides into the IMLD-v2
-        // digest and the witness verify enforces its registry resolution.
-        token_index: deposit.token_index,
-        depositor_slot: recipient_slot,
-    };
-    import_witness
-        .verify()
-        .map_err(|e| WalletError(format!("l1 deposit fund import self-check failed: {e:?}")))?;
-
-    // ---- Step 2: Bundle apply (shared deterministic step — see `l1_deposit_bundle_state`) ----
-    // One consumed L1 deposit is one settle-history/accumulator event. The import step already
-    // inserted it; the bundle only assigns the confirmed amount to a ciphertext slot.
-    let bundle_accumulator = import_accumulator.clone();
-    let bundle_apply_state = l1_deposit_bundle_state(
-        &fund_import_state,
-        recipient_slot,
-        token_slot,
-        recipient_delta,
-        amount_u64,
-    )?;
-
-    Ok(BuiltL1DepositImport {
-        fund_import_state,
-        bundle_apply_state,
-        settled_tx_accumulator: bundle_accumulator,
-    })
+    .with_computed_digest()
 }
 
-/// The CANONICAL deposit bundle-apply state (TM-7 leg b): starting from the verified
-/// post-import state, credit the depositor leaf at EXACTLY the registry-resolved
-/// `(recipient_slot, token_slot)` position (`+= recipient_delta`, `pending_adds += 1`),
-/// `unallocated -= amount`, settle chain unchanged, `state_version`/`epoch` +1.
-/// Every other (row, token) position rides the clones bit-identical.
+/// The CANONICAL deposit import head (TM-7 leg b): starting from the verified fund-import leg,
+/// credit the depositor leaf at EXACTLY the registry-resolved `(recipient_slot, token_slot)`
+/// position (`+= recipient_delta`, `pending_adds += 1`), `unallocated -= amount` (back to the
+/// predecessor's value), settle chain / accumulator root / fund vector as the leg left them, and
+/// link the head DIRECTLY to `prev` (`prev_digest`, `epoch + 1`, `state_version + 1`,
+/// `small_block_number + 1`). Every other (row, token) position rides the clones bit-identical.
 ///
-/// SECURITY (TM-7 leg b, Phase 2b review MAJOR 1): this is the SINGLE definition of the bundle
+/// SECURITY (TM-7 leg b, Phase 2b review MAJOR 1): this is the SINGLE definition of the credit
 /// step, used by BOTH `build_l1_deposit_import` (the proposer) and
 /// `verify_l1_deposit_import_transition` (the co-signer gate, which REBUILDS this state and
 /// requires digest equality with the proposal — the `verify_token_register_transition`
-/// pattern). A proposer-supplied bundle state crediting any other (row, token) position, a
-/// doctored delta/amount, or any other field divergence therefore fails the gate.
-/// The accumulator root is carried from the verified fund-import state; the bundle cannot replace
-/// it with a proposer-selected root.
-fn l1_deposit_bundle_state(
-    fund_import_state: &ChannelState,
+/// pattern). A proposer-supplied head crediting any other (row, token) position, a doctored
+/// delta/amount, a head chained onto the fund leg instead of `prev` (the retired two-head
+/// shape), or any other field divergence therefore fails the gate.
+///
+/// SECURITY (2026-10-15 review, stranded L1 deposit): the head links to `prev`, not to the fund
+/// leg, so the leg is never part of the signed digest chain and no N-of-N head with the deposit
+/// as an uncovered `unallocated_confirmed_incoming` residue ever exists.
+fn l1_deposit_import_head(
+    prev: &ChannelState,
+    fund_import_leg: &ChannelState,
     recipient_slot: usize,
     token_slot: usize,
     recipient_delta: &RegevCiphertext,
     amount_u64: u64,
 ) -> WResult<ChannelState> {
     let recipient_after = add_ciphertexts(
-        &fund_import_state.balance_state.enc_balances[recipient_slot][token_slot],
+        &fund_import_leg.balance_state.enc_balances[recipient_slot][token_slot],
         recipient_delta,
     )
     .map_err(we)?;
-    let mut bundle_enc = fund_import_state.balance_state.enc_balances.clone();
-    bundle_enc[recipient_slot][token_slot] = recipient_after;
-    let mut bundle_pending = fund_import_state.balance_state.pending_adds.clone();
-    bundle_pending[recipient_slot][token_slot] += 1;
+    let mut head_enc = fund_import_leg.balance_state.enc_balances.clone();
+    head_enc[recipient_slot][token_slot] = recipient_after;
+    let mut head_pending = fund_import_leg.balance_state.pending_adds.clone();
+    head_pending[recipient_slot][token_slot] += 1;
     Ok(ChannelState {
-        epoch: fund_import_state.epoch + 1,
+        epoch: prev.epoch + 1,
+        small_block_number: prev.small_block_number + 1,
         balance_state: BalanceState {
-            enc_balances: bundle_enc,
-            settled_tx_chain: fund_import_state.balance_state.settled_tx_chain,
-            settled_tx_accumulator_root: fund_import_state
-                .balance_state
-                .settled_tx_accumulator_root,
-            state_version: fund_import_state.balance_state.state_version + 1,
-            pending_adds: bundle_pending,
-            ..fund_import_state.balance_state.clone()
+            enc_balances: head_enc,
+            settled_tx_chain: fund_import_leg.balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: fund_import_leg.balance_state.settled_tx_accumulator_root,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds: head_pending,
+            ..fund_import_leg.balance_state.clone()
         },
-        unallocated_confirmed_incoming: fund_import_state.unallocated_confirmed_incoming
+        unallocated_confirmed_incoming: fund_import_leg.unallocated_confirmed_incoming
             - u64_to_u256(amount_u64),
-        prev_digest: fund_import_state.digest,
+        prev_digest: prev.digest,
         member_signatures: Vec::new(),
-        ..fund_import_state.clone()
+        ..fund_import_leg.clone()
     }
     .with_computed_digest())
 }
 
-/// L1 deposit import co-signer gate: verifies BOTH steps of the proposed L1 deposit import
-/// transition before a co-signer signs EITHER state. Fail-closed.
+/// L1 deposit import co-signer gate: verifies BOTH legs of the proposed L1 deposit import
+/// transition before a co-signer signs the ONE import head. Fail-closed.
 ///
-/// The two-step obligation (TM-7, Phase 2b review MAJOR 1):
-///   Step 1 (fund import) — verified by `L1DepositImportUpdateWitness::verify`: registry
-///     resolution of the deposit's base `token_index`, fund growth at exactly the resolved
-///     position (others frozen), all leaves bit-identical, chain push, signatures.
-///   Step 2 (bundle apply) — verified by REBUILD-EQUALITY: the gate reconstructs the CANONICAL
-///     bundle state from the verified post-import state via `l1_deposit_bundle_state` (the SAME
-///     code path the proposer's `build_l1_deposit_import` uses, crediting the depositor leaf at
-///     exactly the registry-resolved `(recipient_slot, token_slot)` position) and requires
-///     digest equality with the proposal — the `verify_token_register_transition` pattern. A
-///     proposer-supplied bundle state crediting any other (row, token) position, carrying a
-///     doctored delta/amount, or diverging in ANY other field is rejected. The leg-(b) leaf
-///     binding therefore does NOT rely on the proposer and the co-signers sharing a process.
+/// The two-leg obligation (TM-7, Phase 2b review MAJOR 1):
+///   Leg 1 (fund import) — the gate DERIVES the unsigned fund-import leg itself from `prev`
+///     (`l1_deposit_fund_import_leg`, taking only the proposal's accumulator root) and verifies
+///     it with `L1DepositImportUpdateWitness::verify`: registry resolution of the deposit's base
+///     `token_index`, fund growth at exactly the resolved position (others frozen), all leaves
+///     bit-identical, chain push, structural signatures. No proposer-supplied intermediate
+///     state is accepted, and the leg is never signed (2026-10-15 review: a signed fund-import
+///     head shares the close backing key of the real head and strands the deposit).
+///   Leg 2 (credit head) — verified by REBUILD-EQUALITY: the gate reconstructs the CANONICAL
+///     head from the verified leg via `l1_deposit_import_head` (the SAME code path the
+///     proposer's `build_l1_deposit_import` uses, crediting the depositor leaf at exactly the
+///     registry-resolved `(recipient_slot, token_slot)` position and linking to `prev`) and
+///     requires digest equality with the proposal — the `verify_token_register_transition`
+///     pattern. A proposed head crediting any other (row, token) position, carrying a doctored
+///     delta/amount, chained onto the leg instead of `prev`, or diverging in ANY other field is
+///     rejected. The leg-(b) leaf binding therefore does NOT rely on the proposer and the
+///     co-signers sharing a process.
 ///
 /// `recipient_delta` is the co-signer's OWN derivation of the deposit's delta ciphertext (the
 /// CLI derives it from the shared deterministic seed) — never a wire-trusted copy; the digest
-/// equality binds the proposal to it. The bundle must retain the fund-import accumulator root;
-/// push-faithfulness remains the import builder's persisted-tree obligation, but bundle assignment
-/// cannot overwrite it.
+/// equality binds the proposal to it. The accumulator root is the one field taken from the
+/// proposal (push-faithfulness remains the import builder's persisted-tree obligation, as
+/// before); every other field of both legs is derived here.
 pub fn verify_l1_deposit_import_transition(
     prev: &ChannelState,
     record: &ChannelRecord,
     deposit: &Deposit,
-    fund_import_state: &ChannelState,
-    bundle_apply_state: &ChannelState,
+    import_state: &ChannelState,
     recipient_slot: usize,
     recipient_delta: &RegevCiphertext,
 ) -> WResult<()> {
@@ -5395,9 +5440,20 @@ pub fn verify_l1_deposit_import_transition(
     let amount = deposit.amount.to_u32_vec();
     let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
     let deposit_nullifier = deposit.nullifier();
-    // Step 1 is a PRE-SIGN check. Placeholders exist only in this private validation clone;
-    // the caller's proposal stays unsigned until the durable host gate authorizes signing.
-    let mut import_for_check = fund_import_state.clone();
+    // TM-7 (general registry resolution): resolve on the SIGNED prev registry, which is what the
+    // leg is derived from (immutable across the import per verify_balance_state_common).
+    let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
+    // Leg 1 is a PRE-SIGN check over the leg the gate derives ITSELF. Placeholders exist only in
+    // this private validation clone; the leg is never signed and the caller's proposal stays
+    // unsigned until the durable host gate authorizes signing.
+    let fund_import_leg = l1_deposit_fund_import_leg(
+        prev,
+        deposit_nullifier,
+        token_slot,
+        amount_u64,
+        import_state.balance_state.settled_tx_accumulator_root,
+    );
+    let mut import_for_check = fund_import_leg.clone();
     fill_placeholder_sigs(record, &mut import_for_check);
     let witness = L1DepositImportUpdateWitness {
         channel_record: record.clone(),
@@ -5413,12 +5469,10 @@ pub fn verify_l1_deposit_import_transition(
     witness
         .verify()
         .map_err(|e| WalletError(format!("l1 deposit co-signer gate (fund import): {e:?}")))?;
-    // Step 2 (TM-7 leg b): rebuild-equality against the canonical bundle step. The resolution
-    // runs on the SIGNED prev registry (immutable across the import per
-    // verify_balance_state_common, so prev and post-import registries agree).
-    let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
-    let expected = l1_deposit_bundle_state(
-        fund_import_state,
+    // Leg 2 (TM-7 leg b): rebuild-equality against the canonical import head.
+    let expected = l1_deposit_import_head(
+        prev,
+        &fund_import_leg,
         recipient_slot,
         token_slot,
         recipient_delta,
@@ -5426,11 +5480,12 @@ pub fn verify_l1_deposit_import_transition(
     )?;
     // `signing_digest()` covers every field except `member_signatures` (and is recomputed here,
     // so a doctored stored `digest` cannot mask a divergence).
-    if bundle_apply_state.signing_digest() != expected.digest {
+    if import_state.signing_digest() != expected.digest {
         return bail(
-            "l1 deposit co-signer gate (bundle apply): proposed bundle state is not the \
-             canonical bundle step over the verified import state (TM-7 leg b — wrong credit \
-             position, doctored delta/amount, or field divergence) — refusing to sign",
+            "l1 deposit co-signer gate (import head): proposed head is not the canonical credit \
+             step over the derived fund-import leg linked to the predecessor (TM-7 leg b — wrong \
+             credit position, doctored delta/amount, a head chained onto the unsigned fund leg, \
+             or field divergence) — refusing to sign",
         );
     }
     Ok(())
@@ -8154,19 +8209,18 @@ mod delegate_send_tests {
                 LEVEL,
             )
             .unwrap();
-            assert!(built.fund_import_state.member_signatures.is_empty());
-            assert!(built.bundle_apply_state.member_signatures.is_empty());
+            assert!(built.import_state.member_signatures.is_empty());
+            assert!(built.fund_import_leg.member_signatures.is_empty());
             verify_l1_deposit_import_transition(
                 &snapshot.state,
                 &snapshot.record,
                 &deposit,
-                &built.fund_import_state,
-                &built.bundle_apply_state,
+                &built.import_state,
                 recipient_slot,
                 &delta,
             )
             .expect("unsigned deposit proposal passes the co-signer gate");
-            let mut bundle = built.bundle_apply_state.clone();
+            let mut bundle = built.import_state.clone();
             let s0 = sign_state(&keys[0], 0, &bundle).unwrap();
             add_signature(&mut bundle, s0);
             let s1 = sign_state(&keys[1], 1, &bundle).unwrap();
@@ -10817,10 +10871,10 @@ mod delegate_send_tests {
         let built =
             build_l1_deposit_import(&keys[0], &snapshot, &deposit(T1_INDEX), 1, &delta, LEVEL)
                 .expect("token-55 deposit import");
-        assert!(built.fund_import_state.member_signatures.is_empty());
-        assert!(built.bundle_apply_state.member_signatures.is_empty());
+        assert!(built.import_state.member_signatures.is_empty());
+        assert!(built.fund_import_leg.member_signatures.is_empty());
         let prev = &snapshot.state;
-        let bundle = &built.bundle_apply_state;
+        let bundle = &built.import_state;
         assert_eq!(
             bundle.channel_fund.amounts[1],
             prev.channel_fund.amounts[1] + u64_to_u256(amount)
@@ -10837,35 +10891,33 @@ mod delegate_send_tests {
         assert_eq!(bundle.balance_state.pending_adds[1][1], 1);
         assert_eq!(bundle.balance_state.pending_adds[1][0], 0);
 
-        // Gate FIRST, then both members explicitly sign the unsigned fund-import proposal.
-        // The bundle rebuild-equality ignores signatures by construction.
+        // Gate FIRST, then both members explicitly sign the unsigned import head.
+        // The head rebuild-equality ignores signatures by construction.
         verify_l1_deposit_import_transition(
             prev,
             &snapshot.record,
             &deposit(T1_INDEX),
-            &built.fund_import_state,
-            &built.bundle_apply_state,
+            &built.import_state,
             1,
             &delta,
         )
         .expect("unsigned resolved-token proposal passes the co-signer gate");
-        let mut signed_import = built.fund_import_state.clone();
+        let mut signed_head = built.import_state.clone();
         for slot in 0..snapshot.record.member_count as usize {
-            let sig = sign_state(&keys[slot], slot as u8, &signed_import).unwrap();
-            add_signature(&mut signed_import, sig);
+            let sig = sign_state(&keys[slot], slot as u8, &signed_head).unwrap();
+            add_signature(&mut signed_head, sig);
         }
         verify_l1_deposit_import_transition(
             prev,
             &snapshot.record,
             &deposit(T1_INDEX),
-            &signed_import,
-            &built.bundle_apply_state,
+            &signed_head,
             1,
             &delta,
         )
-        .expect("co-signer gate must accept the resolved-token two-step import");
-        verify_all_signatures(&snapshot.record, &snapshot.members, &signed_import)
-            .expect("fund import is N-of-N signed only after the gate");
+        .expect("co-signer gate must accept the resolved-token import head");
+        verify_all_signatures(&snapshot.record, &snapshot.members, &signed_head)
+            .expect("import head is N-of-N signed only after the gate");
     }
 
     /// TM-7 leg (b) — Phase 2b review MAJOR 1: the co-signer gate REBUILDS the bundle-apply
@@ -10873,6 +10925,140 @@ mod delegate_send_tests {
     /// the registry-resolved (row, token) position: (a) right slot / WRONG token position, (b)
     /// a DIFFERENT slot, (c) a doctored amount (double credit). A distributed co-signer
     /// therefore never signs a proposer-crafted cross-token/cross-slot credit.
+    /// Stranded-funds reproduction (2026-10-15 review): the L1 deposit import used to sign TWO
+    /// N-of-N heads. The first (fund import) grows `channel_fund` + `unallocated_confirmed_incoming`
+    /// and pushes the RAW deposit nullifier; the second (bundle apply) credits the ciphertext
+    /// and leaves `settled_tx_chain` / the fund vector untouched. Both therefore share the
+    /// CloseAssetBacking statement key `(channel_id, settled_tx_chain, token_funds_digest)`, so
+    /// the one attested backing proof closes EITHER head — and a close on the fund-import head
+    /// pays nobody for the deposit: no ciphertext carries it, no IMUI leaf authorizes a
+    /// post-close residual claim, and the late-incoming lane is ReceiveTransfer-only.
+    ///
+    /// The fix removes the intermediate head: one deposit import is ONE signed head whose
+    /// predecessor is the pre-deposit snapshot head. The fund leg survives only as an
+    /// unsigned, deterministic verification step inside the co-signer gate.
+    #[test]
+    fn l1_deposit_import_is_one_signed_head_with_no_closable_fund_import_head() {
+        use crate::common::channel::{CloseIntent, CloseWithdrawal, token_funds_digest};
+        let mut rng = StdRng::seed_from_u64(0x57a4d);
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 26, [40, 0, 0], [0, 0]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let amount = 7_777u64;
+        let deposit = Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 0,
+            amount: U256::from(amount),
+            aux_data: Bytes32::default(),
+        };
+        let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
+        let built = build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &delta, LEVEL)
+            .expect("deposit import builds");
+        let backing_key = |s: &ChannelState| {
+            (
+                s.channel_id,
+                s.balance_state.settled_tx_chain,
+                token_funds_digest(
+                    &s.balance_state.token_registry,
+                    s.balance_state.token_count,
+                    &s.channel_fund.amounts,
+                ),
+            )
+        };
+        let head = built.import_state.clone();
+        let fund_leg = built.fund_import_leg.clone();
+
+        // The unsigned fund leg is NOT distinguishable from a head by the close statement: it
+        // shares the backing key with the real head and `CloseIntent::new` accepts it. That is
+        // exactly why it must never become a signed head.
+        assert_eq!(backing_key(&fund_leg), backing_key(&head), "fund leg and head share the key");
+        assert_eq!(
+            fund_leg.unallocated_confirmed_incoming,
+            snapshot.state.unallocated_confirmed_incoming + U256::from(amount),
+            "the fund leg carries the deposit as an uncovered residue"
+        );
+        let close_tx = CloseWithdrawal {
+            channel_id: fund_leg.channel_id,
+            final_channel_state_digest: fund_leg.digest,
+            final_balance_state_h1: fund_leg.balance_state.h1(),
+            intmax_state_root: fund_leg.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::default(),
+            burn_amount: fund_leg.channel_fund.amounts[0],
+            zkp: vec![],
+        };
+        assert!(
+            CloseIntent::new(&fund_leg, &close_tx).is_ok(),
+            "CloseIntent::new cannot tell the fund leg apart; the guarantee is that it is never signed"
+        );
+
+        // The ONE signed head links straight to the predecessor: no intermediate N-of-N head
+        // exists for anyone to close on.
+        assert_eq!(head.prev_digest, snapshot.state.digest, "head links to the pre-deposit snapshot");
+        assert_eq!(head.epoch, snapshot.state.epoch + 1);
+        assert_eq!(head.small_block_number, snapshot.state.small_block_number + 1);
+        assert_eq!(head.balance_state.state_version, snapshot.state.balance_state.state_version + 1);
+        assert_eq!(
+            head.unallocated_confirmed_incoming, snapshot.state.unallocated_confirmed_incoming,
+            "a deposit never leaves an unallocated residue on a signed head"
+        );
+        assert_ne!(
+            head.balance_state.enc_balances[1][0], snapshot.state.balance_state.enc_balances[1][0],
+            "the head credits the depositor ciphertext"
+        );
+        assert!(head.member_signatures.is_empty() && fund_leg.member_signatures.is_empty());
+
+        // The co-signer gate rebuilds the fund leg itself and accepts only the canonical head.
+        verify_l1_deposit_import_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &deposit,
+            &head,
+            1,
+            &delta,
+        )
+        .expect("canonical single head passes the gate");
+        // A proposal that presents the old two-step shape (a head chained onto the fund leg) is
+        // refused: the gate only ever accepts a head whose predecessor is the snapshot head.
+        let mut legacy_two_step = head.clone();
+        legacy_two_step.prev_digest = fund_leg.digest;
+        legacy_two_step.epoch = fund_leg.epoch + 1;
+        legacy_two_step.balance_state.state_version = fund_leg.balance_state.state_version + 1;
+        let legacy_two_step = legacy_two_step.with_computed_digest();
+        assert!(
+            verify_l1_deposit_import_transition(
+                &snapshot.state,
+                &snapshot.record,
+                &deposit,
+                &legacy_two_step,
+                1,
+                &delta,
+            )
+            .is_err(),
+            "a head chained onto the fund leg (the retired two-step shape) must be refused"
+        );
+        // Nor can the fund leg itself pass as the import head.
+        assert!(
+            verify_l1_deposit_import_transition(
+                &snapshot.state,
+                &snapshot.record,
+                &deposit,
+                &fund_leg,
+                1,
+                &delta,
+            )
+            .is_err(),
+            "the fund leg is not a signable import head"
+        );
+    }
+
     #[test]
     fn l1_deposit_gate_rejects_divergent_bundle_state() {
         let mut rng = StdRng::seed_from_u64(0x2b70b5);
@@ -10897,43 +11083,27 @@ mod delegate_send_tests {
         let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
         let built = build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &delta, LEVEL)
             .expect("token-55 deposit import");
-        assert!(built.fund_import_state.member_signatures.is_empty());
-        assert!(built.bundle_apply_state.member_signatures.is_empty());
-        verify_l1_deposit_import_transition(
-            &snapshot.state,
-            &snapshot.record,
-            &deposit,
-            &built.fund_import_state,
-            &built.bundle_apply_state,
-            1,
-            &delta,
-        )
-        .expect("canonical unsigned deposit proposal passes before signing");
-        let mut signed_import = built.fund_import_state.clone();
-        for slot in 0..snapshot.record.member_count as usize {
-            let sig = sign_state(&keys[slot], slot as u8, &signed_import).unwrap();
-            add_signature(&mut signed_import, sig);
-        }
-        let gate = |bundle: &ChannelState| {
+        assert!(built.import_state.member_signatures.is_empty());
+        assert!(built.fund_import_leg.member_signatures.is_empty());
+        let gate = |head: &ChannelState| {
             verify_l1_deposit_import_transition(
                 &snapshot.state,
                 &snapshot.record,
                 &deposit,
-                &signed_import,
-                bundle,
+                head,
                 1,
                 &delta,
             )
         };
-        // Sanity: the canonical bundle passes.
-        gate(&built.bundle_apply_state).expect("canonical bundle must pass the gate");
+        // Sanity: the canonical head passes.
+        gate(&built.import_state).expect("canonical head must pass the gate");
 
         // (a) Right slot, WRONG token position: credit lands at [1][0] instead of [1][1].
-        let mut wrong_token = built.bundle_apply_state.clone();
+        let mut wrong_token = built.import_state.clone();
         wrong_token.balance_state.enc_balances[1] =
-            built.fund_import_state.balance_state.enc_balances[1].clone();
+            built.fund_import_leg.balance_state.enc_balances[1].clone();
         wrong_token.balance_state.enc_balances[1][0] = add_ciphertexts(
-            &built.fund_import_state.balance_state.enc_balances[1][0],
+            &built.fund_import_leg.balance_state.enc_balances[1][0],
             &delta,
         )
         .unwrap();
@@ -10946,12 +11116,12 @@ mod delegate_send_tests {
         );
 
         // (b) A DIFFERENT slot: credit lands at [0][1] instead of [1][1].
-        let mut wrong_slot = built.bundle_apply_state.clone();
+        let mut wrong_slot = built.import_state.clone();
         wrong_slot.balance_state.enc_balances[1] =
-            built.fund_import_state.balance_state.enc_balances[1].clone();
+            built.fund_import_leg.balance_state.enc_balances[1].clone();
         wrong_slot.balance_state.pending_adds[1] = [0; MAX_CHANNEL_TOKENS];
         wrong_slot.balance_state.enc_balances[0][1] = add_ciphertexts(
-            &built.fund_import_state.balance_state.enc_balances[0][1],
+            &built.fund_import_leg.balance_state.enc_balances[0][1],
             &delta,
         )
         .unwrap();
@@ -10963,9 +11133,9 @@ mod delegate_send_tests {
         );
 
         // (c) Doctored amount: the delta credited TWICE (double credit at the right position).
-        let mut double_credit = built.bundle_apply_state.clone();
+        let mut double_credit = built.import_state.clone();
         double_credit.balance_state.enc_balances[1][1] = add_ciphertexts(
-            &built.bundle_apply_state.balance_state.enc_balances[1][1],
+            &built.import_state.balance_state.enc_balances[1][1],
             &delta,
         )
         .unwrap();
@@ -10975,14 +11145,14 @@ mod delegate_send_tests {
             "a double credit (doctored amount) must be rejected (TM-7 leg b)"
         );
 
-        // (d) The bundle cannot replace the accumulator root committed by the import step.
-        let mut wrong_accumulator = built.bundle_apply_state.clone();
-        wrong_accumulator.balance_state.settled_tx_accumulator_root =
-            Bytes32::from_u32_slice(&[0xacc0; 8]).unwrap();
-        let wrong_accumulator = wrong_accumulator.with_computed_digest();
+        // (d) A head that keeps the deposit as an unallocated residue (the retired fund-import
+        //     head shape with the credit applied on top) is refused.
+        let mut residue = built.import_state.clone();
+        residue.unallocated_confirmed_incoming = built.fund_import_leg.unallocated_confirmed_incoming;
+        let residue = residue.with_computed_digest();
         assert!(
-            gate(&wrong_accumulator).is_err(),
-            "bundle apply must retain the fund-import accumulator root"
+            gate(&residue).is_err(),
+            "an import head must not carry the deposit as an unallocated residue"
         );
     }
 
@@ -11083,11 +11253,11 @@ mod delegate_send_tests {
         let incoming =
             build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &incoming_delta, LEVEL)
                 .expect("incoming deposit transition builds");
-        assert!(incoming.fund_import_state.member_signatures.is_empty());
-        assert!(incoming.bundle_apply_state.member_signatures.is_empty());
+        assert!(incoming.import_state.member_signatures.is_empty());
+        assert!(incoming.fund_import_leg.member_signatures.is_empty());
         let incoming_snapshot = ChannelSnapshot {
             record: record.clone(),
-            state: resign_two_members(incoming.bundle_apply_state, &keys),
+            state: resign_two_members(incoming.import_state, &keys),
             members,
             settled_tx_accumulator: incoming.settled_tx_accumulator,
         };

@@ -170,19 +170,12 @@ async function flushPublishedHead(ch) {
     }
   }
 
-  // L1 deposits have the same two-step receive shape.
+  // An L1 deposit import is ONE signed head (its unsigned fund-import leg is never a head).
   const depositPath = wc(ch, 'l1_import_cosigned.json');
   if (fs.existsSync(depositPath)) {
     const deposit = readJson(depositPath);
-    if (
-      deposit.fundImportState
-      && deposit.bundleApplyState
-      && sameJsonValue(deposit.bundleApplyState.digest, snapshot.state.digest)
-    ) {
-      deferredHeadStates.push(
-        deposit.fundImportState,
-        deposit.bundleApplyState,
-      );
+    if (deposit.importState && sameJsonValue(deposit.importState.digest, snapshot.state.digest)) {
+      deferredHeadStates.push(deposit.importState);
     }
   }
 

@@ -120,7 +120,7 @@ test('completed native import resumes publication without treating consumed capa
   const h = harness(10);
   const operation = await deposits.spendDeposit(10, { amount: '5', recipientSlot: 0 }, h.dependencies);
   cli.writeJson(cli.wc(10, 'l1_import_cosigned.json'), { txHash: operation.txHash,
-    fundImportState: { digest: hash('aa') }, bundleApplyState: { digest: hash('bb') } });
+    importState: { digest: hash('aa') } });
   h.dependencies.preflight = () => { throw new Error('must not charge completed credit capacity twice'); };
   const completed = await deposits.importTrackedDeposit(10, operation, 0, h.dependencies);
   assert.equal(completed.operation.status, 'imported');

@@ -150,17 +150,25 @@ fn ensure_receipt_directory(create: bool) -> bool {
     true
 }
 
-fn result_states(result: &serde_json::Value) -> Result<(ChannelState, ChannelState), String> {
-    let parse = |field: &str| {
-        serde_json::from_value(
-            result
-                .get(field)
-                .cloned()
-                .ok_or_else(|| format!("deposit result is missing {field}"))?,
-        )
-        .map_err(|error| format!("invalid deposit result {field}: {error}"))
-    };
-    Ok((parse("fundImportState")?, parse("bundleApplyState")?))
+/// The ONE signed head of the import. A result that still carries the retired two-head shape
+/// (`fundImportState` + `bundleApplyState`) is refused: the fund-import leg is never a signed
+/// head (2026-10-15 review, stranded L1 deposit).
+fn result_state(result: &serde_json::Value) -> Result<ChannelState, String> {
+    if result.get("fundImportState").is_some() || result.get("bundleApplyState").is_some() {
+        return Err(
+            "deposit result carries the retired two-head import shape (fundImportState/bundleApplyState); \
+             a fund-import head is not a signed head — re-run the import"
+                .into(),
+        );
+    }
+    let field = "importState";
+    serde_json::from_value(
+        result
+            .get(field)
+            .cloned()
+            .ok_or_else(|| format!("deposit result is missing {field}"))?,
+    )
+    .map_err(|error| format!("invalid deposit result {field}: {error}"))
 }
 
 fn validate_receipt(receipt: &Receipt, current: &CliState) -> Result<(), String> {
@@ -204,13 +212,11 @@ fn validate_receipt(receipt: &Receipt, current: &CliState) -> Result<(), String>
         }
     }
     json_required_u64(&receipt.result, "intmaxBlockNumber")?;
-    let (fund, bundle) = result_states(&receipt.result)?;
+    let head = result_state(&receipt.result)?;
     validate_digest_chain(
         receipt.before_digest,
-        fund.prev_digest,
-        fund.digest,
-        bundle.prev_digest,
-        bundle.digest,
+        head.prev_digest,
+        head.digest,
         receipt.after_digest,
     )?;
     current
@@ -218,7 +224,8 @@ fn validate_receipt(receipt: &Receipt, current: &CliState) -> Result<(), String>
         .record
         .validate()
         .map_err(|error| format!("invalid deposit recovery record: {error:?}"))?;
-    for (label, state) in [("fund import", &fund), ("bundle apply", &bundle)] {
+    {
+        let (label, state) = ("import head", &head);
         if state.channel_id != receipt.channel_id
             || state.channel_fund.channel_id != receipt.channel_id
             || state.balance_state.channel_id != receipt.channel_id
@@ -242,23 +249,17 @@ fn validate_receipt(receipt: &Receipt, current: &CliState) -> Result<(), String>
 
 fn validate_digest_chain(
     before: Bytes32,
-    fund_parent: Bytes32,
-    fund: Bytes32,
-    bundle_parent: Bytes32,
-    bundle: Bytes32,
+    head_parent: Bytes32,
+    head: Bytes32,
     after: Bytes32,
 ) -> Result<(), String> {
     if before == Bytes32::default()
-        || fund == Bytes32::default()
-        || bundle == Bytes32::default()
-        || before == fund
-        || before == bundle
-        || fund == bundle
-        || fund_parent != before
-        || bundle_parent != fund
-        || bundle != after
+        || head == Bytes32::default()
+        || before == head
+        || head_parent != before
+        || head != after
     {
-        return Err("deposit recovery breaks the two-step signed digest chain".into());
+        return Err("deposit recovery breaks the signed digest chain".into());
     }
     Ok(())
 }
@@ -287,9 +288,9 @@ fn validate_journal(journal: &Journal, current: &CliState) -> Result<(), String>
     validate_signing_security_state(&journal.after)?;
     verify_snapshot(&journal.after.snapshot, None)
         .map_err(|error| format!("pending deposit snapshot verification: {error}"))?;
-    let (_, bundle) = result_states(&receipt.result)?;
+    let head = result_state(&receipt.result)?;
     if journal.after.snapshot.record.signing_digest() != receipt.record_digest
-        || journal.after.snapshot.state != bundle
+        || journal.after.snapshot.state != head
         || !journal
             .after
             .imported_deposits
@@ -543,14 +544,26 @@ mod tests {
     }
 
     #[test]
-    fn deposit_recovery_requires_exact_two_step_digest_links() {
+    fn deposit_recovery_requires_exact_single_head_digest_links() {
         let before = digest(1);
-        let fund = digest(2);
         let after = digest(3);
-        assert!(validate_digest_chain(before, before, fund, fund, after, after).is_ok());
-        assert!(validate_digest_chain(before, after, fund, fund, after, after).is_err());
-        assert!(validate_digest_chain(before, before, fund, before, after, after).is_err());
-        assert!(validate_digest_chain(before, before, fund, fund, after, fund).is_err());
-        assert!(validate_digest_chain(before, before, fund, fund, before, before).is_err());
+        let other = digest(2);
+        assert!(validate_digest_chain(before, before, after, after).is_ok());
+        assert!(validate_digest_chain(before, other, after, after).is_err());
+        assert!(validate_digest_chain(before, before, after, other).is_err());
+        assert!(validate_digest_chain(before, before, before, before).is_err());
+        assert!(validate_digest_chain(Bytes32::default(), Bytes32::default(), after, after).is_err());
+    }
+
+    /// The retired two-head result shape is refused, not silently rolled forward.
+    #[test]
+    fn deposit_recovery_refuses_the_retired_two_head_result() {
+        let two_head = serde_json::json!({
+            "fundImportState": {}, "bundleApplyState": {}, "txHash": "0x00"
+        });
+        let error = result_state(&two_head).unwrap_err();
+        assert!(error.contains("retired two-head import shape"), "{error}");
+        let missing = serde_json::json!({ "txHash": "0x00" });
+        assert!(result_state(&missing).unwrap_err().contains("missing importState"));
     }
 }

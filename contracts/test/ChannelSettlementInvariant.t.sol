@@ -395,17 +395,19 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
                 "exit from a closed channel is bricked"
             );
         }
-        // C-2 (audit28-08-2026, CRITICAL): `submitPostCloseClaim` is DELIBERATELY disabled — in
-        // every closeable state the incoming delta has already been credited into the receiver's
-        // slot (a close requires `unallocated_confirmed_incoming == 0`) while its tx hash is still
-        // in the settled-tx accumulator, so the path double-credited one entitlement across two
-        // disjoint nullifier domains. The liveness floor this replaces asserted the OPPOSITE — that
-        // the path must succeed — and would now fail by design.
+        // C-2 (audit28-08-2026, CRITICAL; comment corrected 2026-10-15): `submitPostCloseClaim`
+        // once double-credited one entitlement across two disjoint nullifier domains, because the
+        // applied delta's tx hash stayed in the accumulator. It is live again since the IMUI
+        // applied/unapplied accumulator split landed: the version-2 proof opens
+        // `keccak(IMUI || tx_hash)`, and bundle application replaces that leaf with the raw hash,
+        // so an applied delta can no longer be claimed. A close with a nonzero
+        // `unallocated_confirmed_incoming` is allowed when IMUI leaves cover it (close circuit
+        // `channel_close_circuit_proves_nonzero_unallocated_incoming`); the L1 deposit fund-import
+        // leg, the one transition that left an UNCOVERED residue, is no longer a signed head.
         //
-        // This assertion PINS THE DISABLE: it fails the moment the path starts succeeding again,
-        // so re-enabling `submitPostCloseClaim` without first landing an unapplied-incoming
-        // commitment in H1 (or an applied/unapplied accumulator split) trips the invariant suite
-        // rather than silently restoring the double-claim.
+        // This handler never builds an IMUI-backed entitlement (the mock close states carry no
+        // unapplied leaf), so the lane must stay at zero successes HERE; a success would mean the
+        // handler minted a residual claim without an unapplied leaf.
         assertEq(
             handler.succeededPostClose(),
             0,
