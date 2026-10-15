@@ -737,3 +737,98 @@ test('new close waits for exact-head readiness, then pins that prepared head bef
   await exit.attemptCloseRequest(ctx);
   assert.deepEqual(events, ['readiness', 'readiness', 'freeze']);
 });
+
+// ── M7 close-head fallback (2026-10-15) ──────────────────────────────────────────────────────
+// An inter-channel debit head is N-of-N signed before its block posts; while unposted it cannot be
+// backed on L1 and readiness for it fails. The delegate must close the newest predecessor whose
+// backing is finalized and whose kit is retained — and never fabricate a kit.
+const { buildParticipantCloseProof } = require('../delegate/participant-close');
+
+function fallbackFixture({ retainPredecessor = true, predecessorVerified = true, predecessorReady = true, differentParticipants = false } = {}) {
+  const H = `0x${'a2'.repeat(32)}`, H1 = `0x${'a1'.repeat(32)}`, H0 = `0x${'a0'.repeat(32)}`;
+  const recipient = '0x5555555555555555555555555555555555555555';
+  const pkGs = [`0x${'c1'.repeat(32)}`, `0x${'c2'.repeat(32)}`, `0x${'c3'.repeat(32)}`, `0x${'c4'.repeat(32)}`];
+  const recipients = ['0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222',
+    '0x3333333333333333333333333333333333333333', recipient];
+  const record = (members) => ({ memberCount: 2, delegateCount: 2, memberPkGs: members });
+  const snapshotOf = (digest, prevDigest, stateVersion, members = pkGs) => ({
+    record: record(members),
+    state: { digest, prevDigest, epoch: 4, balanceState: { memberCount: 2, delegateCount: 2, recipients, stateVersion } },
+  });
+  const snapshots = { [H]: snapshotOf(H, H1, 9), [H1]: snapshotOf(H1, H0, 8, differentParticipants ? [...pkGs.slice(0, 3), `0x${'c9'.repeat(32)}`] : pkGs) };
+  if (!retainPredecessor) delete snapshots[H1];
+  const proof = buildParticipantCloseProof(snapshots[H], 3, recipient);
+  const store = fakeStore({ mode: 'exiting', acceptedHead: { digest: H, epoch: 4, stateVersion: 9 }, participantCloseProof: proof });
+  const readinessCalls = [], advanced = [], frozenWith = [];
+  const snapshotVault = { load: (digest) => snapshots[String(digest).toLowerCase()] || null };
+  const backingVault = { loadVerified: (digest) => (predecessorVerified && digest === H1 ? { digest } : null) };
+  const ctx = context(store, {
+    recipient, snapshotVault, backingVault,
+    publicClosePublisher: {
+      async checkReadiness({ acceptedHead }) {
+        readinessCalls.push(acceptedHead.digest);
+        if (acceptedHead.digest === H) throw new Error('backing post is not finalized yet');
+        if (acceptedHead.digest === H1 && predecessorReady) {
+          return { ready: true, signedHeadDigest: H1, chainId: 31337, channelId: 7, manager: MANAGER, currentCloseFreezeNonce: 1 };
+        }
+        throw new Error('backing anchor is below the channel\'s last posted block');
+      },
+      async advance(input) { advanced.push(input.acceptedHead.digest); return { phase: 'awaitingChallengeDeadline' }; },
+    },
+    participantCloser: {
+      async requestClose(_manager, closeProof, onBroadcast) {
+        frozenWith.push({ stateDigest: closeProof.stateDigest, pinned: store.get('publicClosePublication') });
+        await onBroadcast(`0x${'0a'.repeat(32)}`);
+        return { txHash: `0x${'0a'.repeat(32)}` };
+      },
+    },
+  });
+  return { H, H1, store, ctx, proof, readinessCalls, advanced, frozenWith };
+}
+
+test('an unposted debit head falls back to the newest finalized predecessor, pins it, and publishes it', async () => {
+  const f = fallbackFixture();
+  await exit.attemptCloseRequest(f.ctx);
+  assert.deepEqual(f.readinessCalls, [f.H, f.H1], 'latest head first, then its predecessor');
+  assert.equal(f.frozenWith.length, 1, 'the freeze was requested');
+  assert.equal(f.frozenWith[0].stateDigest, f.H1, 'the closer sees the predecessor head');
+  assert.equal(f.frozenWith[0].pinned.acceptedHeadDigest, f.H1, 'publication is pinned to the predecessor before the freeze');
+  assert.equal(f.frozenWith[0].pinned.fallbackFromHeadDigest, f.H);
+  const warning = f.ctx.logs.find((entry) => entry.event === 'CLOSE_HEAD_FALLBACK_TO_FINALIZED_PREDECESSOR');
+  assert.ok(warning, 'the fallback is said in the output');
+  assert.equal(warning.latestHeadDigest, f.H);
+  assert.equal(warning.closeHeadDigest, f.H1);
+  assert.equal(warning.depth, 1);
+  assert.match(warning.latestHeadNotReady, /not finalized/);
+  assert.equal(f.store.get('acceptedHead').digest, f.H, 'the accepted head itself is untouched');
+  assert.equal(f.store.get('participantCloseProof').stateDigest, f.H, 'the stored latest-head proof is untouched');
+
+  // Publication reuses the pinned predecessor, not the (unbackable) accepted head.
+  f.store.set('closeLifecycle', { schemaVersion: 1, phase: exit.CLOSE_PHASES.REQUESTED });
+  await exit.onRecoveryTick({ source: 'timer', kind: 'recovery' }, f.ctx);
+  assert.deepEqual(f.advanced, [f.H1]);
+});
+
+test('a predecessor without a retained kit is never fabricated: the close waits', async () => {
+  for (const options of [{ retainPredecessor: false }, { predecessorVerified: false }]) {
+    const f = fallbackFixture(options);
+    await exit.attemptCloseRequest(f.ctx);
+    assert.deepEqual(f.readinessCalls, [f.H], 'only the latest head is checked on L1');
+    assert.deepEqual(f.frozenWith, [], 'no freeze');
+    assert.equal(f.store.get('publicClosePublication'), undefined);
+    assert.equal(f.store.get('closeLifecycle').phase, exit.CLOSE_PHASES.OPEN);
+  }
+});
+
+test('a predecessor signed under a different participant set, or itself not ready, is skipped', async () => {
+  const differing = fallbackFixture({ differentParticipants: true });
+  await exit.attemptCloseRequest(differing.ctx);
+  assert.deepEqual(differing.readinessCalls, [differing.H], 'readiness is not even asked for an incompatible proof');
+  assert.deepEqual(differing.frozenWith, []);
+
+  const notReady = fallbackFixture({ predecessorReady: false });
+  await exit.attemptCloseRequest(notReady.ctx);
+  assert.deepEqual(notReady.readinessCalls, [notReady.H, notReady.H1]);
+  assert.deepEqual(notReady.frozenWith, []);
+  assert.equal(notReady.store.get('closeLifecycle').phase, exit.CLOSE_PHASES.OPEN);
+});

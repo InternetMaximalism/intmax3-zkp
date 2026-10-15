@@ -70,6 +70,69 @@ function publish(ch, { prove = true } = {}) {
   return run;
 }
 
+// The rollup's one close materializer, read from any sibling channel's settlement record on the
+// same rollup (the materializer is shared by every manager of a rollup). Null when no channel of
+// this relay has a settlement stack yet: then no channel can be frozen, and there is nothing to check.
+function materializerOf(ch) {
+  const rollup = cli.rollupOf(ch).toLowerCase();
+  for (const other of cli.CHANNELS || []) {
+    const file = cli.wc(other, 'settlement.json');
+    if (!fs.existsSync(file)) continue;
+    const settlement = cli.readJson(file);
+    if (String(settlement.rollup || '').toLowerCase() !== rollup) continue;
+    const materializer = settlement.close_funding_materializer || settlement.closeFundingMaterializer;
+    if (/^0x[0-9a-f]{40}$/i.test(String(materializer))) return String(materializer);
+  }
+  return null;
+}
+
+const ZERO_ADDRESS = /^0x0{40}$/i, ZERO_WORD = /^0x0{64}$/i;
+const view = (address, sig, arg) => cli.sh('cast', ['call', address, sig, String(arg), '--rpc-url', cli.RPC]).trim().split(/\s+/)[0];
+
+// M7 liveness gap (2): `IntmaxRollup._postBlock` calls the materializer's `recordPost` for every
+// sub-block and bubbles its revert, so a candidate whose span still carries a sub-block of a
+// channel the Manager has frozen (`ChannelExitAlreadyFrozen`) or materialized
+// (`ChannelAlreadyExited`) can never post — and the append-only producer journal cannot drop that
+// block (tests/block_producer_service.rs). Returns every such channel with the span blocks it
+// owns, so the publish step refuses with an operator-readable error instead of reverting on L1
+// and retrying forever.
+function frozenChannelsInCandidate(ch, posting) {
+  const materializer = materializerOf(ch);
+  if (!materializer) return [];
+  const blocksByChannel = new Map();
+  const first = Number(posting.receipt.initialBlockNumber || 0) + 1;
+  posting.subBlocks.forEach((sub, index) => {
+    const id = Number(sub.channelId);
+    if (!blocksByChannel.has(id)) blocksByChannel.set(id, []);
+    blocksByChannel.get(id).push(first + index);
+  });
+  const stuck = [];
+  for (const [channelId, blocks] of blocksByChannel) {
+    if (ZERO_ADDRESS.test(view(materializer, 'managerOfChannel(uint32)(address)', channelId))) continue;
+    const exited = view(materializer, 'materializedChannelExit(uint32)(bytes32)', channelId);
+    const frozen = view(materializer, 'frozenGeneration(uint32)(uint64)', channelId);
+    if (!ZERO_WORD.test(exited)) stuck.push({ channelId, blocks, state: 'exited', revert: 'ChannelAlreadyExited', materializedChannelExit: exited });
+    else if (frozen !== '0') stuck.push({ channelId, blocks, state: 'frozen', revert: 'ChannelExitAlreadyFrozen', frozenGeneration: frozen });
+  }
+  return stuck;
+}
+
+function refuseFrozenChannels(ch, posting) {
+  const stuck = frozenChannelsInCandidate(ch, posting);
+  if (stuck.length === 0) return;
+  const detail = stuck.map(s => `channel ${s.channelId} is ${s.state} on L1 (${s.revert}; blocks ${s.blocks.join(',')})`).join('; ');
+  const recoverable = stuck.every(s => s.state === 'frozen');
+  const error = new Error(
+    `validity candidate ${posting.receipt.candidateId} can never post: ${detail}. IntmaxRollup reverts ` +
+    'the whole batch on the first such sub-block, and the producer journal cannot drop a committed block. ' +
+    (recoverable
+      ? 'Operator action: cancel the pending close (cancelClose unfreezes the channel) and this exact candidate posts as is.'
+      : 'The channel has exited: this span is permanently unpostable. The producer is halted at this candidate; see doc/architecture-audit/detail2.md §K.1 (M7, 2026-10-15) for the owner decision.'));
+  error.code = 'VALIDITY_CANDIDATE_CONTAINS_FROZEN_CHANNEL_BLOCK';
+  error.frozenChannels = stuck;
+  throw error;
+}
+
 async function publishCandidate(ch, prove) {
     await producer.enableLocalValidity();
     const state = await producer.validityStatus();
@@ -78,6 +141,7 @@ async function publishCandidate(ch, prove) {
     if (!state.candidate) await producer.proveValidity(producer.stableRequestId('wallet-validity', {generation: head.generation, root: head.extendedStateCommitment}));
     const posting = await producer.validityPostingArtifact();
     if (!posting || !/^0x[0-9a-f]{64}$/i.test(posting.receipt.candidateId)) throw new Error('validity candidate missing');
+    refuseFrozenChannels(ch, posting);
     // MLE conversion is randomized. Once a blob transaction has been signed, reuse the exact
     // immutable proof bytes pinned by the publisher, including after a daemon restart.
     const manifestPath = path.join(proofDaDir(), 'wallet-validity-' + posting.receipt.candidateId, 'candidate.json');
@@ -104,4 +168,4 @@ async function publishCandidate(ch, prove) {
     await acknowledge(receipt.candidateId, receipt.transactionHash);
 }
 
-module.exports = { deploymentConfig, configure, publish };
+module.exports = { deploymentConfig, configure, publish, frozenChannelsInCandidate };

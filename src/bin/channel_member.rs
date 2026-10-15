@@ -5036,6 +5036,410 @@ fn durable_pending_close_guard(rpc: &str, manager: &str) -> (String, u64) {
 ///   channel_member close <manager_addr> [rpc_url]
 /// env: CLOSE_SV (settlement verifier). Close nonce/snapshot/burn metadata is canonical and has no
 /// caller input: nonce = signed close_freeze_nonce + 1, snapshot = 0, burn hash = 0.
+// ── M7 close-head selection (2026-10-15) ─────────────────────────────────────────────────────
+//
+// An inter-channel debit head H is N-of-N signed before its small block is posted on L1. If that
+// block never posts (the producer stalls, or channel A freezes with the block unposted) H can
+// never be closed: the Manager requires the close's `channel_fund_intmax_state_root` to be a
+// finalized rollup root. Every close tool used to prove and submit the LATEST local head only, so
+// such a channel retried forever. The selector below keeps the latest head whenever its backing
+// root is finalized, and otherwise walks `prev_digest` back through the content-addressed signer
+// exit-kit archive to the newest predecessor whose backing root IS finalized and whose kit is
+// retained. It never fabricates a kit: a predecessor without an archived envelope ends the walk.
+// The anti-equivocation ledger is untouched — closing at H-1 signs nothing new.
+
+/// One link of the signed-head chain as the selector sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CloseHeadLink {
+    digest: Bytes32,
+    prev_digest: Bytes32,
+    /// `channel_fund.intmax_state_root`: the root the Manager requires to be finalized.
+    backing_root: Bytes32,
+    /// Nonzero for an inter-channel debit (the own small block's tx tree root).
+    h2_tag: Bytes32,
+}
+
+impl CloseHeadLink {
+    fn of(state: &ChannelState) -> Self {
+        Self {
+            digest: state.digest,
+            prev_digest: state.prev_digest,
+            backing_root: state.channel_fund.intmax_state_root,
+            h2_tag: state.h2_tag,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CloseHeadChoice {
+    /// The latest head's backing root is finalized: close it, as before.
+    Latest,
+    /// The latest head cannot be backed; close this archived predecessor instead.
+    Fallback {
+        head: Bytes32,
+        depth: usize,
+        latest_kind: &'static str,
+    },
+    /// Neither the latest head nor any archived predecessor can be backed.
+    Unbackable {
+        latest_kind: &'static str,
+        /// The predecessor whose kit is NOT retained (the walk stops there), if that is why.
+        missing_archive_for: Option<Bytes32>,
+        examined: usize,
+    },
+}
+
+const CLOSE_HEAD_FALLBACK_MAX_DEPTH: usize = 64;
+const CLOSE_HEAD_FALLBACK_ENV: &str = "CLOSE_HEAD_FALLBACK";
+
+fn close_head_kind(link: &CloseHeadLink) -> &'static str {
+    if link.h2_tag != Bytes32::default() {
+        "an inter-channel debit (H2 != 0) whose small block is not posted/finalized"
+    } else {
+        "an in-channel or credit-only head (H2 = 0) whose backing block is not posted/finalized"
+    }
+}
+
+/// Pure selection: `archived` resolves a digest to its archived link (None = kit not retained),
+/// `finalized` answers `isFinalizedStateRoot` for a backing root.
+fn choose_close_head(
+    latest: &CloseHeadLink,
+    archived: impl Fn(&Bytes32) -> Option<CloseHeadLink>,
+    finalized: impl Fn(&Bytes32) -> bool,
+) -> CloseHeadChoice {
+    if finalized(&latest.backing_root) {
+        return CloseHeadChoice::Latest;
+    }
+    let latest_kind = close_head_kind(latest);
+    let mut cursor = latest.prev_digest;
+    let mut depth = 0usize;
+    while depth < CLOSE_HEAD_FALLBACK_MAX_DEPTH {
+        if cursor == Bytes32::default() {
+            break;
+        }
+        let Some(link) = archived(&cursor) else {
+            return CloseHeadChoice::Unbackable {
+                latest_kind,
+                missing_archive_for: Some(cursor),
+                examined: depth,
+            };
+        };
+        depth += 1;
+        if finalized(&link.backing_root) {
+            return CloseHeadChoice::Fallback {
+                head: cursor,
+                depth,
+                latest_kind,
+            };
+        }
+        cursor = link.prev_digest;
+    }
+    CloseHeadChoice::Unbackable {
+        latest_kind,
+        missing_archive_for: None,
+        examined: depth,
+    }
+}
+
+fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
+    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    cast(&[
+        "call",
+        rollup,
+        "isFinalizedStateRoot(bytes32)",
+        &root.to_hex(),
+        "--rpc-url",
+        rpc,
+    ])
+    .trim()
+        == TRUE_WORD
+}
+
+/// Every N-of-N-headed envelope in the content-addressed signer exit-kit archive for this
+/// channel, keyed by its signed head digest. Pre-sign (proposed) envelopes are included here and
+/// rejected later by the cryptographic verification of the chosen one, which demands the N-of-N.
+fn archived_signer_exit_kit_envelopes_at(
+    cli: &CliState,
+    directory: &Path,
+) -> Result<
+    std::collections::HashMap<Bytes32, (PathBuf, Vec<u8>, ChannelState, ChannelRecord)>,
+    String,
+> {
+    let archive = directory.join(SIGNER_EXIT_KIT_ARCHIVE_DIR);
+    let mut envelopes = std::collections::HashMap::new();
+    let entries = match fs::read_dir(&archive) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(envelopes),
+        Err(error) => {
+            return Err(format!(
+                "read signer exit-kit archive {}: {error}",
+                archive.display()
+            ));
+        }
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("read signer exit-kit archive entry: {error}"))?
+            .path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = read_bounded_regular_file(
+            &path,
+            MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+            "archived signer exit-kit envelope",
+        ) else {
+            continue;
+        };
+        let Ok(envelope) = parse_public_close_backing_envelope(&bytes) else {
+            continue;
+        };
+        if envelope.backing.signed_head.channel_id != cli.snapshot.record.channel_id
+            || envelope.backing.signed_head_exit_kit.is_none()
+        {
+            continue;
+        }
+        let head = envelope.backing.signed_head;
+        envelopes.entry(head.digest).or_insert((
+            path,
+            bytes,
+            head,
+            envelope.backing.channel_record,
+        ));
+    }
+    Ok(envelopes)
+}
+
+/// The `(record, state, balance proof bytes)` a close must prove. `latest_balance_proof` is the
+/// head attestation (`channel_attestation.bin`); a fallback head takes its proof from its
+/// archived, re-verified envelope instead.
+fn resolve_close_head(
+    cli: &CliState,
+    rpc: &str,
+    rollup: &str,
+    latest_balance_proof: Vec<u8>,
+) -> (ChannelRecord, ChannelState, Vec<u8>) {
+    let latest_state = cli.snapshot.state.clone();
+    let latest_record = cli.snapshot.record.clone();
+    if std::env::var(CLOSE_HEAD_FALLBACK_ENV).is_ok_and(|value| value.trim() == "off") {
+        eprintln!(
+            "[close] {CLOSE_HEAD_FALLBACK_ENV}=off: closing the latest local head {} without \
+             checking that its backing root is finalized on L1",
+            latest_state.digest
+        );
+        return (latest_record, latest_state, latest_balance_proof);
+    }
+    let archive = archived_signer_exit_kit_envelopes_at(cli, Path::new("."))
+        .unwrap_or_else(|error| die(format!("[close] {error}")));
+    let latest = CloseHeadLink::of(&latest_state);
+    let choice = choose_close_head(
+        &latest,
+        |digest| {
+            archive
+                .get(digest)
+                .map(|(_, _, state, _)| CloseHeadLink::of(state))
+        },
+        |root| read_finalized_state_root(rpc, rollup, root),
+    );
+    match choice {
+        CloseHeadChoice::Latest => (latest_record, latest_state, latest_balance_proof),
+        CloseHeadChoice::Fallback {
+            head,
+            depth,
+            latest_kind,
+        } => {
+            let (path, bytes, state, record) = archive
+                .get(&head)
+                .cloned()
+                .unwrap_or_else(|| die("[close] selected fallback head vanished from the archive"));
+            // Cryptographically re-verify the archived envelope (N-of-N, pinned Balance VD,
+            // Balance and backing proofs) before a single byte of it enters the close witness.
+            verified_signer_exit_kit_receipt_at(cli, &bytes, false, Path::new("."))
+                .unwrap_or_else(|error| {
+                    die(format!(
+                        "[close] archived exit kit {} for fallback head {head} failed verification: {error}",
+                        path.display()
+                    ))
+                });
+            if record != latest_record {
+                die(format!(
+                    "[close] fallback head {head} was signed under a different channel record \
+                     than the current one (participants changed since); refusing to close it \
+                     automatically"
+                ));
+            }
+            if state.balance_state.settled_tx_chain == latest_state.balance_state.settled_tx_chain
+                && state.channel_fund == latest_state.channel_fund
+            {
+                die(
+                    "[close] fallback head shares the latest head's asset statement; nothing to fall back to",
+                );
+            }
+            eprintln!(
+                "[close] CLOSE HEAD FALLBACK: the latest signed head {} (epoch {}, state_version {}) is {latest_kind}; \
+                 its backing root {} is not finalized on rollup {rollup}, so the Manager would refuse it. \
+                 Closing the newest backable predecessor {head} (epoch {}, state_version {}, {depth} head(s) back) \
+                 from its retained exit kit {} instead. Funds moved by the unbackable head(s) stay with \
+                 the channel; the counterparty's credit cannot be backed either.",
+                latest_state.digest,
+                latest_state.epoch,
+                latest_state.balance_state.state_version,
+                latest_state.channel_fund.intmax_state_root,
+                state.epoch,
+                state.balance_state.state_version,
+                path.display()
+            );
+            let envelope = parse_public_close_backing_envelope(&bytes)
+                .unwrap_or_else(|error| die(format!("[close] reparse archived envelope: {error}")));
+            (
+                record,
+                state,
+                envelope.backing.balance_attestation.balance_proof,
+            )
+        }
+        CloseHeadChoice::Unbackable {
+            latest_kind,
+            missing_archive_for,
+            examined,
+        } => {
+            let why = match missing_archive_for {
+                Some(digest) => format!(
+                    "predecessor {digest} has no retained exit kit in {SIGNER_EXIT_KIT_ARCHIVE_DIR}/ \
+                     (a kit is never fabricated)"
+                ),
+                None => format!(
+                    "{examined} archived predecessor(s) examined, none has a finalized backing root"
+                ),
+            };
+            die(format!(
+                "[close] the latest signed head {} is {latest_kind}; its backing root {} is not finalized \
+                 on rollup {rollup}, and no predecessor can be closed instead: {why}. Wait for the \
+                 block to post and finalize, or set {CLOSE_HEAD_FALLBACK_ENV}=off to submit the latest \
+                 head anyway (the Manager will refuse it until the root finalizes).",
+                latest_state.digest, latest_state.channel_fund.intmax_state_root
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod close_head_fallback_tests {
+    use super::*;
+
+    fn digest(byte: u8) -> Bytes32 {
+        Bytes32::from_hex(&format!("0x{}", format!("{byte:02x}").repeat(32))).unwrap()
+    }
+
+    fn link(digest_byte: u8, prev_byte: u8, root_byte: u8, debit: bool) -> CloseHeadLink {
+        CloseHeadLink {
+            digest: digest(digest_byte),
+            prev_digest: if prev_byte == 0 {
+                Bytes32::default()
+            } else {
+                digest(prev_byte)
+            },
+            backing_root: digest(root_byte),
+            h2_tag: if debit {
+                digest(0xd0 + digest_byte)
+            } else {
+                Bytes32::default()
+            },
+        }
+    }
+
+    fn archive(links: &[CloseHeadLink]) -> impl Fn(&Bytes32) -> Option<CloseHeadLink> + '_ {
+        move |digest| links.iter().find(|link| link.digest == *digest).cloned()
+    }
+
+    fn finalized(roots: &[u8]) -> impl Fn(&Bytes32) -> bool + '_ {
+        move |root| roots.iter().any(|byte| digest(*byte) == *root)
+    }
+
+    #[test]
+    fn a_finalized_latest_head_is_closed_as_before() {
+        // The archive is irrelevant when the latest head's root is finalized (H2 = 0 reuses the
+        // predecessor's root, so an in-channel send after a settled debit is still "latest").
+        let latest = link(3, 2, 0xa2, false);
+        let choice =
+            choose_close_head(&latest, |_| panic!("archive untouched"), finalized(&[0xa2]));
+        assert_eq!(choice, CloseHeadChoice::Latest);
+    }
+
+    #[test]
+    fn an_unposted_debit_head_falls_back_to_its_finalized_predecessor() {
+        // H (debit, root a3 unfinalized) -> H-1 (root a2 finalized, kit retained).
+        let latest = link(3, 2, 0xa3, true);
+        let archived = [link(2, 1, 0xa2, true), link(1, 0, 0xa1, false)];
+        let choice = choose_close_head(&latest, archive(&archived), finalized(&[0xa1, 0xa2]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Fallback {
+                head: digest(2),
+                depth: 1,
+                latest_kind: "an inter-channel debit (H2 != 0) whose small block is not posted/finalized",
+            }
+        );
+    }
+
+    #[test]
+    fn the_walk_skips_unbackable_predecessors_and_names_a_credit_only_latest_head() {
+        // H (credit-only, H2 = 0) -> H-1 (debit, unposted) -> H-2 (finalized).
+        let latest = link(4, 3, 0xa3, false);
+        let archived = [link(3, 2, 0xa3, true), link(2, 1, 0xa2, true)];
+        let choice = choose_close_head(&latest, archive(&archived), finalized(&[0xa2]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Fallback {
+                head: digest(2),
+                depth: 2,
+                latest_kind: "an in-channel or credit-only head (H2 = 0) whose backing block is not posted/finalized",
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_entry_ends_the_walk_without_fabricating_a_kit() {
+        let latest = link(3, 2, 0xa3, true);
+        // H-1's root is finalized on L1, but its kit was never archived here: not closable.
+        let choice = choose_close_head(&latest, archive(&[]), finalized(&[0xa2]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Unbackable {
+                latest_kind: "an inter-channel debit (H2 != 0) whose small block is not posted/finalized",
+                missing_archive_for: Some(digest(2)),
+                examined: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reaching_genesis_or_the_depth_bound_is_unbackable() {
+        let latest = link(2, 1, 0xa2, true);
+        let archived = [link(1, 0, 0xa1, false)];
+        let choice = choose_close_head(&latest, archive(&archived), finalized(&[]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Unbackable {
+                latest_kind: "an inter-channel debit (H2 != 0) whose small block is not posted/finalized",
+                missing_archive_for: None,
+                examined: 1,
+            }
+        );
+
+        // A pathological chain longer than the bound stops at the bound, not in a loop.
+        let cyclic = link(5, 5, 0xa5, true);
+        let choice = choose_close_head(&cyclic, |_| Some(link(5, 5, 0xa5, true)), finalized(&[]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Unbackable {
+                latest_kind: "an inter-channel debit (H2 != 0) whose small block is not posted/finalized",
+                missing_archive_for: None,
+                examined: CLOSE_HEAD_FALLBACK_MAX_DEPTH,
+            }
+        );
+    }
+}
+
 fn cmd_close(args: &[String]) {
     let manager = args
         .get(1)
@@ -5099,9 +5503,6 @@ fn cmd_close(args: &[String]) {
     // which IS the digest the close circuit binds. Re-deriving keys here to re-mint equivalent
     // signatures is what forced one process to hold every member's secret key; it is gone.
     let st = load_state();
-    let state = st.snapshot.state.clone();
-    let record = st.snapshot.record.clone();
-    let member_count = state.balance_state.member_count as usize;
     let (balance_vd, att, backing) = load_backing();
     if strip0x(&backing.rollup) != strip0x(&settlement_binding.rollup) {
         die(format!(
@@ -5109,11 +5510,14 @@ fn cmd_close(args: &[String]) {
             backing.rollup, settlement_binding.rollup
         ));
     }
-    let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
-        att.balance_proof.clone(),
-        &balance_vd.common,
-    )
-    .unwrap_or_else(|e| die(format!("deserialize balance proof: {e}")));
+    // M7: close the latest head only when its backing root is finalized on L1; otherwise the
+    // newest archived predecessor that is (see `resolve_close_head`). Never the latest head blind.
+    let (record, state, balance_proof_bytes) =
+        resolve_close_head(&st, &rpc, &backing.rollup, att.balance_proof.clone());
+    let member_count = state.balance_state.member_count as usize;
+    let balance_proof =
+        ProofWithPublicInputs::<BF, BC, BD>::from_bytes(balance_proof_bytes, &balance_vd.common)
+            .unwrap_or_else(|e| die(format!("deserialize balance proof: {e}")));
 
     eprintln!(
         "[close] building close witness (member_count={member_count}) + proving close circuit + MLE (HEAVY)…"

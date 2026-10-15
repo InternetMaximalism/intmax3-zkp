@@ -79,6 +79,29 @@ replacement implementation requirement. Do not re-enable the historical IMMS pat
       claim and cancel challenge must all use production APIs (no fixtures/test-utils), with balances
       and nullifiers reconciled against Sepolia after each step.
 
+## M7 — signed-but-never-posted inter-channel debit (2026-10-15)
+
+Review of `claude/bold-hertz-0f2708` (HEAD 5382bebd): fund safety holds; two liveness gaps closed
+on the branch cut from it. Full note: detail2 §K.1 resolution note (2026-10-15).
+
+- [x] Reproduce gap (2) on-chain: `contracts/test/FrozenChannelBatchPost.t.sol` (a frozen channel's
+      sub-block reverts the whole `[A, B]` batch; `[B]` alone posts; `cancelClose` restores posting;
+      a materialized exit refuses the sub-block forever).
+- [x] Show the producer journal cannot exclude the sub-block:
+      `tests/block_producer_service.rs::journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate_span`.
+- [x] Producer side (refusal option, not rebuild): `api/lib/wallet-l1.js` reads the materializer's
+      `managerOfChannel`/`frozenGeneration`/`materializedChannelExit` for every channel in the
+      validity candidate and throws `VALIDITY_CANDIDATE_CONTAINS_FROZEN_CHANNEL_BLOCK` with the
+      operator action, before any L1 transaction (`node/test/wallet-l1-frozen-channel.test.js`).
+- [x] Close tooling fallback to the newest predecessor whose backing root is finalized and whose kit
+      is retained, never fabricating a kit, said in the output: `channel_member close`
+      (`resolve_close_head`; `CLOSE_HEAD_FALLBACK=off` opts out) and the delegate
+      (`selectReadyCloseHead`, pinned before the freeze). Tests: `close_head_fallback_tests`,
+      `delegate-close-lifecycle.test.js` (M7 cases). Anti-equivocation ledger untouched.
+- [ ] **Owner decision:** recovery of a *materialized* exit with an unposted sub-block (journal
+      rewrite vs. a freeze rule that requires the signed head's block to be posted), opt-in vs.
+      opt-out for the CLI fallback, and fallback across a participant-set change. See detail2 §K.1.
+
 ---
 
 # Phase C1 — real verifyCancelClose (cancel-close circuit + on-chain MLE/WHIR)

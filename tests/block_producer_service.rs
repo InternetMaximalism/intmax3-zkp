@@ -1293,3 +1293,105 @@ fn member_set_update_is_disabled_across_all_production_paths() {
         Ok(_) => panic!("legacy member-set update journal must fail closed at startup"),
     }
 }
+
+/// M7 liveness gap (2), producer side. Channel A's N-of-N debit head H is journaled as a block
+/// BEFORE its sub-block reaches L1. If A then freezes or exits on L1 (requestClose →
+/// `freezeFromManager`, or a materialized close), `IntmaxRollup._postBlock` refuses every batch
+/// that still carries A's sub-block (`contracts/test/FrozenChannelBatchPost.t.sol`). This test
+/// shows the journal offers no way around that: the candidate span is the contiguous block range
+/// from the finalized anchor to the head, A's block is part of it, no command removes or
+/// replaces a committed block, the producer refuses a sibling successor at A's predecessor, and a
+/// restart replays A's block in place. Dropping A's block would also orphan the destination
+/// channel's credit, which is why the chosen remedy is a loud operator refusal in the L1 publish
+/// step (`api/lib/wallet-l1.js`) rather than a journal rewrite.
+#[test]
+fn journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate_span() {
+    let directory = TestDirectory::new("frozen-span");
+    let journal = directory.journal();
+    let (keys_a, snapshot_a) = signed_snapshot(31);
+    let (keys_b, snapshot_b) = signed_snapshot(32);
+    let (a_head, a_debit, a_descriptor) =
+        next_descriptor(&keys_a, &snapshot_a, &snapshot_a.state, 0, 3);
+    let (b_head, b_debit, b_descriptor) =
+        next_descriptor(&keys_b, &snapshot_b, &snapshot_b.state, 0, 4);
+
+    let a_block;
+    let b_block;
+    let head_block;
+    {
+        let mut service = BlockProducerService::open(&journal, &[2]).expect("service");
+        service
+            .register("register-31".to_string(), snapshot_a.clone())
+            .expect("register A");
+        service
+            .register("register-32".to_string(), snapshot_b.clone())
+            .expect("register B");
+        a_block = service
+            .post_inter_channel("post-31-0".to_string(), a_head.clone(), a_debit, a_descriptor)
+            .expect("A's debit head H is journaled before its sub-block is posted")
+            .block_number;
+        b_block = service
+            .post_inter_channel("post-32-0".to_string(), b_head, b_debit, b_descriptor)
+            .expect("another channel's block follows in the same unposted span")
+            .block_number;
+        assert!(a_block < b_block, "A's block precedes B's in the span");
+        head_block = service.status().expect("status").block_number;
+        assert_eq!(head_block, b_block);
+
+        // (1) The exported span is contiguous and includes A's block: the validity candidate and
+        // its posting artifact enumerate `finalized+1..=head` (validity_prover_service.rs
+        // `prove_candidate` / `posting_artifact`), there is no per-block filter.
+        let producer = service.producer().expect("keyless producer");
+        for number in 1..=head_block {
+            let block = producer
+                .public_block(BlockNumber::new(number).expect("block number"))
+                .unwrap_or_else(|| panic!("block {number} is exportable"));
+            if number == a_block {
+                assert_eq!(block.channel_id as u64, snapshot_a.record.channel_id.as_u64());
+            }
+        }
+
+        // (2) No command removes or replaces a committed block. The match is exhaustive, so adding
+        // a rollback/exclude command to the API must revisit this test and its contract twin.
+        fn can_drop_a_committed_block(command: &BlockProducerCommand) -> bool {
+            match command {
+                BlockProducerCommand::Status
+                | BlockProducerCommand::Register { .. }
+                | BlockProducerCommand::PostDeposit { .. }
+                | BlockProducerCommand::SyncOffchainHeads { .. }
+                | BlockProducerCommand::PostInterChannel { .. }
+                | BlockProducerCommand::PostCloseFunding { .. }
+                | BlockProducerCommand::PrepareCloseFunding { .. }
+                | BlockProducerCommand::PrepareInterChannelExitKit { .. }
+                | BlockProducerCommand::AbandonPreparedInterChannelExitKit { .. }
+                | BlockProducerCommand::AdoptDelegateJoin { .. }
+                | BlockProducerCommand::PostMemberSetUpdate { .. } => false,
+            }
+        }
+        assert!(!can_drop_a_committed_block(&BlockProducerCommand::Status));
+
+        // (3) The producer's head fence refuses a sibling successor at A's predecessor, so A cannot
+        // be re-signed "around" H to produce a postable block either.
+        let (sibling, sibling_debit, sibling_descriptor) =
+            next_descriptor(&keys_a, &snapshot_a, &snapshot_a.state, 0, 5);
+        assert_ne!(sibling.digest, a_head.digest);
+        let refused = service.post_inter_channel(
+            "post-31-sibling".to_string(),
+            sibling,
+            sibling_debit,
+            sibling_descriptor,
+        );
+        assert!(refused.is_err(), "a sibling of H at H-1 must be refused: {refused:?}");
+        assert_eq!(service.status().expect("status").block_number, head_block);
+    }
+
+    // (4) A restart replays the same span; A's block is still there, in the same position.
+    let service = BlockProducerService::open(&journal, &[2]).expect("replay");
+    assert_eq!(service.status().expect("status").block_number, head_block);
+    let replayed = service
+        .producer()
+        .expect("producer")
+        .public_block(BlockNumber::new(a_block).expect("block number"))
+        .expect("A's block survives replay");
+    assert_eq!(replayed.channel_id as u64, snapshot_a.record.channel_id.as_u64());
+}

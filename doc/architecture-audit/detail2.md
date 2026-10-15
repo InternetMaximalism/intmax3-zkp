@@ -1423,6 +1423,58 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
    when adopting a `.txRoot`-tagged state (a `ChannelState` with `h2_tag ≠ 0`) for close,
    L1 requires the inclusion proof of that small block — it is expected that the existing mechanisms of `CancelClose` / confirmation proof
    (`SignedSmallBlock.confirmation_proof`) can be reused. Spec finalization is in abstract3.
+
+   **Resolution note (2026-10-15, branch cut from `claude/bold-hertz-0f2708`).** The 2026-10-15
+   code review re-examined M7 as "an inter-channel debit head H is N-of-N signed before its small
+   block is posted on L1". *Fund safety holds without further change*: H cannot be closed without its
+   block, because the close requires `channel_fund_intmax_state_root` to be a finalized rollup root and
+   the Balance chain only advances when the send settles (`send_tx_circuit.rs:179`); and
+   `CloseFundingMaterializer.recordPost` refuses any post to a frozen/exited channel, so the debit can
+   never settle after a freeze. Two **liveness** gaps remained and are closed as follows:
+
+   - *Gap (1) — every close tool closed only the latest local head.* `channel_member close` now
+     selects its head (`resolve_close_head` / `choose_close_head`, `src/bin/channel_member.rs`): the
+     latest head when `isFinalizedStateRoot(channel_fund.intmax_state_root)` is true on the rollup;
+     otherwise it walks `prev_digest` through the content-addressed signer exit-kit archive
+     (`.signer-exit-kits/`) to the newest predecessor whose backing root IS finalized and whose kit is
+     retained, re-verifies that envelope (N-of-N, pinned Balance VD, Balance/backing proofs), says so
+     on stderr (`CLOSE HEAD FALLBACK`), and proves/submits that head. A predecessor without an archived
+     kit ends the walk — no kit is ever fabricated — and the command dies with the reason instead of
+     burning a close proof the Manager would refuse. `CLOSE_HEAD_FALLBACK=off` restores the blind
+     latest-head behaviour. The delegate (`node/delegate/branches/exit.js`, `selectReadyCloseHead`)
+     does the same with the immutable snapshot/backing vaults before `requestCloseAsParticipant`:
+     readiness is asked for the accepted head first, then for each archived predecessor with a
+     verified backing and an identical participant proof; the chosen head is pinned in
+     `publicClosePublication` before the freeze, so publication reuses it, and the fallback is logged
+     (`CLOSE_HEAD_FALLBACK_TO_FINALIZED_PREDECESSOR`). The anti-equivocation ledger is untouched:
+     closing at H-1 signs nothing new. Tests: `close_head_fallback_tests` (channel_member),
+     `delegate-close-lifecycle.test.js` (three M7 cases).
+   - *Gap (2) — the committed-but-unposted sub-block strands the rollup.* Reproduced on-chain in
+     `contracts/test/FrozenChannelBatchPost.t.sol`: after A freezes, a batch `[A, B]` or `[B, A]`
+     reverts as a whole with `ChannelExitAlreadyFrozen` (`ChannelAlreadyExited` once materialized);
+     `[B]` alone posts; `cancelClose` lets the original batch post again. The producer journal cannot
+     exclude A's block (`tests/block_producer_service.rs::journaled_sub_block_of_a_frozen_channel_…`):
+     the candidate span is the contiguous `finalized+1..=head` range, no `BlockProducerCommand`
+     removes or replaces a committed block, the head fence refuses a sibling at H-1, and a restart
+     replays the block in place. Rebuilding the span without A's block was judged **unsafe** for the
+     journal format (hash chain, block numbering, and the destination channel's credit all depend on
+     it), so the implemented remedy is the refusal option: the relay's L1 publish step
+     (`api/lib/wallet-l1.js`, `frozenChannelsInCandidate`) reads `managerOfChannel` /
+     `frozenGeneration` / `materializedChannelExit` for every channel in the candidate and throws
+     `VALIDITY_CANDIDATE_CONTAINS_FROZEN_CHANNEL_BLOCK` with the channel, its block numbers and the
+     operator action (cancel the pending close → the exact candidate posts; exited → permanently
+     unpostable) instead of reverting on L1 and retrying forever. Test:
+     `node/test/wallet-l1-frozen-channel.test.js`.
+   - **Owner decisions still open (not implemented):** (a) whether a *materialized* exit with an
+     unposted sub-block should be recoverable at all — it would need a journal rewrite (drop A's block
+     and every dependent credit, renumber, re-prove) or a protocol rule that a channel cannot freeze
+     while it has an unposted producer block (e.g. the Manager reading the producer's pending span, or
+     `requestClose` requiring `lastPostedBlock` to cover the signed head's small block); (b) whether
+     the CLI fallback should require an explicit opt-in rather than the current opt-out
+     (`CLOSE_HEAD_FALLBACK=off`), since closing at H-1 makes H's block permanently unpostable and
+     strands the counterparty's credited head B too; (c) a fallback across a participant-set change
+     (delegate join between H-1 and H) is refused by both tools and would need the predecessor's
+     record to be closable on the current Manager.
 2. **Semantics of retry / version reassignment** (audit finding 12): clarification of the version-consumption rule when a transfer does not succeed.
 3. **Rigorous analysis of the noise budget** (the parameter requiring approval in §B-3).
 4. **Authenticity of `RegevPk`**: the key-substitution attack surface of `publishRegevPk`. It is anchored to L1 by taking

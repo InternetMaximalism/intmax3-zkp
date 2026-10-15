@@ -12,7 +12,8 @@
 // transition are distinct availability requirements; see DESIGN.md §6.3.
 
 const dsm = require('../state-machine');
-const { participantCloseActionId } = require('../participant-close');
+const { participantCloseActionId, buildParticipantCloseProof } = require('../participant-close');
+const wire = require('../../common/wire');
 
 const CLOSE_PHASES = Object.freeze({
   OPEN: 'open',
@@ -47,6 +48,75 @@ function sameStoredValue(a, b) {
 function setIfChanged(store, key, value) {
   if (!sameStoredValue(store.get(key), value)) store.set(key, value);
   return value;
+}
+
+// ── M7 close-head fallback (2026-10-15) ──────────────────────────────────────────────────────
+//
+// An inter-channel debit head is N-of-N signed before its small block posts on L1. While that
+// block is unposted, public-close readiness for the head fails (its backing root is not a
+// finalized rollup root) and a delegate used to retry the exact latest head forever. Walk
+// `prevDigest` back through the immutable snapshot/backing vaults to the newest predecessor that
+// IS ready, never fabricating a kit (a predecessor without an archived snapshot or verified
+// backing ends the walk). The predecessor's participant proof must be byte-identical in every
+// field the freeze transaction uses (slot, pkG, siblings, participantRoot): the participant set
+// did not change between the two heads. Nothing new is signed — the fallback head already carries
+// its N-of-N.
+const CLOSE_HEAD_FALLBACK_MAX_DEPTH = 16;
+
+function sameParticipantProof(a, b) {
+  return a && b && Number(a.slot) === Number(b.slot)
+    && String(a.pkG).toLowerCase() === String(b.pkG).toLowerCase()
+    && String(a.participantRoot).toLowerCase() === String(b.participantRoot).toLowerCase()
+    && Number(a.activeParticipantCount) === Number(b.activeParticipantCount)
+    && JSON.stringify((a.siblings || []).map(s => String(s).toLowerCase()))
+      === JSON.stringify((b.siblings || []).map(s => String(s).toLowerCase()));
+}
+
+async function selectReadyCloseHead(ctx, acceptedHead, proof) {
+  const { publicClosePublisher, snapshotVault, backingVault } = ctx;
+  const readiness = (head) => publicClosePublisher.checkReadiness({ acceptedHead: head, snapshotVault, backingVault });
+  let latestError;
+  try {
+    return { head: acceptedHead, proof, readiness: await readiness(acceptedHead), fallback: null };
+  } catch (error) {
+    latestError = error;
+  }
+  if (!snapshotVault || typeof snapshotVault.load !== 'function'
+      || !backingVault || typeof backingVault.loadVerified !== 'function') throw latestError;
+  let snapshot = snapshotVault.load(acceptedHead.digest);
+  const skipped = [];
+  for (let depth = 1; snapshot && depth <= CLOSE_HEAD_FALLBACK_MAX_DEPTH; depth++) {
+    const previous = String(wire.prevDigest(snapshot.state) || '').toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(previous) || /^0x0{64}$/.test(previous)) break;
+    const candidate = snapshotVault.load(previous);
+    if (!candidate) break; // the kit is not retained: never fabricate one
+    let verified = null;
+    try { verified = backingVault.loadVerified(previous, candidate); } catch (_) { verified = null; }
+    if (verified) {
+      const candidateProof = buildParticipantCloseProof(candidate, ctx.slot, ctx.recipient);
+      if (!sameParticipantProof(candidateProof, proof)) {
+        skipped.push({ digest: previous, reason: 'participant set differs from the latest head' });
+      } else {
+        const head = { ...acceptedHead, digest: previous, epoch: candidate.state.epoch || 0,
+          stateVersion: wire.stateVersion(candidate.state) == null ? 0 : wire.stateVersion(candidate.state) };
+        try {
+          const receipt = await readiness(head);
+          return {
+            head, proof: candidateProof, readiness: receipt,
+            fallback: { from: acceptedHead.digest.toLowerCase(), depth, skipped,
+              reason: String((latestError && latestError.message) || latestError) },
+          };
+        } catch (error) {
+          skipped.push({ digest: previous, reason: String((error && error.message) || error) });
+        }
+      }
+    } else {
+      skipped.push({ digest: previous, reason: 'no verified public backing in the vault' });
+    }
+    snapshot = candidate;
+  }
+  latestError.closeHeadFallbackSkipped = skipped;
+  throw latestError;
 }
 
 function closeObservationKey(event, digest) {
@@ -1818,6 +1888,11 @@ async function attemptCloseRequest(ctx) {
       prepared: true,
     });
   }
+  // The proof handed to the closer. On an M7 fallback its head-bound fields are rewritten in
+  // place by `checkReadiness` below (the closer's populated transaction only uses the fields
+  // `sameParticipantProof` proved identical), so the closer's own readiness/proof comparison sees
+  // the head that is actually being closed.
+  const closeProof = { ...proof };
   try {
     const checkReadiness = async () => {
       try {
@@ -1829,19 +1904,34 @@ async function attemptCloseRequest(ctx) {
             || !ctx.snapshotVault || !ctx.backingVault) {
           throw new Error('exact signed head, participant proof and immutable public-close recovery material are required before freezing');
         }
-        const receipt = await ctx.publicClosePublisher.checkReadiness({
-          acceptedHead, snapshotVault: ctx.snapshotVault, backingVault: ctx.backingVault,
-        });
+        const selected = await selectReadyCloseHead(ctx, acceptedHead, proof);
+        const receipt = selected.readiness;
         if (!receipt || receipt.ready !== true
-            || String(receipt.signedHeadDigest).toLowerCase() !== acceptedHead.digest.toLowerCase()
+            || String(receipt.signedHeadDigest).toLowerCase() !== selected.head.digest.toLowerCase()
             || String((store.get('acceptedHead') || {}).digest).toLowerCase() !== acceptedHead.digest.toLowerCase()) {
           throw new Error('public-close readiness does not cover the current exact signed head');
+        }
+        Object.assign(closeProof, selected.proof);
+        if (selected.fallback) {
+          log.warn({
+            event: 'CLOSE_HEAD_FALLBACK_TO_FINALIZED_PREDECESSOR',
+            channel: ch.id,
+            latestHeadDigest: acceptedHead.digest.toLowerCase(),
+            closeHeadDigest: selected.head.digest.toLowerCase(),
+            depth: selected.fallback.depth,
+            latestHeadNotReady: selected.fallback.reason,
+            skipped: selected.fallback.skipped,
+            note: 'the latest signed head cannot be backed on L1 (its block is not posted/finalized); '
+              + 'closing the newest predecessor whose backing root is finalized and whose kit is retained. '
+              + 'Funds moved by the unbackable head(s) stay with this channel.',
+          });
         }
         // Pin the same immutable bundle before the L1 freeze can escape. Publication reuses this
         // head and prepared bundle, rather than generating another proof after channel freeze.
         setIfChanged(store, 'publicClosePublication', {
-          schemaVersion: 1, acceptedHeadDigest: acceptedHead.digest.toLowerCase(),
+          schemaVersion: 1, acceptedHeadDigest: selected.head.digest.toLowerCase(),
           progress: { phase: 'ready', readiness: receipt },
+          ...(selected.fallback ? { fallbackFromHeadDigest: selected.fallback.from } : {}),
         });
         return receipt;
       } catch (error) {
@@ -1872,7 +1962,7 @@ async function attemptCloseRequest(ctx) {
     };
     const submitted = await participantCloser.requestClose(
       ch.manager,
-      proof,
+      closeProof,
       rememberBroadcast,
       { actionId, era, checkReadiness },
     );
@@ -2453,6 +2543,7 @@ module.exports = {
   attemptCloseRequest,
   attemptCloseFinalize,
   attemptPublicClosePublication,
+  selectReadyCloseHead,
   reconcileParticipantCloseSubmission,
   reconcileCloseFinalizeSubmissions,
   reconcileClaimOutboxActions,
