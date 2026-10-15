@@ -391,8 +391,13 @@ where
 /// commitment `C`; compare against [`agg_list_commitment`].
 ///
 /// SECURITY (A7/A8): the cyclic wrapper enforces `prev_chain_i == C_{i-1}` and `C_0 == 0`, and
-/// self-references its own verifier data, so only proofs from this circuit can extend the list and
-/// the list cannot be seeded mid-chain to hide earlier entries.
+/// verifies its predecessor against the verifier data carried in its OWN public inputs. That
+/// self-reference is only as strong as the CONSUMER's binding of those public inputs: a consumer
+/// that verifies this proof under the constant agg-list key but leaves the verifier-data public
+/// inputs free accepts a chain seeded mid-way from a `dummy_circuit` predecessor (hiding earlier
+/// entries). `ValidityCircuit` therefore consumes it with
+/// `add_proof_target_and_conditionally_verify_cyclic` (code review 2026-10-15, finding C1); any
+/// new consumer must do the same or call `check_cyclic_proof_verifier_data` natively.
 ///
 /// FINDING on the `CommonCircuitData` template (design §5.2 watch item, re-derived deliberately in
 /// this phase rather than assumed): the fixed `common_data_for_hash_chain_circuit()` template needs

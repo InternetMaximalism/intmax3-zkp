@@ -28,7 +28,7 @@ use crate::{
     utils::{
         dummy::DummyProof,
         recursively_verifiable::{
-            add_proof_target_and_conditionally_verify, add_proof_target_and_verify_cyclic,
+            add_proof_target_and_conditionally_verify_cyclic, add_proof_target_and_verify_cyclic,
         },
     },
 };
@@ -246,7 +246,18 @@ where
         // here made the second finalized span unprovable after the first signing block.
         let chain_is_zero = final_bp_sig_chain.is_zero::<F, D, Bytes32>(&mut builder);
         let should_verify_list = builder.not(chain_is_zero);
-        let agg_list_proof = add_proof_target_and_conditionally_verify(
+        // SECURITY (code review 2026-10-15, finding C1): the agg-list proof is a CYCLIC proof. Its
+        // predecessor was verified inside the list circuit against the verifier data carried in
+        // the proof's own public inputs, so those public inputs MUST be connected to the constant
+        // `agg_list_vd` here — exactly as the block-chain proof above and the deposit/registration
+        // chains in `block_step` do. The plain conditional helper verified the proof under the
+        // constant key but left its verifier-data public inputs free: a prover could then seed
+        // the chain from a `dummy_circuit` predecessor claiming any `C_{k-1}` and fold only the
+        // last signing block's real aggregate, skipping every earlier block's N-of-N check while
+        // still matching `final.bp_sig_chain`. Pinned by
+        // `a_signature_list_seeded_from_a_dummy_predecessor_is_refused`. The dummy path (no
+        // signing block, `should_verify_list == false`) is unaffected: the connection is gated.
+        let agg_list_proof = add_proof_target_and_conditionally_verify_cyclic(
             agg_list_vd,
             &mut builder,
             should_verify_list,
@@ -449,5 +460,235 @@ mod tests {
             .collect();
 
         assert_eq!(validity_proof.public_inputs, expected_public_inputs);
+    }
+
+    /// SECURITY regression (code review 2026-10-15, finding C1 — agg-list verifier data).
+    ///
+    /// The N-of-N signature evidence of a span is the cyclic `AggListCircuit` proof. A cyclic
+    /// circuit verifies its PREDECESSOR against the verifier data carried in its OWN public
+    /// inputs, so a prover who is free to choose those public inputs can seed the chain from a
+    /// `dummy_circuit` proof claiming any `C_{k-1}` and fold only the LAST signing block's real
+    /// aggregate. The resulting list proof is a genuine proof of the cyclic circuit — plain
+    /// verification under the agg-list key accepts it — and its commitment equals the span's
+    /// `final.bp_sig_chain`. Only connecting the proof's verifier-data public inputs to the
+    /// constant agg-list key (`add_proof_target_and_conditionally_verify_cyclic`) refuses it.
+    ///
+    /// Span: registration block, then TWO real N-of-N signing blocks. The forged list skips the
+    /// first block's aggregate entirely. The validity circuit must not accept it.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_signature_list_seeded_from_a_dummy_predecessor_is_refused() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use plonky2::recursion::{
+            cyclic_recursion::check_cyclic_proof_verifier_data,
+            dummy_circuit::{cyclic_base_proof, dummy_circuit},
+        };
+        use rand::SeedableRng as _;
+        use rand010::SeedableRng as _;
+
+        use crate::{
+            circuits::test_utils::block_witness_generator::{BlockTxV2Witness, ChannelMemberKeys},
+            common::{
+                balance_state::BalanceState,
+                channel_id::ChannelId,
+                transfer::Transfer,
+                trees::{transfer_tree::TransferTree, tx_v2_tree::TxV2Tree},
+                tx::{TxClass, TxV2},
+                u63::BlockNumber,
+            },
+            ethereum_types::u256::U256,
+            falcon_sig::{
+                agg::{FalconAggCircuit, FalconAggWitness},
+                agg_list::{AggListCircuit, AggListEntry, agg_list_commitment},
+            },
+            regev::encrypt_amount,
+            utils::poseidon_hash_out::PoseidonHashOut,
+            wallet_core::MemberKeys,
+        };
+
+        const CHANNEL: u32 = 1;
+        let supported = vec![2];
+        let processor = BlockHashChainProcessor::<F, C, D>::new(&supported);
+        let block_chain_vd = processor.block_chain_vd();
+        let mut g = BlockWitnessGenerator::new(&supported);
+        let initial_ext_state = g.current_extended_public_state();
+        let channel_id = ChannelId::new(CHANNEL as u64).unwrap();
+
+        // Three real members; the channel is registered with exactly their Falcon keys.
+        let mut crng = rand010::rngs::StdRng::seed_from_u64(0xC1);
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut crng)).collect();
+        let ck = ChannelMemberKeys::from_member_keys(&keys);
+        g.add_channel_registration_keys(CHANNEL, ck);
+        g.add_registration_block(0).expect("registration block");
+
+        // One synthetic post-debit H1' reused by both signing blocks (its content is not what this
+        // test is about; the generator only needs a nonzero IMSB state commitment to sign).
+        let pks: Vec<_> = keys.iter().map(|k| k.regev_pk.clone()).collect();
+        let enc: Vec<_> = (0..3)
+            .map(|i| encrypt_amount(&mut crng, &pks[i], [45u64, 10, 30][i]).unwrap().0)
+            .collect();
+        let regev_pk_digests: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let post_balance_state = BalanceState {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances_token0(&enc),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&regev_pk_digests),
+            recipients: BalanceState::pad_recipients(
+                &(0..3u32)
+                    .map(|i| Address::from_u32_slice(&[0x7E57_0000u32 + i; 5]).unwrap())
+                    .collect::<Vec<_>>(),
+            ),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: crate::wallet_core::empty_settled_tx_accumulator_root(),
+            state_version: 1,
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
+        };
+        let h1: Bytes32 = post_balance_state.h1();
+
+        // Two real signing blocks for the channel: distinct transfers, consecutive nonces, the
+        // TxV2 at the channel's own tx-tree index.
+        let mut brng = rand::rngs::StdRng::seed_from_u64(7);
+        // The registered channel leaf starts at send index 0, so the nonces are 0 then 1.
+        for (round, nonce) in [(1u64, 0u32), (2u64, 1u32)] {
+            let mut transfer_tree = TransferTree::init();
+            transfer_tree.push(Transfer {
+                recipient: Bytes32::rand(&mut brng),
+                token_index: 0,
+                amount: U256::from(5u32 * round as u32),
+                aux_data: Bytes32::default(),
+            });
+            let tx_v2 = TxV2 {
+                tx_class: TxClass::UserTransfer,
+                transfer_tree_root: transfer_tree.get_root(),
+                nonce,
+                channel_action_root: PoseidonHashOut::default(),
+            };
+            let mut tx_v2_tree = TxV2Tree::init();
+            tx_v2_tree.update(channel_id.as_u64(), tx_v2);
+            let tx_tree_root: Bytes32 = tx_v2_tree.get_root().into();
+            let tx_v2_proof = tx_v2_tree.prove(channel_id.as_u64());
+            let witness = BlockTxV2Witness {
+                tx_v2_indices: vec![channel_id.as_u64(), 0],
+                tx_v2s: vec![tx_v2, TxV2::default()],
+                tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof],
+                new_member_leaves: None,
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
+            };
+            g.next_imsb_state_commitment_root = Some(h1);
+            g.add_block_with_tx_v2(CHANNEL, &[1], round, tx_tree_root, Some(witness))
+                .expect("real signing block");
+        }
+        assert_eq!(g.bp_sig_events.len(), 2, "two signing events were folded");
+
+        // The real block-hash-chain proof over [registration, signing 1, signing 2].
+        let mut prev_block_proof = None;
+        for idx in 1..=g.block_number.as_u64() {
+            let bn = BlockNumber::new(idx).unwrap();
+            let witness = g.block_chain_witness.get(&bn).cloned().expect("block witness");
+            let init = if prev_block_proof.is_none() {
+                Some(initial_ext_state.clone())
+            } else {
+                None
+            };
+            let proof = processor
+                .prove_block(init, prev_block_proof.clone(), &witness)
+                .expect("block hash chain proof");
+            prev_block_proof = Some(proof);
+        }
+        let final_block_chain_proof = prev_block_proof.expect("final block chain proof");
+        let final_bp_sig_chain = g.current_bp_sig_chain();
+        assert_ne!(final_bp_sig_chain, Bytes32::default());
+
+        let agg = FalconAggCircuit::<F, C, D>::new();
+        let agg_list = AggListCircuit::<F, C, D>::new(&agg.verifier_data());
+        let validity_circuit =
+            ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list.verifier_data());
+        let prover = Address::rand(&mut brng);
+
+        // Sanity: the HONEST two-step list proves the span.
+        let honest_list = g
+            .build_agg_sig_list_proof(&agg, &agg_list)
+            .expect("honest list")
+            .expect("a signing span has a list");
+        let honest = validity_circuit
+            .prove(&final_block_chain_proof, Some(&honest_list), prover)
+            .expect("the honest list proves the span");
+        validity_circuit.verify(&honest).expect("honest validity proof verifies");
+
+        // The forgery: seed the chain at C_1 (the chain AFTER the first block's statement, which
+        // anyone can compute from the public statements) with a dummy-circuit predecessor, and
+        // fold only the second block's real aggregate on top.
+        let entries: Vec<AggListEntry> = g.bp_sig_events.iter().map(|e| e.entry()).collect();
+        let c1 = agg_list_commitment(&entries[0..1]);
+        let last = &g.bp_sig_events[1];
+        let agg_proof_2 = agg
+            .prove(&FalconAggWitness {
+                message: last.digest,
+                active: last.witnesses.clone(),
+            })
+            .expect("real aggregate for the last signing block");
+        let step_2 = agg_list
+            .step
+            .prove(&agg_proof_2, c1)
+            .expect("the step folds any claimed prev_chain");
+        let common = &agg_list.cyclic.data.common;
+        let dummy = dummy_circuit::<F, C, D>(common);
+        // plonky2's map type (hashbrown); build it by collecting into the parameter's type.
+        let seed = c1
+            .to_u32_vec()
+            .into_iter()
+            .enumerate()
+            .map(|(i, limb)| (i, F::from_canonical_u32(limb)))
+            .collect();
+        let dummy_prev = cyclic_base_proof::<F, C, D>(common, &dummy.verifier_only, seed);
+        let forged = agg_list
+            .cyclic
+            .prove_with_verifier_data_public_inputs(&step_2, &dummy_prev, &dummy.verifier_only)
+            .expect("the cyclic step accepts a self-consistent dummy predecessor");
+
+        // It IS a valid proof of the agg-list circuit, its commitment IS the span's chain, and only
+        // the verifier-data public inputs betray it.
+        agg_list
+            .verifier_data()
+            .verify(forged.clone())
+            .expect("plain verification cannot see the forgery");
+        let forged_commitment = Bytes32::from_u32_slice(
+            &forged.public_inputs[0..BYTES32_LEN]
+                .iter()
+                .map(|f| f.0 as u32)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(forged_commitment, final_bp_sig_chain);
+        assert!(
+            check_cyclic_proof_verifier_data(&forged, &agg_list.cyclic.data.verifier_only, common)
+                .is_err(),
+            "the forged list carries foreign verifier data in its public inputs"
+        );
+
+        // The validity circuit must refuse it: either proving fails (the connected verifier data
+        // mismatch is an unsatisfiable constraint) or the produced proof does not verify.
+        let attempt = catch_unwind(AssertUnwindSafe(|| {
+            validity_circuit.prove(&final_block_chain_proof, Some(&forged), prover)
+        }));
+        let rejected = match attempt {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(proof)) => validity_circuit.verify(&proof).is_err(),
+        };
+        assert!(
+            rejected,
+            "a signature list seeded from a dummy predecessor was accepted: the first signing \
+             block's N-of-N signatures were never verified"
+        );
     }
 }

@@ -484,6 +484,19 @@ impl UpdateUserTree {
             let tx_v2_proof = &self.tx_v2_merkle_proofs[i];
             let tx_v2_index = self.tx_v2_indices[i];
             if strict {
+                // SECURITY (code review 2026-10-15, finding C1b): the block tx tree is indexed by
+                // channel id (`TX_TREE_HEIGHT == CHANNEL_ID_BITS`) and the receivers'
+                // `tx_settlement` opens the sender's tx at index `channel_id`. The nonce-checked
+                // TxV2 must therefore be THAT leaf; a prover-chosen index would let a colluding
+                // cluster satisfy the nonce rule with a decoy leaf while every receiver consumed a
+                // stale transfer at the channel's slot.
+                if tx_v2_index != channel_id.as_u64() {
+                    return Err(UpdateUserTreeError::InvalidLength(format!(
+                        "tx_v2 index at i {i} must be this channel's own tx-tree index (expected {}, \
+                         got {tx_v2_index})",
+                        channel_id.as_u64()
+                    )));
+                }
                 tx_v2_proof
                     .verify(tx_v2, tx_v2_index, block_tx_root)
                     .map_err(|e| {
@@ -1140,6 +1153,10 @@ impl UpdateUserTreeTarget {
 
             let bound_tx_root = tx_v2_merkle_proof.get_root::<F, C, D>(builder, tx_v2, tx_v2_index);
             block_tx_root.conditional_assert_eq(builder, bound_tx_root, should_update);
+            // SECURITY (code review 2026-10-15, finding C1b): the nonce-checked TxV2 is the leaf at
+            // the channel's OWN tx-tree index — the index the receivers' `tx_settlement` opens.
+            // Mirrors the native check above; pinned by `a_tx_opened_at_a_foreign_index_is_refused`.
+            builder.conditional_assert_eq(should_update.target, tx_v2_index, channel_id);
             // SECURITY (base-send replay): H2 authenticates this TxV2, including its nonce.  The
             // channel leaf's `index` is the persisted base-account send cursor, so binding the two
             // makes an already-applied signed H2 unusable after the leaf advances.  Do NOT bind the
@@ -1812,15 +1829,18 @@ mod tests {
             nonce: 0,
             channel_action_root: channel_action_tree.get_root(),
         };
+        // The block tx tree is indexed by channel id (`TX_TREE_HEIGHT == CHANNEL_ID_BITS`): the
+        // channel's TxV2 sits at ITS OWN index, which is where the receivers' `tx_settlement`
+        // opens it and where this circuit now requires it (C1b).
         let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(0, tx_v2);
-        let tx_v2_proof = tx_v2_tree.prove(0);
-        let block = Block::new_with_tx_v2s(
+        tx_v2_tree.update(channel_target.as_u64(), tx_v2);
+        let tx_v2_proof = tx_v2_tree.prove(channel_target.as_u64());
+        let block = Block::new_with_channel(
             num_users,
             channel_id,
             &[key_id],
             rng.next_u64(),
-            &[tx_v2],
+            tx_v2_tree.get_root().into(),
             deposit_hash_chain,
             Bytes32::default(),
         )
@@ -1848,7 +1868,7 @@ mod tests {
             // The bp posts from slot 0, so slot 0's Regev key is the one opened.
             member_regev_pks: vec![channel.regev[0].clone()],
             channel_state_fields: fields,
-            tx_v2_indices: vec![0],
+            tx_v2_indices: vec![channel_target.as_u64()],
             tx_v2s: vec![tx_v2],
             tx_v2_merkle_proofs: vec![tx_v2_proof],
             channel_action_indices: vec![0],
@@ -1909,14 +1929,14 @@ mod tests {
             channel_action_root: channel_action_tree.get_root(),
         };
         let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(0, tx_v2);
-        let tx_v2_proof = tx_v2_tree.prove(0);
-        let block = Block::new_with_tx_v2s(
+        tx_v2_tree.update(channel_target.as_u64(), tx_v2);
+        let tx_v2_proof = tx_v2_tree.prove(channel_target.as_u64());
+        let block = Block::new_with_channel(
             num_users,
             channel_id,
             &[key_id],
             rng.next_u64(),
-            &[tx_v2],
+            tx_v2_tree.get_root().into(),
             deposit_hash_chain,
             Bytes32::default(),
         )
@@ -1942,7 +1962,7 @@ mod tests {
             signer_count: channel.signer_count(),
             member_regev_pks: vec![channel.regev[0].clone()],
             channel_state_fields: fields,
-            tx_v2_indices: vec![0],
+            tx_v2_indices: vec![channel_target.as_u64()],
             tx_v2s: vec![tx_v2],
             tx_v2_merkle_proofs: vec![tx_v2_proof],
             channel_action_indices: vec![0],
@@ -2317,6 +2337,34 @@ mod tests {
 
         tree.block.tx_tree_root = Bytes32::default();
         assert_refused(&tree, "H2=0 is reserved for in-channel updates");
+    }
+
+    /// SECURITY regression (code review 2026-10-15, finding C1b): the nonce-checked TxV2 must be
+    /// the leaf at the channel's OWN tx-tree index. The receivers' `tx_settlement` opens the
+    /// sender's tx at index `channel_id`; if this circuit let the prover pick the index, a
+    /// colluding cluster could satisfy the nonce rule with a decoy leaf elsewhere in the same
+    /// signed tree while every receiver consumed a stale transfer at the channel's slot.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_tx_opened_at_a_foreign_index_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0xb0);
+        let (mut tree, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        // Control: the TxV2 at the channel's own index proves.
+        assert!(tree.to_public_inputs().is_ok());
+        assert!(CIRCUIT.prove(&tree).is_ok());
+
+        // The same TxV2 moved to index 0 (≠ TEST_CHANNEL_ID). The cluster signs the new root, the
+        // opening at index 0 is a valid Merkle proof and the nonce rule still holds — only the
+        // index rule can refuse this witness.
+        assert_ne!(TEST_CHANNEL_ID, 0);
+        let tx_v2 = tree.tx_v2s[0];
+        let mut decoy_tree = TxV2Tree::init();
+        decoy_tree.update(0, tx_v2);
+        tree.tx_v2_indices = vec![0];
+        tree.tx_v2_merkle_proofs = vec![decoy_tree.prove(0)];
+        tree.block.tx_tree_root = decoy_tree.get_root().into();
+        assert_refused(&tree, "tx_v2 index");
     }
 
     /// A correctly signed H2 is not a timeless bearer token. The TxV2 nonce committed below H2

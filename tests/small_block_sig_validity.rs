@@ -152,7 +152,9 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     let tx_v2 = TxV2 {
         tx_class: TxClass::UserTransfer,
         transfer_tree_root,
-        nonce: 1,
+        // The registered channel leaf starts at send index 0 and `update_channel_tree` requires
+        // `tx_v2.nonce == prev_user_leaf.index`, so the first signed block carries nonce 0.
+        nonce: 0,
         channel_action_root: PoseidonHashOut::default(),
     };
     let mut tx_v2_tree = TxV2Tree::init();
@@ -390,7 +392,9 @@ fn block_producer_consumes_real_member_cosignatures() {
     let tx_v2 = TxV2 {
         tx_class: TxClass::UserTransfer,
         transfer_tree_root: transfer_tree.get_root(),
-        nonce: 1,
+        // The registered channel leaf starts at send index 0 and `update_channel_tree` requires
+        // `tx_v2.nonce == prev_user_leaf.index`, so the first signed block carries nonce 0.
+        nonce: 0,
         channel_action_root: PoseidonHashOut::default(),
     };
     let mut tx_v2_tree = TxV2Tree::init();

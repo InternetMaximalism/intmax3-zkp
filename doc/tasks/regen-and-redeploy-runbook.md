@@ -83,6 +83,26 @@ Step 0 below.
 
 ## Why regen is needed — what each change invalidated
 
+- **C1 (2026-10-15, circuit change — soundness fix).** Three added constraints, each
+  rotating a core VK and therefore the whole cohort:
+  1. `validity_circuit.rs` now verifies the N-of-N `AggListCircuit` proof with the CYCLIC
+     helper (`add_proof_target_and_conditionally_verify_cyclic`): the proof's verifier-data
+     public inputs are connected to the constant agg-list key whenever the list is verified.
+     Rotates the **validity** VK (and its MLE wrapper / pinned adapter / config).
+  2. `update_channel_tree.rs` binds the nonce-checked TxV2's tx-tree index to the block's
+     `channel_id` for every updating slot (`tx_v2_index == channel_id`). Rotates
+     **update_channel_tree → block_step → block_hash_chain → validity**.
+  3. `receive_transfer_circuit.rs` requires the sender Balance proof to be the state right
+     before the settled send: `send_leaf.prev <= sender.block_r < tx_block_number` (the same
+     ordering `send_tx_circuit` enforces on the sender's own chain). Rotates
+     **receive_transfer → switch board → balance (cyclic)**, hence every circuit that
+     recursively verifies a Balance proof: close, cancel-close, close-asset-backing (35 limbs),
+     single-withdrawal / withdrawal chain, late-incoming, and the WASM/wallet packages.
+  Every checked-in full proof fixture and every pinned on-chain VK/config is therefore stale
+  after C1; regenerate the complete cohort (Steps 1–4) before any fixture-backed forge test or
+  deployment is meaningful. Native producers already place the TxV2 at `channel_id`
+  (`block_producer.rs`, `wallet_core::inter_channel_tx_v2`); only the unit-test helpers that
+  used index 0 were updated.
 - **#2b (circuit change).** `tx_settlement.rs` and `single_withdrawal_circuit.rs`
   now use `to_hash_out` instead of bare `reduce_to_hash_out`. `tx_settlement` is
   in the balance core (`send_tx_circuit`, `receive_transfer_circuit`);

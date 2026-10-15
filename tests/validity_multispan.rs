@@ -108,7 +108,8 @@ fn two_independent_spans_bind_the_cumulative_agg_list() {
     generator
         .add_registration_block(1)
         .expect("registration block");
-    let (first_tx_root, first_tx_witness) = tx_v2_witness(1);
+    // The registered channel leaf starts at send index 0 (`tx_v2.nonce == prev_user_leaf.index`).
+    let (first_tx_root, first_tx_witness) = tx_v2_witness(0);
     generator
         .add_block_with_tx_v2(1, &[1], 2, first_tx_root, Some(first_tx_witness))
         .expect("first signed block");
@@ -158,7 +159,7 @@ fn two_independent_spans_bind_the_cumulative_agg_list() {
 
     // This is a NEW span: no previous cyclic block-chain proof is supplied. Its initial state is
     // exactly span one's finalized end, whose bp_sig_chain is intentionally non-zero.
-    let (second_tx_root, second_tx_witness) = tx_v2_witness(2);
+    let (second_tx_root, second_tx_witness) = tx_v2_witness(1);
     generator
         .add_block_with_tx_v2(1, &[1], 3, second_tx_root, Some(second_tx_witness))
         .expect("second signed block");

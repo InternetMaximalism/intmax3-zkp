@@ -256,6 +256,28 @@ where
             )));
         }
 
+        // SECURITY (code review 2026-10-15, finding C1b): the sender's Balance proof must be the
+        // state right BEFORE this send — it has processed every earlier send
+        // (`send_leaf.prev <= sender.block_r`) and not this one (`sender.block_r < tx_block_number`),
+        // the same ordering `SendTxCircuit` enforces on the sender's own chain. Without it a stale
+        // sender state, whose spend is still valid for the same nonce, could back receipts of many
+        // conflicting transfers settled in later blocks.
+        let sender_block_r = sender_balance_pis.block_r;
+        if sender_block_r < self.tx_settlement.send_block_number_before_tx() {
+            return Err(ReceiveTransferError::BlockNumberError(format!(
+                "Not send_block_number_before_tx <= sender_balance_pis.block_r: {:?} <= {:?}",
+                self.tx_settlement.send_block_number_before_tx(),
+                sender_block_r,
+            )));
+        }
+        if self.tx_settlement.tx_block_number() <= sender_block_r {
+            return Err(ReceiveTransferError::BlockNumberError(format!(
+                "Not sender_balance_pis.block_r < tx_settlement.tx_block_number(): {:?} < {:?}",
+                sender_block_r,
+                self.tx_settlement.tx_block_number(),
+            )));
+        }
+
         let spend_pis = self.tx_settlement.spend_pis().map_err(|e| {
             ReceiveTransferError::SpendPisError(format!("failed to get spend_pis: {e}"))
         })?;
@@ -464,6 +486,16 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         // tx_block_number <= new_block_r so that the transfer can be received.
         let tx_block_number = tx_settlement.tx_block_number();
         new_block_r.enforce_ge(builder, &tx_block_number);
+
+        // SECURITY (code review 2026-10-15, finding C1b): the sender proof is the state right
+        // before this send: `send_leaf.prev <= sender.block_r < tx_block_number` (mirrors
+        // `SendTxCircuit`; see the native check in `to_public_inputs`). Pinned by
+        // `a_sender_proof_that_predates_the_previous_send_is_refused` and
+        // `a_sender_proof_that_already_covers_the_settling_block_is_refused`.
+        sender_prev_pis
+            .block_r
+            .enforce_ge(builder, &tx_settlement.send_block_number_before_tx());
+        tx_block_number.enforce_gt(builder, &sender_prev_pis.block_r);
 
         // Sender commitment matches spend proof and the proof is marked valid.
         let spend_pis = tx_settlement.spend_pis();
@@ -775,6 +807,27 @@ mod tests {
         receive_transfer_case(false, false);
     }
 
+    /// SECURITY regression (code review 2026-10-15, finding C1b): the sender's Balance proof must
+    /// be the state right before THIS send. Its receive cursor has processed every earlier send
+    /// (`block_r >= send_leaf.prev`) — otherwise a stale sender state, whose spend is still valid
+    /// for the same nonce, could back receipts of many conflicting transfers settled in later
+    /// blocks. The fixture's sender send leaf is `(prev = 2, cur = 5)`; a sender proof at block 1
+    /// predates the previous send and must be refused natively and in-circuit.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_sender_proof_that_predates_the_previous_send_is_refused() {
+        receive_transfer_case_with(false, false, 1, true);
+    }
+
+    /// The mirror bound (`SendTxCircuit` enforces `tx_block_number > prev.block_r` on the sender's
+    /// own chain): a sender proof whose cursor already covers the settling block cannot be the
+    /// pre-send state of this transfer.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_sender_proof_that_already_covers_the_settling_block_is_refused() {
+        receive_transfer_case_with(false, false, 5, true);
+    }
+
     #[cfg(feature = "authenticated-tail-receive")]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -790,6 +843,15 @@ mod tests {
     }
 
     fn receive_transfer_case(tail: bool, late: bool) {
+        // The honest sender proof is the state right before the send at block 5, after the
+        // previous send at block 2: `2 <= block_r < 5`.
+        receive_transfer_case_with(tail, late, 3, false);
+    }
+
+    /// `sender_block_r` is the sender Balance proof's receive cursor. With `expect_rejected` the
+    /// witness must fail the native mirror AND the circuit (an unsatisfiable plonky2 witness
+    /// surfaces as an `Err` or a panic inside proving; both count, "it produced a proof" does not).
+    fn receive_transfer_case_with(tail: bool, late: bool, sender_block_r: u64, expect_rejected: bool) {
         let mut rng = rand::thread_rng();
 
         let binding_witness = crate::circuits::channel::post_close_claim_circuit::test_fixture::build_full_witness();
@@ -1032,7 +1094,7 @@ mod tests {
         let sender_prev_balance_pis = BalancePublicInputs {
             channel_id: sender_user_id,
             public_state: public_state.clone(),
-            block_r: BlockNumber::new(5).unwrap(),
+            block_r: BlockNumber::new(sender_block_r).unwrap(),
             private_commitment: spend_pis.prev_private_commitment,
             settled_tx_chain: Bytes32::default(),
         };
@@ -1154,6 +1216,27 @@ mod tests {
         }
 
         let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
+        if expect_rejected {
+            assert!(
+                witness.to_public_inputs(&balance_cd).is_err(),
+                "the native mirror accepted a sender proof at block_r {sender_block_r} for a send \
+                 with send leaf (prev 2, cur 5)"
+            );
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                circuit.prove(&witness)
+            }));
+            let rejected = match attempt {
+                Err(_) => true,
+                Ok(Err(_)) => true,
+                Ok(Ok(proof)) => circuit.data.verify(proof).is_err(),
+            };
+            assert!(
+                rejected,
+                "the circuit accepted a sender proof at block_r {sender_block_r} for a send with \
+                 send leaf (prev 2, cur 5)"
+            );
+            return;
+        }
         let proof = circuit
             .prove(&witness)
             .expect("receive transfer proof should succeed");

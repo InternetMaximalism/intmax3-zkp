@@ -447,6 +447,14 @@ Transitions: `ReceiveTransfer`, `ReceiveDeposit`, `SendTx`, `UpdatePublicState`
 (`src/circuits/balance/balance_processor.rs:94-174`). `UpdatePublicState` accepts any later public
 state whose previous-root Merkle proof verifies (`common/update_public_state.rs`).
 
+**Sender ordering in a receive (C1b, 2026-10-15).** `ReceiveTransfer` additionally requires the
+sender's Balance proof to be the state right before the settled send:
+`send_leaf.prev ≤ sender.block_r < tx_block_number` (the bounds `SendTx` enforces on the sender's
+own chain). Together with the validity rule that the nonce-checked TxV2 sits at index `channel_id`
+of the block tx tree (`update_channel_tree.rs`), a channel cannot back two receipts with one
+pre-send state → N20, N21. The validity circuit verifies the N-of-N signature-list proof with the
+cyclic helper, so the list cannot be seeded from a foreign predecessor (C1) → N11.
+
 **Receive window** (`src/circuits/balance/common/receive_window.rs:1-16`, callers
 `receive_transfer_circuit.rs:218-245, 440-461`, `receive_deposit_circuit.rs:305-322`): with
 `prev_block_r`, `new_block_r`, the channel leaf's last outgoing block `channel_leaf.prev` and the
