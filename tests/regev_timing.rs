@@ -1,6 +1,7 @@
 #![cfg(not(debug_assertions))]
 use intmax3_zkp::regev::{
-    RegevSecurityLevel, channel_keygen, encrypt_amount, prove_channel_tx, verify_channel_tx,
+    RegevSecurityLevel, channel_keygen, encrypt_amount, prove_channel_tx_decrypted,
+    verify_channel_tx_decrypted,
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use std::time::Instant;
@@ -8,7 +9,7 @@ use std::time::Instant;
 #[test]
 fn time_regev_e1() {
     let mut rng = StdRng::seed_from_u64(1);
-    let (spk, _) = channel_keygen(&mut rng);
+    let (spk, ssk) = channel_keygen(&mut rng);
     let (rpk, _) = channel_keygen(&mut rng);
     let before = encrypt_amount(&mut rng, &spk, 100).unwrap();
     let amount = encrypt_amount(&mut rng, &rpk, 30).unwrap();
@@ -20,11 +21,12 @@ fn time_regev_e1() {
     let _ = (ct, w);
 
     let t = Instant::now();
-    let proof = prove_channel_tx(
+    let proof = prove_channel_tx_decrypted(
         RegevSecurityLevel::Production,
         &spk,
+        &ssk,
         &rpk,
-        (&before.0, &before.1),
+        &before.0,
         (&amount.0, &amount.1),
         (&after.0, &after.1),
     )
@@ -36,7 +38,7 @@ fn time_regev_e1() {
     );
 
     let t = Instant::now();
-    verify_channel_tx(
+    verify_channel_tx_decrypted(
         RegevSecurityLevel::Production,
         &spk,
         &rpk,

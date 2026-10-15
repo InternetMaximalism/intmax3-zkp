@@ -7,8 +7,8 @@
 //! validity of the N-of-N signed update that carried it. No settlement manager is deployed here;
 //! the rollup alone (`script/Deploy.s.sol`) verifies and pays.
 //!
-//! Flow: Rust wallet `build_burn_send` → N-of-N co-signed post-burn head → the burn's base
-//! transfer settled into the base balance IVC head → registration, deposit, bootstrap and burn
+//! Flow: Rust wallet burn builder (decrypted E-2) → N-of-N co-signed post-burn head → the burn's
+//! base transfer settled into the base balance IVC head → registration, deposit, bootstrap and burn
 //! blocks posted to anvil as EIP-4844 blob transactions (`cast mktx --blob`, validated with
 //! `proof_da::validate_decoded_blob_transaction` exactly like the production CLI) and finalized
 //! with their real 4-block validity MLE proof → the burn's single-withdrawal → withdrawal-chain →
@@ -82,9 +82,9 @@ use intmax3_zkp::{
     },
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
-        inter_channel_base_transfer, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_channel_backing,
+        assemble_genesis_state_backed, build_burn_send_token_at_base_nonce_decrypted, build_record,
+        burn_withdrawal_leaf, inter_channel_base_transfer, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_channel_backing,
     },
 };
 use plonky2::{
@@ -760,7 +760,7 @@ fn partial_withdrawal_e2e_anvil() {
     };
 
     // Build genesis ciphertexts, retaining alice's witness (slot 0).
-    let (ct0, w0) = encrypt_amount(&mut crng, &all_pks[0], balances[0]).unwrap();
+    let (ct0, _w0) = encrypt_amount(&mut crng, &all_pks[0], balances[0]).unwrap();
     let ct1 = encrypt_amount(&mut crng, &all_pks[1], balances[1])
         .unwrap()
         .0;
@@ -786,7 +786,7 @@ fn partial_withdrawal_e2e_anvil() {
         genesis_chain.to_hex()
     );
 
-    // ── Phase D: build_burn_send (alice burns 5 ETH) ────────────────────────────────────────
+    // ── Phase D: burn builder (alice burns 5 ETH) ───────────────────────────────────────────
     let burn_amount = 5u64;
     let withdrawal_addr = Address::from_hex("0x70997970C51812dc3A010C7d01b50e0d17dc79C8").unwrap();
     let nullifier_root = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xBE01]).unwrap();
@@ -799,15 +799,16 @@ fn partial_withdrawal_e2e_anvil() {
     };
 
     let timer = Instant::now();
-    let built = build_burn_send(
+    let built = build_burn_send_token_at_base_nonce_decrypted(
         &keys[0],
         &snapshot,
-        1, // bootstrap base send advanced the authenticated ChannelLeaf index to one
-        0, // sender_slot
+        // bootstrap base send advanced the authenticated ChannelLeaf index to one
+        0,
+        // sender_slot
         withdrawal_addr,
+        snapshot.state.balance_state.token_registry[0],
+        1,
         burn_amount,
-        balances[0], // before_amount
-        &w0,
         nullifier_root,
         LEVEL,
         &mut crng,

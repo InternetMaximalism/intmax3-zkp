@@ -11,14 +11,22 @@
 //!
 //! # Statements
 //!
-//! **E-1 ChannelTx ([`DualKeyTransferAir`], 3 ciphertexts):** `before` and `after` are
+//! SECURITY (2026-10-15 adversarial review): the witnessed E-1 / E-2 AIRs below carry NO key
+//! binding — `before` is opened by an encryption witness under whatever `(a, b)` the sender
+//! registered, so a degenerate key (`(0, Δ·1)`: `r = -m` opens the zero ciphertext to every
+//! `m`) proves any balance. They are RETIRED as live purposes and kept ONLY as `#[cfg(test)]`
+//! adversarial tooling (`adversarial::{degenerate_pk, forged_zero_opening}` and the gate tests
+//! that use them); relying parties accept the decrypted purposes alone
+//! (`state_update_verifier::verify_decrypted_transfer_proof`).
+//!
+//! **E-1 ChannelTx ([`DualKeyTransferAir`], 3 ciphertexts — test-only):** `before` and `after` are
 //! well-formed encryptions under the SENDER key, `enc_amount` is a well-formed encryption under
 //! the RECIPIENT key, and the plaintexts satisfy `before = after + amount` over the integers via
 //! a ripple-carry adder on the message-bit columns (underflow is constitutively impossible: all
 //! three plaintexts are committed bit vectors, hence non-negative, and the final carry is
 //! constrained to zero).
 //!
-//! **E-2 ChannelUpdate ([`ChannelUpdateAir`], 4 ciphertexts):** `before`, `after`,
+//! **E-2 ChannelUpdate ([`ChannelUpdateAir`], 4 ciphertexts — test-only):** `before`, `after`,
 //! `sender_delta` are well-formed under the SENDER key, `receiver_delta` is well-formed under
 //! the RECIPIENT key, `before = after + sender_delta` (same carry chain), and **both deltas
 //! encrypt exactly the PUBLIC `amount`**: the message evaluations `m(z)` of both delta
@@ -164,6 +172,8 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// Domain word for E-1 channelTxZKP ("IMCZ").
+/// RETIRED (2026-10-15): the witnessed E-1 purpose is no longer a live purpose; the word stays
+/// reserved so it can never be reused, and the test-only E-1 tooling still absorbs it.
 pub const CHANNEL_TX_ZKP_DOMAIN: u32 = 0x494d435a;
 /// Domain word for E-2 channelUpdateZKP: "IMU2" (`CHANNEL_UPDATE_ZKP_DOMAIN_V2`, detail2 §N-4,
 /// TM-6/TM-15). The v1 "IMUZ" (0x494d555a) domain is RETIRED (multitoken Phase 2b): the E-2
@@ -171,6 +181,8 @@ pub const CHANNEL_TX_ZKP_DOMAIN: u32 = 0x494d435a;
 /// re-versioned per TM-15. The v1 value stays pinned in the repo-wide non-collision test
 /// (`constants::tests::all_domain_constants_pairwise_distinct`), so no future tag can collide
 /// with historic v1 transcripts.
+/// RETIRED (2026-10-15): the witnessed E-2 purpose is no longer a live purpose; the word stays
+/// reserved so it can never be reused, and the test-only E-2 tooling still absorbs it.
 pub const CHANNEL_UPDATE_ZKP_DOMAIN: u32 = crate::constants::CHANNEL_UPDATE_ZKP_DOMAIN_V2;
 /// Domain word for E-3 withdrawClaimZKP ("IMWZ").
 pub const WITHDRAW_CLAIM_ZKP_DOMAIN: u32 = 0x494d575a;
@@ -195,17 +207,19 @@ const _: () = {
     assert!(CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN < super::params::REGEV_Q);
 };
 
-/// The lattice-proof purposes of detail2 §E-4: `ChannelTx` (E-1), `ChannelUpdate` (E-2),
-/// `WithdrawClaim` (E-3), `BalanceRefresh` (§B-3), plus the refresh-free variants
-/// `ChannelTxDecrypted` / `ChannelUpdateDecrypted` — the E-1 / E-2 statements proved by
-/// [`DecryptedDualKeyAir`] with the `before` leg opened by decryption. Each decrypted purpose
-/// shares its statement shape ([`RegevStatement::ChannelTx`] / [`RegevStatement::ChannelUpdate`])
-/// with the witnessed one but is bound to a distinct transcript domain and a structurally
-/// different AIR.
+/// The LIVE lattice-proof purposes of detail2 §E-4: `ChannelTxDecrypted` (E-1b) and
+/// `ChannelUpdateDecrypted` (E-2b) — the E-1 / E-2 statements proved by
+/// [`DecryptedDualKeyAir`] with the `before` leg opened by decryption — plus `WithdrawClaim`
+/// (E-3) and `BalanceRefresh` (§B-3).
+///
+/// SECURITY (2026-10-15 adversarial review): the witnessed purposes `ChannelTx` (E-1, domain
+/// "IMCZ") and `ChannelUpdate` (E-2, "IMU2") are RETIRED and deliberately absent from this
+/// enum, so no relying party can even name them. Their AIRs opened `before` by an encryption
+/// witness under the public `(a, b)` without binding `b = a·s + e_pk`, which let a degenerate
+/// registered key open the canonical zero ciphertext to any amount. The provers and verifiers
+/// survive only as `#[cfg(test)]` adversarial tooling; their domain words stay reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegevProofPurpose {
-    ChannelTx,
-    ChannelUpdate,
     WithdrawClaim,
     BalanceRefresh,
     ChannelTxDecrypted,
@@ -216,8 +230,6 @@ impl RegevProofPurpose {
     /// The transcript domain word bound into every proof of this purpose.
     pub const fn domain(self) -> u32 {
         match self {
-            Self::ChannelTx => CHANNEL_TX_ZKP_DOMAIN,
-            Self::ChannelUpdate => CHANNEL_UPDATE_ZKP_DOMAIN,
             Self::WithdrawClaim => WITHDRAW_CLAIM_ZKP_DOMAIN,
             Self::BalanceRefresh => BALANCE_REFRESH_ZKP_DOMAIN,
             Self::ChannelTxDecrypted => CHANNEL_TX_DECRYPTED_ZKP_DOMAIN,
@@ -268,10 +280,15 @@ impl RegevSecurityLevel {
 //   a_s b_s a_r b_r (exposed) | c1 c2 (exposed) r e1 e2 m k1 k2 |×num_cts
 // (`m` is additionally exposed for the ciphertexts flagged in `AirShape::expose_m`.)
 
+#[cfg(test)]
 const COL_A_S: usize = 0;
+#[cfg(test)]
 const COL_B_S: usize = 1;
+#[cfg(test)]
 const COL_A_R: usize = 2;
+#[cfg(test)]
 const COL_B_R: usize = 3;
+#[cfg(test)]
 const NUM_KEY_COLS: usize = 4;
 
 /// Per-ciphertext main columns (same order as upstream `transfer.rs`).
@@ -287,6 +304,7 @@ const OFF_M: usize = 7;
 const OFF_K1: usize = 8;
 const OFF_K2: usize = 9;
 
+#[cfg(test)]
 const fn ct_base(j: usize) -> usize {
     NUM_KEY_COLS + j * CT_COLS
 }
@@ -294,10 +312,15 @@ const fn ct_base(j: usize) -> usize {
 // Aux (permutation) column layout: 4 key evaluations, then 8 per ciphertext. The aux index of
 // each lookup equals its position in `dual_key_lookups`, so this layout is pinned by the
 // lookup order there.
+#[cfg(test)]
 const AUX_A_S: usize = 0;
+#[cfg(test)]
 const AUX_B_S: usize = 1;
+#[cfg(test)]
 const AUX_A_R: usize = 2;
+#[cfg(test)]
 const AUX_B_R: usize = 3;
+#[cfg(test)]
 const NUM_KEY_AUX: usize = 4;
 const CT_AUX: usize = 8;
 const AOFF_C1: usize = 0;
@@ -309,6 +332,7 @@ const AOFF_M: usize = 5;
 const AOFF_K1: usize = 6;
 const AOFF_K2: usize = 7;
 
+#[cfg(test)]
 const fn aux_base(j: usize) -> usize {
     NUM_KEY_AUX + j * CT_AUX
 }
@@ -316,6 +340,7 @@ const fn aux_base(j: usize) -> usize {
 /// Static shape of a dual-key statement: how many ciphertexts, which of them bind to the
 /// recipient key pair, which message evaluations are published, and which three ciphertexts the
 /// ripple-carry conservation chain runs over.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct AirShape {
     num_cts: usize,
@@ -329,6 +354,7 @@ struct AirShape {
     carry_after: usize,
 }
 
+#[cfg(test)]
 impl AirShape {
     const fn carry_col(&self) -> usize {
         NUM_KEY_COLS + self.num_cts * CT_COLS
@@ -350,6 +376,7 @@ impl AirShape {
 }
 
 /// E-1 ciphertext order: `before` (sender), `enc_amount` (recipient), `after` (sender).
+#[cfg(test)]
 const E1_SHAPE: AirShape = AirShape {
     num_cts: 3,
     recipient_ct: &[false, true, false],
@@ -361,6 +388,7 @@ const E1_SHAPE: AirShape = AirShape {
 
 /// E-2 ciphertext order: `before` (sender), `after` (sender), `sender_delta` (sender),
 /// `receiver_delta` (recipient). Conservation: `before = after + sender_delta`.
+#[cfg(test)]
 const E2_SHAPE: AirShape = AirShape {
     num_cts: 4,
     recipient_ct: &[false, false, false, true],
@@ -385,6 +413,7 @@ const E2_NUM_EXTRA_PVS: usize = AMOUNT_LIMB_PVS + 1;
 
 /// The evaluation arguments (lookups) of a dual-key AIR, in the order that fixes both the aux
 /// column layout and the order of the published evaluations.
+#[cfg(test)]
 fn dual_key_lookups<Fld: Field>(shape: &AirShape) -> Vec<Lookup<Fld>> {
     let main_var = |col: usize| SymbolicVariable::<Fld>::new(BaseEntry::Main { offset: 0 }, col);
     let col = |c: usize| -> Vec<Vec<SymbolicExpression<Fld>>> { vec![vec![main_var(c).into()]] };
@@ -434,6 +463,7 @@ fn dual_key_lookups<Fld: Field>(shape: &AirShape) -> Vec<Lookup<Fld>> {
 /// Constraint body shared by both AIRs: per-ciphertext smallness, the ripple-carry conservation
 /// chain, and the ring identities at the shared evaluation point `z` (each ciphertext bound to
 /// its key pair per `shape.recipient_ct`).
+#[cfg(test)]
 fn eval_dual_key<AB>(builder: &mut AB, n: usize, delta_scale: AB::F, shape: &AirShape)
 where
     AB: PermutationAirBuilder,
@@ -526,12 +556,14 @@ where
 /// AIR for one E-1 channel transfer: `before`/`after` well-formed under the sender key,
 /// `enc_amount` well-formed under the recipient key, `before = after + amount` over the
 /// integers (ripple carry, no underflow).
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct DualKeyTransferAir<Fld> {
     pub n: usize,
     pub delta_scale: Fld,
 }
 
+#[cfg(test)]
 impl<Fld: Field> DualKeyTransferAir<Fld> {
     pub fn new(n: usize, delta_scale: Fld) -> Self {
         assert!(n.is_power_of_two());
@@ -539,6 +571,7 @@ impl<Fld: Field> DualKeyTransferAir<Fld> {
     }
 }
 
+#[cfg(test)]
 impl<Fld: Field> BaseAir<Fld> for DualKeyTransferAir<Fld> {
     fn width(&self) -> usize {
         E1_SHAPE.num_cols()
@@ -557,12 +590,14 @@ impl<Fld: Field> BaseAir<Fld> for DualKeyTransferAir<Fld> {
     }
 }
 
+#[cfg(test)]
 impl<Fld: Field> LookupAir<Fld> for DualKeyTransferAir<Fld> {
     fn get_lookups(&mut self) -> Vec<Lookup<Fld>> {
         dual_key_lookups(&E1_SHAPE)
     }
 }
 
+#[cfg(test)]
 impl<AB> Air<AB> for DualKeyTransferAir<AB::F>
 where
     AB: PermutationAirBuilder,
@@ -580,12 +615,14 @@ where
 /// key, `receiver_delta` well-formed under the recipient key, `before = after + sender_delta`
 /// (ripple carry), and both deltas' message evaluations published so the verifier can pin them
 /// to the public amount.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct ChannelUpdateAir<Fld> {
     pub n: usize,
     pub delta_scale: Fld,
 }
 
+#[cfg(test)]
 impl<Fld: Field> ChannelUpdateAir<Fld> {
     pub fn new(n: usize, delta_scale: Fld) -> Self {
         assert!(n.is_power_of_two());
@@ -593,6 +630,7 @@ impl<Fld: Field> ChannelUpdateAir<Fld> {
     }
 }
 
+#[cfg(test)]
 impl<Fld: Field> BaseAir<Fld> for ChannelUpdateAir<Fld> {
     fn width(&self) -> usize {
         E2_SHAPE.num_cols()
@@ -611,12 +649,14 @@ impl<Fld: Field> BaseAir<Fld> for ChannelUpdateAir<Fld> {
     }
 }
 
+#[cfg(test)]
 impl<Fld: Field> LookupAir<Fld> for ChannelUpdateAir<Fld> {
     fn get_lookups(&mut self) -> Vec<Lookup<Fld>> {
         dual_key_lookups(&E2_SHAPE)
     }
 }
 
+#[cfg(test)]
 impl<AB> Air<AB> for ChannelUpdateAir<AB::F>
 where
     AB: PermutationAirBuilder,
@@ -632,6 +672,7 @@ where
 
 /// Build the trace of one dual-key instance. The caller has already validated the witnesses
 /// (`check_amount_witness` + conservation), so the asserts here are unreachable defense.
+#[cfg(test)]
 fn generate_dual_key_trace(
     shape: &AirShape,
     sender_pk: &UpstreamPublicKey,
@@ -695,6 +736,7 @@ fn generate_dual_key_trace(
 /// SECURITY: the purpose domain word comes first and `extra` (the E-2 amount limbs) directly
 /// after, so every transcript absorbs the purpose and the full public statement before any
 /// challenge is sampled (see module docs, F2-A/F2-B).
+#[cfg(test)]
 fn dual_key_public_values(
     domain: u32,
     extra: &[F],
@@ -1041,6 +1083,7 @@ fn eval_at(coeffs: impl DoubleEndedIterator<Item = F>, z: Challenge) -> Challeng
 /// The expected published evaluations in lookup order: `a_s, b_s, a_r, b_r`, then per
 /// ciphertext `c1, c2` and — where `shape.expose_m[j]` — the message polynomial, which for the
 /// exposed E-2 deltas is `encode_amount(amount)`.
+#[cfg(test)]
 fn expected_published_evals(
     shape: &AirShape,
     sender_pk: &UpstreamPublicKey,
@@ -1095,6 +1138,7 @@ fn check_published_evals(
 /// `enc_amount` well-formed under `recipient_pk`, and `before = after + amount` over the
 /// integers. Refuses (no panic) if any witness is inconsistent with its ciphertext or the
 /// conservation law is violated (including `before < amount`).
+#[cfg(test)]
 pub fn prove_channel_tx(
     level: RegevSecurityLevel,
     sender_pk: &RegevPk,
@@ -1116,6 +1160,7 @@ pub fn prove_channel_tx(
 
 /// Domain-parameterized E-1 prover. Private: only `prove_channel_tx` (and the purpose-binding
 /// adversarial test) call this.
+#[cfg(test)]
 fn prove_dual_key_transfer(
     level: RegevSecurityLevel,
     domain: u32,
@@ -1165,6 +1210,7 @@ fn prove_dual_key_transfer(
 
 /// Verify E-1 channelTxZKP against the claimed statement. Validates all keys and ciphertexts
 /// canonically BEFORE touching the proof bytes.
+#[cfg(test)]
 pub fn verify_channel_tx(
     level: RegevSecurityLevel,
     sender_pk: &RegevPk,
@@ -1205,6 +1251,7 @@ pub fn verify_channel_tx(
 /// amount`, and both deltas encrypt exactly the public `amount`. `token_index` is the BASE-layer
 /// token this update moves (TM-6): it is absorbed as its own public value under the "IMU2"
 /// domain, so a proof for token A can never verify against a statement claiming token B.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn prove_channel_update(
     level: RegevSecurityLevel,
@@ -1276,6 +1323,7 @@ pub fn prove_channel_update(
 /// Verify E-2 channelUpdateZKP against the claimed statement (including the public `amount` and
 /// the base `token_index`, both rebuilt by the VERIFIER — TM-6). Validates all keys and
 /// ciphertexts canonically BEFORE touching the proof bytes.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_channel_update(
     level: RegevSecurityLevel,
@@ -3015,8 +3063,8 @@ pub fn verify_channel_update_decrypted(
 /// A public statement for one Regev proof purpose.
 #[derive(Clone, Debug)]
 pub enum RegevStatement {
-    /// E-1 shape, shared by the `ChannelTx` (encryption-witnessed `before`) and
-    /// `ChannelTxDecrypted` (decryption-opened `before`) purposes.
+    /// E-1 shape, proved under `ChannelTxDecrypted` (`before` opened by decryption). The
+    /// retired witnessed `ChannelTx` purpose shared this shape (test-only now).
     ChannelTx {
         sender_pk: RegevPk,
         recipient_pk: RegevPk,
@@ -3024,8 +3072,8 @@ pub enum RegevStatement {
         enc_amount: RegevCiphertext,
         after: RegevCiphertext,
     },
-    /// E-2 shape, shared by the `ChannelUpdate` (encryption-witnessed `before`) and
-    /// `ChannelUpdateDecrypted` (decryption-opened `before`) purposes.
+    /// E-2 shape, proved under `ChannelUpdateDecrypted` (`before` opened by decryption). The
+    /// retired witnessed `ChannelUpdate` purpose shared this shape (test-only now).
     ChannelUpdate {
         sender_pk: RegevPk,
         recipient_pk: RegevPk,
@@ -3065,7 +3113,9 @@ impl RealRegevProofVerifier {
     ///
     /// SECURITY: a purpose/statement-variant mismatch is rejected here, before any proof work —
     /// this is the structural half of the F2-B defense; the transcript domain word (checked
-    /// inside each `verify_*` function) is the cryptographic half.
+    /// inside each `verify_*` function) is the cryptographic half. The E-1 / E-2 statement
+    /// shapes dispatch ONLY to their decrypted verifiers: the retired witnessed AIRs are not
+    /// reachable through this verifier (see [`RegevProofPurpose`]).
     pub fn verify(
         &self,
         purpose: RegevProofPurpose,
@@ -3073,24 +3123,6 @@ impl RealRegevProofVerifier {
         statement: &RegevStatement,
     ) -> Result<(), RegevError> {
         match (purpose, statement) {
-            (
-                RegevProofPurpose::ChannelTx,
-                RegevStatement::ChannelTx {
-                    sender_pk,
-                    recipient_pk,
-                    before,
-                    enc_amount,
-                    after,
-                },
-            ) => verify_channel_tx(
-                self.level,
-                sender_pk,
-                recipient_pk,
-                before,
-                enc_amount,
-                after,
-                proof,
-            ),
             (
                 RegevProofPurpose::ChannelTxDecrypted,
                 RegevStatement::ChannelTx {
@@ -3107,30 +3139,6 @@ impl RealRegevProofVerifier {
                 before,
                 enc_amount,
                 after,
-                proof,
-            ),
-            (
-                RegevProofPurpose::ChannelUpdate,
-                RegevStatement::ChannelUpdate {
-                    sender_pk,
-                    recipient_pk,
-                    before,
-                    after,
-                    sender_delta,
-                    receiver_delta,
-                    amount,
-                    token_index,
-                },
-            ) => verify_channel_update(
-                self.level,
-                sender_pk,
-                recipient_pk,
-                before,
-                after,
-                sender_delta,
-                receiver_delta,
-                *amount,
-                *token_index,
                 proof,
             ),
             (
@@ -3185,6 +3193,64 @@ impl RealRegevProofVerifier {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Adversarial key material shared by the degenerate-key tests of this crate (the AIR-level
+/// pin below, the transition-gate tests in `state_update_verifier` / `e2e_flow`, and the wallet
+/// gate test in `wallet_core`).
+///
+/// The witnessed E-1/E-2 AIRs open a ciphertext by an ENCRYPTION witness `(r, e1, e2, m)` under
+/// the public `(a, b)` and never bind `b = a·s + e_pk`. For a key its holder chose freely the
+/// ring identities therefore say nothing about a plaintext: with `(a, b) = (a0·1, Δ·1)` the
+/// canonical ZERO ciphertext "opens" to EVERY binary message `m` through `r = -m, e1 = a0·m,
+/// e2 = 0`. The decrypted purposes bind the key in-proof and are immune (no ternary `s` makes
+/// `b - a·s` small for such a key), which is why relying parties accept only those
+/// (`state_update_verifier::verify_decrypted_transfer_proof`).
+#[cfg(test)]
+pub(crate) mod adversarial {
+    use super::*;
+
+    /// `(a, b) = (a0·1, Δ·1)`: constant polynomials, canonical coefficients. `a0 = 0` is the
+    /// fully degenerate key of the review; `a0 ∈ {1, 2}` keeps `a` nonzero — the registration
+    /// screen that predates `RegevPk::reject_degenerate` refused only an all-zero `a`, which this
+    /// family side-steps.
+    pub(crate) fn degenerate_pk(a0: u32) -> RegevPk {
+        assert!(
+            a0 <= 2,
+            "e1 = a0·m must stay inside the CBD(2) range [0, 2]"
+        );
+        let mut a = vec![0u32; REGEV_N];
+        a[0] = a0;
+        let mut b = vec![0u32; REGEV_N];
+        b[0] = channel_regev_params().delta();
+        let pk = RegevPk { a, b };
+        pk.validate().expect("the degenerate key is canonical");
+        pk
+    }
+
+    /// The encryption-witness opening of the CANONICAL ZERO ciphertext
+    /// (`RegevCiphertext::padding()`) to `amount` under [`degenerate_pk`]`(a0)`:
+    /// `r = -m`, `e1 = a0·m`, `e2 = 0`, `k1 = k2 = 0`. Both ring identities hold exactly over
+    /// `Z_q[x]` with no `x^n + 1` wrap (constant key polynomials): `a·r + e1 = a0·(-m) + a0·m =
+    /// 0 = c1` and `b·r + e2 + Δ·m = Δ·(-m) + Δ·m = 0 = c2`.
+    pub(crate) fn forged_zero_opening(a0: u32, amount: u64) -> AmountWitness {
+        assert!(a0 <= 2);
+        let m = encode_amount(amount);
+        let n = m.len();
+        AmountWitness {
+            amount,
+            witness: EncryptionWitness {
+                r: m.iter().map(|&bit| -(bit as i8)).collect(),
+                e1u: m.iter().map(|&bit| a0 as u8 * bit).collect(),
+                e1v: vec![0u8; n],
+                e2u: vec![0u8; n],
+                e2v: vec![0u8; n],
+                m,
+                k1: vec![F::ZERO; n],
+                k2: vec![F::ZERO; n],
+            },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3594,13 +3660,23 @@ mod tests {
             after: f.after.0.clone(),
         };
         assert!(matches!(
-            verifier.verify(RegevProofPurpose::ChannelUpdate, &e1_proof, &tx_statement),
+            verifier.verify(
+                RegevProofPurpose::ChannelUpdateDecrypted,
+                &e1_proof,
+                &tx_statement
+            ),
             Err(RegevError::PurposeMismatch(_))
         ));
-        // And the matching dispatch verifies.
-        verifier
-            .verify(RegevProofPurpose::ChannelTx, &e1_proof, &tx_statement)
-            .unwrap();
+        // The witnessed E-1 is RETIRED as a live purpose: the only dispatch for its statement
+        // shape is the decrypted verifier, which refuses the witnessed proof (2026-10-15).
+        assert!(matches!(
+            verifier.verify(
+                RegevProofPurpose::ChannelTxDecrypted,
+                &e1_proof,
+                &tx_statement
+            ),
+            Err(RegevError::ProofVerification(_))
+        ));
         // An E-1 proof dispatched as a (matching-variant) WithdrawClaim statement reaches the
         // E-3 verifier and is rejected there (shape + transcript mismatch), never panics.
         let wc_statement = RegevStatement::WithdrawClaim {
@@ -4576,11 +4652,20 @@ mod tests {
                 &statement,
             )
             .unwrap();
-        // Same statement shape, wrong purpose: reaches the E-1 verifier and is rejected there.
-        assert!(matches!(
-            verifier.verify(RegevProofPurpose::ChannelTx, &f.send.proof, &statement),
-            Err(RegevError::ProofVerification(_))
-        ));
+        // Same statement shape, the RETIRED witnessed verifier (test-only tooling): rejected
+        // there too — the two AIRs are structurally different.
+        assert!(
+            verify_channel_tx(
+                LEVEL,
+                &f.sender_pk,
+                &f.recipient_pk,
+                &f.before,
+                &f.send.enc_amount.0,
+                &f.send.after.0,
+                &f.send.proof,
+            )
+            .is_err()
+        );
         // Wrong statement variant: rejected structurally.
         let wc = RegevStatement::WithdrawClaim {
             user_pk: f.sender_pk.clone(),
@@ -5136,13 +5221,10 @@ mod tests {
         verifier
             .verify(RegevProofPurpose::ChannelUpdateDecrypted, &du, &statement)
             .unwrap();
-        verifier
-            .verify(RegevProofPurpose::ChannelUpdate, &e2, &statement)
-            .unwrap();
-        assert!(matches!(
-            verifier.verify(RegevProofPurpose::ChannelUpdate, &du, &statement),
-            Err(RegevError::ProofVerification(_))
-        ));
+        // The RETIRED witnessed verifier (test-only tooling) accepts its own proof and refuses
+        // the decrypted one; the live dispatch refuses the witnessed proof outright (2026-10-15).
+        ver_e2(&e2).unwrap();
+        assert!(ver_e2(&du).is_err());
         assert!(matches!(
             verifier.verify(RegevProofPurpose::ChannelUpdateDecrypted, &e2, &statement),
             Err(RegevError::ProofVerification(_))
@@ -5155,5 +5237,143 @@ mod tests {
             RegevProofPurpose::ChannelUpdateDecrypted.domain(),
             CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN
         );
+    }
+
+    /// PIN (2026-10-15 adversarial review): the witnessed E-1/E-2 AIRs carry NO key binding, so
+    /// a freely chosen `(a, b)` opens the canonical zero ciphertext to any amount — the native
+    /// prove-side witness check and both witnessed verifiers accept the forged opening. The
+    /// decrypted twins refuse the same bytes, and no secret key can drive the decrypted prover
+    /// for such a key. This is why the witnessed purposes are test-only and every relying party
+    /// accepts the decrypted purposes alone.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn degenerate_key_opens_the_zero_ciphertext_under_the_witnessed_airs_only() {
+        use super::adversarial::{degenerate_pk, forged_zero_opening};
+        let mut rng = SmallRng::seed_from_u64(0xde6e);
+        let (recipient_pk, recipient_sk) = channel_keygen(&mut rng);
+        let zero = RegevCiphertext::padding();
+        const AMOUNT: u64 = 1_000_000;
+
+        for a0 in [0u32, 1, 2] {
+            let pk = degenerate_pk(a0);
+            let before = forged_zero_opening(a0, u64::MAX);
+            // The prove-side witness check accepts the forged opening of the zero ciphertext...
+            check_amount_witness(
+                &to_upstream_pk(&pk).unwrap(),
+                &to_upstream_ct(&zero).unwrap(),
+                &before,
+                "before",
+            )
+            .expect("the forged opening satisfies both ring identities");
+            // ...so the witnessed E-1 proves `zero = after + AMOUNT` with `zero` read as u64::MAX.
+            let enc_amount = encrypt_amount(&mut rng, &recipient_pk, AMOUNT).unwrap();
+            let after = encrypt_amount(&mut rng, &pk, u64::MAX - AMOUNT).unwrap();
+            let e1 = prove_channel_tx(
+                LEVEL,
+                &pk,
+                &recipient_pk,
+                (&zero, &before),
+                (&enc_amount.0, &enc_amount.1),
+                (&after.0, &after.1),
+            )
+            .expect("the witnessed E-1 AIR has no key binding");
+            verify_channel_tx(
+                LEVEL,
+                &pk,
+                &recipient_pk,
+                &zero,
+                &enc_amount.0,
+                &after.0,
+                &e1,
+            )
+            .expect("the witnessed E-1 verifier accepts the forged proof");
+            assert_eq!(
+                decrypt_amount(&recipient_sk, &enc_amount.0).unwrap(),
+                AMOUNT,
+                "the recipient really is credited the amount"
+            );
+            // The decrypted verifier refuses the same bytes over the same statement.
+            assert!(
+                verify_channel_tx_decrypted(
+                    LEVEL,
+                    &pk,
+                    &recipient_pk,
+                    &zero,
+                    &enc_amount.0,
+                    &after.0,
+                    &e1,
+                )
+                .is_err(),
+                "a0 = {a0}: the decrypted E-1 verifier must refuse a witnessed proof"
+            );
+
+            // The E-2 shape: the same forged `before`, the deltas pinned to the public amount.
+            let sender_delta = encrypt_amount(&mut rng, &pk, AMOUNT).unwrap();
+            let receiver_delta = encrypt_amount(&mut rng, &recipient_pk, AMOUNT).unwrap();
+            let e2 = prove_channel_update(
+                LEVEL,
+                &pk,
+                &recipient_pk,
+                (&zero, &before),
+                (&after.0, &after.1),
+                (&sender_delta.0, &sender_delta.1),
+                (&receiver_delta.0, &receiver_delta.1),
+                AMOUNT,
+                TEST_TOKEN_INDEX,
+            )
+            .expect("the witnessed E-2 AIR has no key binding");
+            verify_channel_update(
+                LEVEL,
+                &pk,
+                &recipient_pk,
+                &zero,
+                &after.0,
+                &sender_delta.0,
+                &receiver_delta.0,
+                AMOUNT,
+                TEST_TOKEN_INDEX,
+                &e2,
+            )
+            .expect("the witnessed E-2 verifier accepts the forged proof");
+            assert!(
+                verify_channel_update_decrypted(
+                    LEVEL,
+                    &pk,
+                    &recipient_pk,
+                    &zero,
+                    &after.0,
+                    &sender_delta.0,
+                    &receiver_delta.0,
+                    AMOUNT,
+                    TEST_TOKEN_INDEX,
+                    &e2,
+                )
+                .is_err(),
+                "a0 = {a0}: the decrypted E-2 verifier must refuse a witnessed proof"
+            );
+
+            // No secret key drives the decrypted prover for this key: `b - a·s = Δ·1 - a0·s`
+            // is never CBD(2)-small for a ternary `s`, so the key-binding leg refuses every
+            // candidate (the natural ones are tried here).
+            for s0 in [0i8, 1, -1] {
+                let mut s = vec![0i8; REGEV_N];
+                s[0] = s0;
+                let sk = RegevSk { s };
+                let err = prove_channel_tx_decrypted(
+                    LEVEL,
+                    &pk,
+                    &sk,
+                    &recipient_pk,
+                    &zero,
+                    (&enc_amount.0, &enc_amount.1),
+                    (&after.0, &after.1),
+                )
+                .expect_err("the decrypted E-1 prover binds b = a·s + e_pk");
+                assert!(
+                    matches!(err, RegevError::InvalidSk(_)),
+                    "a0 = {a0}, s0 = {s0}: expected the key-binding refusal, got {err}"
+                );
+            }
+        }
     }
 }

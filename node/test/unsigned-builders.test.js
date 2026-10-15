@@ -17,9 +17,9 @@ function functionBody(name, visibility) {
   return source.slice(start, end + 2);
 }
 
-// The public builder plus the private `*_with` body it delegates to (the witnessed and the
-// refresh-free decrypted builders share one body, selected by `BeforeLeg`): the sentinel must
-// see the code that actually constructs the proposal, not just the thin wrapper.
+// The public builder plus the private `*_with` body it delegates to (the decrypted builders
+// are thin wrappers over one body each; the witnessed builders were retired on 2026-10-15): the
+// sentinel must see the code that actually constructs the proposal, not just the thin wrapper.
 function publicFunction(name) {
   let body = functionBody(name, 'pub ');
   const delegate = body.match(/\b(build_\w+_with)\(/);
@@ -28,10 +28,8 @@ function publicFunction(name) {
 }
 
 const builders = [
-  'build_send_token',
   'build_send_token_decrypted',
   'build_refresh',
-  'build_inter_channel_send_token_at_base_nonce',
   'build_inter_channel_send_token_at_base_nonce_decrypted',
   'build_burn_send_token_at_base_nonce_decrypted',
   'build_inter_channel_credit',
@@ -50,9 +48,7 @@ for (const name of builders) {
 }
 
 for (const name of [
-  'build_send_token',
   'build_send_token_decrypted',
-  'build_inter_channel_send_token_at_base_nonce',
   'build_inter_channel_send_token_at_base_nonce_decrypted',
 ]) {
   test(`${name} retains the sender's separate A11 transaction authorization`, () => {

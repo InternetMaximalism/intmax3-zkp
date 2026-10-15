@@ -170,11 +170,18 @@ pub fn encode_amount(amount: u64) -> Vec<u8> {
 /// `r` is ternary (0), the four CBD halves are in `[0, 2]` (0), and `m == encode_amount(0)` (all
 /// zero bits).
 ///
-/// SECURITY (why this is not a value-forgery lane): the witness claims `amount = 0`. It cannot be
-/// used to claim any other amount — `check_amount_witness` rejects any `AmountWitness` whose `m`
-/// does not equal `encode_amount(amount)`, and the only `m` that satisfies the `c2` identity for
-/// the all-zero ciphertext is the zero polynomial. Handing this out therefore grants no ability
-/// to spend anything: it is the proof that a canonically-zero slot holds zero.
+/// SECURITY (why handing this out is not a value-forgery lane — and what it does NOT prove): the
+/// witness claims `amount = 0`, and `check_amount_witness` rejects any `AmountWitness` whose `m`
+/// differs from `encode_amount(amount)`. But the ring identities alone do NOT pin `m`: they
+/// bind `m` only relative to the public key, and for a key its holder chose freely the all-zero
+/// ciphertext opens to EVERY binary `m` — e.g. `(a, b) = (0, Δ·1)` with `r = -m`, `e = 0`
+/// (`regev::transfer_stark::adversarial::forged_zero_opening`, the 2026-10-15 review finding).
+/// Only a key with `b = a·s + e_pk` makes the zero opening unique: then `c2 - c1·s = e_pk·r +
+/// e2 + Δ·m - e1·s` must vanish, and every term except `Δ·m` is far below `Δ/2`, so `m = 0`.
+/// That binding is NOT checked by the witnessed E-1/E-2 AIRs (now test-only) — it is proven
+/// in-circuit by the decrypted purposes, which are the only ones relying parties accept
+/// (`state_update_verifier::verify_decrypted_transfer_proof`). Handing out THIS witness grants
+/// nothing beyond what any key holder could already write down.
 ///
 /// INTENTIONALLY SIMPLE: constructed from constants, no RNG, no key material.
 pub fn zero_amount_witness() -> AmountWitness {

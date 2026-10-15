@@ -4,7 +4,13 @@
 //! predecessor, registered keys, and E1/E2/refresh proof. It does not verify a transition, a
 //! ciphertext, a signature, an opening, or channel backing. In particular, the token-wise
 //! conservation invariant (nonnegative balances whose sum is at most the token fund) must
-//! already hold inductively. These checks add no proof, public input, or circuit constraint.
+//! already hold inductively — and it holds ONLY because every co-signer gate admits the
+//! DECRYPTED proof purposes alone (`ChannelTxDecrypted` / `ChannelUpdateDecrypted`, whose AIR
+//! binds the sender's secret key to its registered public key:
+//! `state_update_verifier::verify_decrypted_transfer_proof`). The retired witnessed purposes
+//! let a degenerate registered key open an empty position to any amount (2026-10-15 review),
+//! which would break the invariant this module's bounds presuppose. These checks add no proof,
+//! public input, or circuit constraint.
 //!
 //! `Some(b)` means the signer has established `plaintext <= b <= u64::MAX`; `None` means
 //! unknown, NOT zero. This is private signer state, not a peer-supplied attestation: binding it

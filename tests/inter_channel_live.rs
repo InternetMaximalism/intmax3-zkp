@@ -6,7 +6,8 @@
 //! 4th arg). A member of A sends `AMT` to a member of B. The whole two-leg flow runs through the
 //! new `wallet_core` functions ONLY (no reaching into circuit/test internals beyond key + genesis
 //! setup):
-//!   LEG A: `build_inter_channel_send` → `verify_inter_channel_send_transition` → A members
+//!   LEG A: `build_inter_channel_send_token_at_base_nonce_decrypted` →
+//!   `verify_inter_channel_send_transition` → A members
 //! co-sign.   LEG B: `verify_inter_channel_credit_transition` (the fail-closed gate) →
 //!          `build_inter_channel_credit`.
 //!
@@ -16,7 +17,7 @@
 //! WHAT EACH ASSERTION PROVES ABOUT SECURITY
 //! -----------------------------------------
 //! POSITIVE:
-//!  * `build_inter_channel_send` returning Ok proves the post-debit `a_send` PASSES the REAL
+//!  * the inter-channel builder returning Ok proves the post-debit `a_send` PASSES the REAL
 //!    `InterChannelSendUpdateWitness` (E-2 statement rebuilt from authenticated state; channel_fund
 //!    -= amount; h2_tag == tx_tree_root != 0; sender slot rebound; nullifier advanced). [inv 5,2]
 //!  * `verify_inter_channel_send_transition` Ok proves an A co-signer, binding the payload to the
@@ -47,11 +48,11 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelCredit, BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_inter_channel_credit, build_inter_channel_send,
-        build_inter_channel_send_token, build_inter_channel_send_token_at_base_nonce_decrypted,
-        build_record, decrypt_balance, decrypt_balance_token, default_settled_tx_accumulator,
-        sign_state, verify_all_signatures, verify_inter_channel_credit_transition,
-        verify_inter_channel_send_transition, verify_snapshot,
+        assemble_genesis_state, build_inter_channel_credit,
+        build_inter_channel_send_token_at_base_nonce_decrypted, build_record, decrypt_balance,
+        decrypt_balance_token, default_settled_tx_accumulator, sign_state, verify_all_signatures,
+        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
+        verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -79,13 +80,11 @@ struct ChannelFixture {
     record: intmax3_zkp::common::channel::ChannelRecord,
     snapshot: ChannelSnapshot,
     keys: Vec<MemberKeys>,
-    /// genesis ciphertext witnesses, by slot (kept so the sender slot can prove its E-2 `before`).
-    witnesses: Vec<intmax3_zkp::regev::AmountWitness>,
     balances: Vec<u64>,
 }
 
-/// Build a real `n`-member channel (delegate_count = 0) with a co-signed genesis, retaining each
-/// slot's `AmountWitness`. Mirrors the genesis assembly in `inter_channel_unified_e2e.rs`.
+/// Build a real `n`-member channel (delegate_count = 0) with a co-signed genesis. Mirrors the
+/// genesis assembly in `inter_channel_unified_e2e.rs`.
 fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) -> ChannelFixture {
     let keys: Vec<MemberKeys> = (0..n).map(|_| MemberKeys::generate(rng)).collect();
     let members: Vec<MemberInfo> = keys
@@ -97,11 +96,9 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
     let record = build_record(channel_id, &members, 0, 0).expect("record");
 
     let mut cts = Vec::new();
-    let mut witnesses = Vec::new();
     for (i, &bal) in balances.iter().enumerate() {
-        let (ct, w) = encrypt_amount(rng, &keys[i].regev_pk, bal).expect("enc");
+        let (ct, _w) = encrypt_amount(rng, &keys[i].regev_pk, bal).expect("enc");
         cts.push(ct);
-        witnesses.push(w);
     }
     let fund: u64 = balances.iter().sum();
     // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `cts`
@@ -134,7 +131,6 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
         record,
         snapshot,
         keys,
-        witnesses,
         balances: balances.to_vec(),
     }
 }
@@ -174,24 +170,24 @@ fn run_positive(
         debit_payload,
         transfer_descriptor,
         ..
-    } = build_inter_channel_send(
+    } = build_inter_channel_send_token_at_base_nonce_decrypted(
         &a.keys[sender_slot as usize],
         &a.snapshot,
-        0, // registered ChannelLeaf has not consumed a base send slot
+        // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         dest_id,
         recipient_slot,
         recipient_pk,
         recipient_pk_g,
         intmax3_zkp::common::salt::Salt::default(),
+        a.snapshot.state.balance_state.token_registry[0],
+        0,
         amount,
-        a.balances[sender_slot as usize],
-        &a.witnesses[sender_slot as usize],
         fresh_root(0x412),
         LEVEL,
         rng,
     )
-    .expect("build_inter_channel_send (self-check passes)");
+    .expect("build_inter_channel_send_token_at_base_nonce_decrypted (self-check passes)");
 
     // An A co-signer re-verifies before signing.
     verify_inter_channel_send_transition(&a.snapshot.state, &a.record, &debit_payload, LEVEL)
@@ -512,19 +508,19 @@ fn inter_channel_live_send_and_credit() {
         let dest_id = ChannelId::new(B_ID as u64).unwrap();
         let recipient_pk = b.keys[recipient_slot as usize].regev_pk.clone();
         let recipient_pk_g = b.record.member_pk_gs[recipient_slot as usize];
-        let built = build_inter_channel_send(
+        let built = build_inter_channel_send_token_at_base_nonce_decrypted(
             &a.keys[sender_slot as usize],
             &a.snapshot,
-            0, // registered ChannelLeaf has not consumed a base send slot
+            // registered ChannelLeaf has not consumed a base send slot
             sender_slot,
             dest_id,
             recipient_slot,
             recipient_pk,
             recipient_pk_g,
             intmax3_zkp::common::salt::Salt::default(),
+            a.snapshot.state.balance_state.token_registry[0],
+            0,
             AMT,
-            a.balances[sender_slot as usize],
-            &a.witnesses[sender_slot as usize],
             fresh_root(0x999),
             LEVEL,
             &mut rng,
@@ -581,7 +577,7 @@ fn inter_channel_live_token1_send_and_credit() {
 
     // Upgrade A to a two-token channel: register 55 (local slot 1), fund the sender's token-1
     // position with a REAL self-encryption (its E-1/E-2 witness), and re-co-sign the head.
-    let (a_t1_ct, a_t1_witness) =
+    let (a_t1_ct, _a_t1_witness) =
         encrypt_amount(&mut rng, &a.keys[0].regev_pk, T1_BALANCE).expect("enc t1");
     let mut a_state = a.snapshot.state.clone();
     a_state
@@ -631,10 +627,10 @@ fn inter_channel_live_token1_send_and_credit() {
         debit_payload,
         transfer_descriptor,
         ..
-    } = build_inter_channel_send_token(
+    } = build_inter_channel_send_token_at_base_nonce_decrypted(
         &a.keys[sender_slot as usize],
         &a_snapshot,
-        0, // registered ChannelLeaf has not consumed a base send slot
+        // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         dest_id,
         recipient_slot,
@@ -642,9 +638,8 @@ fn inter_channel_live_token1_send_and_credit() {
         b.record.member_pk_gs[recipient_slot as usize],
         intmax3_zkp::common::salt::Salt::default(),
         T1,
+        0,
         AMT,
-        T1_BALANCE,
-        &a_t1_witness,
         fresh_root(0x155),
         LEVEL,
         &mut rng,

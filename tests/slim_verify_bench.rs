@@ -11,8 +11,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, default_settled_tx_accumulator, regev_pks_array, sign_state,
-        solo_next_state, verify_slim_send_tx,
+        build_record, build_send_token_decrypted, default_settled_tx_accumulator, regev_pks_array,
+        sign_state, solo_next_state, verify_slim_send_tx,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -36,7 +36,7 @@ fn slim_verify_timing_breakdown() {
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
     let record = build_record(7, &members, 0, 0).expect("record");
     let (bal0, bal1) = (50u64, 30u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let digests: Vec<Bytes32> = [&m0, &m1]
         .iter()
@@ -64,14 +64,13 @@ fn slim_verify_timing_breakdown() {
 
     // 1) proof GENERATION (sender side)
     let t = Instant::now();
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &m0,
         &snapshot,
         0,
         1,
+        0,
         5,
-        bal0,
-        &w0,
         Bytes32::default(),
         LEVEL,
         &mut rng,
@@ -131,7 +130,7 @@ fn slim_verify_timing_breakdown() {
     println!("regev_pks_array (ONCE per batch): {:?}", t_pks);
 
     println!("== slim tx timing (Production level, padded 1024-slot state) ==");
-    println!("proof generation (build_send): {:?}", t_gen);
+    println!("proof generation (build_send_token_decrypted): {:?}", t_gen);
     println!("slim JSON size: {:.2} MB", json.len() as f64 / 1e6);
     println!("serde serialize: {:?}   parse: {:?}", t_ser, t_de);
     println!(

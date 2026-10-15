@@ -195,8 +195,8 @@ The four shipped STARK statements (`src/regev/transfer_stark.rs`):
 
 | Statement | AIR | Purpose |
 |---|---|---|
-| E-1 channelTxZKP | `DualKeyTransferAir` | sender's fresh re-encryptions well-formed under both keys, delta consistent |
-| E-2 channelUpdateZKP | `ChannelUpdateAir` | before/after ciphertext transition consistency (4 ciphertexts) |
+| E-1 channelTxZKP (RETIRED 2026-10-15, test-only) | `DualKeyTransferAir` | sender's fresh re-encryptions well-formed under both keys, delta consistent — NO key binding on `before` |
+| E-2 channelUpdateZKP (RETIRED 2026-10-15, test-only) | `ChannelUpdateAir` | before/after ciphertext transition consistency (4 ciphertexts) — NO key binding on `before` |
 | E-3 withdrawClaimZKP | `DecryptionAir` | ciphertext decrypts to a public amount (sk private) |
 | §B-3 refresh | `RefreshAir` | old/new ciphertexts encrypt the same hidden plaintext |
 | E-1 decrypted (`ChannelTxDecrypted`, "IMDS") | `DecryptedDualKeyAir::send` | E-1 statement with `before` opened by decryption (no witness, no refresh) |
@@ -233,19 +233,25 @@ and noise exactly as a refresh would; the D3 counter of the debited position res
 The three message columns stay `Kind::Local` (balance and amount are secret); only the
 public polynomials are published.
 
-**Verifier acceptance:** the decrypted and the witnessed purpose share a statement shape
-but are distinct transcript domains and structurally different AIRs, so a proof verifies
-under at most one. Relying parties call
-`state_update_verifier::verify_transfer_proof_either` (decrypted first, witnessed
-fallback) — the InChannel / InterChannelSend / ReceiverBundleApply witnesses,
-`verify_slim_send_tx`, and the destination-side E-2 re-verification. The
+**Verifier acceptance (2026-10-15):** relying parties accept the decrypted purpose ONLY —
+`state_update_verifier::verify_decrypted_transfer_proof` at the InChannel / InterChannelSend /
+ReceiverBundleApply witnesses, `verify_slim_send_tx`, and the destination-side E-2
+re-verification (`verify_inter_channel_credit_transition`). The earlier
+`verify_transfer_proof_either` (decrypted first, witnessed fallback) is gone: the witnessed AIRs
+opened `before` by an encryption witness under the registered `(a, b)` without binding
+`b = a·s + e_pk`, so a member registered with a degenerate key (`(0, Δ·1)`, or any `(a, b)`
+with `a·r ≡ -e1` for a ternary `r`) could open its canonical-zero position to u64::MAX and the
+fallback admitted the proof. `RegevPk::reject_degenerate` screens the trivially recognizable
+family at registration (`build_record`, hence genesis and delegate join) as defense in depth
+only; the decrypted purposes' in-proof key binding is the load-bearing guard. The
 `pending_adds != 0 ⇒ refresh required` gates are retired; the STARK's `before` binding to the
 verifier's own anchor ciphertext is the enforcement.
 
 **Producers:** `wallet_core::{build_send_token_decrypted,
 build_inter_channel_send_token_at_base_nonce_decrypted, build_burn_send_token_at_base_nonce_decrypted}`
-(`BeforeLeg::Decrypted`), used by the WASM wallet, the browser page, the node delegate and
-the `channel_member` CLI. The witnessed builders remain (`BeforeLeg::Witnessed`) for
+used by the WASM wallet, the browser page, the node delegate and
+the `channel_member` CLI. The witnessed builders were removed on 2026-10-15 (they produced the
+retired purposes; see "Verifier acceptance" above) — formerly they remained for
 callers that hold an encryption witness. `refresh` stays as an explicit maintenance
 operation (e.g. a pure receiver approaching the 64-add budget) — it is no longer a
 precondition of sending.

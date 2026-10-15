@@ -70,7 +70,8 @@ use crate::{
     regev::{
         MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier, RegevPk, RegevSecurityLevel, RegevSk,
         add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount, prove_balance_refresh,
-        prove_channel_tx, prove_channel_update, prove_withdraw_claim, regev_pk_root,
+        prove_channel_tx_decrypted, prove_channel_update_decrypted, prove_withdraw_claim,
+        regev_pk_root,
     },
 };
 
@@ -336,7 +337,7 @@ fn build_flow() -> FlowFixture {
         regev_pk_root(&b_pks),
     );
 
-    let (a0, a_genesis_witnesses) = genesis_state(
+    let (a0, _a_genesis_witnesses) = genesis_state(
         &mut rng,
         &sender_record,
         &a_pks,
@@ -354,20 +355,18 @@ fn build_flow() -> FlowFixture {
     );
 
     // -- step (a): in-channel ChannelTx alice -> bob, amount 7 (abstract2 §3.1/§3.2) ----------
-    // The sender re-encrypts their own slot (50 - 7 = 43) and proves E-1 over
+    // The sender re-encrypts their own slot (50 - 7 = 43) and proves the decrypted E-1 over
     // (before, enc_amount, after); the recipient slot is the PUBLIC homomorphic sum.
     let enc_amount = encrypt_amount(&mut rng, &a_pks[1], IN_CHANNEL_AMOUNT).unwrap();
     let alice_after_tx =
         encrypt_amount(&mut rng, &a_pks[0], A_GENESIS[0] - IN_CHANNEL_AMOUNT).unwrap();
     let bob_after = add_ciphertexts(&a0.balance_state.enc_balances[1][0], &enc_amount.0).unwrap();
-    let e1_proof = prove_channel_tx(
+    let e1_proof = prove_channel_tx_decrypted(
         LEVEL,
         &a_pks[0],
+        &a_sk0,
         &a_pks[1],
-        (
-            &a0.balance_state.enc_balances[0][0],
-            &a_genesis_witnesses[0],
-        ),
+        &a0.balance_state.enc_balances[0][0],
         (&enc_amount.0, &enc_amount.1),
         (&alice_after_tx.0, &alice_after_tx.1),
     )
@@ -431,11 +430,12 @@ fn build_flow() -> FlowFixture {
     .unwrap();
     let sender_delta = encrypt_amount(&mut rng, &a_pks[0], INTER_CHANNEL_AMOUNT).unwrap();
     let receiver_delta = encrypt_amount(&mut rng, &b_pks[0], INTER_CHANNEL_AMOUNT).unwrap();
-    let e2_proof = prove_channel_update(
+    let e2_proof = prove_channel_update_decrypted(
         LEVEL,
         &a_pks[0],
+        &a_sk0,
         &b_pks[0],
-        (&alice_after_tx.0, &alice_after_tx.1),
+        &alice_after_tx.0,
         (&alice_after_send.0, &alice_after_send.1),
         (&sender_delta.0, &sender_delta.1),
         (&receiver_delta.0, &receiver_delta.1),
@@ -1438,4 +1438,300 @@ fn bundle_apply_rejects_forged_sender_cts() {
         witness.verify(&VERIFIER),
         Err(ChannelStateUpdateError::ProofVerification(_))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial: degenerate sender key × witnessed E-2 (2026-10-15 review)
+// ---------------------------------------------------------------------------
+
+/// Channel A where alice registered the degenerate key `(0, Δ·1)` and holds the canonical ZERO
+/// position, "opened" to u64::MAX under the witnessed E-2 AIR to debit `DEGENERATE_AMOUNT` the
+/// channel never allotted her; channel B's import + bundle apply of that very tx. Mirrors the
+/// happy-path fixture's steps (b)–(d) field for field, so the only thing that can refuse the two
+/// witnesses is the E-2 purpose policy.
+const DEGENERATE_AMOUNT: u64 = 30;
+
+fn degenerate_sender_e2_witnesses() -> (
+    InterChannelSendUpdateWitness,
+    ReceiverBundleApplyUpdateWitness,
+) {
+    use crate::regev::{
+        prove_channel_update,
+        transfer_stark::adversarial::{degenerate_pk, forged_zero_opening},
+        verify_channel_update,
+    };
+    let mut rng = SmallRng::seed_from_u64(0xde6e_0002);
+    let a_id = ChannelId::new(5).unwrap();
+    let b_id = ChannelId::new(7).unwrap();
+
+    // Channel A: alice (slot 0) registers the degenerate key; bob and carol are honest.
+    let a_pk0 = degenerate_pk(0);
+    let (a_pk1, _a_sk1) = channel_keygen(&mut rng);
+    let (a_pk2, _a_sk2) = channel_keygen(&mut rng);
+    let a_pks = pad_pks(&[a_pk0, a_pk1, a_pk2]);
+    let sender_record = channel_record(
+        a_id,
+        0,
+        [user(a_id, 10), user(a_id, 11), user(a_id, 12)],
+        regev_pk_root(&a_pks),
+    );
+    // Channel B: dave / erin / frank, honest.
+    let (b_pk0, _b_sk0) = channel_keygen(&mut rng);
+    let (b_pk1, _b_sk1) = channel_keygen(&mut rng);
+    let (b_pk2, _b_sk2) = channel_keygen(&mut rng);
+    let b_pks = pad_pks(&[b_pk0, b_pk1, b_pk2]);
+    let receiver_record = channel_record(
+        b_id,
+        0,
+        [user(b_id, 21), user(b_id, 22), user(b_id, 23)],
+        regev_pk_root(&b_pks),
+    );
+
+    // Alice's position is the canonical ZERO ciphertext; the fund (40) is bob's and carol's.
+    let (mut a0, _) = genesis_state(
+        &mut rng,
+        &sender_record,
+        &a_pks,
+        [0, A_GENESIS[1], A_GENESIS[2]],
+        (A_GENESIS[1] + A_GENESIS[2]) as u32,
+        bytes32_word(402),
+    );
+    a0.balance_state.enc_balances[0][0] = crate::regev::RegevCiphertext::padding();
+    let a0 = a0.with_computed_digest();
+    let (b0, _) = genesis_state(
+        &mut rng,
+        &receiver_record,
+        &b_pks,
+        B_GENESIS,
+        200,
+        bytes32_word(602),
+    );
+
+    // The forged E-2: `before` = the zero position opened to u64::MAX, deltas = the public
+    // amount, `after` = u64::MAX - amount, all "well-formed" under the degenerate key.
+    let zero = a0.balance_state.enc_balances[0][0].clone();
+    let alice_after = encrypt_amount(&mut rng, &a_pks[0], u64::MAX - DEGENERATE_AMOUNT).unwrap();
+    let sender_delta = encrypt_amount(&mut rng, &a_pks[0], DEGENERATE_AMOUNT).unwrap();
+    let receiver_delta = encrypt_amount(&mut rng, &b_pks[0], DEGENERATE_AMOUNT).unwrap();
+    let e2_proof = prove_channel_update(
+        LEVEL,
+        &a_pks[0],
+        &b_pks[0],
+        (&zero, &forged_zero_opening(0, u64::MAX)),
+        (&alice_after.0, &alice_after.1),
+        (&sender_delta.0, &sender_delta.1),
+        (&receiver_delta.0, &receiver_delta.1),
+        DEGENERATE_AMOUNT,
+        0,
+    )
+    .expect("the witnessed E-2 AIR proves the forged opening");
+    // Control: a valid witnessed E-2 over exactly the statement both gates rebuild.
+    verify_channel_update(
+        LEVEL,
+        &a_pks[0],
+        &b_pks[0],
+        &zero,
+        &alice_after.0,
+        &sender_delta.0,
+        &receiver_delta.0,
+        DEGENERATE_AMOUNT,
+        0,
+        &e2_proof,
+    )
+    .expect("control: the witnessed verifier accepts the forged proof");
+
+    let tx_leaf = tx_leaf_hash(
+        user(a_id, 10),
+        sender_delta.0.digest(),
+        user(b_id, 21),
+        receiver_delta.0.digest(),
+    );
+    let tx_tree_root = bytes32_word(301);
+    let a1 = ChannelState {
+        epoch: 2,
+        small_block_number: 1,
+        channel_fund: ChannelFund {
+            amounts: ChannelFund::single_token_amounts(
+                a0.channel_fund.amounts[0] - u256_from_u64(DEGENERATE_AMOUNT),
+            ),
+            ..a0.channel_fund.clone()
+        },
+        balance_state: BalanceState {
+            channel_id: a_id,
+            member_count: E2E_ACTIVE as u8,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
+                alice_after.0.clone(),
+                a0.balance_state.enc_balances[1][0].clone(),
+                a0.balance_state.enc_balances[2][0].clone(),
+            ]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            recipients: a0.balance_state.recipients,
+            settled_tx_chain: settled_tx_chain_push(a0.balance_state.settled_tx_chain, tx_leaf),
+            settled_tx_accumulator_root: Bytes32::default(),
+            state_version: 1,
+            pending_adds: a0.balance_state.pending_adds.clone(),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
+        },
+        h2_tag: tx_tree_root,
+        shared_native_nullifier_root: bytes32_word(412),
+        prev_digest: a0.digest,
+        ..a0.clone()
+    }
+    .with_computed_digest();
+
+    let signed_small_block = SignedSmallBlock {
+        message: SmallBlockRootMessage {
+            channel_id: a_id,
+            bp_member_slot: 0,
+            bp_pk_g: user(a_id, 10),
+            small_block_number: 1,
+            prev_small_block_root: bytes32_word(300),
+            tx_tree_root,
+            state_commitment_root: a1.balance_state.h1(),
+            medium_epoch_hint: 0,
+            close_freeze_nonce: 0,
+        },
+        signatures: signatures_for(&sender_record),
+        aggregated_signature_proof: vec![],
+        medium_block_number: 0,
+        confirmation_proof: vec![],
+    };
+    let transport = transport_envelope();
+    let inter_channel_tx = InterChannelTx {
+        tx_inclusion_proof: MerkleInclusionProof::default(),
+        signed_small_block,
+        sender_delta_ct: sender_delta.0.clone(),
+        source_channel_id: a_id,
+        destination_channel_id: b_id,
+        token_index: 0,
+        base_nonce: 1,
+        destination_base_transfer_salt: crate::common::salt::Salt::default(),
+        source_pk_g: user(a_id, 10),
+        seal: Bytes32::default(),
+        tx_hash: crate::common::channel::inter_channel_tx_hash(
+            a_id,
+            b_id,
+            0,
+            tx_tree_root,
+            tx_leaf,
+        ),
+        intmax_transfer_commitment: bytes32_word(503),
+        recipient_memo: vec![],
+        receiver_deltas: vec![ReceiverBalanceDelta {
+            receiver_pk_g: user(b_id, 21),
+            amount: receiver_delta.0.clone(),
+        }],
+        channel_update_zkp: state_update_envelope(e2_proof),
+        transport_proof: transport.proof.clone(),
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
+    };
+    let send = InterChannelSendUpdateWitness {
+        channel_record: sender_record,
+        regev_pks: a_pks.clone(),
+        destination_recipient_pk: b_pks[0].clone(),
+        prev_state: a0,
+        next_state: a1,
+        inter_channel_tx: inter_channel_tx.clone(),
+        amount: DEGENERATE_AMOUNT,
+        transport_proof: transport,
+    };
+
+    // Channel B: the import (balances untouched) and the bundle apply that re-verifies the E-2.
+    let mut incoming_tree = crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree::<
+        Bytes32,
+    >::new(crate::wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT);
+    incoming_tree.push(crate::common::balance_state::unapplied_incoming_leaf(
+        inter_channel_tx.tx_hash,
+    ));
+    let incoming_proof = incoming_tree.prove(0);
+    let pending_root = Bytes32::from(incoming_tree.get_root());
+    incoming_tree.update(0, inter_channel_tx.tx_hash);
+    let applied_root = Bytes32::from(incoming_tree.get_root());
+    let b1 = ChannelState {
+        epoch: 2,
+        small_block_number: 1,
+        channel_fund: ChannelFund {
+            amounts: ChannelFund::single_token_amounts(
+                b0.channel_fund.amounts[0] + u256_from_u64(DEGENERATE_AMOUNT),
+            ),
+            ..b0.channel_fund.clone()
+        },
+        balance_state: BalanceState {
+            settled_tx_chain: settled_tx_chain_push(b0.balance_state.settled_tx_chain, tx_leaf),
+            state_version: 1,
+            settled_tx_accumulator_root: pending_root,
+            ..b0.balance_state.clone()
+        },
+        shared_native_nullifier_root: bytes32_word(603),
+        unallocated_confirmed_incoming: u256_from_u64(DEGENERATE_AMOUNT),
+        prev_digest: b0.digest,
+        ..b0.clone()
+    }
+    .with_computed_digest();
+    let dave_after =
+        add_ciphertexts(&b1.balance_state.enc_balances[0][0], &receiver_delta.0).unwrap();
+    let b2 = ChannelState {
+        epoch: 3,
+        balance_state: BalanceState {
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
+                dave_after,
+                b1.balance_state.enc_balances[1][0].clone(),
+                b1.balance_state.enc_balances[2][0].clone(),
+            ]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            settled_tx_chain: b1.balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: applied_root,
+            state_version: 2,
+            pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
+            ..b1.balance_state.clone()
+        },
+        unallocated_confirmed_incoming: U256::zero(),
+        prev_digest: b1.digest,
+        ..b1.clone()
+    }
+    .with_computed_digest();
+    let bundle = ReceiverBundleApplyUpdateWitness {
+        incoming_tx_index: 0,
+        incoming_tx_inclusion: incoming_proof,
+        receiver_channel_record: receiver_record,
+        regev_pks: b_pks,
+        source_sender_pk: a_pks[0].clone(),
+        sender_before_ct: zero,
+        sender_after_ct: alice_after.0,
+        prev_state: b1,
+        next_state: b2,
+        inter_channel_tx,
+        amount: DEGENERATE_AMOUNT,
+        recipient_index: 0,
+        recipient_sk: None,
+        expected_amount: None,
+    };
+    (send, bundle)
+}
+
+/// SECURITY (2026-10-15 adversarial review — degenerate key × witnessed fallback, E-2 shape):
+/// the sender-side co-signer gate (`InterChannelSendUpdateWitness::verify`, which debits the
+/// channel fund for value alice never deposited) and the destination's re-verification
+/// (`ReceiverBundleApplyUpdateWitness::verify`) must both refuse a witnessed E-2 whose `before`
+/// is the zero position of a degenerate key. RED on the fallback-era gates: both accepted the
+/// witnessed proof once the decrypted check failed.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn degenerate_key_witnessed_e2_is_refused_by_the_send_and_bundle_gates() {
+    let (send, bundle) = degenerate_sender_e2_witnesses();
+    let result = send.verify(&StructuralTransportVerifier, &VERIFIER);
+    assert!(
+        matches!(result, Err(ChannelStateUpdateError::ProofVerification(_))),
+        "the sender-side E-2 gate must refuse a witnessed E-2 from a degenerate key: {result:?}"
+    );
+    let result = bundle.verify(&VERIFIER);
+    assert!(
+        matches!(result, Err(ChannelStateUpdateError::ProofVerification(_))),
+        "the destination bundle gate must refuse a witnessed E-2 from a degenerate key: {result:?}"
+    );
 }

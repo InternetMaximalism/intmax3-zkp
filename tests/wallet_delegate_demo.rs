@@ -8,8 +8,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, decrypt_balance, default_settled_tx_accumulator, sign_state,
-        verify_all_signatures, verify_send_transition, verify_snapshot,
+        build_record, build_send_token_decrypted, decrypt_balance, default_settled_tx_accumulator,
+        sign_state, verify_all_signatures, verify_send_transition, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -96,14 +96,15 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
 
     // --- browser wasm wallet_send: the DELEGATE (slot 3) sends 7 to member slot 0 ---
     let amount = 7u64;
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &delegate_keys,
         &snapshot,
-        3, /* delegate sender */
-        0, /* member recipient */
+        3,
+        /* delegate sender */
+        0,
+        0,
+        /* member recipient */
         amount,
-        50, /* delegate balance */
-        &delegate_witness,
         Bytes32::default(),
         LEVEL,
         &mut rng,
@@ -214,14 +215,13 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     };
 
     // Delegate 3 sends 9 to delegate 4.
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &d3,
         &snapshot,
         3,
         4,
+        0,
         9,
-        50,
-        &w3,
         Bytes32::default(),
         LEVEL,
         &mut rng,
@@ -316,19 +316,9 @@ fn delegate_join_preserves_send_and_is_importable() {
         members: members.clone(),
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
-    let BuiltSend { payload, .. } = build_send(
-        &d3,
-        &snap,
-        3,
-        0,
-        8,
-        50,
-        &w3,
-        Bytes32::default(),
-        LEVEL,
-        &mut rng,
-    )
-    .unwrap();
+    let BuiltSend { payload, .. } =
+        build_send_token_decrypted(&d3, &snap, 3, 0, 0, 8, Bytes32::default(), LEVEL, &mut rng)
+            .unwrap();
     let mut v1 = payload.proposed_next_state.clone();
     for s in 0..3u8 {
         let g = sign_state(&mk[s as usize], s, &v1).unwrap();
@@ -474,19 +464,9 @@ fn delegate_refresh_after_receive_enables_send() {
     };
 
     // d3 sends 9 to d4 -> d4 now has pending_adds[4]=1 (received).
-    let BuiltSend { payload, .. } = build_send(
-        &d3,
-        &snap,
-        3,
-        4,
-        9,
-        50,
-        &w3,
-        Bytes32::default(),
-        LEVEL,
-        &mut rng,
-    )
-    .unwrap();
+    let BuiltSend { payload, .. } =
+        build_send_token_decrypted(&d3, &snap, 3, 4, 0, 9, Bytes32::default(), LEVEL, &mut rng)
+            .unwrap();
     let mut v1 = payload.proposed_next_state.clone();
     for s in 0..3u8 {
         let x = sign_state(&mk[s as usize], s, &v1).unwrap();
@@ -541,19 +521,9 @@ fn delegate_refresh_after_receive_enables_send() {
     );
 
     // d4 can now SEND again (using the fresh witness from the refresh).
-    let BuiltSend { payload: p2, .. } = build_send(
-        &d4,
-        &snap2,
-        4,
-        0,
-        5,
-        69,
-        &new_w4,
-        Bytes32::default(),
-        LEVEL,
-        &mut rng,
-    )
-    .expect("d4 sends after refresh");
+    let BuiltSend { payload: p2, .. } =
+        build_send_token_decrypted(&d4, &snap2, 4, 0, 0, 5, Bytes32::default(), LEVEL, &mut rng)
+            .expect("d4 sends after refresh");
     verify_send_transition(
         &snap2.state,
         &snap2.record,

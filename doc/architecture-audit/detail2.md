@@ -309,9 +309,12 @@ Two changes to the contract above the E-1/E-2 statements and the signing locus:
   Regev secret key** inside the STARK (`DecryptedDualKeyAir`, purposes `ChannelTxDecrypted`
   "IMDS" and `ChannelUpdateDecrypted` "IMDU", §E-1b/§E-2b). A position credited homomorphically
   (deposit import, received transfer) is spent directly; the fresh `after` re-encryption resets
-  its digits, noise and `pending_adds` exactly as a refresh would. Relying parties accept the
-  decrypted purpose or its witnessed twin for the same statement shape
-  (`state_update_verifier::verify_transfer_proof_either`); the `pending_adds != 0 ⇒ refresh
+  its digits, noise and `pending_adds` exactly as a refresh would. Relying parties accept ONLY
+  the decrypted purpose for each statement shape
+  (`state_update_verifier::verify_decrypted_transfer_proof`; the witnessed twins `ChannelTx` /
+  `ChannelUpdate` were retired on 2026-10-15 — their AIRs never bound `b = a·s + e_pk`, so a
+  degenerate registered key could open the canonical zero ciphertext to any amount; they survive
+  only as `#[cfg(test)]` adversarial tooling); the `pending_adds != 0 ⇒ refresh
   required` gates are retired. `RefreshAir` remains a maintenance operation (e.g. a pure receiver
   approaching the 64-add budget of §B-3), never a send prerequisite. Author cryptographic review
   of the new AIR is still required before production; the adversarial test battery
@@ -1061,9 +1064,11 @@ The external helper process (`tools/lattice-proof-helper`) is also abolished, an
 > `DualKeyTransferAir` (E-1) / `ChannelUpdateAir` (E-2) / `DecryptionAir` (E-3) / `RefreshAir` (§B-3 refresh)
 > / `DecryptedDualKeyAir` (E-1b send shape, E-2b update shape)
 > in `src/regev/transfer_stark.rs` — refresh is a separate `RefreshAir`, not E-1 with delta = 0.
-> A decrypted purpose shares its `RegevStatement` shape with its witnessed twin but is a distinct
-> transcript domain and a structurally different AIR, so a proof verifies under at most one;
-> relying parties call `verify_transfer_proof_either` (decrypted first, witnessed fallback).
+> A decrypted purpose shares its `RegevStatement` shape with the RETIRED witnessed twin
+> (`DualKeyTransferAir` / `ChannelUpdateAir` are `#[cfg(test)]` adversarial tooling since
+> 2026-10-15: no key binding) but is a distinct transcript domain and a structurally different
+> AIR; relying parties call `verify_decrypted_transfer_proof` — the decrypted purpose ONLY, no
+> fallback.
 
 ---
 

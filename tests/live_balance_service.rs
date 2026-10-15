@@ -32,8 +32,8 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, attach_small_block_signatures,
-        build_burn_send_token_at_base_nonce, build_inter_channel_credit,
-        build_inter_channel_send_token_at_base_nonce, build_record, build_token_register,
+        build_burn_send_token_at_base_nonce_decrypted, build_inter_channel_credit,
+        build_inter_channel_send_token_at_base_nonce_decrypted, build_record, build_token_register,
         canonical_inter_channel_base_transfer, default_settled_tx_accumulator, sign_state,
         verify_snapshot,
     },
@@ -102,12 +102,10 @@ fn build_burn(
     snapshot: &ChannelSnapshot,
     base_nonce: u32,
     amount: u64,
-    before_amount: u64,
-    before_witness: &intmax3_zkp::regev::AmountWitness,
     tag: u32,
     rng: &mut StdRng,
 ) -> BuiltInterChannelSend {
-    build_burn_send_token_at_base_nonce(
+    build_burn_send_token_at_base_nonce_decrypted(
         &keys[0],
         snapshot,
         0,
@@ -115,8 +113,6 @@ fn build_burn(
         0,
         base_nonce,
         amount,
-        before_amount,
-        before_witness,
         fresh_root(tag),
         LEVEL,
         rng,
@@ -603,7 +599,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         .map(|(slot, keys)| member_info(slot, keys))
         .collect();
     let record = build_record(CHANNEL, &members, 0, 0).expect("record");
-    let (sender_ciphertext, sender_witness) =
+    let (sender_ciphertext, _) =
         encrypt_amount(&mut rng, &keys[0].regev_pk, DEPOSIT_AMOUNT).expect("encrypt sender");
     let (other_ciphertext, _) =
         encrypt_amount(&mut rng, &keys[1].regev_pk, 0).expect("encrypt other");
@@ -688,16 +684,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         .register("register:41".into(), backed_snapshot.clone())
         .expect("register deposit-backed head");
 
-    let mut first = build_burn(
-        &keys,
-        &backed_snapshot,
-        0,
-        10,
-        DEPOSIT_AMOUNT,
-        &sender_witness,
-        1,
-        &mut rng,
-    );
+    let mut first = build_burn(&keys, &backed_snapshot, 0, 10, 1, &mut rng);
     first.debit_payload.proposed_next_state =
         sign_all(first.debit_payload.proposed_next_state.clone(), &keys);
     let first_state = first.debit_payload.proposed_next_state.clone();
@@ -735,16 +722,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         members: members.clone(),
         settled_tx_accumulator: first.settled_tx_accumulator.clone(),
     };
-    let mut skipped = build_burn(
-        &keys,
-        &first_snapshot,
-        2,
-        1,
-        DEPOSIT_AMOUNT - 10,
-        &first.new_balance_witness,
-        2,
-        &mut rng,
-    );
+    let mut skipped = build_burn(&keys, &first_snapshot, 2, 1, 2, &mut rng);
     skipped.debit_payload.proposed_next_state =
         sign_all(skipped.debit_payload.proposed_next_state.clone(), &keys);
     assert!(matches!(
@@ -759,16 +737,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         )) if message.contains("expected 1")
     ));
 
-    let second = build_burn(
-        &keys,
-        &first_snapshot,
-        1,
-        7,
-        DEPOSIT_AMOUNT - 10,
-        &first.new_balance_witness,
-        3,
-        &mut rng,
-    );
+    let second = build_burn(&keys, &first_snapshot, 1, 7, 3, &mut rng);
 
     // ── Pre-sign exit kit (doc/docs/pre-sign-exit-kit.md): before any member signs the second
     // burn, the producer stages its block for the UNSIGNED proposal and the live balance service
@@ -1133,7 +1102,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         members: members.clone(),
         settled_tx_accumulator: second.settled_tx_accumulator.clone(),
     };
-    let mut inter = build_inter_channel_send_token_at_base_nonce(
+    let mut inter = build_inter_channel_send_token_at_base_nonce_decrypted(
         &keys[0],
         &second_snapshot,
         0,
@@ -1145,8 +1114,6 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         0,
         2,
         INTER_AMOUNT,
-        DEPOSIT_AMOUNT - 10 - 7,
-        &second.new_balance_witness,
         fresh_root(20),
         LEVEL,
         &mut rng,

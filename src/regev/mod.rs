@@ -34,10 +34,15 @@ pub use transfer_stark::{
     CHANNEL_UPDATE_DECRYPTED_ZKP_DOMAIN, CHANNEL_UPDATE_ZKP_DOMAIN, DecryptedSend,
     RealRegevProofVerifier, RegevProofPurpose, RegevSecurityLevel, RegevStatement,
     WITHDRAW_CLAIM_ZKP_DOMAIN, prove_balance_refresh, prove_balance_refresh_witnessed,
-    prove_channel_tx, prove_channel_tx_decrypted, prove_channel_update,
-    prove_channel_update_decrypted, prove_decrypted_send, prove_hash_sig, prove_withdraw_claim,
-    verify_balance_refresh, verify_channel_tx, verify_channel_tx_decrypted, verify_channel_update,
+    prove_channel_tx_decrypted, prove_channel_update_decrypted, prove_decrypted_send,
+    prove_hash_sig, prove_withdraw_claim, verify_balance_refresh, verify_channel_tx_decrypted,
     verify_channel_update_decrypted, verify_hash_sig, verify_withdraw_claim,
+};
+/// The retired witnessed E-1/E-2 provers and verifiers (no key binding — 2026-10-15 review):
+/// test-only adversarial tooling, never a live purpose.
+#[cfg(test)]
+pub(crate) use transfer_stark::{
+    prove_channel_tx, prove_channel_update, verify_channel_tx, verify_channel_update,
 };
 
 use plonky2_keccak::utils::solidity_keccak256;

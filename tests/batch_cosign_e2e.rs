@@ -11,9 +11,9 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BatchTxApply, BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_batch_next_state, build_record, build_send, decrypt_balance,
-        default_settled_tx_accumulator, regev_pks_array, sign_state, verify_all_signatures,
-        verify_send_transition, verify_slim_send_tx, verify_snapshot,
+        assemble_genesis_state, build_batch_next_state, build_record, build_send_token_decrypted,
+        decrypt_balance, default_settled_tx_accumulator, regev_pks_array, sign_state,
+        verify_all_signatures, verify_send_transition, verify_slim_send_tx, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -63,8 +63,8 @@ fn batched_cosign_two_sends_one_transition() {
     let record = build_record(7, &members, 0, 0).expect("record");
 
     let (bal0, bal1, bal2) = (50u64, 30u64, 20u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
-    let (ct1, w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let (ct2, _w2) = encrypt_amount(&mut rng, &m2.regev_pk, bal2).expect("enc2");
     let mut genesis = assemble_genesis_state(
         &record,
@@ -89,27 +89,25 @@ fn batched_cosign_two_sends_one_transition() {
     // Two solo payloads anchored at the SAME head: m0→m2 (7) and m1→m0 (5).
     // m0 both debits and is credited in the same batch (R2, fold-order soundness).
     let (amt_a, amt_b) = (7u64, 5u64);
-    let BuiltSend { payload: pa, .. } = build_send(
+    let BuiltSend { payload: pa, .. } = build_send_token_decrypted(
         &m0,
         &snapshot,
         0,
         2,
+        0,
         amt_a,
-        bal0,
-        &w0,
         Bytes32::default(),
         LEVEL,
         &mut rng,
     )
     .expect("build m0→m2");
-    let BuiltSend { payload: pb, .. } = build_send(
+    let BuiltSend { payload: pb, .. } = build_send_token_decrypted(
         &m1,
         &snapshot,
         1,
         0,
+        0,
         amt_b,
-        bal1,
-        &w1,
         Bytes32::default(),
         LEVEL,
         &mut rng,
@@ -191,7 +189,7 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
     let record = build_record(8, &members, 0, 0).expect("record");
 
     let (bal0, bal1) = (40u64, 10u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let mut genesis = assemble_genesis_state(
         &record,
@@ -212,14 +210,13 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &m0,
         &snapshot,
         0,
         1,
+        0,
         5,
-        bal0,
-        &w0,
         Bytes32::default(),
         LEVEL,
         &mut rng,

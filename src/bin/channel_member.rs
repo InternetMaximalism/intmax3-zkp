@@ -272,9 +272,10 @@ const DELEGATE_GENESIS: u64 = 0;
 /// described the GENESIS token (local position 0): the CLI members are funded at genesis in token
 /// 0 and nowhere else. A non-genesis position is credited HOMOMORPHICALLY (an L1 deposit import,
 /// or an incoming in-channel transfer), which leaves a ciphertext this process holds no encryption
-/// witness for AND `pending_adds > 0` — `build_send_token` refuses both, fail-closed. `refresh`
-/// is the value-preserving way out; this record is what makes the resulting witness reconstructible
-/// on the NEXT process invocation without persisting unserializable key material.
+/// witness for AND `pending_adds > 0`. Sending needs neither (the decrypted send,
+/// `build_send_token_decrypted`, opens the position under the member's own key); `refresh` remains
+/// the value-preserving maintenance operation, and this record is what makes the resulting witness
+/// reconstructible on the NEXT process invocation without persisting unserializable key material.
 ///
 /// SECURITY: `seed_hex` is 32 bytes drawn from the OS CSPRNG at refresh time, never derived from
 /// channel state. Regev encryption randomness must never be reused across two different plaintexts

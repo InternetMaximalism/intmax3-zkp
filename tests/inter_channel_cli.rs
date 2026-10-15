@@ -17,7 +17,7 @@
 //! into `settled_tx_chain` so the genesis deposit attestation can never reconcile (see the SECURITY
 //! note in `channel_member.rs`). So we seed each channel's `cli_state.json` directly with a
 //! co-signed genesis built through the SAME `wallet_core` API, then drive the binary. The debit
-//! payload + transfer descriptor are produced by the REAL `build_inter_channel_send` (real E-2
+//! payload + transfer descriptor are produced by the REAL inter-channel builder (real decrypted E-2
 //! STARK at Production level), so the binary co-signs and credits a genuine transfer.
 //!
 //! WHAT EACH TEST PROVES:
@@ -49,8 +49,9 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_burn_send, build_inter_channel_send_token_at_base_nonce,
-        build_record, decrypt_balance, default_settled_tx_accumulator, sign_state, verify_snapshot,
+        assemble_genesis_state, build_burn_send_token_at_base_nonce_decrypted,
+        build_inter_channel_send_token_at_base_nonce_decrypted, build_record, decrypt_balance,
+        default_settled_tx_accumulator, sign_state, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -168,8 +169,6 @@ fn fresh_root(tag: u32) -> Bytes32 {
 struct ChannelFixture {
     record: ChannelRecord,
     snapshot: ChannelSnapshot,
-    witnesses: Vec<intmax3_zkp::regev::AmountWitness>,
-    balances: Vec<u64>,
     controlled: Vec<ControlledMember>,
 }
 
@@ -186,18 +185,16 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
     let record = build_record(channel_id, &members, 0, 0).expect("record");
 
     let mut cts: Vec<RegevCiphertext> = Vec::new();
-    let mut witnesses = Vec::new();
     let mut controlled = Vec::new();
     for (i, &bal) in balances.iter().enumerate() {
         let balance_seed = 0xBA_0000 + i as u64;
-        let (ct, w) = encrypt_amount(
+        let (ct, _w) = encrypt_amount(
             &mut StdRng::seed_from_u64(balance_seed),
             &keys[i].regev_pk,
             bal,
         )
         .expect("enc");
         cts.push(ct);
-        witnesses.push(w);
         controlled.push(ControlledMember {
             slot: i as u16,
             keygen_seed: cli_keygen_seed(i as u8),
@@ -237,8 +234,6 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
     ChannelFixture {
         record,
         snapshot,
-        witnesses,
-        balances: balances.to_vec(),
         controlled,
     }
 }
@@ -328,11 +323,10 @@ fn cli_state(fx: ChannelFixture) -> CliState {
 }
 
 /// Build a REAL debit payload + transfer descriptor for an A→B transfer of AMT, sender slot 0 →
-/// recipient slot 1, via `wallet_core::build_inter_channel_send` (real E-2 STARK).
+/// recipient slot 1, via `wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted`
+/// (real decrypted E-2 STARK).
 fn build_transfer(
     a_snapshot: &ChannelSnapshot,
-    a_balances: &[u64],
-    a_witnesses: &[intmax3_zkp::regev::AmountWitness],
     b_record: &ChannelRecord,
     sender_slot: u16,
     recipient_slot: u16,
@@ -346,7 +340,7 @@ fn build_transfer(
     let dest_id = ChannelId::new(B_ID as u64).unwrap();
     let recipient_pk = b_keys[recipient_slot as usize].regev_pk.clone();
     let recipient_pk_g = b_record.member_pk_gs[recipient_slot as usize];
-    build_inter_channel_send_token_at_base_nonce(
+    build_inter_channel_send_token_at_base_nonce_decrypted(
         &a_keys[sender_slot as usize],
         a_snapshot,
         sender_slot,
@@ -358,8 +352,6 @@ fn build_transfer(
         a_snapshot.state.balance_state.token_registry[0],
         0,
         amount,
-        a_balances[sender_slot as usize],
-        &a_witnesses[sender_slot as usize],
         fresh_root(nullifier_tag),
         LEVEL,
         &mut rng,
@@ -367,7 +359,7 @@ fn build_transfer(
     .expect("build_inter_channel_send")
 }
 
-/// VALIDATES `build_burn_send` (abstract2-1 §3.6 partial withdrawal, (ii) padding-receiver) with
+/// VALIDATES the burn builder (abstract2-1 §3.6 partial withdrawal, (ii) padding-receiver) with
 /// the REAL E-2 STARK + its build-time self-check (no anvil). A PASS proves the soundness-critical
 /// claim: `receiver_delta = encrypt(amount, RegevPk::padding())` is ACCEPTED by the channel-layer
 /// verification (the E-2 `sender_delta==receiver_delta==amount` constraint holds with the phantom
@@ -390,15 +382,15 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
     let prev_enc = a.snapshot.state.balance_state.enc_balances.clone();
 
     let mut rng = StdRng::seed_from_u64(0xB0_0000);
-    let built = build_burn_send(
+    let built = build_burn_send_token_at_base_nonce_decrypted(
         &a_keys[sender_slot as usize],
         &a.snapshot,
-        0, // registered ChannelLeaf has not consumed a base send slot
+        // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
+        a.snapshot.state.balance_state.token_registry[0],
+        0,
         amount,
-        a.balances[sender_slot as usize], // before_amount = 50 (the member's own share)
-        &a.witnesses[sender_slot as usize],
         fresh_root(0xBEEF),
         LEVEL,
         &mut rng,
@@ -499,15 +491,15 @@ fn burn_send_base_chain_matches_channel() {
     .unwrap();
 
     let mut rng = StdRng::seed_from_u64(0xB0_0000);
-    let built = build_burn_send(
+    let built = build_burn_send_token_at_base_nonce_decrypted(
         &a_keys[sender_slot as usize],
         &a.snapshot,
-        0, // registered ChannelLeaf has not consumed a base send slot
+        // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
+        a.snapshot.state.balance_state.token_registry[0],
+        0,
         amount,
-        a.balances[sender_slot as usize],
-        &a.witnesses[sender_slot as usize],
         fresh_root(0xBEEF),
         LEVEL,
         &mut rng,
@@ -564,7 +556,7 @@ fn burn_send_base_chain_matches_channel() {
 /// `pw-submit`'s pre-flight refuses to consume the channel's single-use partial-withdrawal chain
 /// key unless the tuple its nullifier commits to reproduces the N-of-N co-signed `h2_tag`. That
 /// comparison is only worth anything if it PASSES on an honest burn — a guard that always fires is
-/// as useless as one that never does. This drives the real `build_burn_send` and asserts the
+/// as useless as one that never does. This drives the real burn builder and asserts the
 /// reconstruction the guard performs lands exactly on the value the co-signers signed.
 ///
 /// It is also the anti-drift test for the burn's L1 leaf: `burn_withdrawal_leaf` is fed ONLY from
@@ -587,15 +579,15 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
     let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
 
     let mut rng = StdRng::seed_from_u64(0xB0_0000);
-    let built = build_burn_send(
+    let built = build_burn_send_token_at_base_nonce_decrypted(
         &a_keys[sender_slot as usize],
         &a.snapshot,
-        0, // registered ChannelLeaf has not consumed a base send slot
+        // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
+        a.snapshot.state.balance_state.token_registry[0],
+        0,
         amount,
-        a.balances[sender_slot as usize],
-        &a.witnesses[sender_slot as usize],
         fresh_root(0xBEEF),
         LEVEL,
         &mut rng,
@@ -696,8 +688,6 @@ fn inter_channel_cli_end_to_end() {
 
     let b_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
     let b_record = b.record.clone();
-    let a_balances = a.balances.clone();
-    let a_witnesses_clone: Vec<_> = a.witnesses.clone();
 
     let a_snapshot = a.snapshot.clone();
     let b_snapshot = b.snapshot.clone();
@@ -718,8 +708,6 @@ fn inter_channel_cli_end_to_end() {
     // ---- Produce a REAL debit payload + transfer descriptor via wallet_core (real E-2). ----
     let built = build_transfer(
         &a_snapshot,
-        &a_balances,
-        &a_witnesses_clone,
         &b_record,
         sender_slot,
         recipient_slot,
@@ -988,8 +976,6 @@ fn inter_channel_cli_forged_a_state_refused() {
     let b_record = b.record.clone();
     let a_snapshot = a.snapshot.clone();
     let b_snapshot = b.snapshot.clone();
-    let a_balances = a.balances.clone();
-    let a_witnesses = a.witnesses.clone();
     let b_fund_before = b_snapshot.state.channel_fund.amounts[0];
     let recipient_before = decrypt_balance(
         &b_keys[recipient_slot as usize],
@@ -1009,8 +995,6 @@ fn inter_channel_cli_forged_a_state_refused() {
     // PUBLIC seeds), exactly the value-creation hole the old `/api/inter/credit` path enabled.
     let built = build_transfer(
         &a_snapshot,
-        &a_balances,
-        &a_witnesses,
         &b_record,
         sender_slot,
         recipient_slot,
@@ -1118,8 +1102,6 @@ fn inter_channel_cli_tampered_amount_refused() {
     let b = build_cli_channel(B_ID, &[20, 40, 60]);
     let a_snapshot = a.snapshot.clone();
     let b_record = b.record.clone();
-    let a_balances = a.balances.clone();
-    let a_witnesses = a.witnesses.clone();
 
     let a_state = cli_state(a);
     let a_committed_digest = a_state.snapshot.state.digest;
@@ -1127,17 +1109,7 @@ fn inter_channel_cli_tampered_amount_refused() {
     write_state(&ch_a, &a_state);
     write_state(&ch_b, &cli_state(b));
 
-    let built = build_transfer(
-        &a_snapshot,
-        &a_balances,
-        &a_witnesses,
-        &b_record,
-        0,
-        1,
-        AMT,
-        0x412,
-        0x1C_C1_1,
-    );
+    let built = build_transfer(&a_snapshot, &b_record, 0, 1, AMT, 0x412, 0x1C_C1_1);
     // Tamper the descriptor amount; the real debit payload (extends A's head) stays valid, and the
     // descriptor/debit preflight gate must reject before either leg can be persisted.
     let mut tampered = built.transfer_descriptor.clone();

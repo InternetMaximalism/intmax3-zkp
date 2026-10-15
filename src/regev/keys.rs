@@ -29,6 +29,13 @@ pub const REGEV_PK_ROOT_DOMAIN: u32 = 0x494d5252;
 /// [`regev_pk_root`]; both are built from the same canonical coefficients at registration (DB).
 pub const REGEV_PK_POSEIDON_DOMAIN: u64 = 0x494d5250;
 
+/// Centered-magnitude bound below which a whole key polynomial counts as "small" for
+/// [`RegevPk::reject_degenerate`]: `2^20`, far above every term a degenerate opening needs
+/// (`Δ`-free terms are ternary/CBD-sized) and far below where a uniform coefficient lands
+/// (`q ≈ 2^31`; the chance that all `REGEV_N` coefficients of a uniform polynomial fall within
+/// `±2^20` is `2^-10` per coefficient, `2^-20480` overall).
+pub const DEGENERATE_SMALL_BOUND: u32 = 1 << 20;
+
 /// A member's Regev public key: uniform `a` and `b = a·s + e`, both `REGEV_N` coefficients in
 /// canonical form (`< REGEV_Q`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -69,6 +76,56 @@ impl RegevPk {
             return Err(RegevError::InvalidPk(format!(
                 "non-canonical coefficient {c} (>= q = {REGEV_Q})"
             )));
+        }
+        Ok(())
+    }
+
+    /// Registration-time screen against the trivially recognizable DEGENERATE key family
+    /// (2026-10-15 adversarial review): refuses a key whose `a` or `b` is the zero polynomial or
+    /// a monomial (at most one nonzero coefficient — e.g. `Δ·1`), a constant multiple of
+    /// `1 + x + … + x^{n-1}` (all coefficients equal), or "small" (every centered coefficient
+    /// within `±`[`DEGENERATE_SMALL_BOUND`]). A key from [`channel_keygen`] trips none of these
+    /// except with negligible probability (`a` is uniform over `Z_q^n`, `b = a·s + e` is
+    /// Ring-LWE pseudorandom), so an honest wallet is never refused. [`Self::padding`] IS
+    /// refused: it is the padding-slot constant and must never be registered for a member.
+    ///
+    /// SECURITY (what this is NOT — and why it is not load-bearing): this is NOT a
+    /// well-formedness proof, and no native test on `(a, b)` can be one. An encryption-witnessed
+    /// opening `c1 = a·r + e1, c2 = b·r + e2 + Δ·m` of the all-zero ciphertext to a nonzero `m`
+    /// only needs `a·r ≡ -e1` and `b·r ≡ -(e2 + Δ·m)` for a ternary `r` and CBD-small `e1, e2`.
+    /// For `(a, b) = (0, Δ·1)` that is `r = -m`, which this screen catches; but for ANY ternary
+    /// `r` that is a unit of `Z_q[x]/(x^n + 1)` the pair `a = -e1·r^{-1}`, `b = -(e2 + Δ·m)·r^{-1}`
+    /// satisfies the same identities and is indistinguishable from a uniform key by any
+    /// coefficient statistic. The load-bearing fix is therefore at the relying parties: they
+    /// accept ONLY the decrypted proof purposes, whose AIR binds `b = a·s + e_pk` in-proof
+    /// (`state_update_verifier::verify_decrypted_transfer_proof`); under a key with that
+    /// binding the zero ciphertext decrypts to 0 for every `s`, so no opening to a nonzero
+    /// amount exists. This screen only refuses the keys that would also make the holder's own
+    /// decrypted proving impossible, and records the limitation where the key enters.
+    pub fn reject_degenerate(&self) -> Result<(), RegevError> {
+        self.validate()?;
+        for (name, poly) in [("a", &self.a), ("b", &self.b)] {
+            let nonzero = poly.iter().filter(|&&c| c != 0).count();
+            if nonzero <= 1 {
+                return Err(RegevError::InvalidPk(format!(
+                    "degenerate key: `{name}` has {nonzero} nonzero coefficient(s) (zero \
+                     polynomial or monomial)"
+                )));
+            }
+            if poly.iter().all(|&c| c == poly[0]) {
+                return Err(RegevError::InvalidPk(format!(
+                    "degenerate key: every coefficient of `{name}` equals {}",
+                    poly[0]
+                )));
+            }
+            let small =
+                |c: u32| c <= DEGENERATE_SMALL_BOUND || REGEV_Q - c <= DEGENERATE_SMALL_BOUND;
+            if poly.iter().all(|&c| small(c)) {
+                return Err(RegevError::InvalidPk(format!(
+                    "degenerate key: every centered coefficient of `{name}` lies within \
+                     ±{DEGENERATE_SMALL_BOUND}"
+                )));
+            }
         }
         Ok(())
     }
@@ -201,5 +258,109 @@ mod tests {
             "member order must be part of the root preimage"
         );
         assert_ne!(root, regev_pk_root(&members[..2]));
+    }
+
+    /// `reject_degenerate` admits every honest key and refuses each member of the screened
+    /// degenerate family — including the review's `(0, Δ·1)` and its nonzero-`a` relatives that
+    /// the earlier "nonzero `a`" registration screen admitted.
+    #[test]
+    fn reject_degenerate_admits_honest_keys_and_refuses_the_screened_family() {
+        let mut rng = SmallRng::seed_from_u64(0xde6e);
+        for _ in 0..8 {
+            let (pk, _) = channel_keygen(&mut rng);
+            pk.reject_degenerate()
+                .expect("an honest key is never refused");
+        }
+        let delta = channel_regev_params().delta();
+        let constant = |value: u32| {
+            let mut poly = vec![0u32; REGEV_N];
+            poly[0] = value;
+            poly
+        };
+        let (honest, _) = channel_keygen(&mut rng);
+        let cases: Vec<(&str, RegevPk)> = vec![
+            ("padding (a = b = 0)", RegevPk::padding()),
+            (
+                "(0, Δ·1)",
+                RegevPk {
+                    a: constant(0),
+                    b: constant(delta),
+                },
+            ),
+            (
+                "(1, Δ·1)",
+                RegevPk {
+                    a: constant(1),
+                    b: constant(delta),
+                },
+            ),
+            (
+                "(2·x^7, Δ·1)",
+                RegevPk {
+                    a: {
+                        let mut a = vec![0u32; REGEV_N];
+                        a[7] = 2;
+                        a
+                    },
+                    b: constant(delta),
+                },
+            ),
+            (
+                "honest a, monomial b",
+                RegevPk {
+                    a: honest.a.clone(),
+                    b: constant(delta),
+                },
+            ),
+            (
+                "all coefficients equal",
+                RegevPk {
+                    a: honest.a.clone(),
+                    b: vec![delta; REGEV_N],
+                },
+            ),
+            (
+                "small a (ternary-looking)",
+                RegevPk {
+                    a: (0..REGEV_N)
+                        .map(|i| [1u32, REGEV_Q - 1, 0][i % 3])
+                        .collect(),
+                    b: honest.b.clone(),
+                },
+            ),
+            (
+                "small b (every centered coefficient within the bound)",
+                RegevPk {
+                    a: honest.a.clone(),
+                    b: (0..REGEV_N)
+                        .map(|i| {
+                            if i % 2 == 0 {
+                                i as u32
+                            } else {
+                                REGEV_Q - i as u32
+                            }
+                        })
+                        .collect(),
+                },
+            ),
+        ];
+        for (label, pk) in cases {
+            let err = pk
+                .reject_degenerate()
+                .expect_err(&format!("{label} must be refused"));
+            assert!(
+                err.to_string().contains("degenerate key"),
+                "{label}: unexpected error {err}"
+            );
+        }
+        // Still a canonicality check first: a non-canonical key is refused as such.
+        let mut bad = honest;
+        bad.a[0] = REGEV_Q;
+        assert!(
+            !bad.reject_degenerate()
+                .unwrap_err()
+                .to_string()
+                .contains("degenerate key")
+        );
     }
 }

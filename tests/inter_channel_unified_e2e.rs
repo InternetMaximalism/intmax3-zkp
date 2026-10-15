@@ -51,7 +51,7 @@ use intmax3_zkp::{
     falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
     regev::{
         RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount,
-        prove_channel_update,
+        prove_channel_update_decrypted,
     },
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{
@@ -316,7 +316,7 @@ fn unified_inter_channel_transfer_e2e() {
     };
 
     // ---- genesis A (deposit-backed) + §F-1; retain alice's witness for the E-2 ----
-    let (a_ct0, a_w0) = encrypt_amount(&mut crng, &a_pks[0], a_bal[0]).unwrap();
+    let (a_ct0, _a_w0) = encrypt_amount(&mut crng, &a_pks[0], a_bal[0]).unwrap();
     let a_cts = [
         a_ct0.clone(),
         encrypt_amount(&mut crng, &a_pks[1], a_bal[1]).unwrap().0,
@@ -362,11 +362,12 @@ fn unified_inter_channel_transfer_e2e() {
         encrypt_amount(&mut crng, &a_pks[0], a_bal[0] - AMT).unwrap();
     let sdelta = encrypt_amount(&mut crng, &a_pks[0], AMT).unwrap();
     let rdelta = encrypt_amount(&mut crng, &dest_pk, AMT).unwrap();
-    let e2 = prove_channel_update(
+    let e2 = prove_channel_update_decrypted(
         LEVEL,
         &a_pks[0],
+        &a_keys[0].regev_sk,
         &dest_pk,
-        (&a_ct0, &a_w0),
+        &a_ct0,
         (&alice_after, &alice_after_w),
         (&sdelta.0, &sdelta.1),
         (&rdelta.0, &rdelta.1),

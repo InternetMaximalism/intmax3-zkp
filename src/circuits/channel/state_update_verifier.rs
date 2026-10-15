@@ -154,21 +154,26 @@ impl RegevProofVerifier for RealRegevProofVerifier {
     }
 }
 
-/// Verify a transfer proof whose statement shape is shared by a witnessed purpose and its
-/// refresh-free decrypted twin: [`RegevStatement::ChannelTx`] ↔ `ChannelTx` /
-/// `ChannelTxDecrypted`, [`RegevStatement::ChannelUpdate`] ↔ `ChannelUpdate` /
-/// `ChannelUpdateDecrypted`. The decrypted purpose is tried FIRST (it is what the wallet now
-/// produces); the witnessed purpose is still accepted for senders that hold an encryption
-/// witness of their `before` ciphertext (CLI genesis / refresh flows).
+/// Verify a transfer proof under the ONE purpose a relying party admits for its statement
+/// shape: [`RegevStatement::ChannelTx`] ↔ `ChannelTxDecrypted`, [`RegevStatement::ChannelUpdate`]
+/// ↔ `ChannelUpdateDecrypted`. These are the purposes every wallet produces (refresh-free sends,
+/// 2026-09-21); there is no other admissible purpose for a live transition.
 ///
-/// SECURITY: both purposes prove the SAME conservation statement over the SAME verifier-rebuilt
-/// public ciphertexts and keys (`before = after + amount`, `after`/deltas fresh and well-formed
-/// under the bound keys); they differ only in how the sender opens `before` (encryption witness
-/// vs. decryption under the secret key behind the sender's public key). Accepting either
-/// therefore does not widen what a relying party admits. Each purpose is a distinct transcript
-/// domain and a structurally different AIR, so a proof verifies under at most one of them; a
-/// role/backend mismatch is reported immediately (it is purpose-independent).
-pub fn verify_transfer_proof_either<VR>(
+/// SECURITY (2026-10-15 adversarial review — why there is no witnessed fallback): the retired
+/// witnessed purposes (`ChannelTx` / `ChannelUpdate`, now test-only adversarial tooling in
+/// `regev::transfer_stark`) opened `before` by an ENCRYPTION witness under the sender's public
+/// `(a, b)` and never bound `b = a·s + e_pk`. A member who registered a degenerate key —
+/// `(0, Δ·1)`, or any `(a, b)` chosen so that `a·r ≡ -e1` for a ternary `r` — could "open"
+/// its canonical ZERO ciphertext to u64::MAX and spend value it never held: hidden balances
+/// exceeding the fund in-channel (honest members lose at close under the per-token cap), or a
+/// fund debit for value never deposited inter-channel. Every fallback-era gate accepted that
+/// proof once the decrypted check had failed. The decrypted AIR opens `before` by DECRYPTION
+/// under a secret key whose binding to the public key is proven in-circuit, so its opening is
+/// the plaintext for every key, degenerate or not; the registration-time screen
+/// (`RegevPk::reject_degenerate`) is defense in depth only. A witnessed proof fails here on the
+/// transcript domain word and on the structural width/PV mismatch; a role/backend mismatch is
+/// reported first (it is purpose-independent).
+pub fn verify_decrypted_transfer_proof<VR>(
     regev_verifier: &VR,
     envelope: &ChannelProofEnvelope,
     statement: &RegevStatement,
@@ -176,33 +181,16 @@ pub fn verify_transfer_proof_either<VR>(
 where
     VR: RegevProofVerifier,
 {
-    let (decrypted, witnessed) = match statement {
-        RegevStatement::ChannelTx { .. } => (
-            RegevProofPurpose::ChannelTxDecrypted,
-            RegevProofPurpose::ChannelTx,
-        ),
-        RegevStatement::ChannelUpdate { .. } => (
-            RegevProofPurpose::ChannelUpdateDecrypted,
-            RegevProofPurpose::ChannelUpdate,
-        ),
+    let purpose = match statement {
+        RegevStatement::ChannelTx { .. } => RegevProofPurpose::ChannelTxDecrypted,
+        RegevStatement::ChannelUpdate { .. } => RegevProofPurpose::ChannelUpdateDecrypted,
         _ => {
             return Err(ChannelStateUpdateError::ProofVerification(
-                "statement shape has no decrypted twin".to_string(),
+                "statement shape is not a transfer statement".to_string(),
             ));
         }
     };
-    match regev_verifier.verify(envelope, decrypted, statement) {
-        Ok(()) => Ok(()),
-        Err(ChannelStateUpdateError::ProofVerification(first)) => regev_verifier
-            .verify(envelope, witnessed, statement)
-            .map_err(|second| {
-                ChannelStateUpdateError::ProofVerification(format!(
-                    "neither the decrypted ({decrypted:?}) nor the witnessed ({witnessed:?}) \
-                     purpose verified: [{first}] / [{second}]"
-                ))
-            }),
-        Err(other) => Err(other),
-    }
+    regev_verifier.verify(envelope, purpose, statement)
 }
 
 #[derive(Debug, Error)]
@@ -564,9 +552,10 @@ impl InChannelTransferUpdateWitness {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        // (g) Mandatory channelTxZKP (E-1, or its refresh-free decrypted twin — see
-        // `verify_transfer_proof_either`), statement rebuilt from checked data. TM-2 leg 4: the
-        // proof is handed exactly the (prev, after) ciphertexts selected by the SIGNED token_slot.
+        // (g) Mandatory decrypted channelTxZKP (`ChannelTxDecrypted` ONLY — see
+        // `verify_decrypted_transfer_proof`), statement rebuilt from checked data. TM-2 leg 4:
+        // the proof is handed exactly the (prev, after) ciphertexts selected by the SIGNED
+        // token_slot.
         let statement = RegevStatement::ChannelTx {
             sender_pk: self.regev_pks[self.sender_index].clone(),
             recipient_pk: self.regev_pks[self.recipient_index].clone(),
@@ -576,7 +565,11 @@ impl InChannelTransferUpdateWitness {
             after: self.next_state.balance_state.enc_balances[self.sender_index][token_slot]
                 .clone(),
         };
-        verify_transfer_proof_either(regev_verifier, &self.channel_tx.channel_tx_zkp, &statement)?;
+        verify_decrypted_transfer_proof(
+            regev_verifier,
+            &self.channel_tx.channel_tx_zkp,
+            &statement,
+        )?;
         // (h) Recipient-only decryption check.
         if let Some(sk) = &self.recipient_sk {
             let expected = self.expected_amount.ok_or_else(|| {
@@ -785,7 +778,7 @@ impl InterChannelSendUpdateWitness {
             // resolution above admitted.
             token_index: self.inter_channel_tx.token_index,
         };
-        verify_transfer_proof_either(
+        verify_decrypted_transfer_proof(
             regev_verifier,
             &self.inter_channel_tx.channel_update_zkp,
             &statement,
@@ -1152,9 +1145,9 @@ impl ReceiverBundleApplyUpdateWitness {
             self.recipient_index,
             token_slot,
         )?;
-        // Re-verify the E-2 proof that was signed into the IMIT digest (flowReceive3). The
-        // sender-side before/after ciphertexts come from the off-chain witness share — the STARK
-        // transcript binds them, so a forged pair cannot verify.
+        // Re-verify the decrypted E-2 proof that was signed into the IMIT digest (flowReceive3).
+        // The sender-side before/after ciphertexts come from the off-chain witness share — the
+        // STARK transcript binds them, so a forged pair cannot verify.
         let statement = RegevStatement::ChannelUpdate {
             sender_pk: self.source_sender_pk.clone(),
             recipient_pk: self.regev_pks[self.recipient_index].clone(),
@@ -1167,7 +1160,7 @@ impl ReceiverBundleApplyUpdateWitness {
             // registry resolution admitted.
             token_index: self.inter_channel_tx.token_index,
         };
-        verify_transfer_proof_either(
+        verify_decrypted_transfer_proof(
             regev_verifier,
             &self.inter_channel_tx.channel_update_zkp,
             &statement,
@@ -2175,7 +2168,8 @@ mod tests {
         },
         ethereum_types::{address::Address, u256::U256},
         regev::{
-            RegevSecurityLevel, channel_keygen, encrypt_amount, prove_channel_tx, regev_pk_root,
+            RegevSecurityLevel, channel_keygen, encrypt_amount, prove_channel_tx_decrypted,
+            regev_pk_root,
         },
     };
 
@@ -2212,8 +2206,8 @@ mod tests {
         std::array::from_fn(|i| active.get(i).cloned().unwrap_or_else(RegevPk::padding))
     }
 
-    /// Full in-channel fixture: 3 real key pairs, real balance encryptions, a real E-1 STARK at
-    /// RegevSecurityLevel::Test, and prev/next states wired per the v2 transition rules.
+    /// Full in-channel fixture: 3 real key pairs, real balance encryptions, a real decrypted E-1
+    /// STARK at RegevSecurityLevel::Test, and prev/next states wired per the v2 transition rules.
     struct InChannelFixture {
         witness: InChannelTransferUpdateWitness,
         sks: Vec<RegevSk>,
@@ -2266,11 +2260,12 @@ mod tests {
         let after_s = encrypt_amount(&mut rng, &pks[0], 43).unwrap();
         let after_r = add_ciphertexts(&before_r.0, &enc_amount.0).unwrap();
 
-        let proof = prove_channel_tx(
+        let proof = prove_channel_tx_decrypted(
             RegevSecurityLevel::Test,
             &pks[0],
+            &sk0,
             &pks[1],
-            (&before_s.0, &before_s.1),
+            &before_s.0,
             (&enc_amount.0, &enc_amount.1),
             (&after_s.0, &after_s.1),
         )
@@ -2805,24 +2800,26 @@ mod tests {
         let enc_amount1 = encrypt_amount(&mut rng, &pks[1], 7).unwrap();
         let after_s1 = encrypt_amount(&mut rng, &pks[0], 33).unwrap();
         let after_r1 = add_ciphertexts(&r1.0, &enc_amount1.0).unwrap();
-        let proof1 = prove_channel_tx(
+        let proof1 = prove_channel_tx_decrypted(
             RegevSecurityLevel::Test,
             &pks[0],
+            &sk0,
             &pks[1],
-            (&s1.0, &s1.1),
+            &s1.0,
             (&enc_amount1.0, &enc_amount1.1),
             (&after_s1.0, &after_s1.1),
         )
         .unwrap();
 
-        // A REAL spare token-0 E-1 (same parties) for the proof-substitution negative.
+        // A REAL spare token-0 decrypted E-1 (same parties) for the proof-substitution negative.
         let enc_amount0 = encrypt_amount(&mut rng, &pks[1], 7).unwrap();
         let after_s0 = encrypt_amount(&mut rng, &pks[0], 43).unwrap();
-        let proof0 = prove_channel_tx(
+        let proof0 = prove_channel_tx_decrypted(
             RegevSecurityLevel::Test,
             &pks[0],
+            &sk0,
             &pks[1],
-            (&s0.0, &s0.1),
+            &s0.0,
             (&enc_amount0.0, &enc_amount0.1),
             (&after_s0.0, &after_s0.1),
         )
@@ -3748,6 +3745,162 @@ mod tests {
         w.next_state.balance_state.state_version += 1;
         w.next_state = w.next_state.with_computed_digest();
         assert!(w.verify().is_err(), "state_version skip must be rejected");
+    }
+
+    /// SECURITY (2026-10-15 adversarial review — degenerate key × witnessed fallback): a member
+    /// whose registered Regev key is `(0, Δ·1)` "opens" its canonical-zero balance position to
+    /// u64::MAX under the witnessed E-1 AIR (no key binding) and sends 1,000,000 out of a
+    /// 40-token channel. The in-channel co-signer gate must refuse the transition: only the
+    /// decrypted purpose, whose AIR binds `b = a·s + e_pk`, is admissible. RED on the
+    /// fallback-era gate, which accepted the witnessed proof once the decrypted check failed.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn degenerate_key_witnessed_e1_is_refused_by_the_in_channel_gate() {
+        use crate::regev::{
+            prove_channel_tx,
+            transfer_stark::adversarial::{degenerate_pk, forged_zero_opening},
+            verify_channel_tx,
+        };
+        let mut rng = SmallRng::seed_from_u64(0xde6e_0001);
+        let channel_id = ChannelId::new(5).unwrap();
+        let pk0 = degenerate_pk(0);
+        let (pk1, sk1) = channel_keygen(&mut rng);
+        let (pk2, _sk2) = channel_keygen(&mut rng);
+        let pks = pad_pks(&[pk0, pk1, pk2]);
+        let record = ChannelRecord {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            member_pk_gs: pad_hashes(&[pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)]),
+            member_pubkeys_root: Bytes32::from_u32_slice(&[1, 1, 1, 1, 0, 0, 0, 0]).unwrap(),
+            set_version: 0,
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(7u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: regev_pk_root(&pks),
+        };
+
+        // The attacker's position is the canonical ZERO ciphertext (what every joined delegate
+        // and every emptied slot holds); the honest members hold 10 and 30, fund = 40.
+        let zero = RegevCiphertext::padding();
+        let before_r = encrypt_amount(&mut rng, &pks[1], 10).unwrap();
+        let before_t = encrypt_amount(&mut rng, &pks[2], 30).unwrap();
+        const AMOUNT: u64 = 1_000_000;
+        let enc_amount = encrypt_amount(&mut rng, &pks[1], AMOUNT).unwrap();
+        let after_s = encrypt_amount(&mut rng, &pks[0], u64::MAX - AMOUNT).unwrap();
+        let after_r = add_ciphertexts(&before_r.0, &enc_amount.0).unwrap();
+        let proof = prove_channel_tx(
+            RegevSecurityLevel::Test,
+            &pks[0],
+            &pks[1],
+            (&zero, &forged_zero_opening(0, u64::MAX)),
+            (&enc_amount.0, &enc_amount.1),
+            (&after_s.0, &after_s.1),
+        )
+        .expect("the witnessed E-1 AIR proves the forged opening");
+        // Control: the forged proof IS a valid witnessed E-1 over exactly the statement the
+        // gate rebuilds, so a refusal below is the gate's purpose policy, not a malformed fixture.
+        verify_channel_tx(
+            RegevSecurityLevel::Test,
+            &pks[0],
+            &pks[1],
+            &zero,
+            &enc_amount.0,
+            &after_s.0,
+            &proof,
+        )
+        .expect("control: the witnessed verifier accepts the forged proof");
+
+        let fund = ChannelFund {
+            channel_id,
+            amounts: ChannelFund::single_token_amounts(U256::from(40u32)),
+            intmax_state_root: Bytes32::default(),
+        };
+        let prev_state = ChannelState {
+            channel_id,
+            epoch: 1,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: fund,
+            balance_state: BalanceState {
+                channel_id,
+                member_count: 3,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
+                    zero.clone(),
+                    before_r.0.clone(),
+                    before_t.0.clone(),
+                ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
+                settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 3,
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 2, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: signatures_for(&record),
+        }
+        .with_computed_digest();
+        let next_state = ChannelState {
+            epoch: 2,
+            balance_state: BalanceState {
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
+                    after_s.0.clone(),
+                    after_r,
+                    before_t.0.clone(),
+                ]),
+                state_version: 4,
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 3, 0]),
+                ..prev_state.balance_state.clone()
+            },
+            prev_digest: prev_state.digest,
+            ..prev_state.clone()
+        }
+        .with_computed_digest();
+        let channel_tx = ChannelTx {
+            token_slot: 0,
+            recipient_pk_g: pubkey_hash(20),
+            enc_amount: enc_amount.0,
+            nonce: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            channel_tx_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof,
+            },
+            sender_pk_g: pubkey_hash(10),
+            sender_hash_sig: vec![1, 2, 3],
+            sender_pk_b: pubkey_hash(40),
+        };
+        // Verified as the recipient co-signer: the attacker DID encrypt the amount to it, so the
+        // own-slot decryption check is not what stops this transition.
+        let witness = InChannelTransferUpdateWitness {
+            channel_record: record,
+            regev_pks: pks,
+            prev_state,
+            next_state,
+            channel_tx,
+            sender_index: 0,
+            recipient_index: 1,
+            recipient_sk: Some(sk1),
+            expected_amount: Some(AMOUNT),
+        };
+        let result = witness.verify(&VERIFIER);
+        assert!(
+            matches!(result, Err(ChannelStateUpdateError::ProofVerification(_))),
+            "the in-channel gate must refuse a witnessed E-1 from a degenerate key: {result:?}"
+        );
     }
 }
 

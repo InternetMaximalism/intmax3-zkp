@@ -9,8 +9,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, SendPayload, add_signature,
-        assemble_genesis_state, build_record, build_send, default_settled_tx_accumulator,
-        sign_state, verify_send_transition,
+        assemble_genesis_state, build_record, build_send_token_decrypted,
+        default_settled_tx_accumulator, sign_state, verify_send_transition,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -69,7 +69,7 @@ fn native_json_roundtrip_verifies() {
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
     let record = build_record(5, &members, 0, 0).unwrap();
     let (bal0, bal1) = (50u64, 30u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).unwrap();
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).unwrap();
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).unwrap();
     let digests = [
         Bytes32::from(m0.regev_pk.poseidon_digest()),
@@ -95,14 +95,13 @@ fn native_json_roundtrip_verifies() {
     };
 
     let nonce = Bytes32::default();
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &m0,
         &snapshot,
         0,
         1,
+        0,
         7,
-        bal0,
-        &w0,
         nonce,
         RegevSecurityLevel::Production,
         &mut rng,

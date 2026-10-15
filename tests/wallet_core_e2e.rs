@@ -13,8 +13,8 @@ use intmax3_zkp::{
     },
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, decrypt_balance, default_settled_tx_accumulator, sign_state,
-        verify_all_signatures, verify_send_transition, verify_snapshot,
+        build_record, build_send_token_decrypted, decrypt_balance, default_settled_tx_accumulator,
+        sign_state, verify_all_signatures, verify_send_transition, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -51,7 +51,7 @@ fn wallet_core_in_channel_send_receive() {
 
     // Each member encrypts their own genesis balance and KEEPS the witness.
     let (bal0, bal1) = (50u64, 30u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let mut genesis = assemble_genesis_state(
         &record,
@@ -89,10 +89,8 @@ fn wallet_core_in_channel_send_receive() {
         mut payload,
         new_balance,
         ..
-    } = build_send(
-        &m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng,
-    )
-    .expect("build_send");
+    } = build_send_token_decrypted(&m0, &snapshot, 0, 1, 0, amount, nonce, LEVEL, &mut rng)
+        .expect("build_send");
     assert_eq!(new_balance, bal0 - amount);
 
     // Member 1 (recipient) verifies the transition + E-1 proof and decrypts the incoming amount.
@@ -155,7 +153,7 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     let record = build_record(9, &members, 0, 0).expect("record");
 
     let (bal0, bal1) = (40u64, 20u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let mut genesis = assemble_genesis_state(
         &record,
@@ -179,10 +177,9 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     // Sanity: the honest payload verifies.
     let amount = 5u64;
     let nonce = Bytes32::default();
-    let BuiltSend { payload, .. } = build_send(
-        &m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng,
-    )
-    .expect("build_send");
+    let BuiltSend { payload, .. } =
+        build_send_token_decrypted(&m0, &snapshot, 0, 1, 0, amount, nonce, LEVEL, &mut rng)
+            .expect("build_send");
     verify_send_transition(
         &snapshot.state,
         &snapshot.record,
@@ -263,7 +260,7 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     let record = build_record(channel_id, &members, 0, 0).expect("record");
 
     let (bal0, bal1) = (40u64, 20u64);
-    let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
+    let (ct0, _w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
     let mut genesis = assemble_genesis_state(
         &record,
@@ -285,14 +282,13 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     };
 
     let amount = 5u64;
-    let BuiltSend { payload, .. } = build_send(
+    let BuiltSend { payload, .. } = build_send_token_decrypted(
         &m0,
         &snapshot,
         0,
         1,
+        0,
         amount,
-        bal0,
-        &w0,
         Bytes32::default(),
         LEVEL,
         &mut rng,

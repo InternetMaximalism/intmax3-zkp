@@ -42,8 +42,8 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     regev::{
-        RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, RegevSk,
-        add_ciphertexts, encrypt_amount, prove_channel_update, regev_pk_root,
+        RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, add_ciphertexts,
+        encrypt_amount, prove_channel_update_decrypted,
     },
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
@@ -399,7 +399,7 @@ fn inter_channel_transfer_real_deposit_backed() {
     // ---- Genesis (deposit-backed) signed by REAL members; §F-1 reconciles on BOTH channels ------
     // Build A's genesis ciphertexts RETAINING alice's witness (slot 0) — the E-2 `before` MUST be
     // the exact genesis ciphertext the verifier reads from `prev_state.enc_balances[0]`.
-    let (a_ct0, a_w0) = encrypt_amount(&mut crng, &a_pks[0], a_bal[0]).unwrap();
+    let (a_ct0, _a_w0) = encrypt_amount(&mut crng, &a_pks[0], a_bal[0]).unwrap();
     let a_ct1 = encrypt_amount(&mut crng, &a_pks[1], a_bal[1]).unwrap().0;
     let a_ct2 = encrypt_amount(&mut crng, &a_pks[2], a_bal[2]).unwrap().0;
     let a_cts = [a_ct0.clone(), a_ct1, a_ct2];
@@ -434,11 +434,12 @@ fn inter_channel_transfer_real_deposit_backed() {
         encrypt_amount(&mut crng, &a_pks[0], a_bal[0] - AMT).unwrap();
     let sender_delta = encrypt_amount(&mut crng, &a_pks[0], AMT).unwrap();
     let receiver_delta = encrypt_amount(&mut crng, &b_pks[0], AMT).unwrap();
-    let e2 = prove_channel_update(
+    let e2 = prove_channel_update_decrypted(
         LEVEL,
         &a_pks[0],
+        &a_keys[0].regev_sk,
         &b_pks[0],
-        (&a_ct0, &a_w0), // before = the genesis ciphertext at alice's slot
+        &a_ct0, // before = the genesis ciphertext at alice's slot, opened by decryption
         (&alice_after_ct, &alice_after_w),
         (&sender_delta.0, &sender_delta.1),
         (&receiver_delta.0, &receiver_delta.1),

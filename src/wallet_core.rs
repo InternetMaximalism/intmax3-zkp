@@ -34,7 +34,7 @@ use crate::{
             ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
             InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
             L1DepositImportUpdateWitness, ReceiverBundleApplyUpdateWitness,
-            TokenRegisterUpdateWitness, require_accumulator_push, verify_transfer_proof_either,
+            TokenRegisterUpdateWitness, require_accumulator_push, verify_decrypted_transfer_proof,
         },
     },
     common::{
@@ -68,9 +68,8 @@ use crate::{
         RegevPk, RegevSecurityLevel, RegevSk, add_ciphertexts, channel_keygen, decrypt_amount,
         encrypt_amount,
         hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
-        prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_tx_decrypted,
-        prove_channel_update, prove_channel_update_decrypted, prove_hash_sig, regev_pk_root,
-        verify_hash_sig,
+        prove_balance_refresh_witnessed, prove_channel_tx_decrypted,
+        prove_channel_update_decrypted, prove_hash_sig, regev_pk_root, verify_hash_sig,
     },
     utils::{
         poseidon_hash_out::PoseidonHashOut, trees::incremental_merkle_tree::IncrementalMerkleTree,
@@ -900,21 +899,15 @@ fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResul
 pub fn validate_new_participant_exit_keys(members: &[MemberInfo]) -> WResult<()> {
     let mut seen = std::collections::HashSet::new();
     for member in members {
+        // Canonical shape, then the degenerate-family screen (2026-10-15 review). The screen is
+        // defense in depth ONLY: the sound guard against a chosen key is that every co-signer
+        // gate accepts just the decrypted proof purposes (`verify_decrypted_transfer_proof`),
+        // whose AIR binds `b = a·s + e_pk`; see `RegevPk::reject_degenerate` for why no native
+        // test on `(a, b)` could carry that weight.
         member
             .regev_pk
-            .validate()
-            .map_err(|error| WalletError(error.to_string()))?;
-        if member
-            .regev_pk
-            .a
-            .iter()
-            .all(|&coefficient| coefficient == 0)
-        {
-            return bail(format!(
-                "active slot {} has a zero Regev a polynomial; the withdrawal claim requires a nonzero key",
-                member.slot
-            ));
-        }
+            .reject_degenerate()
+            .map_err(|error| WalletError(format!("active slot {}: {error}", member.slot)))?;
         if !seen.insert(Bytes32::from(member.regev_pk.poseidon_digest())) {
             return bail(
                 "active participants must have distinct Regev keys for independently claimable balances",
@@ -1440,111 +1433,25 @@ pub fn decrypt_balance_token(
 // In-channel send
 // ---------------------------------------------------------------------------
 
-/// How the sender opens its `before` ciphertext (its CURRENT balance at the sent position) for
-/// the transfer proof.
-#[derive(Clone, Copy)]
-pub enum BeforeLeg<'a> {
-    /// E-1 / E-2: the sender holds the encryption witness of its current ciphertext (genesis
-    /// contribution or a completed refresh of the position) and its plaintext balance. Refused
-    /// when the position has pending homomorphic adds (the witness is then stale).
-    Witnessed {
-        amount: u64,
-        witness: &'a AmountWitness,
-    },
-    /// Refresh-free (`DecryptedDualKeyAir`): the sender opens `before` by DECRYPTION under its
-    /// own Regev secret key. Works on any ciphertext this wallet's key decrypts — including a
-    /// position credited homomorphically (deposit import, received transfer) — so no refresh is
-    /// ever required before sending. The proof's fresh `after` resets the position's digits and
-    /// noise exactly as a refresh would.
-    Decrypted,
-}
-
 /// The output of building a send: the payload to hand to co-signers, plus the sender's fresh
-/// `after`-balance witness (a wallet on the witnessed path keeps it to send again; the decrypted
-/// path does not need it).
+/// `after`-balance witness (the decrypted send does not need it to send again; it is returned
+/// for wallets that still track witnesses, e.g. for the seeded-RNG refresh reconstruction).
 pub struct BuiltSend {
     pub payload: SendPayload,
     pub new_balance_witness: AmountWitness,
     pub new_balance: u64,
 }
 
-/// Build an in-channel transfer of the GENESIS token (local token slot 0) — the wire-compat
-/// single-token entry; the per-token builder is [`build_send_token`].
-#[allow(clippy::too_many_arguments)]
-pub fn build_send(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    recipient_slot: u16,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    nonce: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltSend> {
-    build_send_token(
-        keys,
-        snapshot,
-        sender_slot,
-        recipient_slot,
-        0,
-        amount,
-        before_amount,
-        before_witness,
-        nonce,
-        level,
-        rng,
-    )
-}
-
-/// Build an in-channel transfer of `amount` of LOCAL token position `token_slot` from
-/// `sender_slot` to `recipient_slot` (multitoken §N-3 — the Phase 4 per-token build path;
-/// `token_slot` is signed into the IMPA-v2 digest and the verifier paths enforce the full
-/// TM-2 binding triple at exactly that position).
-///
-/// `before_witness` is the sender's `AmountWitness` for their CURRENT balance ciphertext AT
-/// `token_slot` (held locally since genesis/last refresh of that position). `before_amount` is
-/// the sender's current plaintext balance at that position. Produces the E-1 proof, the signed
+/// In-channel transfer of `amount` of LOCAL token position `token_slot` from `sender_slot`
+/// (which must be THIS wallet's slot) to `recipient_slot` (multitoken §N-3; `token_slot` is
+/// signed into the IMPA-v2 digest and the verifier paths enforce the full TM-2 binding triple
+/// at exactly that position). The sender's current balance ciphertext is opened by DECRYPTION
+/// under `keys.regev_sk` inside the STARK (`DecryptedDualKeyAir`), so no encryption witness and
+/// no prior refresh are needed — a position credited homomorphically (deposit import, received
+/// transfer) is spent directly, and the fresh `after` resets its digits and noise exactly as a
+/// refresh would. Produces the decrypted-send proof (`RegevProofPurpose::ChannelTxDecrypted`,
+/// the ONLY E-1 purpose co-signers accept — see `verify_decrypted_transfer_proof`), the signed
 /// `ChannelTx`, and the proposed next state carrying only the sender's signature.
-#[allow(clippy::too_many_arguments)]
-pub fn build_send_token(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    recipient_slot: u16,
-    token_slot: u8,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    nonce: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltSend> {
-    build_send_token_with(
-        keys,
-        snapshot,
-        sender_slot,
-        recipient_slot,
-        token_slot,
-        amount,
-        BeforeLeg::Witnessed {
-            amount: before_amount,
-            witness: before_witness,
-        },
-        nonce,
-        level,
-        rng,
-    )
-}
-
-/// Refresh-free in-channel transfer of `amount` of LOCAL token position `token_slot` from
-/// `sender_slot` (which must be THIS wallet's slot) to `recipient_slot`: the sender's current
-/// balance ciphertext is opened by decryption under `keys.regev_sk` ([`BeforeLeg::Decrypted`]),
-/// so no encryption witness and no prior refresh are needed — a position credited
-/// homomorphically is spent directly. Produces the decrypted-send proof
-/// (`RegevProofPurpose::ChannelTxDecrypted`), the signed `ChannelTx`, and the proposed next
-/// state; everything else is identical to [`build_send_token`].
 #[allow(clippy::too_many_arguments)]
 pub fn build_send_token_decrypted(
     keys: &MemberKeys,
@@ -1564,7 +1471,6 @@ pub fn build_send_token_decrypted(
         recipient_slot,
         token_slot,
         amount,
-        BeforeLeg::Decrypted,
         nonce,
         level,
         rng,
@@ -1579,7 +1485,6 @@ fn build_send_token_with(
     recipient_slot: u16,
     token_slot: u8,
     amount: u64,
-    before: BeforeLeg<'_>,
     nonce: Bytes32,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
@@ -1610,28 +1515,11 @@ fn build_send_token_with(
     let sender_pk = &regev_pks[sender_slot as usize];
     let recipient_pk = &regev_pks[recipient_slot as usize];
     let before_ct = &prev.balance_state.enc_balances[sender_slot as usize][ts];
-    let before_amount = match before {
-        BeforeLeg::Witnessed { amount, .. } => {
-            // D3/TM-13: on the witnessed path the SENT position must be clean — a homomorphic
-            // credit invalidates the held witness (the proof would fail anyway; this is the
-            // clear error).
-            if prev.balance_state.pending_adds[sender_slot as usize][ts] != 0 {
-                return bail(
-                    "sender (slot, token) position has pending homomorphic adds; the held witness is stale — use the decrypted send (or refresh)",
-                );
-            }
-            amount
-        }
-        BeforeLeg::Decrypted => {
-            // Decryption needs THIS wallet's key behind the sender slot.
-            if record.member_pk_gs[sender_slot as usize] != keys.pk_g() {
-                return bail(
-                    "decrypted send: sender_slot pk_g does not match the building member's key",
-                );
-            }
-            decrypt_amount(&keys.regev_sk, before_ct).map_err(we)?
-        }
-    };
+    // Decryption needs THIS wallet's key behind the sender slot.
+    if record.member_pk_gs[sender_slot as usize] != keys.pk_g() {
+        return bail("decrypted send: sender_slot pk_g does not match the building member's key");
+    }
+    let before_amount = decrypt_amount(&keys.regev_sk, before_ct).map_err(we)?;
     if before_amount < amount {
         return bail("insufficient balance");
     }
@@ -1642,28 +1530,18 @@ fn build_send_token_with(
     let (after_ct, after_w) = encrypt_amount(rng, sender_pk, new_balance).map_err(we)?;
 
     // channelTxZKP over (before, enc_amount, after) — the `before` ciphertext is the sender's
-    // position at the SIGNED token_slot (TM-2 leg 4). Witnessed ⇒ E-1; decrypted ⇒ the
-    // refresh-free twin (`ChannelTxDecrypted`); co-signers accept either
-    // (`verify_transfer_proof_either`).
-    let proof = match before {
-        BeforeLeg::Witnessed { witness, .. } => prove_channel_tx(
-            level,
-            sender_pk,
-            recipient_pk,
-            (before_ct, witness),
-            (&enc_amount, &enc_amount_w),
-            (&after_ct, &after_w),
-        ),
-        BeforeLeg::Decrypted => prove_channel_tx_decrypted(
-            level,
-            sender_pk,
-            &keys.regev_sk,
-            recipient_pk,
-            before_ct,
-            (&enc_amount, &enc_amount_w),
-            (&after_ct, &after_w),
-        ),
-    }
+    // position at the SIGNED token_slot (TM-2 leg 4), opened by decryption under this wallet's
+    // key (`ChannelTxDecrypted`, the only E-1 purpose co-signers accept:
+    // `verify_decrypted_transfer_proof`).
+    let proof = prove_channel_tx_decrypted(
+        level,
+        sender_pk,
+        &keys.regev_sk,
+        recipient_pk,
+        before_ct,
+        (&enc_amount, &enc_amount_w),
+        (&after_ct, &after_w),
+    )
     .map_err(we)?;
 
     // Proposed next state (shared with the slim-batch verifier, detail2 §M-2).
@@ -1938,8 +1816,8 @@ fn verify_send_core(
 ///      claimed slots (`record.member_pk_gs`);
 ///   5. sender authorization — the full A11 BabyBear hash-sig over the IMPA tx digest (whose
 ///      preimage binds `prev.digest`, so a stale tx cannot carry a valid signature);
-///   6. the mandatory channelTx STARK (E-1 or its decrypted twin), statement rebuilt from the
-///      verifier's own data (`before = prev.enc_balances[sender]` — never wire-supplied);
+///   6. the mandatory decrypted channelTx STARK (`ChannelTxDecrypted` only), statement rebuilt from
+///      the verifier's own data (`before = prev.enc_balances[sender]` — never wire-supplied);
 ///   7. (recipient co-signer only) the own-slot `enc_amount` decryption check.
 /// `regev_pks` is built ONCE per batch by the caller (`regev_pks_array` clones ~1024 keys — do
 /// not pay that per tx).
@@ -2019,7 +1897,8 @@ pub fn verify_slim_send_tx(
         registered_sender_pk_g,
         sender_member.pk_b,
     )?;
-    // 6. Mandatory channelTxZKP (E-1 or its refresh-free decrypted twin), statement rebuilt from
+    // 6. Mandatory decrypted channelTxZKP (`ChannelTxDecrypted` ONLY — the witnessed E-1 has no
+    // key binding and is refused, see `verify_decrypted_transfer_proof`), statement rebuilt from
     // verifier-owned data. TM-2 leg 4: `before` is the verifier's OWN anchor ciphertext at the
     // SIGNED token position — never wire-supplied, and never a different position's ciphertext.
     let statement = crate::regev::RegevStatement::ChannelTx {
@@ -2030,7 +1909,7 @@ pub fn verify_slim_send_tx(
         after: slim.after_ct.clone(),
     };
     let verifier = RealRegevProofVerifier { level };
-    verify_transfer_proof_either(&verifier, &slim.channel_tx.channel_tx_zkp, &statement)
+    verify_decrypted_transfer_proof(&verifier, &slim.channel_tx.channel_tx_zkp, &statement)
         .map_err(|e| WalletError(format!("channelTxZKP invalid: {e:?}")))?;
     // 7. Recipient-only decryption check.
     if let Some(sk) = recipient_sk {
@@ -2487,7 +2366,7 @@ fn unsigned_small_block_slots(record: &ChannelRecord) -> Vec<MemberSignature> {
 /// [`unsigned_small_block_slots`] placeholders. A block producer MUST call this before posting;
 /// a block still carrying placeholders cannot satisfy the in-circuit N-of-N.
 ///
-/// `a_signed` is the post-debit state returned by [`build_inter_channel_send`] AFTER the co-sign
+/// `a_signed` is the post-debit state returned by the inter-channel builder AFTER the co-sign
 /// round has filled `member_signatures` (see `add_signature` / `sign_state_if_backed`).
 ///
 /// SECURITY — this is the wallet-side half of the Phase-3 binding. `update_channel_tree` verifies,
@@ -2608,159 +2487,31 @@ pub fn verify_small_block_state_binding(
     Ok(())
 }
 
-/// LEG A — build the inter-channel debit of the GENESIS token (`registry[0]`, the wire-compat
-/// single-token entry; the per-token builder is [`build_inter_channel_send_token`]).
-#[allow(clippy::too_many_arguments)]
-pub fn build_inter_channel_send(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    prev_user_leaf_index: u32,
-    sender_slot: u16,
-    destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
-    destination_recipient_pk: RegevPk,
-    destination_recipient_pk_g: Bytes32,
-    destination_base_transfer_salt: Salt,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    let genesis_token_index = snapshot.state.balance_state.token_registry[0];
-    build_inter_channel_send_token(
-        keys,
-        snapshot,
-        prev_user_leaf_index,
-        sender_slot,
-        destination_channel_id,
-        destination_recipient_slot,
-        destination_recipient_pk,
-        destination_recipient_pk_g,
-        destination_base_transfer_salt,
-        genesis_token_index,
-        amount,
-        before_amount,
-        before_witness,
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// LEG A — build the inter-channel debit on the SOURCE channel, moving BASE token `token_index`
-/// (multitoken §N-4, TM-6 — the Phase 4 per-token build path).
+/// LEG A — the production inter-channel builder: build the inter-channel debit on the SOURCE
+/// channel, moving BASE token `token_index` (multitoken §N-4, TM-6).
 ///
 /// `snapshot` is channel A; `sender_slot` is a channel-A ACTIVE participant (member OR delegate,
 /// located by its `pk_g`). `token_index` is the BASE-layer token index (never a local slot —
 /// source and destination registries map it to different local slots); it must resolve against
 /// A's OWN active registry (unregistered ⇒ refused fail-closed, and the verifier paths re-check
-/// on both sides). `before_*` are the sender's CURRENT plaintext balance + `AmountWitness` at
-/// the RESOLVED local position (held locally). `new_nullifier_root` advances the shared native
-/// nullifier (detail2 §C-3: a send MUST change it). Produces the post-debit `a_send`
-/// (state_version+1, `channel_fund.amounts[resolved slot]` -= amount, settled_tx_chain pushes
-/// the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the untouched positions'
-/// enc_balances/pending_adds preserved via the `..prev.balance_state.clone()` spread), the REAL
-/// E-2 (whose IMU2 PVs bind `token_index`), the 1-tx `TxV2Tree` (root + inclusion proof
-/// computed INTERNALLY), and CALLS `InterChannelSendUpdateWitness::verify` to self-check before
-/// returning an unsigned state proposal.
-/// `prev_user_leaf_index` must be read from the authenticated pre-block `ChannelLeaf`: the
-/// validity circuit requires `TxV2.nonce == prev_user_leaf.index`. It cannot be reconstructed from
+/// on both sides). The sender's `before` ciphertext at the RESOLVED local position is opened by
+/// decryption under `keys.regev_sk` inside the STARK and the debit is proved with the decrypted
+/// E-2 (`ChannelUpdateDecrypted`, the ONLY E-2 purpose co-signers and the destination accept —
+/// see `verify_decrypted_transfer_proof`): no encryption witness, no prior refresh.
+/// `new_nullifier_root` advances the shared native nullifier (detail2 §C-3: a send MUST change
+/// it). Produces the post-debit `a_send` (state_version+1, `channel_fund.amounts[resolved slot]`
+/// -= amount, settled_tx_chain pushes the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the
+/// untouched positions' enc_balances/pending_adds preserved via the `..prev.balance_state.clone()`
+/// spread), the REAL E-2 (whose IMDU PVs bind `token_index`), the 1-tx `TxV2Tree` (root +
+/// inclusion proof computed INTERNALLY), and CALLS `InterChannelSendUpdateWitness::verify` to
+/// self-check before returning an unsigned state proposal.
+///
+/// `base_nonce` is read from the persisted live base IVC head immediately before proving (it
+/// equals the authenticated pre-block `ChannelLeaf.index`: the validity circuit requires
+/// `TxV2.nonce == prev_user_leaf.index`, and it cannot be reconstructed from
 /// `small_block_number`, because incoming-only channel transitions advance that independent
-/// counter without consuming a base send slot.
-#[allow(clippy::too_many_arguments)]
-pub fn build_inter_channel_send_token(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    prev_user_leaf_index: u32,
-    sender_slot: u16,
-    destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
-    destination_recipient_pk: RegevPk,
-    destination_recipient_pk_g: Bytes32,
-    destination_base_transfer_salt: Salt,
-    token_index: u32,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    // Compatibility wrapper for callers that hold the authenticated public ChannelLeaf. The
-    // production wallet instead reads the equal cursor from its persisted base IVC head and calls
-    // `build_inter_channel_send_token_at_base_nonce` directly.
-    let base_nonce = prev_user_leaf_index;
-    build_inter_channel_send_token_at_base_nonce(
-        keys,
-        snapshot,
-        sender_slot,
-        destination_channel_id,
-        destination_recipient_slot,
-        destination_recipient_pk,
-        destination_recipient_pk_g,
-        destination_base_transfer_salt,
-        token_index,
-        base_nonce,
-        amount,
-        before_amount,
-        before_witness,
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// Production inter-channel builder. `base_nonce` is read from the persisted live base IVC head
-/// immediately before proving. It is committed twice: directly by IMI4 and transitively by H2's
-/// TxV2 root. Co-signers and the base prover both reject a stale cursor.
-#[allow(clippy::too_many_arguments)]
-pub fn build_inter_channel_send_token_at_base_nonce(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
-    destination_recipient_pk: RegevPk,
-    destination_recipient_pk_g: Bytes32,
-    destination_base_transfer_salt: Salt,
-    token_index: u32,
-    base_nonce: u32,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    build_inter_channel_send_with(
-        keys,
-        snapshot,
-        sender_slot,
-        destination_channel_id,
-        destination_recipient_slot,
-        destination_recipient_pk,
-        destination_recipient_pk_g,
-        destination_base_transfer_salt,
-        token_index,
-        base_nonce,
-        amount,
-        BeforeLeg::Witnessed {
-            amount: before_amount,
-            witness: before_witness,
-        },
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// Refresh-free production inter-channel builder: identical to
-/// [`build_inter_channel_send_token_at_base_nonce`], but the sender's `before` ciphertext at the
-/// resolved position is opened by decryption under `keys.regev_sk` ([`BeforeLeg::Decrypted`])
-/// and the debit is proved with the decrypted E-2 twin (`ChannelUpdateDecrypted`). No encryption
-/// witness, no prior refresh.
+/// counter without consuming a base send slot). It is committed twice: directly by IMI4 and
+/// transitively by H2's TxV2 root. Co-signers and the base prover both reject a stale cursor.
 #[allow(clippy::too_many_arguments)]
 pub fn build_inter_channel_send_token_at_base_nonce_decrypted(
     keys: &MemberKeys,
@@ -2790,7 +2541,6 @@ pub fn build_inter_channel_send_token_at_base_nonce_decrypted(
         token_index,
         base_nonce,
         amount,
-        BeforeLeg::Decrypted,
         new_nullifier_root,
         level,
         rng,
@@ -2810,7 +2560,6 @@ fn build_inter_channel_send_with(
     token_index: u32,
     base_nonce: u32,
     amount: u64,
-    before: BeforeLeg<'_>,
     new_nullifier_root: Bytes32,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
@@ -2828,23 +2577,11 @@ fn build_inter_channel_send_with(
     // TM-6 (source-side registry resolution): the SIGNED base token_index must resolve against
     // A's OWN active registry; the resolved LOCAL slot is the only position debited below.
     let token_slot = resolve_local_token_slot(&prev.balance_state, token_index)?;
-    let before_amount = match before {
-        BeforeLeg::Witnessed { amount, .. } => {
-            // D3/TM-13: on the witnessed path the DEBITED position must be clean — a homomorphic
-            // credit invalidates the held witness.
-            if prev.balance_state.pending_adds[sender_slot as usize][token_slot] != 0 {
-                return bail(
-                    "sender (slot, token) position has pending homomorphic adds; the held witness is stale — use the decrypted send (or refresh)",
-                );
-            }
-            amount
-        }
-        BeforeLeg::Decrypted => decrypt_amount(
-            &keys.regev_sk,
-            &prev.balance_state.enc_balances[sender_slot as usize][token_slot],
-        )
-        .map_err(we)?,
-    };
+    let before_amount = decrypt_amount(
+        &keys.regev_sk,
+        &prev.balance_state.enc_balances[sender_slot as usize][token_slot],
+    )
+    .map_err(we)?;
     if before_amount < amount {
         return bail("insufficient balance");
     }
@@ -2868,36 +2605,23 @@ fn build_inter_channel_send_with(
     let (receiver_delta_ct, receiver_delta_w) =
         encrypt_amount(rng, &destination_recipient_pk, amount).map_err(we)?;
 
-    // REAL E-2 channelUpdateZKP (detail2 §E-2) — or its refresh-free decrypted twin
-    // (`ChannelUpdateDecrypted`): binds before/after/sender_delta under the sender key,
-    // receiver_delta under the destination key, conservation `before = after + amount`, and both
-    // deltas == the public amount. Co-signers and the destination accept either
-    // (`verify_transfer_proof_either`).
-    let e2 = match before {
-        BeforeLeg::Witnessed { witness, .. } => prove_channel_update(
-            level,
-            &sender_pk,
-            &destination_recipient_pk,
-            (&before_ct, witness),
-            (&after_ct, &after_w),
-            (&sender_delta_ct, &sender_delta_w),
-            (&receiver_delta_ct, &receiver_delta_w),
-            amount,
-            token_index,
-        ),
-        BeforeLeg::Decrypted => prove_channel_update_decrypted(
-            level,
-            &sender_pk,
-            &keys.regev_sk,
-            &destination_recipient_pk,
-            &before_ct,
-            (&after_ct, &after_w),
-            (&sender_delta_ct, &sender_delta_w),
-            (&receiver_delta_ct, &receiver_delta_w),
-            amount,
-            token_index,
-        ),
-    }
+    // REAL decrypted E-2 channelUpdateZKP (detail2 §E-2b, `ChannelUpdateDecrypted`): binds
+    // `before` by decryption under this wallet's key (key binding in-proof), after/sender_delta
+    // under the sender key, receiver_delta under the destination key, conservation
+    // `before = after + amount`, and both deltas == the public amount. It is the ONLY E-2
+    // purpose co-signers and the destination accept (`verify_decrypted_transfer_proof`).
+    let e2 = prove_channel_update_decrypted(
+        level,
+        &sender_pk,
+        &keys.regev_sk,
+        &destination_recipient_pk,
+        &before_ct,
+        (&after_ct, &after_w),
+        (&sender_delta_ct, &sender_delta_w),
+        (&receiver_delta_ct, &receiver_delta_w),
+        amount,
+        token_index,
+    )
     .map_err(we)?;
 
     // The tx leaf chained into settled_tx_chain (detail2 §C-6): binds both participants + both
@@ -3004,8 +2728,7 @@ fn build_inter_channel_send_with(
     let mut enc_balances = prev.balance_state.enc_balances.clone();
     enc_balances[sender_slot as usize][token_slot] = after_ct.clone();
     // The debited position is freshly re-encrypted (`after_ct`), so its D3 counter resets —
-    // exactly what `InterChannelSendUpdateWitness::verify` requires. On the witnessed path the
-    // counter was already 0 (gate above); on the decrypted path this is what clears a
+    // exactly what `InterChannelSendUpdateWitness::verify` requires; this is what clears a
     // homomorphically credited position without a refresh.
     let mut pending_adds = prev.balance_state.pending_adds.clone();
     pending_adds[sender_slot as usize][token_slot] = 0;
@@ -3166,15 +2889,16 @@ fn build_inter_channel_send_with(
     })
 }
 
-/// abstract2-1 §3.6 — channel-layer "burn send" for PARTIAL WITHDRAWAL (channel stays open).
+/// The production burn builder (abstract2-1 §3.6 partial withdrawal, (ii) padding-receiver):
+/// a member debits ONLY their own encBalance by `amount` of BASE token `token_index` (decrypted
+/// E-2, sender-slot-only — `state_update_verifier.rs` debits the sender slot and
+/// `ensure_slot_unchanged` on all others) toward the reserved `BURN_CHANNEL_ID` with an
+/// `ADDRESS_TAG` L1 recipient, so the base-layer `single_withdrawal` later pays the member's L1
+/// address `withdrawal_l1_address` in the burned asset (the proof-committed leaf binds
+/// `tokenIndex`). Then the channel continues: `state_version`/`settled_tx_chain` advance,
+/// members keep transacting.
 ///
-/// A member debits ONLY their own encBalance by `amount` (E-2 `channelUpdateZKP`, sender-slot-only
-/// — `state_update_verifier.rs` debits the sender slot and `ensure_slot_unchanged` on all others)
-/// toward the reserved `BURN_CHANNEL_ID` with an `ADDRESS_TAG` L1 recipient, so the base-layer
-/// `single_withdrawal` later pays the member's L1 address `withdrawal_l1_address`. Then the channel
-/// continues: `state_version`/`settled_tx_chain` advance, members keep transacting.
-///
-/// This REUSES [`build_inter_channel_send`] UNCHANGED via the (ii) padding-receiver design
+/// This REUSES the inter-channel debit UNCHANGED via the (ii) padding-receiver design
 /// (architecture-audit/partial-withdrawal-impl-plan.md): the channel-layer phantom receiver is
 /// `RegevPk::padding()` (canonical, NO secret key), so `receiver_delta = encrypt(amount, padding)`
 /// satisfies the E-2 `sender_delta == receiver_delta == amount` constraint. The phantom credit is
@@ -3184,118 +2908,9 @@ fn build_inter_channel_send_with(
 /// can never also be credited to a channel. The withdrawn `amount` equals the member's proven
 /// encBalance debit (over-claim / cross-member-claim closed at the proof level).
 ///
-/// SECURITY — NOT YET VALIDATED END-TO-END: the E-2 self-check runs at build time, but the full
-/// fund path (this burn send → N-of-N cosign → finalize → `single_withdrawal` → on-chain
-/// `withdrawNative`, channel stays open) requires the opt-in heavy E2E (`INTMAX_RUN_HEAVY_E2E`) AND
-/// a dedicated attacker-subagent review BEFORE merge (CLAUDE.md). Do not ship on a fund path until
-/// both pass.
-pub fn build_burn_send(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    prev_user_leaf_index: u32,
-    sender_slot: u16,
-    withdrawal_l1_address: crate::ethereum_types::address::Address,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    let genesis_token_index = snapshot.state.balance_state.token_registry[0];
-    build_burn_send_token(
-        keys,
-        snapshot,
-        prev_user_leaf_index,
-        sender_slot,
-        withdrawal_l1_address,
-        genesis_token_index,
-        amount,
-        before_amount,
-        before_witness,
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// [`build_burn_send`] generalized to BASE token `token_index` (multitoken Phase 4): the burn
-/// debits the sender's balance + the channel fund at the LOCAL slot A's registry resolves for
-/// `token_index`, and the base `Transfer` (→ the burn `Withdrawal`) carries that SAME base
-/// index, so the L1 leg pays out via `withdrawERC20`/`withdrawNative` in the burned asset (the
-/// proof-committed leaf binds `tokenIndex`).
-#[allow(clippy::too_many_arguments)]
-pub fn build_burn_send_token(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    prev_user_leaf_index: u32,
-    sender_slot: u16,
-    withdrawal_l1_address: crate::ethereum_types::address::Address,
-    token_index: u32,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    // Compatibility wrapper for callers that hold the authenticated public ChannelLeaf. Never
-    // derive this cursor from the independent channel small-block counter.
-    let base_nonce = prev_user_leaf_index;
-    build_burn_send_token_at_base_nonce(
-        keys,
-        snapshot,
-        sender_slot,
-        withdrawal_l1_address,
-        token_index,
-        base_nonce,
-        amount,
-        before_amount,
-        before_witness,
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// Production burn builder. `base_nonce` comes from the persisted live base-account state and is
-/// independent of the channel small-block counter.
-#[allow(clippy::too_many_arguments)]
-pub fn build_burn_send_token_at_base_nonce(
-    keys: &MemberKeys,
-    snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    withdrawal_l1_address: crate::ethereum_types::address::Address,
-    token_index: u32,
-    base_nonce: u32,
-    amount: u64,
-    before_amount: u64,
-    before_witness: &AmountWitness,
-    new_nullifier_root: Bytes32,
-    level: RegevSecurityLevel,
-    rng: &mut impl Rng,
-) -> WResult<BuiltInterChannelSend> {
-    build_burn_send_with(
-        keys,
-        snapshot,
-        sender_slot,
-        withdrawal_l1_address,
-        token_index,
-        base_nonce,
-        amount,
-        BeforeLeg::Witnessed {
-            amount: before_amount,
-            witness: before_witness,
-        },
-        new_nullifier_root,
-        level,
-        rng,
-    )
-}
-
-/// Refresh-free production burn builder: [`build_burn_send_token_at_base_nonce`] with the
-/// sender's `before` opened by decryption ([`BeforeLeg::Decrypted`]) — no encryption witness,
-/// no prior refresh.
+/// `base_nonce` comes from the persisted live base-account state and is independent of the
+/// channel small-block counter. The sender's `before` is opened by decryption — no encryption
+/// witness, no prior refresh.
 #[allow(clippy::too_many_arguments)]
 pub fn build_burn_send_token_at_base_nonce_decrypted(
     keys: &MemberKeys,
@@ -3317,7 +2932,6 @@ pub fn build_burn_send_token_at_base_nonce_decrypted(
         token_index,
         base_nonce,
         amount,
-        BeforeLeg::Decrypted,
         new_nullifier_root,
         level,
         rng,
@@ -3333,13 +2947,12 @@ fn build_burn_send_with(
     token_index: u32,
     base_nonce: u32,
     amount: u64,
-    before: BeforeLeg<'_>,
     new_nullifier_root: Bytes32,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
     use crate::circuits::balance::common::recipient::calculate_recipient_from_address;
-    // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send`
+    // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what the inter-channel debit
     // writes into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key
     // = `RegevPk::padding()`; destination = `BURN_CHANNEL_ID` (unregisterable) ⇒ unclaimable
     // phantom.
@@ -3358,7 +2971,6 @@ fn build_burn_send_with(
         token_index,
         base_nonce,
         amount,
-        before,
         new_nullifier_root,
         level,
         rng,
@@ -5033,8 +4645,9 @@ pub fn verify_inter_channel_credit_transition(
     };
     let regev_verifier = RealRegevProofVerifier { level };
     // Through the TRAIT (envelope role/backend checked, `ChannelStateUpdateError` shape) and
-    // accepting E-2 or its refresh-free decrypted twin, exactly as the witnesses do.
-    verify_transfer_proof_either(
+    // accepting ONLY the decrypted E-2 (`ChannelUpdateDecrypted`), exactly as the witnesses do —
+    // the witnessed E-2 has no key binding (`verify_decrypted_transfer_proof`).
+    verify_decrypted_transfer_proof(
         &regev_verifier,
         &inter_channel_tx.channel_update_zkp,
         &statement,
@@ -8258,7 +7871,7 @@ mod delegate_send_tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn cosign_gate_refuses_every_asset_or_composition_moving_successor() {
         let mut rng = StdRng::seed_from_u64(0xE1);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 12, [40, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -8266,14 +7879,13 @@ mod delegate_send_tests {
             members,
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
-        let BuiltSend { payload, .. } = build_send(
+        let BuiltSend { payload, .. } = build_send_token_decrypted(
             &keys[0],
             &snapshot,
             0,
             1,
+            0,
             5,
-            40,
-            &witnesses[0],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -8333,7 +7945,7 @@ mod delegate_send_tests {
     fn da_send_happy_delegate_sends_to_member() {
         let mut rng = StdRng::seed_from_u64(0xDADADA);
         let (bal0, bal1, bal_d) = (50u64, 30u64, 20u64);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 11, [bal0, bal1, bal_d]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -8349,14 +7961,15 @@ mod delegate_send_tests {
 
         // The delegate (slot 2) sends 8 to member 0.
         let amount = 8u64;
-        let BuiltSend { mut payload, .. } = build_send(
+        let BuiltSend { mut payload, .. } = build_send_token_decrypted(
             &keys[2],
             &snapshot,
-            2, // delegate sender
-            0, // member recipient
+            2,
+            // delegate sender
+            0,
+            0,
+            // member recipient
             amount,
-            bal_d,
-            &witnesses[2],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -8432,7 +8045,7 @@ mod delegate_send_tests {
     #[test]
     fn da2_delegate_send_wrong_key_rejected() {
         let mut rng = StdRng::seed_from_u64(0xD2D2D2);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 12, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -8441,14 +8054,13 @@ mod delegate_send_tests {
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         let amount = 8u64;
-        let BuiltSend { payload, .. } = build_send(
+        let BuiltSend { payload, .. } = build_send_token_decrypted(
             &keys[2],
             &snapshot,
             2,
             0,
+            0,
             amount,
-            20,
-            &witnesses[2],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -8504,7 +8116,7 @@ mod delegate_send_tests {
     #[test]
     fn da2_delegate_send_mismatched_leaf_rejected() {
         let mut rng = StdRng::seed_from_u64(0xD2BBBB);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 13, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -8513,14 +8125,13 @@ mod delegate_send_tests {
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         let amount = 8u64;
-        let BuiltSend { payload, .. } = build_send(
+        let BuiltSend { payload, .. } = build_send_token_decrypted(
             &keys[2],
             &snapshot,
             2,
             0,
+            0,
             amount,
-            20,
-            &witnesses[2],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -8570,7 +8181,7 @@ mod delegate_send_tests {
     #[test]
     fn da1_fabricated_delegate_debit_rejected() {
         let mut rng = StdRng::seed_from_u64(0xD1D1D1);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 14, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -8580,14 +8191,13 @@ mod delegate_send_tests {
         };
         // Honest member-0 -> member-1 send (the delegate at slot 2 is NOT involved).
         let amount = 5u64;
-        let BuiltSend { mut payload, .. } = build_send(
+        let BuiltSend { mut payload, .. } = build_send_token_decrypted(
             &keys[0],
             &snapshot,
             0,
             1,
+            0,
             amount,
-            50,
-            &witnesses[0],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -8653,14 +8263,13 @@ mod delegate_send_tests {
         verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("verify genesis (3 members)");
 
         let amount = 6u64;
-        let BuiltSend { mut payload, .. } = build_send(
+        let BuiltSend { mut payload, .. } = build_send_token_decrypted(
             &keys[0],
             &snapshot,
             0,
             1,
+            0,
             amount,
-            b0,
-            &ws[0],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -10091,8 +9700,8 @@ mod delegate_send_tests {
     }
 
     /// Build a SLIM in-channel send of `amount` at `token_slot` through the REAL Phase 4
-    /// per-token build path (`build_send_token` → `to_slim`), so the TM-14 batch suite ALSO
-    /// exercises the production builder at non-genesis positions.
+    /// per-token build path (`build_send_token_decrypted` → `to_slim`), so the TM-14 batch suite
+    /// ALSO exercises the production builder at non-genesis positions.
     #[allow(clippy::too_many_arguments)]
     fn build_slim_send_at(
         rng: &mut StdRng,
@@ -10102,8 +9711,6 @@ mod delegate_send_tests {
         recipient_slot: u16,
         token_slot: u8,
         amount: u64,
-        before_amount: u64,
-        before_witness: &AmountWitness,
         nonce_seed: u32,
     ) -> (SlimSendPayload, AmountWitness) {
         let nonce = Bytes32::from_u32_slice(&[nonce_seed, 0, 0, 0, 0, 0, 0, 1]).unwrap();
@@ -10111,15 +9718,13 @@ mod delegate_send_tests {
             payload,
             new_balance_witness,
             ..
-        } = build_send_token(
+        } = build_send_token_decrypted(
             keys,
             snapshot,
             sender_slot,
             recipient_slot,
             token_slot,
             amount,
-            before_amount,
-            before_witness,
             nonce,
             LEVEL,
             rng,
@@ -10136,7 +9741,7 @@ mod delegate_send_tests {
     #[test]
     fn mixed_token_batch_same_member_two_debits() {
         let mut rng = StdRng::seed_from_u64(0x2b70b1);
-        let (record, keys, members, genesis, w_t0, w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 21, [50, 30, 20], [40, 25]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -10147,12 +9752,8 @@ mod delegate_send_tests {
         let regev_pks = regev_pks_array(&snapshot.members);
 
         // Member 0 debits token 0 (7 -> slot 1) AND token 1 (5 -> slot 1) in ONE batch.
-        let (slim_a, _wa) = build_slim_send_at(
-            &mut rng, &keys[0], &snapshot, 0, 1, 0, 7, 50, &w_t0[0], 0xA1,
-        );
-        let (slim_b, _wb) = build_slim_send_at(
-            &mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 40, &w_t1[0], 0xB2,
-        );
+        let (slim_a, _wa) = build_slim_send_at(&mut rng, &keys[0], &snapshot, 0, 1, 0, 7, 0xA1);
+        let (slim_b, _wb) = build_slim_send_at(&mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 0xB2);
         for slim in [&slim_a, &slim_b] {
             verify_slim_send_tx(
                 &snapshot.state,
@@ -10217,7 +9818,7 @@ mod delegate_send_tests {
     #[test]
     fn mixed_token_batch_rejects_doctored_slot_and_after_ct() {
         let mut rng = StdRng::seed_from_u64(0x2b70b2);
-        let (record, keys, members, genesis, _w_t0, w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 22, [50, 30, 20], [40, 25]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -10226,9 +9827,7 @@ mod delegate_send_tests {
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         let regev_pks = regev_pks_array(&snapshot.members);
-        let (slim, _w) = build_slim_send_at(
-            &mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 40, &w_t1[0], 0xC3,
-        );
+        let (slim, _w) = build_slim_send_at(&mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 0xC3);
 
         // (a) Doctored token_slot echo.
         let mut doctored = slim.clone();
@@ -10301,8 +9900,8 @@ mod delegate_send_tests {
     ///
     ///   1. a homomorphic credit at (slot 0, token 1) raises `pending_adds` and installs a
     ///      ciphertext the holder has no encryption witness for;
-    ///   2. a send from that position is REFUSED fail-closed (the D3/TM-13 refresh gate), and it is
-    ///      refused BEFORE the stale pre-credit witness could be used;
+    ///   2. (the witnessed E-1 builder that used to refuse this position is retired — the decrypted
+    ///      send spends it directly; the refresh remains a maintenance operation);
     ///   3. `build_refresh` re-encrypts the position to a fresh, locally-witnessed ciphertext whose
     ///      plaintext is the CREDITED total — no inflation, no loss — and the co-signer gate
     ///      (`verify_refresh_transition`, real RefreshAir) accepts it;
@@ -10317,7 +9916,7 @@ mod delegate_send_tests {
     fn refresh_unblocks_a_homomorphically_credited_token_position() {
         let mut rng = StdRng::seed_from_u64(0x2b70fa);
         // Slot 0 = the "faucet" member (40 at token 1), slot 1 = a funder, slot 2 = a delegate.
-        let (record, keys, members, genesis, _w_t0, w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 27, [50, 30, 20], [40, 25]);
         let mut snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -10327,15 +9926,13 @@ mod delegate_send_tests {
         };
 
         // (1) Homomorphic credit into slot 0's token-1 position (slot 1 sends it 10).
-        let credit = build_send_token(
+        let credit = build_send_token_decrypted(
             &keys[1],
             &snapshot,
             1,
             0,
             1,
             10,
-            25,
-            &w_t1[1],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -10363,27 +9960,10 @@ mod delegate_send_tests {
             "a homomorphic credit must raise the recipient's (slot, token) counter"
         );
 
-        // (2) Fail-closed: the credited position cannot send, even with the pre-credit witness.
-        let blocked = build_send_token(
-            &keys[0],
-            &snapshot,
-            0,
-            1,
-            1,
-            7,
-            40,
-            &w_t1[0],
-            Bytes32::default(),
-            LEVEL,
-            &mut rng,
-        );
-        match blocked {
-            Ok(_) => panic!("a position with pending adds must not be spendable"),
-            Err(e) => assert!(
-                e.0.contains("pending homomorphic adds"),
-                "expected the D3/TM-13 refresh gate, got: {e}"
-            ),
-        }
+        // (2) (The witnessed E-1 builder that used to refuse this position is retired: the
+        // decrypted send spends a credited position directly, see
+        // `decrypted_send_spends_a_homomorphically_credited_position_without_refresh`. This test
+        // keeps the refresh as the value-preserving MAINTENANCE operation it still is.)
 
         // (3) Refresh from a RECORDED seed — the CLI's witness-store model.
         let seed = [0x5Au8; 32];
@@ -10429,15 +10009,13 @@ mod delegate_send_tests {
         snapshot.state = refreshed;
 
         // (4) The faucet drip: the refreshed position sends, and the recipient decrypts it.
-        let drip = build_send_token(
+        let drip = build_send_token_decrypted(
             &keys[0],
             &snapshot,
             0,
             2,
             1,
             7,
-            witness.amount,
-            &witness,
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -10479,15 +10057,14 @@ mod delegate_send_tests {
     }
 
     /// Refresh removal (decrypted send): a position credited HOMOMORPHICALLY is spent directly —
-    /// no refresh, no encryption witness. The witnessed E-1 path is still refused on that
-    /// position (its witness is stale), the co-signer gates (solo AND slim) accept the
+    /// no refresh, no encryption witness. The co-signer gates (solo AND slim) accept the
     /// decrypted-send proof, the recipient decrypts exactly the amount, the counter resets, a
     /// second decrypted send chains off the fresh `after` immediately, and the wrong key /
     /// an overspend / a doctored `after` are refused.
     #[test]
     fn decrypted_send_spends_a_homomorphically_credited_position_without_refresh() {
         let mut rng = StdRng::seed_from_u64(0xdec5e7d);
-        let (record, keys, members, genesis, _w_t0, w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 28, [50, 30, 20], [40, 25]);
         let mut snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -10504,47 +10081,26 @@ mod delegate_send_tests {
             signed
         };
 
-        // (1) Homomorphic credit into slot 0's token-1 position (slot 1 sends it 10 on the
-        // legacy witnessed path — co-signers still accept E-1).
-        let credit = build_send_token(
+        // (1) Homomorphic credit into slot 0's token-1 position (slot 1 sends it 10).
+        let credit = build_send_token_decrypted(
             &keys[1],
             &snapshot,
             1,
             0,
             1,
             10,
-            25,
-            &w_t1[1],
             Bytes32::default(),
             LEVEL,
             &mut rng,
         )
         .expect("credit send builds");
         verify_send_transition(&snapshot.state, &record, &credit.payload, LEVEL, None, None)
-            .expect("co-signers still accept a witnessed E-1 send");
+            .expect("co-signers accept the decrypted send");
         snapshot.state = cosign(&credit.payload.proposed_next_state, &keys);
         verify_all_signatures(&record, &snapshot.members, &snapshot.state).unwrap();
         assert_eq!(snapshot.state.balance_state.pending_adds[0][1], 1);
 
-        // (2) The witnessed path is still refused on the credited position (stale witness)...
-        let blocked = build_send_token(
-            &keys[0],
-            &snapshot,
-            0,
-            2,
-            1,
-            7,
-            40,
-            &w_t1[0],
-            Bytes32::default(),
-            LEVEL,
-            &mut rng,
-        );
-        assert!(
-            matches!(&blocked, Err(e) if e.0.contains("pending homomorphic adds")),
-            "the witnessed path must refuse a credited position"
-        );
-        // ...but the decrypted send spends it directly.
+        // (2) The decrypted send spends the credited position directly.
         let drip = build_send_token_decrypted(
             &keys[0],
             &snapshot,
@@ -10690,12 +10246,12 @@ mod delegate_send_tests {
     }
 
     /// Refresh removal for the inter-channel debit and the burn: a homomorphically credited
-    /// token-1 position is debited cross-channel (decrypted E-2 twin) and burned without a
-    /// refresh; the witnessed builder is refused on it; the co-signer gate accepts both debits.
+    /// token-1 position is debited cross-channel (decrypted E-2) and burned without a refresh;
+    /// the co-signer gate accepts both debits.
     #[test]
     fn decrypted_inter_channel_send_and_burn_debit_a_credited_position() {
         let mut rng = StdRng::seed_from_u64(0xdec1c2c);
-        let (record, keys, members, genesis, _w0, w1) =
+        let (record, keys, members, genesis, _w0, _w1) =
             setup_two_token_channel(&mut rng, 52, [50, 30, 20], [40, 25]);
         let mut state = genesis;
         state.channel_fund.amounts[1] = u64_to_u256(65);
@@ -10707,15 +10263,13 @@ mod delegate_send_tests {
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         // Credit slot 0's token-1 position homomorphically (slot 1 → 0, 10 at token 1).
-        let credit = build_send_token(
+        let credit = build_send_token_decrypted(
             &keys[1],
             &snapshot,
             1,
             0,
             1,
             10,
-            25,
-            &w1[1],
             Bytes32::default(),
             LEVEL,
             &mut rng,
@@ -10733,33 +10287,7 @@ mod delegate_send_tests {
         let dest_channel = crate::common::channel_id::ChannelId::new(98).unwrap();
         let nullifier_root = Bytes32::from_u32_slice(&[8, 7, 6, 5, 4, 3, 2, 1]).unwrap();
 
-        // The witnessed builder is refused on the credited position.
-        assert!(
-            matches!(
-                build_inter_channel_send_token_at_base_nonce(
-                    &keys[0],
-                    &snapshot,
-                    0,
-                    dest_channel,
-                    0,
-                    dest_keys.regev_pk.clone(),
-                    dest_keys.pk_g(),
-                    Salt::default(),
-                    T1_INDEX,
-                    0,
-                    5,
-                    40,
-                    &w1[0],
-                    nullifier_root,
-                    LEVEL,
-                    &mut rng,
-                ),
-                Err(e) if e.0.contains("pending homomorphic adds")
-            ),
-            "the witnessed inter-channel builder must refuse a credited position"
-        );
-
-        // The decrypted builder debits it directly.
+        // The decrypted builder debits the credited position directly.
         let built = build_inter_channel_send_token_at_base_nonce_decrypted(
             &keys[0],
             &snapshot,
@@ -11162,7 +10690,7 @@ mod delegate_send_tests {
     #[test]
     fn k1_batch_fold_identical_to_solo_per_token() {
         let mut rng = StdRng::seed_from_u64(0x2b70b3);
-        let (record, keys, members, genesis, w_t0, w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 23, [50, 30, 20], [40, 25]);
         let snapshot = ChannelSnapshot {
             record,
@@ -11170,9 +10698,7 @@ mod delegate_send_tests {
             members,
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
-        for (token_slot, amount, before, witness) in
-            [(0u8, 7u64, 50u64, &w_t0[0]), (1u8, 5u64, 40u64, &w_t1[0])]
-        {
+        for (token_slot, amount) in [(0u8, 7u64), (1u8, 5u64)] {
             let (slim, _w) = build_slim_send_at(
                 &mut rng,
                 &keys[0],
@@ -11181,8 +10707,6 @@ mod delegate_send_tests {
                 1,
                 token_slot,
                 amount,
-                before,
-                witness,
                 0xD0 + token_slot as u32,
             );
             let solo = solo_next_state(
@@ -11227,7 +10751,7 @@ mod delegate_send_tests {
     #[test]
     fn compatibility_builders_keep_prev_leaf_nonce_after_incoming_transition() {
         let mut rng = StdRng::seed_from_u64(0x1C0A_1A6);
-        let (record, keys, members, genesis, w_t0, _w_t1) =
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
             setup_two_token_channel(&mut rng, 30, [50, 30, 20], [0, 0]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
@@ -11271,10 +10795,9 @@ mod delegate_send_tests {
         );
 
         let destination = MemberKeys::generate(&mut rng);
-        let send = build_inter_channel_send_token(
+        let send = build_inter_channel_send_token_at_base_nonce_decrypted(
             &keys[0],
             &incoming_snapshot,
-            prev_user_leaf_index,
             0,
             ChannelId::new(31).unwrap(),
             0,
@@ -11282,9 +10805,8 @@ mod delegate_send_tests {
             destination.pk_g(),
             Salt::default(),
             0,
+            prev_user_leaf_index,
             5,
-            50,
-            &w_t0[0],
             Bytes32::from_u32_slice(&[1, 1, 2, 3, 5, 8, 13, 21]).unwrap(),
             LEVEL,
             &mut rng,
@@ -11299,16 +10821,14 @@ mod delegate_send_tests {
         assert_eq!(send.transfer_descriptor.inter_channel_tx.base_nonce, 0);
         assert_eq!(send.transfer_descriptor.tx_v2.nonce, 0);
 
-        let burn = build_burn_send_token(
+        let burn = build_burn_send_token_at_base_nonce_decrypted(
             &keys[0],
             &incoming_snapshot,
-            prev_user_leaf_index,
             0,
             Address::from_u32_slice(&[0xA11CE; 5]).unwrap(),
             0,
+            prev_user_leaf_index,
             5,
-            50,
-            &w_t0[0],
             Bytes32::from_u32_slice(&[21, 13, 8, 5, 3, 2, 1, 1]).unwrap(),
             LEVEL,
             &mut rng,
@@ -11388,7 +10908,7 @@ mod delegate_send_tests {
     #[test]
     fn build_send_token_rejects_inactive_position() {
         let mut rng = StdRng::seed_from_u64(0x8ba9);
-        let (record, keys, members, genesis, witnesses) =
+        let (record, keys, members, genesis, _witnesses) =
             setup_delegate_channel(&mut rng, 32, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record,
@@ -11397,15 +10917,14 @@ mod delegate_send_tests {
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         assert!(
-            build_send_token(
+            build_send_token_decrypted(
                 &keys[0],
                 &snapshot,
                 0,
                 1,
-                1, // token_count is 1 — position 1 is inactive
+                1,
+                // token_count is 1 — position 1 is inactive
                 5,
-                50,
-                &witnesses[0],
                 Bytes32::default(),
                 LEVEL,
                 &mut rng,
@@ -11509,7 +11028,7 @@ mod delegate_send_tests {
     #[test]
     fn inter_channel_send_token_debits_resolved_slot() {
         let mut rng = StdRng::seed_from_u64(0x1C2C);
-        let (record, keys, members, genesis, _w0, w1) =
+        let (record, keys, members, genesis, _w0, _w1) =
             setup_two_token_channel(&mut rng, 51, [50, 30, 20], [40, 25]);
         let mut state = genesis;
         state.channel_fund.amounts[1] = u64_to_u256(65);
@@ -11526,10 +11045,10 @@ mod delegate_send_tests {
 
         // Unregistered base index: refused before any proof work.
         assert!(
-            build_inter_channel_send_token(
+            build_inter_channel_send_token_at_base_nonce_decrypted(
                 &keys[0],
                 &snapshot,
-                0, // registered ChannelLeaf has not consumed a base send slot
+                // registered ChannelLeaf has not consumed a base send slot
                 0,
                 dest_channel,
                 0,
@@ -11537,9 +11056,8 @@ mod delegate_send_tests {
                 dest_keys.pk_g(),
                 Salt::default(),
                 77,
+                0,
                 5,
-                40,
-                &w1[0],
                 nullifier_root,
                 LEVEL,
                 &mut rng,
@@ -11550,7 +11068,7 @@ mod delegate_send_tests {
 
         // The base cursor is zero even though this transition's channel small-block number is one.
         // That is the normal post-setup shape and proves the two counters are independent.
-        let built = build_inter_channel_send_token_at_base_nonce(
+        let built = build_inter_channel_send_token_at_base_nonce_decrypted(
             &keys[0],
             &snapshot,
             0,
@@ -11562,8 +11080,6 @@ mod delegate_send_tests {
             T1_INDEX,
             0,
             5,
-            40,
-            &w1[0],
             nullifier_root,
             LEVEL,
             &mut rng,
@@ -11711,7 +11227,7 @@ mod delegate_send_tests {
     #[test]
     fn small_block_carries_real_n_of_n_and_one_member_can_block_it() {
         let mut rng = StdRng::seed_from_u64(0x5106);
-        let (record, keys, members, genesis, _w0, w1) =
+        let (record, keys, members, genesis, _w0, _w1) =
             setup_two_token_channel(&mut rng, 61, [50, 30, 20], [40, 25]);
         let mut state = genesis;
         state.channel_fund.amounts[1] = u64_to_u256(65);
@@ -11726,10 +11242,10 @@ mod delegate_send_tests {
         let dest_channel = crate::common::channel_id::ChannelId::new(99).unwrap();
         let nullifier_root = Bytes32::from_u32_slice(&[9, 8, 7, 6, 5, 4, 3, 2]).unwrap();
 
-        let built = build_inter_channel_send_token(
+        let built = build_inter_channel_send_token_at_base_nonce_decrypted(
             &keys[0],
             &snapshot,
-            0, // registered ChannelLeaf has not consumed a base send slot
+            // registered ChannelLeaf has not consumed a base send slot
             0,
             dest_channel,
             0,
@@ -11737,9 +11253,8 @@ mod delegate_send_tests {
             dest_keys.pk_g(),
             Salt::default(),
             T1_INDEX,
+            0,
             5,
-            40,
-            &w1[0],
             nullifier_root,
             LEVEL,
             &mut rng,
@@ -11842,6 +11357,161 @@ mod delegate_send_tests {
         assert_eq!(pk_gs.len(), n);
         assert_eq!(agg_witness.active.len(), n);
         assert_eq!(agg_witness.message, a_signed.digest);
+    }
+
+    /// SECURITY (2026-10-15 adversarial review — degenerate key × witnessed fallback, the
+    /// WALLET gates): a delegate whose registered Regev key is `(1, Δ·1)` (nonzero `a`, so the
+    /// registration screen of the time admitted it) "opens" its canonical-zero slot to u64::MAX
+    /// under the witnessed E-1 AIR and sends 1,000,000 to a member out of a 70-token channel.
+    /// Both wallet gates — the fat `verify_send_transition` and the slim batch
+    /// `verify_slim_send_tx` — must refuse: only the decrypted purpose is admissible. RED on the
+    /// fallback-era gates, which accepted the witnessed proof once the decrypted check failed.
+    ///
+    /// The record is assembled directly rather than through `build_record`: the gates must
+    /// refuse the proof for a key that is ALREADY registered, independently of the
+    /// registration-time screen (`RegevPk::reject_degenerate`, defense in depth only).
+    #[test]
+    fn degenerate_key_witnessed_e1_is_refused_by_both_wallet_send_gates() {
+        use crate::{
+            common::balance_state::zero_ciphertext,
+            regev::{
+                prove_channel_tx,
+                transfer_stark::adversarial::{degenerate_pk, forged_zero_opening},
+            },
+        };
+        let mut rng = StdRng::seed_from_u64(0xde6e_0003);
+        let mut keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        keys[2].regev_pk = degenerate_pk(1);
+        let members: Vec<MemberInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| member_info(i as u16, k))
+            .collect();
+        let regev_pks = regev_pks_array(&members);
+        let mut record = ChannelRecord {
+            channel_id: ChannelId::new(31).unwrap(),
+            member_count: 2,
+            delegate_count: 1,
+            member_pk_gs: std::array::from_fn(|i| {
+                members.get(i).map(|m| m.pk_g).unwrap_or_default()
+            }),
+            member_pubkeys_root: Bytes32::default(),
+            set_version: 0,
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(0u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: regev_pk_root(&regev_pks),
+        };
+        record.member_pubkeys_root = member_pubkeys_root(&record, &members).unwrap();
+        record.validate().expect("record shape");
+
+        // Genesis: the members hold 40 / 30; the delegate's slot is the canonical ZERO
+        // ciphertext (the opening position of every joined delegate). Fund = 70.
+        let (ct0, _) = encrypt_amount(&mut rng, &keys[0].regev_pk, 40).unwrap();
+        let (ct1, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, 30).unwrap();
+        let cts = vec![ct0, ct1, zero_ciphertext().clone()];
+        let pkds: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let mut genesis = assemble_active_genesis(&record, &cts, &pkds, 70);
+        for slot in 0..2u8 {
+            let sig = sign_state(&keys[slot as usize], slot, &genesis).unwrap();
+            add_signature(&mut genesis, sig);
+        }
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&snapshot, Some((&keys[0], 0)))
+            .expect("the channel is otherwise well-formed");
+
+        // The attacker's payload, assembled by hand: a witnessed E-1 over (zero slot "opened"
+        // to u64::MAX, enc_amount to member 0, after = u64::MAX - amount), the sender's own A11
+        // authorization, and the canonical solo next state.
+        const AMOUNT: u64 = 1_000_000;
+        let (enc_amount, enc_amount_w) = encrypt_amount(&mut rng, &regev_pks[0], AMOUNT).unwrap();
+        let (after_ct, after_w) =
+            encrypt_amount(&mut rng, &regev_pks[2], u64::MAX - AMOUNT).unwrap();
+        let before_ct = snapshot.state.balance_state.enc_balances[2][0].clone();
+        assert_eq!(&before_ct, zero_ciphertext());
+        let proof = prove_channel_tx(
+            LEVEL,
+            &regev_pks[2],
+            &regev_pks[0],
+            (&before_ct, &forged_zero_opening(1, u64::MAX)),
+            (&enc_amount, &enc_amount_w),
+            (&after_ct, &after_w),
+        )
+        .expect("the witnessed E-1 AIR has no key binding: it proves the forged opening");
+        let proposed_next_state =
+            solo_next_state(&snapshot.state, 2, 0, 0, &after_ct, &enc_amount).unwrap();
+        let nonce = Bytes32::from_u32_slice(&[0xde6e, 0, 0, 0, 0, 0, 0, 1]).unwrap();
+        let tx_digest = ChannelTx::signing_digest(
+            snapshot.state.channel_id,
+            snapshot.state.digest,
+            &enc_amount,
+            nonce,
+            0,
+            record.member_pk_gs[2],
+            record.member_pk_gs[0],
+        );
+        let sender_hash_sig = sign_channel_tx_sender(&keys[2], &tx_digest, LEVEL).unwrap();
+        let channel_tx = ChannelTx {
+            recipient_pk_g: record.member_pk_gs[0],
+            token_slot: 0,
+            enc_amount,
+            nonce,
+            channel_tx_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof,
+            },
+            sender_pk_g: record.member_pk_gs[2],
+            sender_hash_sig,
+            sender_pk_b: keys[2].pk_b(),
+        };
+        let payload = SendPayload {
+            sender_index: 2,
+            recipient_index: 0,
+            channel_tx,
+            proposed_next_state,
+            members: members.clone(),
+            record: record.clone(),
+        };
+
+        // The fat gate, as the recipient co-signer (the attacker DID encrypt the amount to it,
+        // so the own-slot decryption check is not what stops this).
+        let fat = verify_send_transition(
+            &snapshot.state,
+            &record,
+            &payload,
+            LEVEL,
+            Some(&keys[0].regev_sk),
+            Some(AMOUNT),
+        );
+        assert!(
+            matches!(&fat, Err(e) if e.0.contains("ProofVerification")),
+            "the fat send gate must refuse a witnessed E-1 from a degenerate key: {fat:?}"
+        );
+        // The slim batch gate.
+        let slim = verify_slim_send_tx(
+            &snapshot.state,
+            &record,
+            &snapshot.members,
+            &regev_pks,
+            &payload.to_slim(),
+            LEVEL,
+            Some(&keys[0].regev_sk),
+            Some(AMOUNT),
+        );
+        assert!(
+            matches!(&slim, Err(e) if e.0.contains("ProofVerification")),
+            "the slim send gate must refuse a witnessed E-1 from a degenerate key: {slim:?}"
+        );
     }
 }
 
@@ -11980,20 +11650,32 @@ mod slot_capacity_tests {
     use crate::{
         common::balance_state::BalanceState,
         ethereum_types::address::Address,
-        regev::{REGEV_N, RegevCiphertext, RegevPk},
+        regev::{REGEV_N, REGEV_Q, RegevCiphertext, RegevPk},
     };
 
     /// Fabricated distinct identity for `slot`. `pk_g` / `pk_b` are only hashed, but the Regev
     /// key IS validated: `build_record` -> `validate_new_participant_exit_keys` requires every
-    /// active slot's key to be shape/canonicality-valid (`RegevPk::validate`), to have a NONZERO
-    /// `a` polynomial, and to be DISTINCT from every other active slot's key. So `a` is the
-    /// padding vector with a per-slot tag in `a[0]` — nonzero, distinct, canonical
-    /// (`tag < REGEV_Q`) — which satisfies the check without generating 300 real keypairs, and
-    /// keeps this test cheap enough to cover 300 slots natively.
+    /// active slot's key to be shape/canonicality-valid, NOT degenerate
+    /// (`RegevPk::reject_degenerate`: no zero / monomial / all-equal / small `a` or `b` — the
+    /// old `padding() + tag in a[0]` fabrication is exactly a refused monomial), and DISTINCT
+    /// from every other active slot's key. So `a` and `b` are filled from a cheap per-slot
+    /// xorshift stream reduced mod q — uniform-looking, nonzero, distinct, canonical — which
+    /// satisfies the screen without generating 300 real keypairs and keeps this test cheap
+    /// enough to cover 300 slots natively.
     fn fake_member(slot: u16) -> MemberInfo {
         let tag = slot as u32 + 1;
-        let mut regev_pk = RegevPk::padding();
-        regev_pk.a[0] = tag;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ ((u64::from(tag) << 32) | u64::from(tag));
+        let mut next = || {
+            // xorshift64*: deterministic per slot, cheap, and far from any degenerate family.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            ((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u32) % REGEV_Q
+        };
+        let regev_pk = RegevPk {
+            a: (0..REGEV_N).map(|_| next()).collect(),
+            b: (0..REGEV_N).map(|_| next()).collect(),
+        };
         MemberInfo {
             slot,
             pk_g: Bytes32::from_u32_slice(&[0xA0, 0, 0, 0, 0, 0, 0, tag]).unwrap(),
