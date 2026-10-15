@@ -1081,7 +1081,7 @@ contract DeployGuardsTest is Test {
             vm.toString(bytes(backingMle).length),
             ',"backingMleSha256":"',
             vm.toString(mleSha),
-            '","backingPublicInputCount":34,"backingPublicInputsFile":"backing_public_inputs.json","backingPublicInputsSha256":"',
+            '","backingPublicInputCount":35,"backingPublicInputsFile":"backing_public_inputs.json","backingPublicInputsSha256":"',
             vm.toString(sha256(bytes(backingPis))),
             '","backingMleConfigFile":"backing_mle_config.json","backingMleConfigBytes":',
             vm.toString(configBytes),

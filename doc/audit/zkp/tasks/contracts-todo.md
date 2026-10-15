@@ -56,8 +56,24 @@ Legend: [ ] todo · [~] in progress · [x] modeled+proved
       instead: a burn leaf pays exactly like any leaf (proof-bound economics, finalized root,
       single-use nullifier, escrow ceiling), and close-vs-burn ordering from the
       `CloseFundingMaterializer` journal — `recordPost` reverts for a frozen/exited bound channel,
-      and close admission/materialization require a backing anchor `>= lastPostedBlock` — so no
-      settled close vector still contains a burn the rollup pays. Deferred by the owner.
+      and close admission/materialization require the backing's **processed-send block**
+      (`CloseAssetBacking` PI limb 26 = the Balance proof's `block_r`) `>= lastPostedBlock` — so
+      no settled close vector still contains a burn the rollup pays. Deferred by the owner.
+      **2026-10-15 correction:** the 2026-10-09 rule compared the backing's *anchor*
+      (`public_state.block_number`) with `lastPostedBlock`; that was unsound, because a receive
+      step may re-anchor a pre-burn head at any later finalized state while `block_r` stays below
+      the burn (doc/architecture-audit/detail2.md §T). The statement is now 35 limbs with
+      `processedSendBlockNumber` at limb 26 (`<= anchorBlockNumber`, circuit-range-checked), the
+      materializer keeps `signedHeadBackingProcessedSendPlusOne` per statement key (the
+      `signedHeadBackingAnchorPlusOne` getter is gone), and `_materialize` checks
+      `lastPostedBlock <= processedSendBlockNumber`. Stale models to update with the above:
+      `Zkp/Implementation/CloseAssetBacking.lean` (`publicInputsLength = 26`, no
+      `processedSendBlockNumber`, no `enforceCursorAtOrBelowAnchor` op) and every materializer
+      row of `Coverage.lean`; `doc/audit/zkp/evidence/faithfulness-CloseAssetBacking.ops` is
+      re-blessed (`registerPublicInputs 35`, `enforceCursorAtOrBelowAnchor`). The
+      `close_asset_backing_*` fixtures under `contracts/test/data` are the pre-2026-10-15 34-limb
+      statement and must be regenerated (regen-and-redeploy runbook) before `DeployGuards`,
+      `DeployCloseCli` and `CloseLifecycleE2E` can pass again.
 - [x] claimAuthorizedWithdrawal → IntmaxRollupWithdraw (`claimAuthorized_escrow_conservation`, renamed 2026-07-28 from the misleading `claimAuthorized_safe`: it proves escrow conservation + nullifier consumption + an authorization read-back, NOT economic soundness — the DERIVATION of the digest's fields was always out of model scope). **The contract function itself was DELETED 2026-07-28** (doc/tasks/pw-auth-threat-model.md); the model transition is retained so the solvency inductions cover a superset of deployed operations. authorizePartialWithdrawal → IntmaxRollupDeposit (access control)
 - [x] helpers (hash/crypto) → Coverage.lean (structural keccak_det + crypto oracles)
 - [x] `registerChannel()` (:891)  → Coverage.lean (structural reg keccak chain)

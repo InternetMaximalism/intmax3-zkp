@@ -34,6 +34,7 @@ constantTokenFundsDomain	constant	ok
 constantZero	constant	ok
 constantZeroLeaf	constant	ok
 decodeBalanceTargetPis	aliasing	ok
+enforceCursorAtOrBelowAnchor	range	ok
 equalRegistry [45 pairs]	arith	not-static
 flattenAmountLimbs	aliasing	ok
 multiplyInactiveAmount [0..10)x[0..8)	arith	not-static
@@ -42,7 +43,7 @@ multiplyNextActivity [0..9)	arith	not-static
 notActivity [0..10)	arith	not-static
 rangeCount32	range	ok
 rangeRegistry32 [0..10)	range	ok
-registerPublicInputs 26	public-inputs	ok
+registerPublicInputs 35	public-inputs	ok
 selectUpdatedRoot [0..10)	arith	not-static
 startStandardRecursionZk	config	ok
 subtractActivityFromOne [0..9)	arith	not-static

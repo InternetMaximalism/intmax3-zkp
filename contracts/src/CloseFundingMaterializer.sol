@@ -173,13 +173,20 @@ contract CloseFundingMaterializer {
         bytes32 settledTxChain;
         bytes32 tokenFundsDigest;
         bytes32 backingRoot;
+        /// The finalized public state the Balance proof is anchored at.
         uint64 anchorBlockNumber;
+        /// The Balance proof's `block_r`: every own send the channel posted at or before this
+        /// block is processed into `settledTxChain` and debited from the fund vector. The close
+        /// ordering rule compares THIS value with `lastPostedBlock`; the anchor cannot be used
+        /// for that, because a receive step may anchor at any later finalized state while its
+        /// cursor stays below the next unprocessed own send (2026-10-15).
+        uint64 processedSendBlockNumber;
         bytes32 balanceStateCommitment;
     }
 
     IntmaxRollup public immutable rollup;
     /// @notice The constructor-pinned compact-v2 adapter of the CloseAssetBacking circuit. It
-    ///         recursively checks the Balance proof and exposes only the 34 fields consumed at the
+    ///         recursively checks the Balance proof and exposes only the 35 fields consumed at the
     ///         L1 exit boundary. Like every other statement verifier of this deployment it owns its
     ///         complete immutable VK/configuration; there is no post-deploy initialization.
     IPinnedMleVerifierV2 public immutable backingMleVerifier;
@@ -195,9 +202,11 @@ contract CloseFundingMaterializer {
     mapping(uint32 => uint64) public frozenGeneration;
     mapping(uint32 => uint64) public lastPostedBlock;
     mapping(uint32 => bytes32) public materializedChannelExit;
-    /// 0 means absent; otherwise value - 1 is the greatest verified anchor for this exact
-    /// manager/channel + settled-chain + token-funds composition.
-    mapping(bytes32 => uint64) public signedHeadBackingAnchorPlusOne;
+    /// 0 means absent; otherwise value - 1 is the greatest verified processed-send block
+    /// (`BackingStatement.processedSendBlockNumber`) for this exact manager/channel +
+    /// settled-chain + token-funds composition. Every attested proof of one composition proves the
+    /// same settled chain, so the maximum is a sound bound for that state.
+    mapping(bytes32 => uint64) public signedHeadBackingProcessedSendPlusOne;
     /// Exact canonical `(chain, deployment, rollup, manager, proof)` receipt. Materialization
     /// supplies the proof argument but reuses this earlier verification instead of paying the MLE
     /// verifier twice.
@@ -327,7 +336,9 @@ contract CloseFundingMaterializer {
     ///      withdrawal proof alone, so once the Manager freezes the channel a burn block that was
     ///      not yet posted can never be posted, and therefore never paid; the close returns that
     ///      amount instead. A burn block posted before the freeze raises `lastPostedBlock`, which
-    ///      `requireSignedHeadBacking` then demands of every close backing.
+    ///      `requireSignedHeadBacking` then demands of every close backing's
+    ///      `processedSendBlockNumber`: the backing's Balance proof must have processed that
+    ///      send, so its settled chain and fund vector exclude the burned amount.
     function recordPost(uint32 channelId, uint64 blockNumber) external onlyRollup {
         if (managerOfChannel[channelId] == address(0)) return;
         if (materializedChannelExit[channelId] != bytes32(0)) revert ChannelAlreadyExited();
@@ -361,9 +372,9 @@ contract CloseFundingMaterializer {
         bytes32 statementKey =
             _backingStatementKey(address(manager), channelId, statement.settledTxChain, statement.tokenFundsDigest);
         bytes32 proofId = _backingProofId(address(manager), backingProof);
-        uint64 anchorPlusOne = statement.anchorBlockNumber + 1;
-        if (anchorPlusOne > signedHeadBackingAnchorPlusOne[statementKey]) {
-            signedHeadBackingAnchorPlusOne[statementKey] = anchorPlusOne;
+        uint64 processedSendPlusOne = statement.processedSendBlockNumber + 1;
+        if (processedSendPlusOne > signedHeadBackingProcessedSendPlusOne[statementKey]) {
+            signedHeadBackingProcessedSendPlusOne[statementKey] = processedSendPlusOne;
         }
         if (!attestedBackingProof[proofId]) {
             attestedBackingProof[proofId] = true;
@@ -374,7 +385,8 @@ contract CloseFundingMaterializer {
     }
 
     /// @notice True only when this exact bound Manager has a verified whole-vector backing
-    ///         receipt whose anchor is not older than the channel's current reorg-aware post head.
+    ///         receipt whose processed-send block is not older than the channel's current
+    ///         reorg-aware post head.
     function hasSignedHeadBacking(
         address manager,
         uint32 channelId,
@@ -387,11 +399,13 @@ contract CloseFundingMaterializer {
 
     /// @notice Manager-only admission check. Keeping the branch and error in this satellite saves
     ///         scarce ChannelSettlementManager runtime bytes while preserving the submit ABI.
-    /// @dev Once a close is requested the backing must be anchored at or after the channel's last
-    ///      posted block. Its settled-tx chain comes from the base Balance proof at that anchor, so
-    ///      a state that predates a posted burn block cannot be backed: no close can settle a fund
-    ///      vector that still contains an amount the Rollup pays out as a burn. (While `Active`,
-    ///      the only caller, `submitCloseIntent`, reverts `CloseNotRequested` after this check.)
+    /// @dev Once a close is requested the backing's processed-send block must be at or after the
+    ///      channel's last posted block: the base Balance proof has then processed every own send
+    ///      the channel posted, so its settled-tx chain and fund vector exclude every posted burn.
+    ///      A state that predates a posted burn block cannot be backed, whatever later finalized
+    ///      state its Balance proof is anchored at: no close can settle a fund vector that still
+    ///      contains an amount the Rollup pays out as a burn. (While `Active`, the only caller,
+    ///      `submitCloseIntent`, reverts `CloseNotRequested` after this check.)
     function requireSignedHeadBacking(uint32 channelId, bytes32 settledTxChain, bytes32 tokenFundsDigest)
         external
         view
@@ -411,9 +425,11 @@ contract CloseFundingMaterializer {
         bool requireCurrent
     ) private view returns (bool) {
         if (managerOfChannel[channelId] != manager) return false;
-        uint64 anchorPlusOne =
-            signedHeadBackingAnchorPlusOne[_backingStatementKey(manager, channelId, settledTxChain, tokenFundsDigest)];
-        return anchorPlusOne != 0 && (!requireCurrent || anchorPlusOne - 1 >= lastPostedBlock[channelId]);
+        uint64 processedSendPlusOne = signedHeadBackingProcessedSendPlusOne[
+            _backingStatementKey(manager, channelId, settledTxChain, tokenFundsDigest)
+        ];
+        return processedSendPlusOne != 0
+            && (!requireCurrent || processedSendPlusOne - 1 >= lastPostedBlock[channelId]);
     }
 
     /// @notice Permissionless signer-independent exit using finalized H plus its already-attested
@@ -431,7 +447,7 @@ contract CloseFundingMaterializer {
             statement.settledTxChain != manager.finalizedSettledTxChain()
                 || statement.tokenFundsDigest != manager.finalizedTokenFundsDigest()
         ) revert BackingPublicInputsMismatch();
-        _materialize(manager, statement.anchorBlockNumber);
+        _materialize(manager, statement.anchorBlockNumber, statement.processedSendBlockNumber);
         uint32 channelId = uint32(manager.channelId());
         lateBalanceStateCommitment[channelId] = statement.balanceStateCommitment;
         lateBalanceAnchorBlock[channelId] = statement.anchorBlockNumber;
@@ -497,7 +513,9 @@ contract CloseFundingMaterializer {
 
     /// @dev Re-entered only by the Rollup's authenticated endpoint. The digest is consumed before
     ///      token credits; any later underflow/mismatch reverts it and every Rollup mutation.
-    function _materialize(ChannelSettlementManager m, uint64 anchorBlockNumber) private {
+    function _materialize(ChannelSettlementManager m, uint64 anchorBlockNumber, uint64 processedSendBlockNumber)
+        private
+    {
         address manager = address(m);
         uint32 channelId = uint32(m.channelId());
         if (managerOfChannel[channelId] != manager) revert NotBoundManager();
@@ -513,7 +531,12 @@ contract CloseFundingMaterializer {
         if (digest == bytes32(0) || !rollup.isFinalizedStateRoot(stateRoot)) {
             revert ChannelExitStatementMismatch();
         }
-        if (anchorBlockNumber > rollup.latestFinalizedBlockNumber() || lastPostedBlock[channelId] > anchorBlockNumber) {
+        // The anchor must be finalized; the processed-send block, not the anchor, must cover the
+        // channel's last posted block (close-vs-burn ordering, 2026-10-15).
+        if (
+            anchorBlockNumber > rollup.latestFinalizedBlockNumber()
+                || lastPostedBlock[channelId] > processedSendBlockNumber
+        ) {
             revert ChannelExitHasUnfinalizedBlocks();
         }
 
@@ -538,10 +561,12 @@ contract CloseFundingMaterializer {
         emit SignedHeadExitMaterialized(channelId, manager, digest, tokenCount);
     }
 
-    /// @dev Exact PI layout (34 limbs): channelId[1] | settledTxChain[8] | TFD[8] |
-    ///      finalizedExtendedStateCommitment[8] | anchorBlockNumber[1] | balanceStateCommitment[8].
-    ///      All fields except the anchor are canonical
-    ///      u32 limbs; the anchor is canonical u63. The backing ext root need not equal H's signed
+    /// @dev Exact PI layout (35 limbs): channelId[1] | settledTxChain[8] | TFD[8] |
+    ///      finalizedExtendedStateCommitment[8] | anchorBlockNumber[1] |
+    ///      processedSendBlockNumber[1] | balanceStateCommitment[8].
+    ///      All fields except the two block numbers are canonical u32 limbs; the block numbers
+    ///      are canonical u63 with processedSendBlockNumber <= anchorBlockNumber (the circuit
+    ///      range-checks that difference). The backing ext root need not equal H's signed
     ///      channel-fund root: it is the later finalized root that actually contains this Balance
     ///      proof. Channel/settled-chain/TFD are the bridge back to H.
     function _validateBackingPublicInputs(ChannelSettlementManager manager, uint256[] memory pi)
@@ -549,11 +574,11 @@ contract CloseFundingMaterializer {
         view
         returns (BackingStatement memory statement)
     {
-        if (pi.length != 34) revert BackingPublicInputsMismatch();
+        if (pi.length != 35) revert BackingPublicInputsMismatch();
         for (uint256 i = 0; i < pi.length; ++i) {
-            if (i != 25 && pi[i] > type(uint32).max) revert BackingPublicInputsMismatch();
+            if (i != 25 && i != 26 && pi[i] > type(uint32).max) revert BackingPublicInputsMismatch();
         }
-        if (pi[25] >= (uint256(1) << 63)) revert BackingPublicInputsMismatch();
+        if (pi[25] >= (uint256(1) << 63) || pi[26] > pi[25]) revert BackingPublicInputsMismatch();
         uint32 channelId = uint32(manager.channelId());
         if (managerOfChannel[channelId] != address(manager)) revert NotBoundManager();
         if (pi[0] != channelId) revert BackingPublicInputsMismatch();
@@ -562,7 +587,8 @@ contract CloseFundingMaterializer {
             tokenFundsDigest: _limbsToBytes32(pi, 9),
             backingRoot: _limbsToBytes32(pi, 17),
             anchorBlockNumber: uint64(pi[25]),
-            balanceStateCommitment: _limbsToBytes32(pi, 26)
+            processedSendBlockNumber: uint64(pi[26]),
+            balanceStateCommitment: _limbsToBytes32(pi, 27)
         });
         if (!rollup.isFinalizedStateRoot(statement.backingRoot)) revert BackingPublicInputsMismatch();
         // A receipt may be attested at any finalized anchor. Close admission

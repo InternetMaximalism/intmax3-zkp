@@ -42,6 +42,7 @@ producer.liveBackingArtifact = async () => ({
       tokenFundsDigest: '0x' + '45'.repeat(32),
       finalizedExtendedStateCommitment: '0x' + '67'.repeat(32),
       anchorBlockNumber: 11,
+      processedSendBlockNumber: 9,
       balanceStateCommitment: `0x${'aa'.repeat(32)}`,
     },
   },
@@ -89,6 +90,7 @@ test('backing endpoint serves only the durable live proof bundle, never setup-ti
     assert.equal(body.baseHead.settledTxChain, '0x' + '12'.repeat(32));
     assert.deepEqual(body.signedHeadExitKit.backingProof, [7, 8, 9]);
     assert.equal(body.signedHeadExitKit.backingPublicInputs.anchorBlockNumber, 11);
+    assert.equal(body.signedHeadExitKit.backingPublicInputs.processedSendBlockNumber, 9);
     assert.equal(body.signedHeadExitKit.backingMleJson, undefined,
       'live source must archive the inner proof, never an MLE wrapper');
     assert.equal(body.fund, undefined);

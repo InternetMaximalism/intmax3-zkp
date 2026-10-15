@@ -97,8 +97,8 @@ contract DeployCloseCli is Script {
             "backing MLE SHA-256 mismatch"
         );
         require(
-            vm.parseJsonUint(manifest, ".backingPublicInputCount") == 34,
-            "backing circuit must expose exactly 34 public inputs"
+            vm.parseJsonUint(manifest, ".backingPublicInputCount") == 35,
+            "backing circuit must expose exactly 35 public inputs"
         );
         require(
             keccak256(bytes(vm.parseJsonString(manifest, ".backingPublicInputsFile")))

@@ -100,7 +100,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             == vm.parseJsonBytes32(_closeIntentJson(), ".member_set_commitment");
     }
 
-    /// @dev The 34-limb CloseAssetBacking public-input vector the backing fixture was proved over,
+    /// @dev The 35-limb CloseAssetBacking public-input vector the backing fixture was proved over,
     /// parsed from the fixture so every statement below is asserted BEFORE the on-chain call.
     function _backingPublicInputs() internal view returns (uint256[] memory pi) {
         string[] memory raw = vm.parseJsonStringArray(_backingJson(), ".proof.publicInputs");
@@ -113,15 +113,16 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     /// @dev Attest the co-generated whole-vector backing proof for THIS channel against the
     /// finalized chain. `submitCloseIntent` → `_checkCloseProof` → `requireSignedHeadBacking`
     /// demands, during ClosePending, an attested backing whose (settledTxChain, tokenFundsDigest)
-    /// equal the close proof's and whose anchor is >= the channel's `lastPostedBlock` (3: only
-    /// block 3 carries channel 1). The materializer itself re-checks pi[0] == channelId, that the
-    /// backing root (limbs 17..24) is a FINALIZED rollup root and that the anchor (limb 25) is
-    /// <= `latestFinalizedBlockNumber()`. Every one of those is asserted here from the fixture
+    /// equal the close proof's and whose processed-send block (limb 26, the Balance proof's
+    /// block_r) is >= the channel's `lastPostedBlock` (3: only block 3 carries channel 1). The
+    /// materializer itself re-checks pi[0] == channelId, that the backing root (limbs 17..24) is
+    /// a FINALIZED rollup root, that the anchor (limb 25) is <= `latestFinalizedBlockNumber()`
+    /// and that limb 26 <= limb 25. Every one of those is asserted here from the fixture
     /// BEFORE the call so a stale/mis-generated backing fails on a readable message.
     function _attestRealBacking() internal {
         bytes memory bproof = FixtureLib.parseCompactProofV2(_backingJson());
         uint256[] memory pi = _backingPublicInputs();
-        assertEq(pi.length, 34, "backing fixture must carry the 34-limb CloseAssetBacking PI vector");
+        assertEq(pi.length, 35, "backing fixture must carry the 35-limb CloseAssetBacking PI vector");
         assertEq(pi[0], uint256(uint32(manager.channelId())), "backing PI channel id != manager channel id");
         bytes32 backingRoot;
         for (uint256 i = 17; i < 25; ++i) {
@@ -134,6 +135,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         );
         assertTrue(rollup.isFinalizedStateRoot(backingRoot), "backing root must be a finalized rollup root");
         assertEq(pi[25], 3, "backing PI anchor must be block 3 (the channel's last posted block)");
+        assertEq(pi[26], 3, "backing PI processed-send block must cover block 3 (the channel's last posted block)");
         assertEq(materializer.lastPostedBlock(uint32(manager.channelId())), 3, "channel last posted block");
         assertEq(rollup.latestFinalizedBlockNumber(), 3, "finalized head");
         assertEq(materializer.managerOfChannel(uint32(manager.channelId())), address(manager), "manager bound");
@@ -156,7 +158,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             materializer.hasSignedHeadBacking(
                 address(manager), uint32(manager.channelId()), settledTxChain, tokenFundsDigest, true
             ),
-            "attested backing must be CURRENT for this channel (anchor >= lastPostedBlock)"
+            "attested backing must be CURRENT for this channel (processedSendBlock >= lastPostedBlock)"
         );
         // The backing statement is the bridge back to the close proof: the same settled chain and
         // token-funds digest the close PI carries (limbs 69..77 / 95..103 of the close vector).

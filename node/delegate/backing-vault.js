@@ -12,7 +12,7 @@ const { isDeepStrictEqual } = require('util');
 const PUBLIC_BACKING_SCHEMA_VERSION = 3;
 const LIVE_BALANCE_SNAPSHOT_VERSION = 4;
 const SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION = 1;
-const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN = 34;
+const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN = 35;
 const DEVELOPMENT_CHAIN_ID = 31_337;
 const MAX_BACKING_BYTES = 64 * 1024 * 1024;
 const MAX_BALANCE_COMPONENT_BYTES = 16 * 1024 * 1024;
@@ -119,6 +119,7 @@ function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxCh
       'tokenFundsDigest',
       'finalizedExtendedStateCommitment',
       'anchorBlockNumber',
+      'processedSendBlockNumber',
       'balanceStateCommitment',
     ],
     'backing.signedHeadExitKit.backingPublicInputs',
@@ -149,16 +150,27 @@ function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxCh
     Number.MAX_SAFE_INTEGER,
     'exit backing anchorBlockNumber',
   );
+  // The Balance proof's block_r: every own send posted at or before it is processed. The L1
+  // materializer compares this limb, not the anchor, with the channel's lastPostedBlock.
+  const processedSendBlockNumber = uint(
+    inputs.processedSendBlockNumber,
+    Number.MAX_SAFE_INTEGER,
+    'exit backing processedSendBlockNumber',
+  );
+  if (processedSendBlockNumber > anchorBlockNumber) {
+    throw new Error('signed-head exit backing processedSendBlockNumber is past its anchorBlockNumber');
+  }
   const publicInputs = [
     channelId,
     ...bytes32Limbs(settledTxChain),
     ...bytes32Limbs(tokenFundsDigest),
     ...bytes32Limbs(finalizedExtendedStateCommitment),
     anchorBlockNumber,
+    processedSendBlockNumber,
     ...bytes32Limbs(canonicalDigest(inputs.balanceStateCommitment, 'exit backing balanceStateCommitment')),
   ];
   if (publicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
-    throw new Error('signed-head exit backing public inputs do not contain exactly 34 limbs');
+    throw new Error('signed-head exit backing public inputs do not contain exactly 35 limbs');
   }
   return {
     schemaVersion: SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
@@ -166,6 +178,7 @@ function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxCh
     publicInputs,
     finalizedExtendedStateCommitment,
     anchorBlockNumber,
+    processedSendBlockNumber,
   };
 }
 
@@ -351,11 +364,11 @@ function validateVerificationReceipt(receipt, checked, authority) {
     backingPublicInputs: (() => {
       if (!Array.isArray(value.backingPublicInputs)
           || value.backingPublicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
-        throw new Error('verification receipt backing public inputs must contain exactly 34 limbs');
+        throw new Error('verification receipt backing public inputs must contain exactly 35 limbs');
       }
       return value.backingPublicInputs.map((input, index) => uint(
         input,
-        index === 25
+        index === 25 || index === 26
           ? Number.MAX_SAFE_INTEGER
           : 0xffffffff,
         `verification receipt backing publicInputs[${index}]`,

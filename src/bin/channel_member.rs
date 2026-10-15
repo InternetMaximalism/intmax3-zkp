@@ -13034,11 +13034,20 @@ fn parse_close_backing_public_inputs(
         .enumerate()
         .map(|(index, value)| close_backing_public_input(value, index))
         .collect::<Result<Vec<_>, _>>()?;
-    if parsed.iter().enumerate().any(|(i, value)| i != 25 && *value > u32::MAX as u64) {
+    if parsed
+        .iter()
+        .enumerate()
+        .any(|(i, value)| i != 25 && i != 26 && *value > u32::MAX as u64)
+    {
         return Err(format!("{what} contains a non-canonical u32 limb"));
     }
     if parsed[25] >= (1u64 << 63) {
         return Err(format!("{what} anchor block is not a canonical u63"));
+    }
+    if parsed[26] > parsed[25] {
+        return Err(format!(
+            "{what} processed-send block is not a canonical u63 at or below its anchor"
+        ));
     }
     Ok(parsed)
 }
@@ -13200,7 +13209,7 @@ fn validate_close_backing_bundle_bytes(
     if json_required_u64(&manifest, "backingPublicInputCount")?
         != CLOSE_BACKING_PUBLIC_INPUTS as u64
     {
-        return Err("manifest does not declare the exact 34-limb backing statement".to_string());
+        return Err("manifest does not declare the exact 35-limb backing statement".to_string());
     }
 
     let mle_inputs = validate_close_backing_mle_v2(mle_bytes, mle_config_bytes)?;
@@ -15388,7 +15397,7 @@ mod settlement_broadcast_recovery_tests {
                 &balance_vd_sha256,
             )
             .unwrap_err()
-            .contains("exactly 34"),
+            .contains("exactly 35"),
             "a close-proof-shaped MLE must never key the backing adapter"
         );
     }

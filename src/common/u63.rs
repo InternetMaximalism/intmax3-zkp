@@ -11,7 +11,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const U63_BITS: usize = 63;
+pub const U63_BITS: usize = 63;
 const U63_LOW_BITS: usize = 32;
 const U63_HIGH_BITS: usize = U63_BITS - U63_LOW_BITS;
 const U63_MAX_VALUE: u64 = (1u64 << U63_BITS) - 1;

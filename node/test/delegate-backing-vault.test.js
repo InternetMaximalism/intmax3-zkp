@@ -23,6 +23,7 @@ const ROLLUP = `0x${'77'.repeat(20)}`;
 const TOKEN_FUNDS_DIGEST = `0x${'88'.repeat(32)}`;
 const FINALIZED_EXTENDED_STATE_COMMITMENT = `0x${'99'.repeat(32)}`;
 const ANCHOR_BLOCK_NUMBER = 12;
+const PROCESSED_SEND_BLOCK_NUMBER = 10;
 
 function bytes32Limbs(value) {
   return Array.from(
@@ -39,6 +40,7 @@ function exitPublicInputs(backing) {
     ...bytes32Limbs(inputs.tokenFundsDigest),
     ...bytes32Limbs(inputs.finalizedExtendedStateCommitment),
     inputs.anchorBlockNumber,
+    inputs.processedSendBlockNumber,
     ...bytes32Limbs(inputs.balanceStateCommitment),
   ];
 }
@@ -94,6 +96,7 @@ function fixture(digest = DIGEST) {
         tokenFundsDigest: TOKEN_FUNDS_DIGEST,
         finalizedExtendedStateCommitment: FINALIZED_EXTENDED_STATE_COMMITMENT,
         anchorBlockNumber: ANCHOR_BLOCK_NUMBER,
+        processedSendBlockNumber: PROCESSED_SEND_BLOCK_NUMBER,
         balanceStateCommitment: DIGEST,
       },
     },
@@ -192,7 +195,7 @@ test('backing validation binds chain, rollup, exact signed state/record and sett
   assert.equal(checked.digest, DIGEST);
   assert.equal(checked.signedHeadExitKitSchemaVersion, 1);
   assert.equal(checked.backingProofBytes, 4);
-  assert.equal(checked.backingPublicInputs.length, 34);
+  assert.equal(checked.backingPublicInputs.length, 35);
   assert.equal(checked.backingPublicInputs[0], 7);
   assert.deepEqual(checked.backingPublicInputs.slice(1, 9), bytes32Limbs(CHAIN));
   assert.deepEqual(checked.backingPublicInputs.slice(9, 17), bytes32Limbs(TOKEN_FUNDS_DIGEST));
@@ -201,6 +204,8 @@ test('backing validation binds chain, rollup, exact signed state/record and sett
     bytes32Limbs(FINALIZED_EXTENDED_STATE_COMMITMENT),
   );
   assert.equal(checked.backingPublicInputs[25], ANCHOR_BLOCK_NUMBER);
+  assert.equal(checked.backingPublicInputs[26], PROCESSED_SEND_BLOCK_NUMBER);
+  assert.deepEqual(checked.backingPublicInputs.slice(27, 35), bytes32Limbs(DIGEST));
   for (const [name, mutate, pattern] of [
     ['chain', (x) => { x.chainId = 1; }, /chainId differs/],
     ['rollup', (x) => { x.rollup = `0x${'99'.repeat(20)}`; }, /rollup differs/],
@@ -233,6 +238,15 @@ test('backing validation binds chain, rollup, exact signed state/record and sett
     ['exit anchor', (x) => {
       x.signedHeadExitKit.backingPublicInputs.anchorBlockNumber = -1;
     }, /anchorBlockNumber must be a canonical unsigned integer/],
+    ['exit processed-send block', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.processedSendBlockNumber = -1;
+    }, /processedSendBlockNumber must be a canonical unsigned integer/],
+    ['exit processed-send block past anchor', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.processedSendBlockNumber = ANCHOR_BLOCK_NUMBER + 1;
+    }, /processedSendBlockNumber is past its anchorBlockNumber/],
+    ['exit missing processed-send block', (x) => {
+      delete x.signedHeadExitKit.backingPublicInputs.processedSendBlockNumber;
+    }, /unexpected schema/],
   ]) {
     const bad = structuredClone(backing);
     mutate(bad);

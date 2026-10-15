@@ -62,11 +62,11 @@ contract LateIncomingLifecycleTest is CloseSettlementBase {
         uint256[10] memory funds; funds[0] = 75; funds[1] = 40;
         uint32[10] memory tokens; tokens[1] = TOKEN;
         ChannelSettlementManager.CloseIntent memory intent = _intentWithTokens(1, 9, 22, 1, funds, tokens, 2);
-        uint256[] memory pi = new uint256[](34);
+        uint256[] memory pi = new uint256[](35);
         pi[0] = uint32(CHANNEL_ID);
         _word(pi, 1, intent.finalSettledTxChain);
         _word(pi, 9, verifier.tokenFundsDigest(tokens, 2, funds));
-        _word(pi, 17, EXT); pi[25] = 10; _word(pi, 26, INITIAL);
+        _word(pi, 17, EXT); pi[25] = 10; pi[26] = 10; _word(pi, 27, INITIAL);
         bytes memory backing = abi.encode(pi);
         materializer.attestSignedHeadBacking(manager, backing);
         _requestCloseAndElapseGrace();

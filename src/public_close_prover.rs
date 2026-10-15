@@ -1115,6 +1115,8 @@ mod tests {
             finalized_extended_state_commitment: Bytes32::from_u32_slice(&[9; 8])
                 .expect("state commitment"),
             anchor_block_number: crate::common::u63::BlockNumber::new(42).expect("anchor"),
+            processed_send_block_number: crate::common::u63::BlockNumber::new(40)
+                .expect("processed-send block"),
         }
     }
 

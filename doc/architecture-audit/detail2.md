@@ -2370,3 +2370,94 @@ Timers: `INTMAX_CLUSTER_WARN_MS` / `HALT_MS` / `CLOSE_MS` / `WATCHDOG_MS` (60 s 
   has no partial/merge form yet. The other co-sign purposes (refresh, inter-channel debit and
   credit, deposit import, token registration, member-set update) still sign every slot on the
   receiving host — extending them is the same gate → partial → merge split.
+
+## T. Close-vs-burn ordering: the processed-send boundary (2026-10-15)
+
+Context: since 2026-10-09 a partial withdrawal is a burn send paid by `withdrawNative` /
+`withdrawERC20` on its base withdrawal proof alone; the Manager holds no burn state. The
+no-double-draw argument then rested on the `CloseFundingMaterializer` journal: `recordPost`
+refuses a post to a frozen or exited channel, and close admission / materialization required
+the backing's **anchor** (`CloseAssetBacking.anchor_block_number =
+Balance.public_state.block_number`) to be `>= lastPostedBlock`. The third link of that argument,
+"the Balance proof cannot advance past an unprocessed own send", was false for the anchor.
+
+### T-1. The gap
+
+The receive circuits (`receive_transfer_circuit.rs`, `receive_deposit_circuit.rs`) bound only the
+balance cursor: `prev_block_r <= new_block_r < send_leaf.cur` (the next unprocessed own send),
+and `public_state.block_number >= new_block_r` with no upper bound. `update_public_state` accepts
+any later finalized public state. So a head whose last Balance step is a receive can be re-proved
+with `public_state.block_number >= B` (the burn block) while `block_r < B` and its
+`settled_tx_chain` / private state predate the burn. That proof satisfies the native witness
+mirrors and the `CloseAssetBacking` constructor, its anchor clears `anchor >= lastPostedBlock`,
+and the close would settle a fund vector that still holds the amount the Rollup pays as the burn.
+Under full co-signer collusion, or a missed challenge, that is a double draw from pooled escrow.
+`close_asset_backing_circuit.rs::pre_burn_head_reproved_past_the_burn_block_exposes_its_processed_send_boundary`
+constructs exactly this history (burn send leaf `(2, 5]`, `prev_block_r = 3`, `new_block_r = 4`,
+anchor 7).
+
+### T-2. The rule (fix (a): expose the boundary, compare it on L1)
+
+The ordering key is the Balance proof's `block_r`, not its anchor: `block_r >= B` holds only if
+the send step at `B` ran (the send circuit sets `new_block_r = tx_block_number` with
+`tx_block_number > prev.block_r` and `prev.block_r >= send_leaf.prev`, so own sends are processed
+in order; a receive can never move the cursor to or past the next unprocessed send). The
+`CloseAssetBacking` statement therefore exposes it:
+
+```text
+channel_id(1) | settled_tx_chain(8) | token_funds_digest(8) |
+finalized_extended_state_commitment(8) | anchor_block_number(1) |
+processed_send_block_number(1) | balance_state_commitment(8)      — 35 limbs
+```
+
+`processed_send_block_number` is the same wire as `Balance.block_r`; the circuit range-checks
+`anchor - block_r` to 63 bits (`enforceCursorAtOrBelowAnchor`), so the boundary never exceeds
+the anchor. `CloseFundingMaterializer`:
+
+- `_validateBackingPublicInputs`: 35 limbs; limbs 25 and 26 are canonical u63 with
+  `pi[26] <= pi[25]`; the anchor must still be `<= latestFinalizedBlockNumber()` and the
+  backing root a finalized state root.
+- `attestSignedHeadBacking` keeps, per statement key, `signedHeadBackingProcessedSendPlusOne`
+  (the greatest `processedSendBlockNumber + 1`; the old `signedHeadBackingAnchorPlusOne` is
+  gone). Every proof of one `(channel, settledTxChain, tokenFundsDigest)` composition proves the
+  same settled chain, so the maximum is sound.
+- `requireSignedHeadBacking` / `hasSignedHeadBacking(requireCurrent)`:
+  `processedSendBlockNumber >= lastPostedBlock[channel]`.
+- `_materialize`: `anchor <= latestFinalized` (finality) and
+  `lastPostedBlock <= processedSendBlockNumber` (ordering).
+
+Final ordering rule: a close can be admitted or materialized only on a backing whose Balance
+proof has processed every own send the channel has posted (`processed_send_block_number >=
+lastPostedBlock`). Either the burn block is posted first, so no pre-burn head can be backed
+whatever anchor it is re-proved at; or the close freezes first, so the burn block is never posted
+and never paid, and the close returns the amount.
+
+Alternatives considered: (b) constraining `channel_leaf.prev <= block_r` inside the backing
+circuit at the anchor (same VK rotation, no wire change, but the rule would live only in the
+circuit and have no on-chain test surface); (c) a contract-only burn high-water (impossible
+without re-adding the Manager burn authorization the 2026-10-09 change removed, because the
+contract cannot tell from the 34-limb statement whether the settled chain contains the burn).
+
+### T-3. What rotates
+
+The `CloseAssetBacking` plonky2 circuit (new PI count and one new range check) and therefore its
+MLE/WHIR verification config and pinned adapter (`close_asset_backing_mle_config.json`,
+`close_asset_backing_mle.json`, `close_asset_backing_public_inputs.json`, the backing entries of
+`close_asset_backing_manifest.json`). The Balance, close, withdrawal, claim, post-close, cancel
+and late-incoming circuits are unchanged (`LateIncoming` consumes the Balance proof directly, not
+the backing statement). Regenerate per `doc/tasks/regen-and-redeploy-runbook.md` in one batch
+with the close family; `DeployCloseCli` now refuses a manifest whose
+`backingPublicInputCount != 35`. The Lean model
+`doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean` (26 registered inputs, no
+`processedSendBlockNumber`) and `ChannelSettlementManager.lean` / `Coverage.lean` rows for the
+materializer rule are stale until re-modelled (tracked in
+`doc/audit/zkp/tasks/contracts-todo.md`).
+
+Tests: Rust `close_asset_backing_circuit.rs` (the re-proof history above, release-only; the
+fixed-width roundtrip; the faithfulness table row `enforceCursorAtOrBelowAnchor` and
+`registerPublicInputs 35`); Solidity `SignerIndependentExit.t.sol`
+`test_burnOrdering_preBurnHeadReprovedPastTheBurnBlockIsRefused` (pre-burn head attested at
+anchors 5 and 7 with boundary 4 is refused at admission and materialization; boundary 5 exits)
+and `test_backingStatementRejectsProcessedSendPastAnchorNoncanonicalLimbAndOldLayout`;
+`node/delegate/backing-vault.js` carries the new limb through the exit kit and the verification
+receipt.

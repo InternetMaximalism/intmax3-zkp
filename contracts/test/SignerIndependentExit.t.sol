@@ -182,10 +182,17 @@ contract SignerIndependentExitTest is Test {
     // A partial withdrawal (burn) is an ordinary inter-channel send to the BURN channel, paid by
     // the Rollup on its base withdrawal proof alone once its block is finalized. Nothing in the
     // Manager authorizes it. What keeps a burn and a close from drawing the same value twice is
-    // this journal: (b) once the burn block N is posted, a close needs backing anchored at or
-    // after N — a pre-burn state (whose fund vector still holds the burned amount) cannot be
-    // backed; (c) once the Manager freezes the channel, a burn block not yet posted can never be
-    // posted, so the burn is never paid and the close returns the amount.
+    // this journal: (b) once the burn block N is posted, a close needs backing whose
+    // processed-send block (the Balance proof's block_r, PI limb 26) is at or after N — a
+    // pre-burn state (whose fund vector still holds the burned amount) has block_r < N whatever
+    // finalized state its Balance proof is anchored at, so it cannot be backed; (c) once the
+    // Manager freezes the channel, a burn block not yet posted can never be posted, so the burn
+    // is never paid and the close returns the amount.
+    //
+    // The anchor (limb 25) is NOT the ordering key. A receive step may re-anchor a head at any
+    // later finalized public state while its cursor stays below the next unprocessed own send
+    // (receive_window), so a pre-burn head can carry an anchor >= N. Comparing the anchor with
+    // lastPostedBlock, as this journal did until 2026-10-15, admitted exactly that head.
 
     bytes32 private constant PRE_BURN_SETTLED = keccak256("settled chain before the burn");
     bytes32 private constant PRE_BURN_TFD = keccak256("fund vector still holding the burned amount");
@@ -194,9 +201,10 @@ contract SignerIndependentExitTest is Test {
     bytes32 private constant LATER_SETTLED = keccak256("settled chain after the burn");
     bytes32 private constant LATER_TFD = keccak256("fund vector after the burn");
 
-    /// (b) After `recordPost(channel, N)` for the burn block, a close whose backing anchor is < N is
-    /// refused by `requireSignedHeadBacking` while the Manager is ClosePending; a backing anchored
-    /// at N, or above it, is accepted. Materialization enforces the same anchor rule again.
+    /// (b) After `recordPost(channel, N)` for the burn block, a close whose backing processed-send
+    /// block is < N is refused by `requireSignedHeadBacking` while the Manager is ClosePending; a
+    /// backing that processed N, or a later send, is accepted. Materialization enforces the same
+    /// rule again.
     function test_burnOrdering_closeBackedBelowPostedBurnBlockIsRefused() external {
         // An earlier channel block, then the burn block N = 5, both finalized.
         rollup.post(materializer, CHANNEL, 2);
@@ -204,7 +212,8 @@ contract SignerIndependentExitTest is Test {
         rollup.setHead(6, 6);
         assertEq(materializer.lastPostedBlock(CHANNEL), 5, "the burn block is the channel's last post");
 
-        // The pre-burn head is attested at the newest anchor its Balance proof can have, N - 1.
+        // The pre-burn head, attested with the widest cursor the receive window allows below the
+        // burn (block_r = N - 1), anchored at the same block.
         materializer.attestSignedHeadBacking(_m(manager), _proof(4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
         // The post-burn head exactly at N, and a later head above N.
         materializer.attestSignedHeadBacking(_m(manager), _proof(5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
@@ -243,6 +252,78 @@ contract SignerIndependentExitTest is Test {
         manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, tokens, amounts);
         materializer.materializeSignedHead(_m(manager), _proof(5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
         assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST, "the post-burn close exits");
+    }
+
+    /// (b') The same pre-burn head RE-PROVED past the burn block: its Balance proof is anchored at
+    /// a finalized state at or after N (the receive circuits allow any later `public_state`), but
+    /// its processed-send block is still N - 1. The anchor clears every finality check; only the
+    /// processed-send rule refuses it, at close admission and again at materialization. The
+    /// materializer also refuses a statement claiming a processed-send block past its anchor, a
+    /// non-canonical processed-send limb, and the former 34-limb layout.
+    function test_burnOrdering_preBurnHeadReprovedPastTheBurnBlockIsRefused() external {
+        rollup.post(materializer, CHANNEL, 2);
+        rollup.post(materializer, CHANNEL, 5);
+        rollup.setHead(7, 7);
+
+        // Anchored exactly at N, and anchored after N: both finalized, both with block_r = 4.
+        materializer.attestSignedHeadBacking(_m(manager), _proofProcessed(5, 4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        materializer.attestSignedHeadBacking(_m(manager), _proofProcessed(7, 4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        assertEq(
+            materializer.signedHeadBackingProcessedSendPlusOne(
+                _statementKey(address(manager), PRE_BURN_SETTLED, PRE_BURN_TFD)
+            ),
+            5,
+            "the high-water is the processed-send block, not the anchor"
+        );
+        assertTrue(
+            materializer.hasSignedHeadBacking(address(manager), CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD, false),
+            "the receipts are recorded"
+        );
+        assertFalse(
+            materializer.hasSignedHeadBacking(address(manager), CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD, true),
+            "but neither is current: the burn at 5 is not processed"
+        );
+
+        manager.requestClose();
+        vm.prank(address(manager));
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.requireSignedHeadBacking(CHANNEL, PRE_BURN_SETTLED, PRE_BURN_TFD);
+
+        // Even a finalized pre-burn close cannot materialize through the re-anchored proof.
+        (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, PRE_BURN_SETTLED, PRE_BURN_TFD, tokens, amounts);
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitHasUnfinalizedBlocks.selector);
+        materializer.materializeSignedHead(_m(manager), _proofProcessed(7, 4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
+        _assertNothingMaterialized(11, 29);
+
+        // A head whose Balance proof processed the burn (block_r = 5) backs a close at any
+        // finalized anchor >= 5.
+        materializer.attestSignedHeadBacking(_m(manager), _proofProcessed(7, 5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
+        vm.prank(address(manager));
+        materializer.requireSignedHeadBacking(CHANNEL, POST_BURN_SETTLED, POST_BURN_TFD);
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, tokens, amounts);
+        materializer.materializeSignedHead(_m(manager), _proofProcessed(7, 5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST, "the post-burn close exits");
+    }
+
+    function test_backingStatementRejectsProcessedSendPastAnchorNoncanonicalLimbAndOldLayout() external {
+        rollup.setHead(7, 7);
+        // processedSendBlockNumber > anchorBlockNumber: the circuit never emits it.
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.attestSignedHeadBacking(_m(manager), _proofProcessed(5, 6, SETTLED, TFD, BACKING_ROOT));
+        // Non-canonical u63 processed-send limb.
+        uint256[] memory limbs = _limbsFor(CHANNEL, 7, 7, SETTLED, TFD, BACKING_ROOT);
+        limbs[26] = uint256(1) << 63;
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.attestSignedHeadBacking(_m(manager), abi.encode(limbs));
+        // The pre-2026-10-15 34-limb layout (no processed-send limb) is not a statement.
+        uint256[] memory old = new uint256[](34);
+        for (uint256 i = 0; i < 26; ++i) old[i] = limbs[i];
+        for (uint256 i = 26; i < 34; ++i) old[i] = limbs[i + 1];
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.attestSignedHeadBacking(_m(manager), abi.encode(old));
+        assertFalse(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, false));
     }
 
     /// (c) After the Manager freezes the channel (`requestClose` -> `freezeFromManager`), a burn
@@ -435,8 +516,9 @@ contract SignerIndependentExitTest is Test {
         _closeTwoTokens(11, 29);
         rollup.seedEscrow(11, TOKEN, 29);
 
-        uint256[] memory mutatedLimbs = _limbsFor(CHANNEL, 1, SETTLED, TFD, BACKING_ROOT);
+        uint256[] memory mutatedLimbs = _limbsFor(CHANNEL, 1, 1, SETTLED, TFD, BACKING_ROOT);
         mutatedLimbs[25] = 0;
+        mutatedLimbs[26] = 0;
         bytes memory mutatedAnchor = abi.encode(mutatedLimbs);
         vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
         materializer.materializeSignedHead(_m(manager), mutatedAnchor);
@@ -888,8 +970,10 @@ contract SignerIndependentExitTest is Test {
         amounts[1] = tokenAmount;
     }
 
-    /// @dev Compact-proof surrogate accepted by `MockPinnedMleVerifierV2`: the exact 34-limb
-    ///      CloseAssetBacking public-input vector, ABI-encoded as `uint256[]`.
+    /// @dev Compact-proof surrogate accepted by `MockPinnedMleVerifierV2`: the exact 35-limb
+    ///      CloseAssetBacking public-input vector, ABI-encoded as `uint256[]`. This form is a
+    ///      statement with no unprocessed own send at its anchor (processedSendBlockNumber ==
+    ///      anchor); `_proofProcessed` sets the two apart.
     function _proof(uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
         pure
@@ -898,25 +982,52 @@ contract SignerIndependentExitTest is Test {
         return _proofFor(CHANNEL, anchor, settled, tfd, backingRoot);
     }
 
+    function _proofProcessed(uint64 anchor, uint64 processedSend, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
+        private
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(_limbsFor(CHANNEL, anchor, processedSend, settled, tfd, backingRoot));
+    }
+
     function _proofFor(uint32 channelId, uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
         pure
         returns (bytes memory)
     {
-        return abi.encode(_limbsFor(channelId, anchor, settled, tfd, backingRoot));
+        return abi.encode(_limbsFor(channelId, anchor, anchor, settled, tfd, backingRoot));
     }
 
-    function _limbsFor(uint32 channelId, uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
-        private
-        pure
-        returns (uint256[] memory limbs)
-    {
-        limbs = new uint256[](34);
+    function _limbsFor(
+        uint32 channelId,
+        uint64 anchor,
+        uint64 processedSend,
+        bytes32 settled,
+        bytes32 tfd,
+        bytes32 backingRoot
+    ) private pure returns (uint256[] memory limbs) {
+        limbs = new uint256[](35);
         limbs[0] = channelId;
         _putBytes32(limbs, 1, settled);
         _putBytes32(limbs, 9, tfd);
         _putBytes32(limbs, 17, backingRoot);
         limbs[25] = anchor;
+        limbs[26] = processedSend;
+    }
+
+    function _statementKey(address manager_, bytes32 settled, bytes32 tfd) private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                bytes4(0x494d4241), // BACKING_STATEMENT_DOMAIN "IMBA"
+                block.chainid,
+                address(materializer),
+                address(rollup),
+                manager_,
+                CHANNEL,
+                settled,
+                tfd
+            )
+        );
     }
 
     function _putBytes32(uint256[] memory limbs, uint256 offset, bytes32 value) private pure {

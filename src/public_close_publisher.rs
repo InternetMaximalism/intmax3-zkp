@@ -546,7 +546,9 @@ struct PreparedClose {
 struct BackingAttestationIdentity {
     statement_key: String,
     proof_id: String,
-    anchor_plus_one: u64,
+    /// `processedSendBlockNumber + 1`: the materializer's per-statement high-water the close
+    /// admission rule compares with `lastPostedBlock` (2026-10-15).
+    processed_send_plus_one: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -695,7 +697,7 @@ pub struct ObservedDeployment {
     pub materializer_manager_of_channel: String,
     pub materializer_frozen_generation: u64,
     pub materializer_last_posted_block: u64,
-    pub signed_head_backing_anchor_plus_one: u64,
+    pub signed_head_backing_processed_send_plus_one: u64,
     pub exact_backing_proof_attested: bool,
     pub signed_head_backing_current: bool,
     pub materialized_channel_exit: String,
@@ -1388,7 +1390,8 @@ impl MleStatement {
     fn limb_bound(self, index: usize) -> u64 {
         match self {
             Self::Close => 1u64 << 32,
-            Self::Backing if index == 25 => 1u64 << 63,
+            // anchorBlockNumber and processedSendBlockNumber are canonical u63.
+            Self::Backing if index == 25 || index == 26 => 1u64 << 63,
             Self::Backing => 1u64 << 32,
         }
     }
@@ -2041,18 +2044,18 @@ fn backing_attestation_identity(
     .map_err(|error| {
         PublicClosePublisherError::Bundle(format!("encode backing proof identity: {error}"))
     })?;
-    let anchor_plus_one = prepared
+    let processed_send_plus_one = prepared
         .backing_public_inputs
-        .anchor_block_number
+        .processed_send_block_number
         .as_u64()
         .checked_add(1)
         .ok_or_else(|| {
-            PublicClosePublisherError::Bundle("backing anchor plus one overflowed u64".into())
+            PublicClosePublisherError::Bundle("backing processed-send block plus one overflowed u64".into())
         })?;
     Ok(BackingAttestationIdentity {
         statement_key: keccak_hex(&statement),
         proof_id: keccak_hex(&proof),
-        anchor_plus_one,
+        processed_send_plus_one,
     })
 }
 
@@ -2725,11 +2728,15 @@ fn validate_deployment_observation(
                 .into(),
         ));
     }
+    // The materializer admits a close only when every own send the channel has posted is
+    // processed by the backing's Balance proof: `processedSendBlockNumber >= lastPostedBlock`.
+    // The anchor is a later finalized state and says nothing about processed sends.
     if observed.materializer_last_posted_block
-        > prepared.backing_public_inputs.anchor_block_number.as_u64()
+        > prepared.backing_public_inputs.processed_send_block_number.as_u64()
     {
         return Err(PublicClosePublisherError::Conflict(format!(
-            "signed-head backing anchor {} is older than the channel's reorg-aware last posted block {}",
+            "signed-head backing processed-send block {} (anchor {}) is older than the channel's reorg-aware last posted block {}",
+            prepared.backing_public_inputs.processed_send_block_number.as_u64(),
             prepared.backing_public_inputs.anchor_block_number.as_u64(),
             observed.materializer_last_posted_block
         )));
@@ -2826,31 +2833,33 @@ fn backing_attestation_ready(
     observed: &ObservedDeployment,
     prepared: &PreparedClose,
 ) -> Result<bool> {
-    let expected_anchor_plus_one = prepared
+    let expected_processed_send_plus_one = prepared
         .backing_public_inputs
-        .anchor_block_number
+        .processed_send_block_number
         .as_u64()
         .checked_add(1)
         .ok_or_else(|| {
-            PublicClosePublisherError::Evidence("backing anchor plus one overflowed u64".into())
+            PublicClosePublisherError::Evidence(
+                "backing processed-send block plus one overflowed u64".into(),
+            )
         })?;
     if observed.signed_head_backing_current
-        && observed.signed_head_backing_anchor_plus_one == 0
+        && observed.signed_head_backing_processed_send_plus_one == 0
     {
         return Err(PublicClosePublisherError::Evidence(
-            "materializer reports current signed-head backing without a statement anchor".into(),
+            "materializer reports current signed-head backing without a statement processed-send block".into(),
         ));
     }
     if observed.exact_backing_proof_attested
-        && observed.signed_head_backing_anchor_plus_one < expected_anchor_plus_one
+        && observed.signed_head_backing_processed_send_plus_one < expected_processed_send_plus_one
     {
         return Err(PublicClosePublisherError::Evidence(format!(
-            "exact backing proof is attested but statement anchor {} is below its proof-bound anchor {}",
-            observed.signed_head_backing_anchor_plus_one, expected_anchor_plus_one
+            "exact backing proof is attested but statement processed-send block {} is below its proof-bound value {}",
+            observed.signed_head_backing_processed_send_plus_one, expected_processed_send_plus_one
         )));
     }
     Ok(observed.exact_backing_proof_attested
-        && observed.signed_head_backing_anchor_plus_one >= expected_anchor_plus_one
+        && observed.signed_head_backing_processed_send_plus_one >= expected_processed_send_plus_one
         && observed.signed_head_backing_current)
 }
 
@@ -7428,19 +7437,19 @@ impl ClosePublisherBackend for CastCloseBackend {
             )?,
             "settlementVerifier.closeMleVerifier",
         )?;
-        let signed_head_backing_anchor_plus_one = word_uint(
+        let signed_head_backing_processed_send_plus_one = word_uint(
             &decode_words(
                 &self.one_bytes32(
                     &manifest.close_funding_materializer,
-                    "signedHeadBackingAnchorPlusOne",
+                    "signedHeadBackingProcessedSendPlusOne",
                     &attestation.statement_key,
                     block_number,
                 )?,
                 1,
-                "materializer.signedHeadBackingAnchorPlusOne",
+                "materializer.signedHeadBackingProcessedSendPlusOne",
             )?[0],
             8,
-            "materializer.signedHeadBackingAnchorPlusOne",
+            "materializer.signedHeadBackingProcessedSendPlusOne",
         )?;
         let exact_backing_proof_attested = word_bool(
             &decode_words(
@@ -7553,7 +7562,7 @@ impl ClosePublisherBackend for CastCloseBackend {
                 8,
                 "materializer.lastPostedBlock",
             )?,
-            signed_head_backing_anchor_plus_one,
+            signed_head_backing_processed_send_plus_one,
             exact_backing_proof_attested,
             signed_head_backing_current,
             materialized_channel_exit: word_bytes32(
@@ -8366,6 +8375,9 @@ mod tests {
         // Exercise the backing parser's U63 anchor position rather than accidentally retaining
         // the close parser's u32-only behavior.
         let backing_anchor_block_number = BlockNumber::new((1u64 << 40) + 9).expect("U63 anchor");
+        // Strictly below the anchor so the processed-send rule is exercised on its own limb.
+        let backing_processed_send_block_number =
+            BlockNumber::new((1u64 << 40) + 6).expect("U63 processed-send block");
         let backing_public_inputs = CloseAssetBackingPublicInputs {
             balance_state_commitment: Bytes32::default(),
             channel_id,
@@ -8373,6 +8385,7 @@ mod tests {
             token_funds_digest,
             finalized_extended_state_commitment: backing_finalized_extended_state_commitment,
             anchor_block_number: backing_anchor_block_number,
+            processed_send_block_number: backing_processed_send_block_number,
         }
         .to_u64_vec();
         assert_eq!(
@@ -8765,10 +8778,10 @@ mod tests {
             materializer_manager_of_channel: fixture.deployment.manager.clone(),
             materializer_frozen_generation: 1,
             materializer_last_posted_block: 9,
-            signed_head_backing_anchor_plus_one: fixture
+            signed_head_backing_processed_send_plus_one: fixture
                 .prepared
                 .backing_public_inputs
-                .anchor_block_number
+                .processed_send_block_number
                 .as_u64()
                 + 1,
             exact_backing_proof_attested: true,
@@ -9372,7 +9385,7 @@ mod tests {
         active.close_requested_at = 0;
         backend.deployment.materializer_frozen_generation = 0;
         // Readiness precedes attestation. It must not require or emit that L1 transaction.
-        backend.deployment.signed_head_backing_anchor_plus_one = 0;
+        backend.deployment.signed_head_backing_processed_send_plus_one = 0;
         backend.deployment.exact_backing_proof_attested = false;
         backend.deployment.signed_head_backing_current = false;
         backend
@@ -9413,7 +9426,7 @@ mod tests {
                 1 => backend.deployment.rollup_latest_finalized_block_number =
                     fixture.prepared.backing_public_inputs.anchor_block_number.as_u64() - 1,
                 2 => backend.deployment.materializer_last_posted_block =
-                    fixture.prepared.backing_public_inputs.anchor_block_number.as_u64() + 1,
+                    fixture.prepared.backing_public_inputs.processed_send_block_number.as_u64() + 1,
                 3 => backend.managers.get_mut(&backend.head).expect("manager").status = 1,
                 4 => backend.managers.get_mut(&backend.head).expect("manager").current_close_freeze_nonce += 1,
                 5 => backend.deployment.channel_fund_root_finalized = false,
@@ -10341,7 +10354,7 @@ mod tests {
         backend.receipts.remove(&external.transaction_hash);
         backend.deployment.exact_backing_proof_attested = false;
         backend.deployment.signed_head_backing_current = false;
-        backend.deployment.signed_head_backing_anchor_plus_one = 0;
+        backend.deployment.signed_head_backing_processed_send_plus_one = 0;
         assert!(matches!(
             advance_with_backend(&fixture.config, &mut backend)
                 .expect("broadcast the local attestation"),
@@ -11037,7 +11050,7 @@ mod tests {
     }
 
     #[test]
-    fn backing_public_inputs_require_exact_typed_34_limb_vector_and_mle_equality() {
+    fn backing_public_inputs_require_exact_typed_35_limb_vector_and_mle_equality() {
         let count_fixture = fixture("backing-pi-count");
         let path = count_fixture
             .config
@@ -11058,7 +11071,7 @@ mod tests {
             &count_fixture.config.expected_final_channel_state_digest,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("required 34"));
+        assert!(error.to_string().contains("required 35"));
 
         let type_fixture = fixture("backing-pi-type");
         let path = type_fixture
@@ -11357,7 +11370,7 @@ mod tests {
         let ready = observed_deployment(&fixture);
         assert!(backing_attestation_ready(&ready, &fixture.prepared).unwrap());
         let mut impossible = ready;
-        impossible.signed_head_backing_anchor_plus_one = 0;
+        impossible.signed_head_backing_processed_send_plus_one = 0;
         assert!(backing_attestation_ready(&impossible, &fixture.prepared).is_err());
     }
 

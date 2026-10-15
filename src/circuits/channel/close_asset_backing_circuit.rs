@@ -62,8 +62,9 @@ use crate::{
 };
 
 /// `channel_id(1) | settled_tx_chain(8) | token_funds_digest(8) |
-/// finalized_extended_state_commitment(8) | anchor_block_number(1)`.
-pub const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN: usize = 2 + 4 * BYTES32_LEN;
+/// finalized_extended_state_commitment(8) | anchor_block_number(1) |
+/// processed_send_block_number(1) | balance_state_commitment(8)`.
+pub const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN: usize = 3 + 4 * BYTES32_LEN;
 
 #[derive(Debug, Error)]
 pub enum CloseAssetBackingCircuitError {
@@ -77,6 +78,8 @@ pub enum CloseAssetBackingCircuitError {
     BalancePrivateCommitmentMismatch,
     #[error("balance proof public state does not equal ExtendedPublicState.inner")]
     BalancePublicStateMismatch,
+    #[error("balance proof block_r is past its own public state's block number")]
+    BalanceCursorPastAnchor,
     #[error("balance proof channel id does not equal the signed ChannelState channel id")]
     BalanceChannelMismatch,
     #[error("balance proof settled chain does not equal the signed ChannelState settled chain")]
@@ -96,9 +99,16 @@ pub struct CloseAssetBackingPublicInputs {
     /// Byte-for-byte compatible with [`crate::common::channel::token_funds_digest`].
     pub token_funds_digest: Bytes32,
     pub finalized_extended_state_commitment: Bytes32,
-    /// Same wire as `ExtendedPublicState.inner.block_number`; the L1 materializer uses this
-    /// channel anchor to reject a close artifact older than the last channel-affecting post.
+    /// Same wire as `ExtendedPublicState.inner.block_number`: the finalized public state the
+    /// Balance proof is anchored at. The L1 materializer requires it finalized.
     pub anchor_block_number: BlockNumber,
+    /// Same wire as the Balance proof's `block_r`: every own send posted at or before this block
+    /// has been processed by a send step, so it is in `settled_tx_chain` and debited from the
+    /// private state. The anchor alone does not say that (a receive step may anchor at any later
+    /// finalized state while `block_r` stays below the next unprocessed own send), so the L1
+    /// materializer compares THIS field, not the anchor, with the channel's `lastPostedBlock`:
+    /// a head that predates a posted burn block can never back a close (2026-10-15).
+    pub processed_send_block_number: BlockNumber,
     /// Full Balance PI commitment, including private/nullifier state and pinned cyclic VD.
     pub balance_state_commitment: Bytes32,
 }
@@ -111,6 +121,7 @@ impl CloseAssetBackingPublicInputs {
             self.token_funds_digest.to_u64_vec(),
             self.finalized_extended_state_commitment.to_u64_vec(),
             self.anchor_block_number.to_u64_vec(),
+            self.processed_send_block_number.to_u64_vec(),
             self.balance_state_commitment.to_u64_vec(),
         ]
         .concat()
@@ -132,13 +143,23 @@ impl CloseAssetBackingPublicInputs {
         };
         let anchor_block_number = BlockNumber::new(values[1 + 3 * BYTES32_LEN])
             .map_err(|err| CloseAssetBackingCircuitError::InvalidPublicInputs(err.to_string()))?;
+        let processed_send_block_number = BlockNumber::new(values[2 + 3 * BYTES32_LEN])
+            .map_err(|err| CloseAssetBackingCircuitError::InvalidPublicInputs(err.to_string()))?;
+        if processed_send_block_number > anchor_block_number {
+            return Err(CloseAssetBackingCircuitError::InvalidPublicInputs(format!(
+                "processed_send_block_number {} is past anchor_block_number {}",
+                processed_send_block_number.as_u64(),
+                anchor_block_number.as_u64()
+            )));
+        }
         Ok(Self {
             channel_id,
             settled_tx_chain: parse_bytes32(1)?,
             token_funds_digest: parse_bytes32(1 + BYTES32_LEN)?,
             finalized_extended_state_commitment: parse_bytes32(1 + 2 * BYTES32_LEN)?,
             anchor_block_number,
-            balance_state_commitment: parse_bytes32(26)?,
+            processed_send_block_number,
+            balance_state_commitment: parse_bytes32(3 + 3 * BYTES32_LEN)?,
         })
     }
 
@@ -159,6 +180,7 @@ pub struct CloseAssetBackingPublicInputsTarget {
     pub token_funds_digest: Bytes32Target,
     pub finalized_extended_state_commitment: Bytes32Target,
     pub anchor_block_number: BlockNumberTarget,
+    pub processed_send_block_number: BlockNumberTarget,
     pub balance_state_commitment: Bytes32Target,
 }
 
@@ -176,9 +198,14 @@ impl CloseAssetBackingPublicInputsTarget {
             finalized_extended_state_commitment: Bytes32Target::from_slice(
                 &values[1 + 2 * BYTES32_LEN..1 + 3 * BYTES32_LEN],
             ),
-            balance_state_commitment: Bytes32Target::from_slice(&values[26..34]),
+            balance_state_commitment: Bytes32Target::from_slice(
+                &values[3 + 3 * BYTES32_LEN..3 + 4 * BYTES32_LEN],
+            ),
             anchor_block_number: BlockNumberTarget {
                 value: values[1 + 3 * BYTES32_LEN],
+            },
+            processed_send_block_number: BlockNumberTarget {
+                value: values[2 + 3 * BYTES32_LEN],
             },
         }
     }
@@ -190,6 +217,7 @@ impl CloseAssetBackingPublicInputsTarget {
             self.token_funds_digest.to_vec(),
             self.finalized_extended_state_commitment.to_vec(),
             vec![self.anchor_block_number.value],
+            vec![self.processed_send_block_number.value],
             self.balance_state_commitment.to_vec(),
         ]
         .concat()
@@ -281,6 +309,9 @@ where
         }
         if balance_pis.public_state != extended_public_state.inner {
             return Err(CloseAssetBackingCircuitError::BalancePublicStateMismatch);
+        }
+        if balance_pis.block_r > extended_public_state.inner.block_number {
+            return Err(CloseAssetBackingCircuitError::BalanceCursorPastAnchor);
         }
         if channel_state.channel_id != channel_state.balance_state.channel_id
             || channel_state.channel_id != channel_state.channel_fund.channel_id
@@ -375,6 +406,7 @@ where
             ),
             finalized_extended_state_commitment: self.extended_public_state.commitment(),
             anchor_block_number: self.extended_public_state.inner.block_number,
+            processed_send_block_number: balance_full_pis.pis.block_r,
             balance_state_commitment: Bytes32::from(balance_full_pis.commitment(&balance_vd.common.config)),
         })
     }
@@ -437,6 +469,8 @@ pub(crate) struct CloseAssetBackingFaithfulnessProbe {
     pub reconstructed_root: PoseidonHashOutTarget,
     /// the `keccak256` preimage of the token-funds digest, :492-501.
     pub digest_preimage: Vec<Target>,
+    /// `anchor - block_r`, the range-checked slack of `enforceCursorAtOrBelowAnchor`.
+    pub cursor_slack: Target,
 }
 
 impl<F, C, const D: usize> CloseAssetBackingCircuit<F, C, D>
@@ -474,6 +508,15 @@ where
         balance_pis
             .public_state
             .connect(&mut builder, &extended_public_state.inner);
+        // The processed-send boundary never exceeds the anchor it is exposed with: the Balance
+        // circuits maintain `block_r <= public_state.block_number`, and this re-states it at the
+        // L1 boundary so the materializer's `processedSendBlockNumber <= anchorBlockNumber`
+        // decode rule is a circuit fact, not a convention.
+        let cursor_slack = builder.sub(
+            extended_public_state.inner.block_number.value,
+            balance_pis.block_r.value,
+        );
+        builder.range_check(cursor_slack, crate::common::u63::U63_BITS);
 
         let token_count = builder.add_virtual_target();
         builder.range_check(token_count, 32);
@@ -588,6 +631,7 @@ where
             token_funds_digest,
             finalized_extended_state_commitment,
             anchor_block_number: extended_public_state.inner.block_number.clone(),
+            processed_send_block_number: balance_pis.block_r.clone(),
         };
         #[cfg(test)]
         let probe = CloseAssetBackingFaithfulnessProbe {
@@ -604,6 +648,7 @@ where
             empty_asset_root,
             reconstructed_root,
             digest_preimage: digest_preimage.clone(),
+            cursor_slack,
         };
 
         builder.register_public_inputs(&public_inputs.to_vec());
@@ -847,6 +892,11 @@ mod tests {
             expected.anchor_block_number,
             fixture.witness.extended_public_state.inner.block_number
         );
+        assert_eq!(
+            expected.processed_send_block_number,
+            BlockNumber::new(12).unwrap(),
+            "the mock Balance proof's block_r"
+        );
 
         let prove_started = Instant::now();
         let proof = fixture.backing_circuit.prove(&fixture.witness).unwrap();
@@ -978,15 +1028,266 @@ mod tests {
         assert!(fixture.backing_circuit.prove(&wrong_extended).is_err());
     }
 
+    /// Close-vs-burn ordering (2026-10-15). A burn is an own inter-channel send posted at block
+    /// B; `recordPost` makes `lastPostedBlock = B`. The receive circuits bound only the balance
+    /// cursor (`prev_block_r <= new_block_r < send_leaf.cur = B`) and let `public_state` be ANY
+    /// later finalized state (`public_state.block_number >= new_block_r`). So the pre-burn head,
+    /// whose last Balance step is a receive, has a Balance proof with
+    /// `public_state.block_number >= B` while its settled chain and private state predate the
+    /// burn. The native witness mirrors accept exactly that proof, and the backing statement's
+    /// anchor (`public_state.block_number`) clears the L1 rule `anchor >= lastPostedBlock`.
+    /// The statement therefore exposes `block_r` as `processed_send_block_number`, the field the
+    /// materializer compares with `lastPostedBlock` (CloseFundingMaterializer, 2026-10-15).
+    #[cfg_attr(debug_assertions, ignore = "run with --release (NullifierTree::init asserts canonical field elements)")]
+    #[test]
+    fn pre_burn_head_reproved_past_the_burn_block_exposes_its_processed_send_boundary() {
+        use crate::{
+            circuits::balance::{
+                common::{
+                    account_state::AccountState, deposit_witness::DepositWitness,
+                    recipient::calculate_recipient_from_user_id,
+                    update_private_state::UpdatePrivateState,
+                    update_public_state::UpdatePublicState,
+                },
+                receive_deposit_circuit::ReceiveDepositWitness,
+            },
+            common::{
+                deposit::Deposit,
+                private_state::FullPrivateState,
+                trees::{
+                    channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
+                    deposit_tree::DepositTree,
+                    nullifier_tree::NullifierTree,
+                },
+                u63::U63,
+            },
+            constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
+            ethereum_types::u32limb_trait::U32LimbTrait as _,
+        };
+
+        let channel_id = ChannelId::new(91).unwrap();
+        let burn_block = BlockNumber::new(5).unwrap();
+        let prev_block_r = BlockNumber::new(3).unwrap();
+        // The widest cursor the receive window allows below the burn.
+        let new_block_r = BlockNumber::new(4).unwrap();
+        // A finalized public state AFTER the burn block was posted.
+        let anchor_block = BlockNumber::new(7).unwrap();
+
+        // Account tree at `anchor_block`: the channel's last own post is the burn block, whose
+        // send leaf spans (2, 5].
+        let mut send_tree = SendTree::new(SEND_TREE_HEIGHT);
+        let burn_send_leaf = SendLeaf {
+            prev: BlockNumber::new(2).unwrap(),
+            cur: burn_block,
+            tx_tree_root: Bytes32::from_u32_slice(&[6; 8]).unwrap(),
+        };
+        send_tree.push(burn_send_leaf.clone());
+        let send_merkle_proof = send_tree.prove(0);
+        let channel_leaf = ChannelLeaf {
+            index: 1,
+            prev: burn_block,
+            send_tree_root: send_tree.get_root(),
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
+        };
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        channel_tree.update(channel_id.as_u64(), channel_leaf.clone());
+        let user_merkle_proof = channel_tree.prove(channel_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
+        let account_state = AccountState::new(
+            channel_id,
+            account_tree_root,
+            burn_send_leaf,
+            0,
+            send_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
+        )
+        .unwrap();
+
+        // A deposit before the burn, received at the pre-burn cursor.
+        let mut rng = rand::thread_rng();
+        let deposit_salt = Salt::rand(&mut rng);
+        let deposit = Deposit {
+            deposit_index: U63::default(),
+            block_number: new_block_r,
+            depositor: Address::default(),
+            recipient: calculate_recipient_from_user_id(channel_id, deposit_salt),
+            token_index: 0,
+            amount: U256::from(5u32),
+            aux_data: Bytes32::default(),
+        };
+        let mut deposit_tree = DepositTree::init();
+        deposit_tree.push(deposit.clone());
+        let deposit_witness = DepositWitness::new(
+            channel_id,
+            deposit_tree.get_root(),
+            deposit_salt,
+            deposit.clone(),
+            deposit_tree.prove(0),
+        )
+        .unwrap();
+
+        let mut full_private_state = FullPrivateState::new(Salt::rand(&mut rng));
+        full_private_state.asset_tree.update(0, U256::from(10u32));
+        let prev_private_state = full_private_state.to_private_state();
+        let asset_merkle_proof = full_private_state.asset_tree.prove(0);
+        let mut nullifier_tree = NullifierTree::init();
+        let nullifier_proof = nullifier_tree.prove_and_insert(deposit.nullifier()).unwrap();
+        let update_private_state = UpdatePrivateState::new(
+            0,
+            deposit.amount,
+            deposit.nullifier(),
+            &prev_private_state,
+            &nullifier_proof,
+            U256::from(10u32),
+            &asset_merkle_proof,
+        )
+        .unwrap();
+
+        let public_state = PublicState {
+            block_number: anchor_block,
+            timestamp: 0,
+            account_tree_root,
+            deposit_tree_root: deposit_tree.get_root(),
+            prev_public_state_root: Default::default(),
+        };
+        let update_public_state =
+            UpdatePublicState::new(public_state.clone(), public_state.clone(), None).unwrap();
+        let pre_burn_chain = Bytes32::from_u32_slice(&[7; 8]).unwrap();
+        let prev_balance_pis = BalancePublicInputs {
+            channel_id,
+            public_state: public_state.clone(),
+            block_r: prev_block_r,
+            private_commitment: prev_private_state.commitment(),
+            settled_tx_chain: pre_burn_chain,
+        };
+
+        let balance_common_data =
+            TestCyclicCircuit::<F, C, D>::generate_cd(BALANCE_PUBLIC_INPUTS_LEN);
+        let balance_circuit = TestCyclicCircuit::<F, C, D>::new(
+            CircuitConfig::standard_recursion_config(),
+            BALANCE_PUBLIC_INPUTS_LEN,
+            &balance_common_data,
+        );
+        let balance_vd = balance_circuit.data.verifier_data();
+        let prove_balance = |pis: &BalancePublicInputs| {
+            let full = BalanceFullPublicInputs {
+                pis: pis.clone(),
+                vd: balance_vd.verifier_only.clone(),
+            };
+            let fields = full.to_u64_vec(&balance_vd.common.config).to_field_vec::<F>();
+            balance_circuit.prove(Some(&fields), None).unwrap()
+        };
+
+        // 1. The receive witness is accepted by every native mirror the receive-deposit circuit
+        //    enforces, although the public state is past the posted burn block.
+        let receive = ReceiveDepositWitness::<F, C, D> {
+            prev_balance_proof: prove_balance(&prev_balance_pis),
+            update_public_state,
+            new_block_r,
+            account_state,
+            deposit_witness,
+            update_private_state: update_private_state.clone(),
+        };
+        let reproved = receive.to_public_inputs(&balance_vd.common).unwrap().pis;
+        assert_eq!(reproved.block_r, new_block_r);
+        assert!(reproved.block_r < burn_block, "the burn send is NOT processed");
+        assert_eq!(reproved.public_state.block_number, anchor_block);
+        assert!(reproved.public_state.block_number > burn_block, "anchored past the burn");
+        assert_ne!(reproved.settled_tx_chain, Bytes32::default());
+
+        // 2. The backing constructor accepts that Balance proof: the statement's anchor is the
+        //    public state's block number, which clears `lastPostedBlock = burn_block` on L1.
+        let new_private_state = update_private_state.new_private_state.clone();
+        let mut registry = [0u32; MAX_CHANNEL_TOKENS];
+        registry[0] = 0;
+        let mut amounts = [U256::default(); MAX_CHANNEL_TOKENS];
+        amounts[0] = U256::from(15u32);
+        let mut canonical = AssetTree::init();
+        canonical.update(0, amounts[0]);
+        assert_eq!(canonical.get_root(), new_private_state.asset_tree_root);
+        let balance_state = BalanceState {
+            channel_id,
+            member_count: 2,
+            delegate_count: 0,
+            enc_balances: Vec::new(),
+            regev_pk_digests: [Bytes32::default(); crate::constants::MAX_CHANNEL_MEMBERS],
+            recipients: [Address::default(); crate::constants::MAX_CHANNEL_MEMBERS],
+            settled_tx_chain: reproved.settled_tx_chain,
+            settled_tx_accumulator_root: Bytes32::default(),
+            state_version: 1,
+            pending_adds: Vec::new(),
+            token_registry: registry,
+            token_count: 1,
+        };
+        let state = ChannelState {
+            channel_id,
+            epoch: 0,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id,
+                amounts,
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state,
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::default(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: Vec::new(),
+        };
+        let extended_public_state = ExtendedPublicState::new(
+            public_state,
+            Bytes32::default(),
+            Bytes32::default(),
+            Default::default(),
+            Bytes32::default(),
+            Bytes32::default(),
+        );
+        let witness = CloseAssetBackingWitness::from_private_state_and_channel_state(
+            new_private_state,
+            &state,
+            prove_balance(&reproved),
+            extended_public_state,
+            &balance_vd,
+        )
+        .unwrap();
+        let statement = witness.public_inputs(&balance_vd).unwrap();
+        assert_eq!(statement.settled_tx_chain, reproved.settled_tx_chain);
+        assert_eq!(statement.anchor_block_number, anchor_block);
+        assert!(statement.anchor_block_number >= burn_block, "anchor >= lastPostedBlock");
+
+        // 3. The fix: the statement carries the processed-send boundary (`block_r`), and it is
+        //    below the burn block. `CloseFundingMaterializer` compares THIS field, not the
+        //    anchor, with `lastPostedBlock`, so this attestation can never back a close once the
+        //    burn block is posted.
+        assert_eq!(statement.processed_send_block_number, new_block_r);
+        assert!(statement.processed_send_block_number < burn_block);
+        let limbs = statement.to_u64_vec();
+        assert_eq!(limbs[25], anchor_block.as_u64());
+        assert_eq!(limbs[26], new_block_r.as_u64());
+
+        // A statement whose processed boundary claims to be past its anchor is malformed.
+        let mut inverted = limbs.clone();
+        inverted[26] = anchor_block.as_u64() + 1;
+        assert!(matches!(
+            CloseAssetBackingPublicInputs::from_u64_slice(&inverted),
+            Err(CloseAssetBackingCircuitError::InvalidPublicInputs(_))
+        ));
+    }
+
     #[test]
     fn public_inputs_roundtrip_is_fixed_width() {
-        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 34);
+        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 35);
         let inputs = CloseAssetBackingPublicInputs {
             channel_id: ChannelId::new(7).unwrap(),
             settled_tx_chain: Bytes32::from_u32_slice(&[1; 8]).unwrap(),
             token_funds_digest: Bytes32::from_u32_slice(&[2; 8]).unwrap(),
             finalized_extended_state_commitment: Bytes32::from_u32_slice(&[3; 8]).unwrap(),
             anchor_block_number: BlockNumber::new(4).unwrap(),
+            processed_send_block_number: BlockNumber::new(2).unwrap(),
             balance_state_commitment: Bytes32::from_u32_slice(&[5; 8]).unwrap(),
         };
         assert_eq!(
@@ -1002,6 +1303,18 @@ mod tests {
         noncanonical_anchor[25] = 1 << 63;
         assert!(matches!(
             CloseAssetBackingPublicInputs::from_u64_slice(&noncanonical_anchor),
+            Err(CloseAssetBackingCircuitError::InvalidPublicInputs(_))
+        ));
+        let mut noncanonical_cursor = inputs.to_u64_vec();
+        noncanonical_cursor[26] = 1 << 63;
+        assert!(matches!(
+            CloseAssetBackingPublicInputs::from_u64_slice(&noncanonical_cursor),
+            Err(CloseAssetBackingCircuitError::InvalidPublicInputs(_))
+        ));
+        let mut cursor_past_anchor = inputs.to_u64_vec();
+        cursor_past_anchor[26] = 5;
+        assert!(matches!(
+            CloseAssetBackingPublicInputs::from_u64_slice(&cursor_past_anchor),
             Err(CloseAssetBackingCircuitError::InvalidPublicInputs(_))
         ));
     }
@@ -1130,6 +1443,13 @@ mod tests {
                 && view.same_slices(&balance_pis.public_state.to_vec(), &ext.inner.to_vec()),
             "holds: balanceProofWire.statement.publicState = extendedStateWire.inner — all 15 \
              inner wires (block number, 2 timestamp limbs, 3 Poseidon roots) are connected",
+        );
+        table.check(
+            "enforceCursorAtOrBelowAnchor", "close_asset_backing_circuit.rs:467-476", "range",
+            view.range_bits(p.cursor_slack).contains(&63),
+            "holds: (extendedStateWire.inner.blockNumber - balanceProofWire.statement.blockR) is \
+             range-checked to 63 bits — the processed-send boundary never exceeds the anchor \
+             (2026-10-15 close-vs-burn ordering)",
         );
 
         // --- token vector allocation -----------------------------------------------------------
@@ -1376,6 +1696,7 @@ mod tests {
             pi.token_funds_digest.to_vec(),
             pi.finalized_extended_state_commitment.to_vec(),
             vec![ext.inner.block_number.value],
+            vec![balance_pis.block_r.value],
             pi.balance_state_commitment.to_vec(),
         ]
         .concat();
@@ -1384,22 +1705,24 @@ mod tests {
             pi.channel_id.value == balance_pis.channel_id.value
                 && pi.settled_tx_chain.to_vec() == balance_pis.settled_tx_chain.to_vec()
                 && pi.anchor_block_number.value == ext.inner.block_number.value
+                && pi.processed_send_block_number.value == balance_pis.block_r.value
                 && pi.token_funds_digest.to_vec().len() == BYTES32_LEN
                 && pi.finalized_extended_state_commitment.to_vec().len() == BYTES32_LEN
                 && pi.to_vec() == expected_pi_order,
             "holds: publicWire = {channelId := balance.channelId, settledTxChain := \
              balance.settledTxChain, tokenFundsDigest, extendedStateCommitment, anchorBlockNumber \
-             := extendedState.inner.blockNumber} — every field is the SAME wire as its source \
-             (the two digests are the literal gadget outputs); no re-witnessing",
+             := extendedState.inner.blockNumber, processedSendBlockNumber := balance.blockR} — \
+             every field is the SAME wire as its source (the two digests are the literal gadget \
+             outputs); no re-witnessing",
         );
         table.check(
-            "registerPublicInputs 34", "close_asset_backing_circuit.rs:598", "public-inputs",
+            "registerPublicInputs 35", "close_asset_backing_circuit.rs:598", "public-inputs",
             expected_pi_order.len() == CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
-                && CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN == 34
+                && CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN == 35
                 && view.public_inputs_are(&expected_pi_order)
-                && c.data.common.num_public_inputs == 34,
-            "holds: publicWire.words.length = 34 — current source extension: the 34 registered \
-             wires are exactly the 6 fields of CloseAssetBackingPublicInputsTarget, in to_vec order",
+                && c.data.common.num_public_inputs == 35,
+            "holds: publicWire.words.length = 35 — current source extension: the 35 registered \
+             wires are exactly the 7 fields of CloseAssetBackingPublicInputsTarget, in to_vec order",
         );
         table.note(
             "buildCircuit", "close_asset_backing_circuit.rs:600", "no-gate", TRIVIAL,
