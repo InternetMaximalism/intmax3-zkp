@@ -160,7 +160,8 @@ contract PostingBondUnitTest is Test {
 
     /// A proven fraud: the offender forfeits its base and `postStake` for each of its truncated
     /// posts; a later post of another producer, truncated with it, forfeits its `postStake`.
-    /// 90% goes to the reporter, the rest to the treasury.
+    /// The reporter receives 90% of the OFFENDER's forfeiture; the rest of it and everything
+    /// forfeited by other producers goes to the treasury (review 2026-10-15, C3).
     function test_bond_fraudForfeitsBasePlusEachTruncatedPost() public {
         _post(producer, 1 ether); // id 0, kept
         _post(producer, 0); // id 1, the fraud target
@@ -168,9 +169,15 @@ contract PostingBondUnitTest is Test {
         _post(producer, 0); // id 3
         rollup.truncate(1, reporter, true);
 
-        uint256 forfeited = BASE + 2 * PER_POST + PER_POST;
-        assertEq(rollup.pendingWithdrawals(reporter), forfeited * 90 / 100);
-        assertEq(rollup.pendingWithdrawals(treasury), forfeited - forfeited * 90 / 100);
+        uint256 offenderForfeited = BASE + 2 * PER_POST;
+        uint256 othersForfeited = PER_POST;
+        uint256 reward = offenderForfeited * 90 / 100;
+        assertEq(rollup.pendingWithdrawals(reporter), reward, "reporter: 90% of the offender's forfeiture only");
+        assertEq(
+            rollup.pendingWithdrawals(treasury),
+            offenderForfeited - reward + othersForfeited,
+            "treasury: the offender's remainder plus every other producer's forfeited post stake"
+        );
         (uint256 balance, uint256 posted,) = _bond(producer);
         assertEq(balance, 1 ether - BASE - 2 * PER_POST);
         assertEq(posted, 1, "the kept post is still counted");
@@ -178,6 +185,44 @@ contract PostingBondUnitTest is Test {
         assertEq(balance, BASE, "the other producer lost only its truncated post's stake");
         assertEq(posted, 0);
         assertEq(rollup.nextSubmissionId(), 1);
+    }
+
+    /// SECURITY regression (code review 2026-10-15, finding C3): `fraudProof` never checks that the
+    /// reporter differs from the offender (and cannot — a second address is free), so the reporter
+    /// share must never contain other producers' stakes. Before this fix an offender who reported
+    /// its own fraud received 90% of EVERYTHING forfeited, including the `postStake` of every other
+    /// producer whose posts were truncated with it, and turned a profit once enough foreign posts
+    /// sat on top of the fraud. Now its reward is 90% of its OWN forfeiture: self-reporting always
+    /// nets a loss (the treasury's 10%), and foreign stakes never reach the reporter.
+    function test_bond_selfReportNeverProfitsFromOtherProducersStakes() public {
+        _post(producer, 1 ether); // id 0, kept
+        _post(producer, 0); // id 1, the fraud target
+        _post(other, BASE + 20 * PER_POST); // ids 2..21: twenty foreign posts built on the fraud
+        for (uint256 i = 1; i < 20; i++) {
+            _post(other, 0);
+        }
+        uint256 offenderBefore = 1 ether;
+
+        // The offender reports itself.
+        rollup.truncate(1, producer, true);
+
+        uint256 ownForfeited = BASE + PER_POST; // its base and its one truncated post (id 1)
+        uint256 foreignForfeited = 20 * PER_POST;
+        uint256 reward = ownForfeited * 90 / 100;
+        assertEq(rollup.pendingWithdrawals(producer), reward, "self-report: 90% of its OWN forfeiture");
+        assertEq(
+            rollup.pendingWithdrawals(treasury),
+            ownForfeited - reward + foreignForfeited,
+            "treasury: the offender's 10% plus every foreign post stake"
+        );
+        (uint256 balance,,) = _bond(producer);
+        assertLt(
+            balance + rollup.pendingWithdrawals(producer),
+            offenderBefore,
+            "self-reporting a fraud is always a net loss for the offender"
+        );
+        (balance,,) = _bond(other);
+        assertEq(balance, BASE, "the foreign producer lost exactly its truncated posts' stakes");
     }
 
     /// A bond whose base is gone yields only what it holds, and its producer posts again only

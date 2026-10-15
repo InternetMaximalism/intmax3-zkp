@@ -678,11 +678,25 @@ contract IntmaxRollup {
     uint8 private constant MLE_STARVED = 3; // verification was gas-starved
     uint8 private constant MLE_PI_MISMATCH = 4; // fraud prover supplied the wrong PI preimage
 
-    /// @dev SECURITY: the PoW-22 compact classifier must be remeasured below this conservative
-    ///      entry floor after every verifier/profile change. A caller below the floor is
-    ///      classified STARVED, never fraudulent. The parent full-transaction resource gate must
-    ///      be rerun whenever the circuit envelope or verifier bytecode changes.
-    uint256 private constant MIN_MLE_VERIFY_GAS = 25_000_000;
+    /// @dev Entry floor of the fraud classifier: a `fraudProof` arriving at the verdict with less
+    ///      gas than this is classified STARVED (reverts `FraudProofGasStarved`) before any
+    ///      verification is attempted; it is never read as fraud. Correctness does NOT depend on
+    ///      the floor: an evaluation that runs out of gas is caught by the two-layer OOG detection
+    ///      in `_encodedMleVerdict` and in the pinned adapter (`gasleft() < reserve + budget / 8`),
+    ///      so the floor only spares hopeless attempts the cost of a failed verification.
+    ///
+    ///      SECURITY (code review 2026-10-15, finding C3): EIP-7825 (Fusaka) caps a transaction at
+    ///      2^24 = 16,777,216 gas. The wire-v3 validity compact proof is ~130 KB, i.e. ~2.03M of
+    ///      calldata intrinsic gas, leaving ~14.7M for execution. The previous floor of 25M was
+    ///      therefore unreachable on a capped chain: every fraud proof carrying bytes reverted
+    ///      STARVED and only the proof-free timeout removal (which forfeits nothing) remained, so the
+    ///      bond deterred nothing. Measured with the checked-in fixture
+    ///      (`MleFinalizeE2E.t.sol`): a conviction of a mutated proof costs ~6.1M, the full VALID
+    ///      verdict ~14.7M. The floor is set below the cap's execution budget and above the harness
+    ///      sweeps that pin the STARVED classification (`RollupFraudHardening`, `RedTeamRound3Fraud`,
+    ///      whose mirrors of this constant must follow it). Remeasure after every verifier/profile
+    ///      change; the parent full-transaction resource gate must be rerun with the 2^24 cap.
+    uint256 private constant MIN_MLE_VERIFY_GAS = 8_000_000;
 
     uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
@@ -2143,12 +2157,23 @@ contract IntmaxRollup {
     /// @dev Remove `targetId` and every later submission. Each removed post is uncounted from its
     ///      producer's bond. With `forfeit` (a proven fraud) each removed post forfeits `postStake`
     ///      from its producer and the offender (the target's submitter) forfeits `baseStake`, each
-    ///      capped at the bond left, credited 90% to the reporter and the rest to the treasury
-    ///      (pull-payment: a reverting recipient cannot block `fraudProof`). A timeout removal
-    ///      forfeits nothing.
+    ///      capped at the bond left. The reporter is credited 90% of the OFFENDER's forfeiture;
+    ///      the remaining 10% and everything forfeited by OTHER producers (whose posts were built on
+    ///      the fraud and truncated with it) go to the treasury (pull-payment: a reverting recipient
+    ///      cannot block `fraudProof`). A timeout removal forfeits nothing.
+    ///
+    ///      SECURITY (code review 2026-10-15, finding C3): `fraudProof` cannot tell an offender
+    ///      from an honest reporter (a second address is free), so the reporter share must never
+    ///      contain foreign stakes. Paying the reporter 90% of EVERYTHING forfeited let an offender
+    ///      report its own fraud and pocket 90% of every other producer's `postStake` — a net
+    ///      profit once enough foreign posts sat on top of the fraud. With the split below a
+    ///      self-report always nets a loss (the treasury's 10% of the offender's own bond) and no
+    ///      foreign stake ever reaches the reporter. Pinned by
+    ///      `test_bond_selfReportNeverProfitsFromOtherProducersStakes`.
     function _truncateSubmissions(uint256 targetId, address reporter, bool forfeit) internal {
         address offender = _submissions[targetId].submitter;
-        uint256 forfeited;
+        uint256 offenderForfeited;
+        uint256 othersForfeited;
         uint256 currentId = nextSubmissionId;
         while (currentId > targetId) {
             currentId--;
@@ -2156,9 +2181,14 @@ contract IntmaxRollup {
             if (sub.finalized) revert AlreadyFinalized();
 
             // A removed post lies above the finalized height, so it was never released.
-            Bond storage bond = bonds[sub.submitter];
+            address submitter = sub.submitter;
+            Bond storage bond = bonds[submitter];
             bond.posted -= 1;
-            if (forfeit) forfeited += _forfeitBond(bond, postStake);
+            if (forfeit) {
+                uint256 taken = _forfeitBond(bond, postStake);
+                if (submitter == offender) offenderForfeited += taken;
+                else othersForfeited += taken;
+            }
             _rollbackBatch(currentId);
 
             delete _submissions[currentId];
@@ -2166,11 +2196,11 @@ contract IntmaxRollup {
         }
         nextSubmissionId = targetId;
         if (!forfeit) return;
-        forfeited += _forfeitBond(bonds[offender], baseStake);
-        if (forfeited == 0) return;
+        offenderForfeited += _forfeitBond(bonds[offender], baseStake);
+        if (offenderForfeited == 0 && othersForfeited == 0) return;
 
-        uint256 reward = (forfeited * FRAUD_REWARD_PERCENT) / 100;
-        uint256 treasuryShare = forfeited - reward;
+        uint256 reward = (offenderForfeited * FRAUD_REWARD_PERCENT) / 100;
+        uint256 treasuryShare = (offenderForfeited - reward) + othersForfeited;
         pendingWithdrawals[reporter] += reward;
         pendingWithdrawals[fraudTreasury] += treasuryShare;
         emit WithdrawalCredited(reporter, reward);

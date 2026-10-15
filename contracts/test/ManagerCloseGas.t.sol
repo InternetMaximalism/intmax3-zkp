@@ -196,6 +196,10 @@ contract ManagerCloseGasTest is Test {
         emit log_named_uint("transaction intrinsic gas", intrinsicGas);
         emit log_named_uint("Manager execution budget at 20M", managerExecutionBudget);
         emit log_named_uint("cold harness CALL gas spent", harnessCallGasSpent);
+        // EIP-7825 record (review 2026-10-15, C3): the per-transaction cap this 20M envelope must be
+        // compared against on Fusaka chains; execution + intrinsic must stay below it.
+        emit log_named_uint("EIP-7825 transaction gas cap (2^24)", 16_777_216);
+        emit log_named_uint("execution + intrinsic", harnessCallGasSpent + intrinsicGas);
         assertTrue(success, "real Manager close submit does not execute within 20M transaction budget");
         assertEq(
             manager.getPendingClose().closeIntentDigest,

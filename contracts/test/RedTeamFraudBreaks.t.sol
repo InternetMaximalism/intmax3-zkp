@@ -107,7 +107,7 @@ contract RedTeamFraudBreaksTest is Test {
 
     /// `IntmaxRollup.MIN_MLE_VERIFY_GAS`, mirrored (it is `private constant` there). R3-4: the RT-1
     /// sweep must be able to say which side of this floor each iteration is on.
-    uint256 internal constant MIN_MLE_VERIFY_GAS_MIRROR = 25_000_000;
+    uint256 internal constant MIN_MLE_VERIFY_GAS_MIRROR = 8_000_000;
 
     // =======================================================================
     // FINDING RT-1 (C-1 NOT CLOSED) — gas starvation turns `!_verifyMle` into

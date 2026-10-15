@@ -205,6 +205,42 @@ no production operator may open value on a public chain before the independent c
 review, the full Rust/Solidity/DA/gas/size matrix, real public-chain acceptance, and closure of all
 other final-audit NO-GO items.
 
+### EIP-7825 per-transaction gas cap (measured 2026-10-15)
+
+Fusaka's EIP-7825 caps every transaction at **2^24 = 16,777,216 gas** (live on Sepolia/Holesky;
+scheduled for mainnet with Fusaka — confirm the deployment chain's status before deploying). The
+20M envelope this repository was tuned for is above that cap. Execution gas measured in forge
+(`evm_version = prague`, cold harness, checked-in wire-v3 fixtures; the tests print these as
+`log_named_uint` under `forge test -vv`):
+
+| transaction | execution gas | proof bytes | calldata intrinsic (+21k base) | execution + intrinsic | vs 2^24 | test |
+|---|---:|---:|---:|---:|---|---|
+| `IntmaxRollup.finalize` (1-block validity) | 14,741,933 | 129,996 | 2,029,740 | 16,771,673 | fits by ~5.5k | `MleFinalizeE2E` `test_gasEnvelope_eip7825_recordValidityEntryPoints` |
+| `IntmaxRollup.finalize` (3-block lifecycle validity) | 14,799,659 | ~130 KB | ~2.03M | ~16.83M | **over by ~50k** | `WithdrawNativeE2E` (`finalize gas (lifecycle validity proof)`) |
+| `IntmaxRollup.withdrawNative` (real withdrawal proof) | 14,841,064 | 129,748 | ~2.03M | ~16.87M | **over by ~90k** | `WithdrawNativeE2E` `test_withdrawNative_fullLifecycle` |
+| `IntmaxRollup.fraudProof`, INVALID verdict (mutated proof) | 6,141,189 | 129,996 | 2,032,888 | ~8.17M | fits | `MleFinalizeE2E` `..._convictsWithinEip7825Budget` |
+| `IntmaxRollup.fraudProof`, VALID verdict (no conviction) | 14,721,479 | 129,996 | 2,032,888 | ~16.75M | fits by ~23k | `MleFinalizeE2E` `..._validCanonicalRawDoesNotConvict` |
+| `ChannelSettlementManager.submitCloseIntent` (real 103-PI close proof) | 17,057,210 | 131,716 | 2,057,964 | 19,115,174 | **over by ~2.3M** | `ManagerCloseGas` |
+| adapter `verifyCompactPublicInputs` / `verifyCompact` alone | 14,446,270 / 14,420,008 | 129,996 | — | — | — | `MleFinalizeE2E` |
+
+Consequences, as measured:
+- `submitCloseIntent` cannot be sent on an EIP-7825 chain at all; `withdrawNative` and a
+  multi-block `finalize` exceed the cap by tens of thousands of gas; a 1-block `finalize` and a
+  non-convicting `fraudProof` fit with a margin of a few thousand gas that any calldata/storage
+  variation can erase. A conviction (INVALID verdict, ~6.1M) fits comfortably.
+- `MIN_MLE_VERIFY_GAS` was lowered from 25M to 8M (`IntmaxRollup.sol`) so that a fraud proof the
+  classifier can evaluate is no longer refused as `FraudProofGasStarved` under the cap; starvation is
+  still classified by the two-layer OOG detection, never as fraud (`RollupFraudHardening`,
+  `RedTeamRound3Fraud` re-pinned at 8M).
+- The fraud reward is now 90% of the OFFENDER's own forfeiture; stakes forfeited by other producers
+  whose posts were truncated with the fraud go to the treasury, so an offender reporting its own
+  fraud (from any address) always nets a loss (`PostingBond` `test_bond_selfReportNever...`).
+- **Owner decision required before any public deployment on a capped chain:** reduce the verifier's
+  cost below ~14.5M with margin (smaller WHIR profile / fewer queries), split verification across
+  transactions (commit the proof, verify in a second call with a stored checkpoint), or accept that
+  close submission is impossible there. None of these is implemented. The Sepolia record of
+  2026-06-14 (`sepolia-smoke-runbook.md`) predates the current profile and the cap.
+
 <details>
 <summary>Historical pre-V2 Sepolia procedure (reference only; do not execute)</summary>
 

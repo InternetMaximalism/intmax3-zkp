@@ -54,8 +54,9 @@ contract Outer {
 ///         by inheritance (its own tests re-run under this contract name; that is the price of not
 ///         duplicating a 200-line rollup fixture).
 contract RedTeamRound3FraudTest is RedTeamFraudBreaksTest {
-    /// The floor, mirrored (it is `private constant` in IntmaxRollup).
-    uint256 internal constant MIN_MLE_VERIFY_GAS = 25_000_000;
+    /// The floor, mirrored (it is `private constant` in IntmaxRollup). Lowered from 25M to 8M on
+    /// 2026-10-15 (C3): 25M was unreachable under the EIP-7825 2^24 transaction gas cap.
+    uint256 internal constant MIN_MLE_VERIFY_GAS = 8_000_000;
 
     // ═════════════════════════════════════════════════════════════════════════
     // BREAK — B-4 part 2 (`gasleft() <= gasBefore/64`) is DEAD CODE under the

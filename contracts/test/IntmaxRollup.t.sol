@@ -1526,10 +1526,12 @@ contract IntmaxRollupTest is Test {
         assertTrue(fraudConfirmed, "Fraud should be confirmed");
 
         // The offender forfeits its base and its post's stake; the later post, truncated with it,
-        // forfeits its post's stake.
-        uint256 forfeited = r.baseStake() + 2 * r.postStake();
-        uint256 expectedReward = forfeited * 90 / 100;
-        uint256 expectedTreasury = forfeited - expectedReward;
+        // forfeits its post's stake. The reporter is paid 90% of the OFFENDER's forfeiture only;
+        // the other producer's forfeited post stake goes to the treasury (review 2026-10-15, C3).
+        uint256 offenderForfeited = r.baseStake() + r.postStake();
+        uint256 othersForfeited = r.postStake();
+        uint256 expectedReward = offenderForfeited * 90 / 100;
+        uint256 expectedTreasury = offenderForfeited - expectedReward + othersForfeited;
         // Pull-payment: rewards credited to pendingWithdrawals
         assertEq(r.pendingWithdrawals(reporter), expectedReward, "Reporter reward mismatch");
         assertEq(r.pendingWithdrawals(fraudTreasury), expectedTreasury, "Treasury share mismatch");

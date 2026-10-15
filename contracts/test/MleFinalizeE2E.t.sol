@@ -145,8 +145,44 @@ contract MleFinalizeE2ETest is Test {
             _postBlock(keccak256(proof), uint32(proof.length), keccak256("mutated_v2_blob"));
 
         vm.prank(makeAddr("fraudProver"));
-        assertTrue(rollup.fraudProof(submissionId, stateRoot, vpis, proof));
+        uint256 gasBefore = gasleft();
+        bool convicted = rollup.fraudProof(submissionId, stateRoot, vpis, proof);
+        emit log_named_uint("fraudProof gas (real proof, one evaluation mutated, verdict INVALID)", gasBefore - gasleft());
+        assertTrue(convicted);
         assertEq(rollup.nextSubmissionId(), 0);
+    }
+
+    /// SECURITY regression (code review 2026-10-15, finding C3): under EIP-7825 a transaction has
+    /// at most 2^24 gas, so after the proof's calldata intrinsic gas roughly 14.7M remain for
+    /// execution. The pinned classifier convicts this invalid proof in ~6.1M (measured in
+    /// `test_fraudProof_realVerifier_singleEvalMutationConvicts`), yet `_encodedMleVerdict` used to
+    /// refuse any call arriving with less than 25M gas as `FraudProofGasStarved`, which made every
+    /// fraud proof impossible on a capped chain and left only the proof-free timeout removal (no
+    /// forfeiture). The floor is now below the cap's execution budget; starvation is still
+    /// classified by the two-layer OOG detection, never as fraud.
+    function test_fraudProof_realVerifier_convictsWithinEip7825Budget() public {
+        _skipUnlessV2();
+        bytes memory proof = _proof();
+        proof[proof.length - 1] = bytes1(uint8(proof[proof.length - 1]) ^ 1);
+        (uint256 submissionId, bytes32 stateRoot, IntmaxRollup.ValidityPublicInputs memory vpis,) =
+            _postBlock(keccak256(proof), uint32(proof.length), keccak256("capped_fraud_blob"));
+
+        bytes memory callData = abi.encodeCall(IntmaxRollup.fraudProof, (submissionId, stateRoot, vpis, proof));
+        uint256 intrinsic = 21_000;
+        for (uint256 i = 0; i < callData.length; ++i) {
+            intrinsic += callData[i] == bytes1(0) ? 4 : 16;
+        }
+        uint256 executionBudget = 16_777_216 - intrinsic;
+        emit log_named_uint("fraudProof execution budget under EIP-7825", executionBudget);
+
+        vm.prank(makeAddr("fraudProver"));
+        (bool ok, bytes memory ret) = address(rollup).call{gas: executionBudget}(callData);
+        if (!ok) {
+            emit log_named_bytes32("fraudProof revert selector", bytes32(ret));
+        }
+        assertTrue(ok, "a fraud proof that the classifier can evaluate must not be refused under the EIP-7825 budget");
+        assertTrue(abi.decode(ret, (bool)), "the invalid proof is convicted");
+        assertEq(rollup.nextSubmissionId(), 0, "the fraudulent submission was truncated");
     }
 
     function test_fraudProof_invalidProofCannotHideBehindPiMismatch() public {
@@ -167,8 +203,49 @@ contract MleFinalizeE2ETest is Test {
             _postBlock(keccak256(proof), uint32(proof.length), keccak256("valid_compact"));
 
         vm.prank(makeAddr("fraudProver"));
-        assertFalse(rollup.fraudProof(submissionId, stateRoot, vpis, proof));
+        uint256 gasBefore = gasleft();
+        bool convicted = rollup.fraudProof(submissionId, stateRoot, vpis, proof);
+        emit log_named_uint("fraudProof gas (real valid proof, verdict VALID)", gasBefore - gasleft());
+        assertFalse(convicted);
         assertTrue(rollup.getCommitment(submissionId) != bytes32(0));
+    }
+
+    /// EIP-7825 (Fusaka) caps every transaction at 2^24 = 16,777,216 gas. This test records, for
+    /// the checked-in wire-v3 validity fixture, the execution gas of each MLE-bound entry point and
+    /// of its building blocks, next to that cap and the proof's calldata intrinsic gas. It asserts
+    /// nothing about fitting: it is the executable measurement the deploy runbook cites (review
+    /// 2026-10-15, finding C3). `MIN_MLE_VERIFY_GAS` is irrelevant on a capped chain unless the
+    /// adapter path itself fits under the cap; see the runbook for the owner decision this leaves.
+    function test_gasEnvelope_eip7825_recordValidityEntryPoints() public {
+        _skipUnlessV2();
+        bytes memory proof = _proof();
+        uint256 cap = 16_777_216;
+        uint256 intrinsic = 21_000;
+        for (uint256 i = 0; i < proof.length; ++i) {
+            intrinsic += proof[i] == bytes1(0) ? 4 : 16;
+        }
+        emit log_named_uint("EIP-7825 transaction gas cap", cap);
+        emit log_named_uint("validity compact proof bytes", proof.length);
+        emit log_named_uint("calldata intrinsic gas of the proof alone (+21k base)", intrinsic);
+
+        // Adapter building blocks, called directly (view).
+        uint256 g = gasleft();
+        validityAdapter.verifyCompactPublicInputs(proof);
+        emit log_named_uint("adapter.verifyCompactPublicInputs gas", g - gasleft());
+        g = gasleft();
+        validityAdapter.verifyCompact(proof);
+        emit log_named_uint("adapter.verifyCompact gas", g - gasleft());
+
+        // finalize (post first, then the real finalize).
+        (uint256 submissionId, bytes32 stateRoot, IntmaxRollup.ValidityPublicInputs memory vpis,) =
+            _postBlockForFinalize();
+        g = gasleft();
+        rollup.fullVerify(stateRoot, vpis, proof);
+        emit log_named_uint("rollup.fullVerify gas (direct)", g - gasleft());
+        g = gasleft();
+        bool ok = rollup.finalize(submissionId, stateRoot, vpis, proof);
+        emit log_named_uint("rollup.finalize gas", g - gasleft());
+        assertTrue(ok);
     }
 
     function test_fraudProof_realVerifier_undecodableAuthenticatedRawConvicts() public {

@@ -30,7 +30,12 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         uint256 escrowBefore = rollup.totalEscrowed();
         bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
+        uint256 gasBefore = gasleft();
         rollup.withdrawNative(ws, prover, wproof);
+        // EIP-7825 record (review 2026-10-15, C3): execution gas of a real withdrawal, next to the
+        // 2^24 per-transaction cap. Measurement only; see the deploy runbook.
+        emit log_named_uint("withdrawNative gas (real withdrawal proof)", gasBefore - gasleft());
+        emit log_named_uint("withdrawal compact proof bytes", wproof.length);
 
         assertEq(rollup.pendingWithdrawals(recipient), amount, "recipient credited exact amount");
         assertEq(rollup.totalEscrowed(), escrowBefore - amount, "escrow decreased by exactly amount");

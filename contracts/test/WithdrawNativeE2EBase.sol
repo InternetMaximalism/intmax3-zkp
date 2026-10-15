@@ -144,7 +144,11 @@ abstract contract WithdrawNativeE2EBase is Test {
         // 4. Finalize the full 3-block chain with the real validity MLE proof.
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
         bytes memory vproof = FixtureLib.parseCompactProofV2(_validityMleJson());
+        uint256 gasBefore = gasleft();
         bool ok = rollup.finalize(finalSubId, finalStateRoot, vpis, vproof);
+        // EIP-7825 record (review 2026-10-15, C3): execution gas of this suite's real 3-block
+        // validity finalize, next to the 2^24 per-transaction cap. Measurement only.
+        emit log_named_uint("finalize gas (lifecycle validity proof)", gasBefore - gasleft());
         assertTrue(ok, "finalize failed (real validity MLE)");
         assertEq(rollup.latestFinalizedStateRoot(), finalStateRoot, "finalized state root mismatch");
     }
