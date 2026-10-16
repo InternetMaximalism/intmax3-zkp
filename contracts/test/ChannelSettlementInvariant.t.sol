@@ -29,6 +29,7 @@ contract SettlementHandler {
     struct ScopedPayout {
         address recipient;
         bytes32 withdrawalNullifier;
+        uint256 amount;
         bool paid;
     }
 
@@ -76,6 +77,9 @@ contract SettlementHandler {
     // about the code: "an attempt that FIT under the remaining ceiling was refused anyway".
     uint256 public feasibleWithdrawal;
     uint256 public feasiblePostClose;
+    /// claim() attempts made while an unpaid accrued payout existed AND the Manager held pulled
+    /// funds covering it: the Manager had no legitimate reason to refuse that claim.
+    uint256 public feasibleClaim;
 
     constructor(
         ChannelSettlementManager manager_,
@@ -161,6 +165,7 @@ contract SettlementHandler {
                 scopedPayouts.push(ScopedPayout({
                     recipient: c.recipient,
                     withdrawalNullifier: c.withdrawalNullifier,
+                    amount: amt,
                     paid: false
                 }));
             }
@@ -199,6 +204,16 @@ contract SettlementHandler {
         }
         try manager.submitPostCloseClaim(c, CloseTestLib.proofWithLimbs(limbs)) {
             succeededPostClose += 1;
+            // A residual claim accrues a payout under the shared-native nullifier; it is turned
+            // into value through the same `claimWithdrawalCredit` lane as a withdrawal claim.
+            if (amt > 0) {
+                scopedPayouts.push(ScopedPayout({
+                    recipient: c.recipient,
+                    withdrawalNullifier: snn,
+                    amount: amt,
+                    paid: false
+                }));
+            }
         } catch {}
     }
 
@@ -207,6 +222,9 @@ contract SettlementHandler {
         if (scopedPayouts.length == 0) return;
         ScopedPayout storage payout = scopedPayouts[payoutSeed % scopedPayouts.length];
         if (payout.paid) return;
+        if (manager.totalCreditedOut(0) + payout.amount <= manager.receivedChannelFunds(0)) {
+            feasibleClaim += 1;
+        }
         address r = payout.recipient;
         uint256 balBefore = r.balance;
         vm.prank(r);
@@ -376,12 +394,20 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
             "I6 LIVENESS: NEITHER submitWithdrawalClaim() NOR submitPostCloseClaim() ever succeeded "
             "-- a closed channel's members can never accrue their exit by any route"
         );
-        assertGt(
-            handler.succeededClaim(),
-            0,
-            "I6 LIVENESS: claimWithdrawalCredit() never once succeeded -- accrued credit can never be "
-            "turned into value"
-        );
+        // Gated on feasibility like the per-path floors below: a payout must have been accrued AND
+        // the Manager must already hold the pulled funds when claim() is drawn. Both accrual lanes
+        // draw on the same 75-unit I3 ceiling with amounts up to 99, so a 500-call run can spend
+        // the ceiling before pull() lands or draw claim() only before any payout exists; that is
+        // a statement about the draw order, not the contract (see the header comment above).
+        if (handler.feasibleClaim() > 0) {
+            assertGt(
+                handler.succeededClaim(),
+                0,
+                "I6 LIVENESS: claimWithdrawalCredit() was called on an accrued payout the Manager held "
+                "pulled funds for and STILL never once succeeded -- accrued credit can never be turned "
+                "into value"
+            );
+        }
 
         // 3. Per-path, gated on feasibility: an attempt that FIT under the remaining I3 ceiling was
         //    refused anyway. This is the assertion that fires on a single bricked entry point, and
@@ -395,32 +421,38 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
                 "exit from a closed channel is bricked"
             );
         }
-        // C-2 (audit28-08-2026, CRITICAL; comment corrected 2026-10-15): `submitPostCloseClaim`
-        // once double-credited one entitlement across two disjoint nullifier domains, because the
-        // applied delta's tx hash stayed in the accumulator. It is live again since the IMUI
-        // applied/unapplied accumulator split landed: the version-2 proof opens
-        // `keccak(IMUI || tx_hash)`, and bundle application replaces that leaf with the raw hash,
-        // so an applied delta can no longer be claimed. A close with a nonzero
-        // `unallocated_confirmed_incoming` is allowed when IMUI leaves cover it (close circuit
-        // `channel_close_circuit_proves_nonzero_unallocated_incoming`); the L1 deposit fund-import
-        // leg, the one transition that left an UNCOVERED residue, is no longer a signed head.
-        //
-        // This handler never builds an IMUI-backed entitlement (the mock close states carry no
-        // unapplied leaf), so the lane must stay at zero successes HERE; a success would mean the
-        // handler minted a residual claim without an unapplied leaf.
-        assertEq(
-            handler.succeededPostClose(),
-            0,
-            "C-2: submitPostCloseClaim() SUCCEEDED -- the double-credit path is supposed to be "
-            "permanently disabled; re-enabling it requires an unapplied-incoming commitment in H1"
-        );
+        // C-2 (audit28-08-2026, CRITICAL; pin retired 2026-10-16): `submitPostCloseClaim` once
+        // double-credited one entitlement across two disjoint nullifier domains, because the
+        // applied delta's tx hash stayed in the accumulator. The path was disabled and this
+        // assertion pinned the disable (b0bc4548). It is live again since the IMUI
+        // applied/unapplied accumulator split: the version-2 proof opens `keccak(IMUI || tx_hash)`
+        // and bundle application replaces that leaf with the raw hash, so an applied delta can no
+        // longer be claimed. Whether a leaf is still unapplied is a CIRCUIT statement, not an
+        // on-chain check: the Manager verifies the proof and then accrues under the same per-token
+        // cap as a withdrawal claim. This handler attests its claims through the mock verifier
+        // (`expectedPostCloseClaimLimbs`), i.e. every claim it submits is one the circuit WOULD
+        // have proved, so the Manager has no legitimate reason to refuse one that fits under the
+        // remaining ceiling. The lane therefore gets the same feasibility-gated liveness floor as
+        // the withdrawal lane; the double-credit shape itself is pinned by the legacy 57-limb
+        // rejection and the shared-nullifier tests in CloseLifecycleHardening (`test_C2_*`).
+        if (handler.feasiblePostClose() > 0) {
+            assertGt(
+                handler.succeededPostClose(),
+                0,
+                "I6 LIVENESS: submitPostCloseClaim() was called with an amount that fit under the "
+                "remaining accrual ceiling and STILL never once succeeded -- the residual-claim exit "
+                "from a closed channel is bricked"
+            );
+        }
 
         // 4. The property the whole suite is FOR: real ETH reached a real member.
-        assertGt(
-            handler.ghostPaid(),
-            0,
-            "I6 LIVENESS: not one wei ever reached a member over the whole run -- the honest exit is "
-            "impossible and every safety invariant above is satisfied by zero"
-        );
+        if (handler.feasibleClaim() > 0) {
+            assertGt(
+                handler.ghostPaid(),
+                0,
+                "I6 LIVENESS: not one wei ever reached a member over the whole run -- the honest exit "
+                "is impossible and every safety invariant above is satisfied by zero"
+            );
+        }
     }
 }

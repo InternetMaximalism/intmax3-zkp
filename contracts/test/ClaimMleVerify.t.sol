@@ -20,7 +20,7 @@ contract ClaimMleVerifyTest is Test {
     /// Fixtures searched, in order, for a duplicated final-round query row. WHIR's Fiat-Shamir
     /// queries are fixture-specific, so the duplicate is located from the current WHIR shape
     /// instead of pinning byte offsets that move on every regeneration.
-    function _duplicateRowCandidates() internal pure returns (string[7] memory) {
+    function _duplicateRowCandidates() internal pure returns (string[16] memory) {
         return [
             "withdrawal_claim_mle.json",
             "close_intent_mle.json",
@@ -28,7 +28,16 @@ contract ClaimMleVerifyTest is Test {
             "cancel_close_mle.json",
             "withdrawal_mle.json",
             "close_withdrawal_mle.json",
-            "c2c_withdrawal_mle.json"
+            "c2c_withdrawal_mle.json",
+            "close_asset_backing_mle.json",
+            "burn_withdrawal_mle.json",
+            "sepolia_withdrawal_mle.json",
+            "mle_fixture.json",
+            "lifecycle_validity_mle.json",
+            "close_lifecycle_validity_mle.json",
+            "c2c_lifecycle_validity_mle.json",
+            "burn_lifecycle_validity_mle.json",
+            "sepolia_lifecycle_validity_mle.json"
         ];
     }
 
@@ -167,47 +176,78 @@ contract ClaimMleVerifyTest is Test {
         }
     }
 
-    function test_realMleVerifier_rejectsMismatchedFinalDuplicateRow() public {
-        string[7] memory candidates = _duplicateRowCandidates();
-        for (uint256 c = 0; c < candidates.length; c++) {
-            // Each ~1 MB V2 artifact is probed in its OWN call frame: Solidity never releases
-            // memory, so scanning all seven fixtures inline exhausts the quadratic memory budget.
-            if (this.probeDuplicateFinalRow(candidates[c])) {
-                emit log_named_string("duplicate final query fixture", candidates[c]);
-                return;
-            }
-        }
-        // WHIR draws 16 final-round queries from a 2^11 domain, so a checked-in proof carries a
-        // duplicated query only with ~6% probability per fixture. Regeneration is not
-        // reproducible (ZK blinding), so the duplicate-row path can only be exercised against a
-        // real proof when one of the fixtures happens to contain one; report that explicitly
-        // instead of failing the suite on fixture luck.
-        vm.skip(true, "no checked-in proof carries a duplicated final-round query; regenerate one that does");
+    /// The wire-v3 prover and verifier both sort and compact the in-domain query indices before
+    /// any row is serialized (`consume_opening_challenges(.., deduplicate)` with
+    /// `WHIR_DEDUPLICATE_IN_DOMAIN_V2`; `SpongefishWhirVerify._sortAndDedupIndices`), so a repeated
+    /// final-round query never yields two serialized rows. The former "mismatched duplicate row"
+    /// probe therefore had no reachable target: none of the 16 tracked proofs nor 60 freshly
+    /// re-rolled cancel_close proofs carried one (2026-10-16), and with 10 final queries drawn from
+    /// a 2^19 domain even an index collision is a ~1e-4 event per proof. What the compacted wire
+    /// DOES guarantee is checked here on every tracked V2 proof: the opened final-round rows are
+    /// pairwise distinct, and a one-byte mutation of any one of them is rejected by the real
+    /// verifier (each row is authenticated by its Merkle opening, never by a duplicate-hash
+    /// shortcut).
+    /// Four fixtures per test: one probe costs ~140M gas (JSON parse, adapter deploy, two real
+    /// verifications) and Foundry's per-test gas limit is 2^30, so the 16-fixture sweep is split.
+    function test_realMleVerifier_finalRoundRowsAreDistinctAndEachAuthenticated_0() public {
+        _probeFinalRoundRowsRange(0, 4);
     }
 
-    /// @dev External only so the candidate loop above can drop this frame's memory. Returns false
-    ///      when the fixture is not V2 or carries no duplicated final-round row; otherwise proves
-    ///      the verifier rejects the one-byte mutation of the repeated row (assertions revert on
-    ///      failure, which fails the calling test).
-    function probeDuplicateFinalRow(string calldata fixtureName) external returns (bool found) {
+    function test_realMleVerifier_finalRoundRowsAreDistinctAndEachAuthenticated_1() public {
+        _probeFinalRoundRowsRange(4, 8);
+    }
+
+    function test_realMleVerifier_finalRoundRowsAreDistinctAndEachAuthenticated_2() public {
+        _probeFinalRoundRowsRange(8, 12);
+    }
+
+    function test_realMleVerifier_finalRoundRowsAreDistinctAndEachAuthenticated_3() public {
+        _probeFinalRoundRowsRange(12, 16);
+    }
+
+    function _probeFinalRoundRowsRange(uint256 from, uint256 to) internal {
+        string[16] memory candidates = _duplicateRowCandidates();
+        for (uint256 c = from; c < to; c++) {
+            // Each ~1 MB V2 artifact is probed in its OWN call frame: Solidity never releases
+            // memory, so scanning several fixtures inline exhausts the quadratic memory budget.
+            uint256 rows = this.probeFinalRoundRows(candidates[c]);
+            emit log_named_uint(string.concat("final-round rows checked in ", candidates[c]), rows);
+        }
+    }
+
+    /// @dev External only so the candidate loop above can drop this frame's memory. Reverts (via
+    ///      assertions) when the fixture is not V2, the final-round rows cannot be located, two
+    ///      rows repeat, or the mutated proof is accepted. Returns the number of rows checked.
+    function probeFinalRoundRows(string calldata fixtureName) external returns (uint256 rowCount) {
         require(msg.sender == address(this), "probe is an internal frame");
         string memory json = _load(fixtureName);
-        // Historical V1 ABI fixtures carry no compact bytes and are never reinterpreted.
-        if (!vm.keyExistsJson(json, ".schemaVersion")) return false;
+        require(vm.keyExistsJson(json, ".schemaVersion"), string.concat(fixtureName, ": not a V2 fixture"));
         bytes memory hints = vm.parseJsonBytes(json, ".proof.whirHints");
-        uint256 duplicateOffset;
-        (found, duplicateOffset) = _findFinalDuplicateRow(hints, _verificationConfig(json).whir);
-        if (!found) return false;
+        (bool found, uint256 rowsStart, uint256 rows, uint256 rowBytes) =
+            _locateFinalRoundRows(hints, _verificationConfig(json).whir);
+        require(found, string.concat(fixtureName, ": final-round rows not located"));
+        rowCount = rows;
+
+        bytes32[] memory rowHashes = new bytes32[](rows);
+        for (uint256 i = 0; i < rows; i++) {
+            bytes memory row = new bytes(rowBytes);
+            for (uint256 b = 0; b < rowBytes; b++) row[b] = hints[rowsStart + i * rowBytes + b];
+            rowHashes[i] = keccak256(row);
+            for (uint256 j = 0; j < i; j++) {
+                assertTrue(rowHashes[j] != rowHashes[i], string.concat(fixtureName, ": duplicate final-round row serialized"));
+            }
+        }
 
         (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
         bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
-        assertTrue(adapter.verifyCompact(compactProof), "unmodified fixture verifies");
-        // The verifier sorts/hash-deduplicates rows before evaluating the opening. A one-byte
-        // mutation in the repeated row must therefore hit the explicit duplicate-hash equality
-        // check, rather than letting Merkle dedup silently authenticate only the first copy.
-        uint256 target = _compactWhirHintsOffset(compactProof, json, hints) + duplicateOffset;
+        assertTrue(adapter.verifyCompact(compactProof), string.concat(fixtureName, ": unmodified fixture verifies"));
+        // Flip one byte of one opened row (row and byte chosen from the fixture name, so every
+        // fixture exercises a different position) and require the real verifier to reject it.
+        uint256 pick = uint256(keccak256(bytes(fixtureName)));
+        uint256 rowOffset = rowsStart + (pick % rows) * rowBytes + ((pick >> 64) % rowBytes);
+        uint256 target = _compactWhirHintsOffset(compactProof, json, hints) + rowOffset;
         compactProof[target] = bytes1(uint8(compactProof[target]) ^ 1);
-        _assertRejected(adapter, compactProof, "mismatched duplicate final-round row accepted");
+        _assertRejected(adapter, compactProof, string.concat(fixtureName, ": mutated final-round row accepted"));
     }
 
     /// @dev The exact constructor-pinned configuration the adapter was deployed from. Its WHIR
@@ -240,34 +280,26 @@ contract ClaimMleVerifyTest is Test {
         require(keccak256(window) == keccak256(hints), "compact hints offset drift");
     }
 
-    /// Locate the second copy of a duplicated final-round query row. The final intermediate
-    /// commitment is opened as an Arkworks Vec of `inDomainSamples` rows of `interleavingDepth`
-    /// extension-field elements (24 bytes each); rows are serialized in transcript order, so a
-    /// repeated query index yields byte-identical rows.
-    function _findFinalDuplicateRow(bytes memory hints, SpongefishWhirVerify.WhirParams memory whir)
-        internal pure returns (bool found, uint256 duplicateOffset)
+    /// Locate the opened final-round rows. The final intermediate commitment is opened as an
+    /// Arkworks Vec of `rows * interleavingDepth` extension-field elements (24 bytes each), rows in
+    /// sorted query order. `rows` is the DEDUPLICATED query count, so the search starts at
+    /// `inDomainSamples` and steps down to admit a proof whose transcript drew a repeated index.
+    function _locateFinalRoundRows(bytes memory hints, SpongefishWhirVerify.WhirParams memory whir)
+        internal pure returns (bool found, uint256 rowsStart, uint256 rows, uint256 rowBytes)
     {
-        if (whir.numRounds == 0 || whir.rounds.length != whir.numRounds) return (false, 0);
+        if (whir.numRounds == 0 || whir.rounds.length != whir.numRounds) return (false, 0, 0, 0);
         SpongefishWhirVerify.RoundParams memory finalRound = whir.rounds[whir.numRounds - 1];
-        uint256 rawQueryCount = finalRound.inDomainSamples;
-        uint256 rowBytes = finalRound.interleavingDepth * 24;
-        uint256 expectedElements = rawQueryCount * finalRound.interleavingDepth;
-        if (expectedElements > type(uint64).max) return (false, 0);
-        (bool prefixFound, uint256 prefixOffset) = _findUniqueFinalVecPrefix(
-            hints, uint64(expectedElements), rawQueryCount, rowBytes, finalRound.merkleDepth
-        );
-        if (!prefixFound) return (false, 0);
-        uint256 rowsStart = prefixOffset + 8;
-        bytes32[] memory rowHashes = new bytes32[](rawQueryCount);
-        for (uint256 i = 0; i < rawQueryCount; i++) {
-            bytes memory row = new bytes(rowBytes);
-            for (uint256 b = 0; b < rowBytes; b++) row[b] = hints[rowsStart + i * rowBytes + b];
-            rowHashes[i] = keccak256(row);
-            for (uint256 j = 0; j < i; j++) {
-                if (rowHashes[j] == rowHashes[i]) return (true, rowsStart + i * rowBytes);
-            }
+        rowBytes = finalRound.interleavingDepth * 24;
+        for (uint256 n = finalRound.inDomainSamples; n > 0; n--) {
+            uint256 expectedElements = n * finalRound.interleavingDepth;
+            if (expectedElements > type(uint64).max) return (false, 0, 0, 0);
+            (bool prefixFound, uint256 prefixOffset) = _findUniqueFinalVecPrefix(
+                hints, uint64(expectedElements), n, rowBytes, finalRound.merkleDepth
+            );
+            if (prefixFound) return (true, prefixOffset + 8, n, rowBytes);
+            if (n + 2 < finalRound.inDomainSamples) break; // more than two collisions: not this wire
         }
-        return (false, 0);
+        return (false, 0, 0, 0);
     }
 
     /// @dev Locate the final canonical Arkworks u64-LE prefix. Besides exact 64-bit matching, the

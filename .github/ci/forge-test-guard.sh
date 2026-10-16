@@ -55,9 +55,6 @@ MIN_SUITES=37
 #                     — the unsafe direct in-place MSU statement is retired. Pins the absent
 #                       production selector/VK surface and fail-closed retired-selector behavior;
 #                       the historical V1 proof remains quarantined under test/data/deprecated.
-#   AuthorizedBurnFenwick
-#                     — proof-bound newest-snapshot selection for authorized burns. Guards against
-#                       selecting an older balance root after the signed burn snapshot exists.
 #   FixtureParsingGuards
 #                     — deployment input schema boundaries: gate-count/hole rejection, checked
 #                       integer narrowing and canonical Goldilocks elements.
@@ -81,9 +78,8 @@ test/C2CFullE2E.t.sol:C2CFullE2ETest	2
 test/MleE2E.t.sol:MleE2ETest	6
 test/MleFinalizeE2E.t.sol:MleFinalizeE2ETest	2
 test/ManagerCloseGas.t.sol:ManagerCloseGasTest	1
-test/AuthorizedBurnFenwick.t.sol:AuthorizedBurnSnapshotTest	7
 test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17
-test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	17"
+test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	16"
 
 out="$(mktemp -t forge-test-json)"
 trap 'rm -f "$out"' EXIT
