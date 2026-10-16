@@ -9640,7 +9640,9 @@ mod delegate_send_tests {
         );
 
         let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
-        accumulator.push(tx_hash);
+        // The fund import absorbs the IMUI-tagged UNAPPLIED leaf, not the raw tx_hash; a residual
+        // claim opens exactly that entry (the raw hash is what a bundle apply swaps in).
+        accumulator.push(crate::common::balance_state::unapplied_incoming_leaf(tx_hash));
         accumulator.push(Bytes32::from_u32_slice(&[77, 0, 0, 0, 0, 0, 0, 0]).unwrap());
         let incoming_tx_index = 0u64;
         let accumulator_root = Bytes32::from(accumulator.get_root());

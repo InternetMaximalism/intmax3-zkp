@@ -40,6 +40,8 @@ abstract contract CloseE2EBase is Test {
     bytes32 internal constant V2_FULL_SCHEMA_HASH = keccak256("plonky2-mle-v3-solidity");
 
     address internal constant FRAUD_TREASURY = address(0xFEED);
+    uint256 internal constant BASE_STAKE = 0.1 ether;
+    uint256 internal constant POST_STAKE = 0.001 ether;
     uint64 internal constant CHALLENGE_PERIOD = 1 days;
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
@@ -158,7 +160,10 @@ abstract contract CloseE2EBase is Test {
 
     function _rollupInitcode(bytes32 genesis, PinnedAdapters memory adapters) internal pure returns (bytes memory) {
         return abi.encodePacked(
-            type(IntmaxRollup).creationCode, abi.encode(FRAUD_TREASURY, adapters.validity, adapters.withdrawal, genesis)
+            type(IntmaxRollup).creationCode,
+            // Same posting-bond parameters as the deploy scripts (868bd28c added them to the
+            // constructor; the printer and `_deployAll` must share this initcode byte-for-byte).
+            abi.encode(FRAUD_TREASURY, adapters.validity, adapters.withdrawal, genesis, BASE_STAKE, POST_STAKE)
         );
     }
 
@@ -175,7 +180,12 @@ abstract contract CloseE2EBase is Test {
         returns (bytes memory)
     {
         return abi.encodePacked(
-            type(CloseFundingMaterializer).creationCode, abi.encode(IntmaxRollup(payable(rollupAddr)), backing)
+            type(CloseFundingMaterializer).creationCode,
+            // The late-incoming slot (0b6a8d87) is pinned to the backing adapter: this E2E never
+            // submits a late receive, and the late-incoming config is a deploy-time export
+            // (`export_late_incoming_config`, `DeployLateIncomingVerifier`), not a checked-in
+            // fixture. Same stand-in as SignerIndependentExit / FrozenChannelBatchPost.
+            abi.encode(IntmaxRollup(payable(rollupAddr)), backing, backing)
         );
     }
 

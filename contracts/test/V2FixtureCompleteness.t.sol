@@ -89,10 +89,6 @@ contract V2FixtureCompletenessTest is Test {
         _assertFullV2("/test/data/burn_withdrawal_mle.json");
     }
 
-    function test_releaseFixture_partialWithdrawalCloseIntent() public view {
-        _assertFullV2("/test/data/pw_close_intent_mle.json");
-    }
-
     function test_releaseFixture_sepoliaLifecycleValidity() public view {
         _assertDaCompanion("/test/data/sepolia_lifecycle_validity_mle.json", "/test/data/sepolia_lifecycle.json");
     }

@@ -15,13 +15,13 @@ import {Plonky2GateEvaluatorExt3} from "@mle/Plonky2GateEvaluatorExt3.sol";
 import {PoseidonPublicInputsHash} from "@mle/PoseidonPublicInputsHash.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
-import {RegRecordLib} from "../script/RegRecordLib.sol";
 import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 import {MockRollupRegistry} from "./CloseSettlementBase.sol";
 
 /// @notice Production-shape gas guard for the value-bearing Manager close path.
-/// @dev Uses a real 103-PI close proof (the `pw_` fixture: a signed state whose settled-tx chain
-///      ends in a burn, closed like any other state) and the real pinned adapter. Only the three
+/// @dev Uses the real 103-PI close proof of the generated close family (`close_intent_mle.json`,
+///      channel 1 of `close_lifecycle.json`, intent descriptor `close_intent.json`; the former
+///      `pw_` close-intent fixture lost its producer in 909658b1) and the real pinned adapter. Only the three
 ///      unrelated statement adapters and finalized-root registry response are test doubles. The
 ///      measured call is the exact `submitCloseIntent` ABI, including its state writes; calldata
 ///      intrinsic gas is added explicitly to the measured execution cost.
@@ -73,7 +73,7 @@ contract ManagerCloseGasTest is Test {
     /// Deploy in Foundry's separate setup transaction so the measured submit begins with cold
     /// account/storage access, like a production transaction rather than a deploy-and-call bundle.
     function setUp() public {
-        _deployManager(_read("pw_close_intent_mle.json"));
+        _deployManager(_read("close_intent_mle.json"));
         // Freeze (era 0 -> 1, the fixture's `close_freeze_nonce`) and pass the grace window here,
         // so the measured submit is the era's first close intent.
         vm.prank(closeRequester);
@@ -122,7 +122,7 @@ contract ManagerCloseGasTest is Test {
             snapshotMediumBlockNumber: uint64(vm.parseJsonUint(json, ".snapshot_medium_block_number")),
             finalStateVersion: uint64(vm.parseJsonUint(json, ".final_state_version")),
             finalSettledTxChain: vm.parseJsonBytes32(json, ".final_settled_tx_chain"),
-            finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(json, ".final_settled_tx_acc_root")
+            finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(json, ".final_settled_tx_accumulator_root")
         });
     }
 
@@ -136,23 +136,29 @@ contract ManagerCloseGasTest is Test {
             IPinnedMleVerifierV2(address(closeAdapter)), withdrawalClaim, postCloseClaim, cancelClose
         );
 
-        RegRecordLib.Record memory record = RegRecordLib.parse(_read("pw_reg.json"));
+        // Same registration the lifecycle E2E deploys from (CloseE2EBase._managerInitcode):
+        // sig-cluster only, no delegates, zero participant root.
+        string memory lifecycleJson = _read("close_lifecycle.json");
+        uint32 channelId = uint32(vm.parseJsonUint(lifecycleJson, ".registration.channel_id"));
+        uint8 bpSlot = uint8(vm.parseJsonUint(lifecycleJson, ".registration.bp_member_slot"));
+        bytes32[] memory pkGs = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_gs");
+        address[] memory recipients = vm.parseJsonAddressArray(lifecycleJson, ".registration.recipients");
         rollup = new MockRollupRegistry(IChannelSettlementVerifier(address(settlementVerifier)));
-        rollup.register(record.channelId, record.bpSlot, RegRecordLib.regPkGs(record));
+        rollup.register(channelId, bpSlot, pkGs);
 
         ChannelSettlementManager.MemberBinding[] memory bindings =
-            new ChannelSettlementManager.MemberBinding[](record.memberCount);
-        for (uint256 i = 0; i < record.memberCount; ++i) {
-            bindings[i] = ChannelSettlementManager.MemberBinding({pkG: record.pkGs[i], recipient: record.recipients[i]});
+            new ChannelSettlementManager.MemberBinding[](pkGs.length);
+        for (uint256 i = 0; i < pkGs.length; ++i) {
+            bindings[i] = ChannelSettlementManager.MemberBinding({pkG: pkGs[i], recipient: recipients[i]});
         }
-        closeRequester = record.recipients[0];
+        closeRequester = recipients[0];
 
         manager = new ChannelSettlementManager(
-            bytes4(record.channelId),
-            record.bpSlot,
-            record.pkGs[record.bpSlot],
-            record.activeDelegateCount,
-            record.participantRoot,
+            bytes4(channelId),
+            bpSlot,
+            pkGs[bpSlot],
+            uint16(0),
+            bytes32(0),
             1,
             0,
             0,
@@ -166,8 +172,8 @@ contract ManagerCloseGasTest is Test {
 
     function test_realManagerCloseSubmitFitsProductionGasEnvelope() public {
         assertEq(block.chainid, 31337, "gas fixture is local-devnet contained");
-        string memory proofJson = _read("pw_close_intent_mle.json");
-        string memory submitJson = _read("pw_submit.json");
+        string memory proofJson = _read("close_intent_mle.json");
+        string memory submitJson = _read("close_intent.json");
         ChannelSettlementManager.CloseIntent memory intent = _parseIntent(submitJson);
         bytes memory compactProof = FixtureLib.parseCompactProofV2(proofJson);
         bytes memory callData = abi.encodeCall(ChannelSettlementManager.submitCloseIntent, (intent, compactProof));

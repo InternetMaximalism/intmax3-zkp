@@ -143,17 +143,17 @@ contract ClaimMleVerifyTest is Test {
     }
 
     function test_realClosePublicInputsPathFitsProductionGasEnvelope() public {
-        _assertPublicInputsPathFitsProductionGasEnvelope("pw_close_intent_mle.json", 103);
+        _assertPublicInputsPathFitsProductionGasEnvelope("close_intent_mle.json", 103);
     }
 
     function test_realWithdrawalClaimPublicInputsPathFitsProductionGasEnvelope() public {
         _assertPublicInputsPathFitsProductionGasEnvelope("withdrawal_claim_mle.json", 50);
     }
 
-    // Historical 57-limb artifact only. This is NOT the gas acceptance test for the new
-    // IMUI/version-2 statement; regenerate and pin its MLE export before deployment.
+    // 58 limbs since the slot<->receiver binding (pass-3 H1, 2026-10-16) added the receiver's
+    // Regev-key digest to the statement; the fixture is the regenerated version-2 export.
     function test_realPostCloseClaimPublicInputsPathFitsProductionGasEnvelope() public {
-        _assertPublicInputsPathFitsProductionGasEnvelope("post_close_claim_mle.json", 57);
+        _assertPublicInputsPathFitsProductionGasEnvelope("post_close_claim_mle.json", 58);
     }
 
     function test_realCancelClosePublicInputsPathFitsProductionGasEnvelope() public {

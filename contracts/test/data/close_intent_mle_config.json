@@ -11,15 +11,15 @@
     "protocolVersion": 3,
     "constituentWidth": 160,
     "circuitDigest": [
-      "0xb02f75b1726102f4",
-      "0x97cee1dd7e6053b9",
-      "0x6254fc67bf85a4dc",
-      "0x4413ef887934d6cd"
+      "0xf93ff52b1ab376b9",
+      "0x14a68f855b97cee9",
+      "0xe7393b209fdb7963",
+      "0xe1193944b53cc3de"
     ],
-    "preprocessedCommitmentRoot": "0xf2dd5e7ba259c66c2f77f3d4dbb25d26760c3a3c4191b75e2c368df57efa3bd8",
+    "preprocessedCommitmentRoot": "0x6165a74511471b43e2bf8956a8363b7dd96739d9fff4b94c5e0d61769ec5ecb7",
     "whirProtocolId": "0x488db828f22d9a8b478c442b614a0e57c4775417ce19d0437dd0b66af3487a7d23be8dad96d8e9227da868a42f9198e33cba9e85e55c915c3c4f4466af23e7c1",
     "whirSessionId": "0x4718b4d97ba5a65d7c39cd0cb763b20371cdd9c229cffda76d90bbb0b9b08036",
-    "circuitConfigDigest": "0xf673b1cb5df49c5ea21d633071786e7c8acbd3bd4f3cccc2bd751fcaeed77fb6",
+    "circuitConfigDigest": "0xdffc36fbf2b6cb092aeac807326219e200faa39b3956c7a42e99c55bf47b26d1",
     "numSelectors": 3,
     "numGateConstraints": 123,
     "quotientDegreeFactor": 8,
@@ -609,17 +609,17 @@
     }
   },
   "pinnedVerifier": {
-    "preprocessedCommitmentRoot": "0xf2dd5e7ba259c66c2f77f3d4dbb25d26760c3a3c4191b75e2c368df57efa3bd8",
-    "circuitConfigDigest": "0xf673b1cb5df49c5ea21d633071786e7c8acbd3bd4f3cccc2bd751fcaeed77fb6",
+    "preprocessedCommitmentRoot": "0x6165a74511471b43e2bf8956a8363b7dd96739d9fff4b94c5e0d61769ec5ecb7",
+    "circuitConfigDigest": "0xdffc36fbf2b6cb092aeac807326219e200faa39b3956c7a42e99c55bf47b26d1",
     "whirParametersDigest": "0x966b03c9b06cc88e5aeeb7bbabdddb1d59ce885c06f6fd7b726413a398c30b31",
     "verificationConfigDigest": "0x5a3b3fb9cb0582c16b4f5b1ecb2b9833b87c9d5c1357766b0ebcc88386d1ebd1",
     "whirProtocolId": "0x488db828f22d9a8b478c442b614a0e57c4775417ce19d0437dd0b66af3487a7d23be8dad96d8e9227da868a42f9198e33cba9e85e55c915c3c4f4466af23e7c1",
     "whirSessionId": "0x4718b4d97ba5a65d7c39cd0cb763b20371cdd9c229cffda76d90bbb0b9b08036",
     "circuitDigest": [
-      "0xb02f75b1726102f4",
-      "0x97cee1dd7e6053b9",
-      "0x6254fc67bf85a4dc",
-      "0x4413ef887934d6cd"
+      "0xf93ff52b1ab376b9",
+      "0x14a68f855b97cee9",
+      "0xe7393b209fdb7963",
+      "0xe1193944b53cc3de"
     ]
   },
   "solidityAbiVerificationConfig": {

@@ -56,6 +56,9 @@ contract RegisterTokens is Script {
     error AlreadyRegisteredToAnotherToken(uint32 tokenIndex, address onChain, address manifest);
     /// @dev The post-registration read-back disagreed — never report success on an unverified write.
     error ReadBackMismatch(uint32 tokenIndex, address onChain, address expected);
+    /// @dev No exit materializer is installed and `ALLOW_NO_SETTLEMENT_STACK` is not set: registering a
+    ///      token now would make this rollup unable to ever attach a settlement stack (pass-3 H2).
+    error SettlementStackNotAttached(address rollup);
 
     function run() external {
         string memory manifestPath = vm.envOr("TOKENS_MANIFEST", string("../node/tokens.json"));
@@ -75,6 +78,20 @@ contract RegisterTokens is Script {
         console2.log("manifest      :", manifestPath);
         console2.log("IntmaxRollup  :", rollupAddr);
         console2.log("chainId       :", manifestChainId);
+
+        // SECURITY (pass-3 H2, 2026-10-16): registering the first ERC-20 index closes the Rollup's
+        // exit-materializer install window for good (`registerSettlementManager` installs the
+        // satellite only while `totalEscrowed == 0 && registeredTokenCount == 0`). A rollup that is
+        // meant to carry channels must therefore have its settlement stack attached BEFORE this
+        // script runs; otherwise it can never close a channel and must be redeployed. A rollup-only
+        // deployment (no channels ever) opts out explicitly.
+        address exitMaterializer = IntmaxRollup(rollupAddr).channelExitMaterializer();
+        if (exitMaterializer == address(0)) {
+            if (!vm.envOr("ALLOW_NO_SETTLEMENT_STACK", false)) revert SettlementStackNotAttached(rollupAddr);
+            console2.log("WARNING: no exit materializer installed; ALLOW_NO_SETTLEMENT_STACK=1 set, this rollup can never attach a settlement stack");
+        } else {
+            console2.log("exit materializer:", exitMaterializer);
+        }
 
         vm.startBroadcast();
         registerAll(IntmaxRollup(rollupAddr), json);
