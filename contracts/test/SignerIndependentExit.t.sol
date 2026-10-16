@@ -132,8 +132,11 @@ contract SignerIndependentExitTest is Test {
     bytes32 private constant SIGNED_ROOT = keccak256("signed H root");
     bytes32 private constant BACKING_ROOT = keccak256("backing ext root");
     bytes32 private constant SETTLED = keccak256("settled chain");
-    bytes32 private constant TFD = keccak256("exact token funds digest");
+    /// The IMTF digest of the (11, 29) two-token vector every ordinary close in this suite settles
+    /// with (pass-3 H2: the materializer recomputes it from the Manager's amounts). Set in `setUp`.
+    bytes32 private TFD;
     bytes32 private constant CLOSE_DIGEST = keccak256("close intent");
+    uint32 private constant TOKEN_FUNDS_DIGEST_DOMAIN = 0x494d5446;
 
     ExitRollupHarness private rollup;
     CloseFundingMaterializer private materializer;
@@ -143,6 +146,10 @@ contract SignerIndependentExitTest is Test {
     MockPinnedMleVerifierV2 private verifier;
 
     function setUp() external {
+        TFD = _tfdOf(11, 29);
+        PRE_BURN_TFD = _tfdOf(11, 29);
+        POST_BURN_TFD = _tfdOf(11, 20);
+        LATER_TFD = _tfdOf(11, 15);
         rollup = new ExitRollupHarness();
         verifier = new MockPinnedMleVerifierV2(block.chainid);
         materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier, verifier);
@@ -195,11 +202,16 @@ contract SignerIndependentExitTest is Test {
     // lastPostedBlock, as this journal did until 2026-10-15, admitted exactly that head.
 
     bytes32 private constant PRE_BURN_SETTLED = keccak256("settled chain before the burn");
-    bytes32 private constant PRE_BURN_TFD = keccak256("fund vector still holding the burned amount");
     bytes32 private constant POST_BURN_SETTLED = keccak256("settled chain ending in the burn");
-    bytes32 private constant POST_BURN_TFD = keccak256("fund vector without the burned amount");
     bytes32 private constant LATER_SETTLED = keccak256("settled chain after the burn");
-    bytes32 private constant LATER_TFD = keccak256("fund vector after the burn");
+    /// Real IMTF digests (pass-3 H2: `_materialize` re-hashes the Manager's fund vector and
+    /// compares it with the proof's digest, so a digest is no longer a free label). The pre-burn
+    /// vector still holds the burned amount (11, 29); the post-burn vector is (11, 20); the later
+    /// vector is (11, 15). Assigned in `setUp` because a keccak over a packed loop is not a
+    /// compile-time constant.
+    bytes32 private PRE_BURN_TFD;
+    bytes32 private POST_BURN_TFD;
+    bytes32 private LATER_TFD;
 
     /// (b) After `recordPost(channel, N)` for the burn block, a close whose backing processed-send
     /// block is < N is refused by `requireSignedHeadBacking` while the Manager is ClosePending; a
@@ -248,8 +260,9 @@ contract SignerIndependentExitTest is Test {
         materializer.materializeSignedHead(_m(manager), _proof(4, PRE_BURN_SETTLED, PRE_BURN_TFD, BACKING_ROOT));
         _assertNothingMaterialized(11, 29);
 
-        // The post-burn close, backed at N, materializes.
-        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, tokens, amounts);
+        // The post-burn close, backed at N, materializes (its vector no longer holds the burn).
+        (uint32[] memory postTokens, uint256[] memory postAmounts) = _twoTokenVector(11, 20);
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, postTokens, postAmounts);
         materializer.materializeSignedHead(_m(manager), _proof(5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
         assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST, "the post-burn close exits");
     }
@@ -302,7 +315,8 @@ contract SignerIndependentExitTest is Test {
         materializer.attestSignedHeadBacking(_m(manager), _proofProcessed(7, 5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
         vm.prank(address(manager));
         materializer.requireSignedHeadBacking(CHANNEL, POST_BURN_SETTLED, POST_BURN_TFD);
-        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, tokens, amounts);
+        (uint32[] memory postTokens, uint256[] memory postAmounts) = _twoTokenVector(11, 20);
+        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, POST_BURN_SETTLED, POST_BURN_TFD, postTokens, postAmounts);
         materializer.materializeSignedHead(_m(manager), _proofProcessed(7, 5, POST_BURN_SETTLED, POST_BURN_TFD, BACKING_ROOT));
         assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST, "the post-burn close exits");
     }
@@ -954,7 +968,23 @@ contract SignerIndependentExitTest is Test {
 
     function _finishTwoTokensOn(ExitManagerHarness target, uint256 nativeAmount, uint256 tokenAmount) private {
         (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(nativeAmount, tokenAmount);
-        target.finishClose(CLOSE_DIGEST, SIGNED_ROOT, SETTLED, TFD, tokens, amounts);
+        target.finishClose(CLOSE_DIGEST, SIGNED_ROOT, SETTLED, _tfdOf(nativeAmount, tokenAmount), tokens, amounts);
+    }
+
+    /// Byte-exact copy of `ChannelSettlementVerifier.tokenFundsDigest` for the suite's two-token
+    /// vector `[native at slot 0, TOKEN at slot 1]`.
+    function _tfdOf(uint256 nativeAmount, uint256 tokenAmount) private pure returns (bytes32) {
+        bytes memory pre = abi.encodePacked(bytes4(TOKEN_FUNDS_DIGEST_DOMAIN));
+        pre = abi.encodePacked(pre, uint32(0), TOKEN);
+        for (uint256 t = 2; t < 10; t++) {
+            pre = abi.encodePacked(pre, uint32(0));
+        }
+        pre = abi.encodePacked(pre, uint32(2));
+        pre = abi.encodePacked(pre, nativeAmount, tokenAmount);
+        for (uint256 t = 2; t < 10; t++) {
+            pre = abi.encodePacked(pre, uint256(0));
+        }
+        return keccak256(pre);
     }
 
     function _twoTokenVector(uint256 nativeAmount, uint256 tokenAmount)

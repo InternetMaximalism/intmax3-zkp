@@ -478,10 +478,21 @@ cd .. && mkdir -p deploy-staging/ch7 deploy-staging/ch8
   neither the path nor password material is added to child argv. Raw `--private-key` remains
   local-Anvil-only.
 
-### ERC-20 token registration (multi-token §N-7) — AFTER the rollup deploy, BEFORE any ERC-20 deposit
+### ERC-20 token registration (multi-token §N-7) — AFTER the settlement attach, BEFORE any ERC-20 deposit
 The base `tokenIndex → ERC-20` registry is **set-once per index** (TM-10b) and `deposit()` reverts
 for an unregistered nonzero index, so this runs between the `Deploy.s.sol` above and the first
 ERC-20 deposit. Standalone — no existing deploy script runs it.
+
+**Ordering rule (pass-3 H2, 2026-10-16).** `registerToken` and the first native `deposit` both
+close the rollup's exit-materializer install window: `IntmaxRollup.registerSettlementManager`
+installs the set-once `CloseFundingMaterializer` only while `totalEscrowed == 0` and
+`registeredTokenCount == 0`, and reverts `InvalidChannelExitManager` afterwards. Run the settlement
+attach (`deploy-settlement` / `DeployCloseCli.s.sol`, whose last transaction is
+`registerSettlementManager`) for the FIRST channel before this step and before opening deposits. A
+rollup that already holds escrow or a token registry can never receive an exit materializer; it has
+to be redeployed together with its settlement stack. Later channels reuse the installed materializer
+and are not affected. Verify with `cast call <rollup> "channelExitMaterializer()(address)"` before
+announcing the deposit address.
 ```bash
 $EDITOR deploy-staging/ch7/tokens.json            # template: node/tokens.example.json
                                                   # `rollup` = the address just deployed, `chainId` = 11155111
@@ -558,6 +569,11 @@ set -a; . ./.claude/.apikey; set +a
 eu-north-1-locked, so the Japan↔Stockholm latency is inherent.)
 
 ## Operational notes / invariants (do NOT regress)
+- **Exit materializer before escrow** (pass-3 H2): the settlement attach must run before the first
+  deposit and before `registerToken`; the rollup refuses to install an exit materializer once it
+  holds escrow or a token registry. The materializer re-hashes every Manager-reported fund vector
+  into the proof-attested IMTF digest before crediting (`ChannelExitTokenFundsDigestMismatch`), so
+  Manager getters never decide amounts. Do not add a deployer path that bypasses either rule.
 - **§F-1 backing is anchored at GENESIS only** (`create_channel` uses `sign_state_if_backed`). Ongoing
   co-signs (`cmd_cosign`, `cmd_cosign_refresh`, `join_delegate`, `cosign-inter-transfer`) use plain
   N-of-N `sign_state`, because an inter-channel send legitimately ADVANCES `settled_tx_chain` (detail2

@@ -629,6 +629,10 @@ contract IntmaxRollup {
         if (address(tokenAddressOf[tokenIndex]) != address(0)) revert TokenIndexAlreadyRegistered();
         if (token.code.length == 0) revert TokenNotAContract();
         tokenAddressOf[tokenIndex] = IERC20(token);
+        // Closes the exit-materializer install window for ERC-20 escrow (see
+        // `registerSettlementManager`): `escrowedByToken` cannot be summed on-chain, but no ERC-20
+        // can be escrowed before its index is registered here.
+        registeredTokenCount += 1;
         emit TokenRegistered(tokenIndex, token);
     }
 
@@ -808,8 +812,19 @@ contract IntmaxRollup {
         if (materializer != address(0)) {
             if (materializer.code.length == 0) revert InvalidChannelExitManager();
             address installed = _channelExitMaterializer;
-            if (installed == address(0)) _channelExitMaterializer = materializer;
-            else if (installed != materializer) revert InvalidChannelExitManager();
+            if (installed == address(0)) {
+                // SECURITY (pass-3 H2, 2026-10-16): the installed satellite is the ONLY caller
+                // `creditChannelExit` honours, and nothing here verifies its code (its immutables
+                // make a codehash pin per-deployment). So the slot may be filled only while the
+                // Rollup holds no escrow at all: before the first native deposit and before any
+                // ERC-20 index exists. A depositor can then read `channelExitMaterializer()` and
+                // audit the contract that will ever be allowed to move the escrow, and a deployer
+                // key can no longer point a live Rollup's escrow at a satellite of its choosing.
+                if (totalEscrowed != 0 || registeredTokenCount != 0) revert InvalidChannelExitManager();
+                _channelExitMaterializer = materializer;
+            } else if (installed != materializer) {
+                revert InvalidChannelExitManager();
+            }
             assembly ("memory-safe") {
                 let ptr := mload(0x40)
                 mstore(ptr, shl(224, 0x3c72b923)) // bindManager(address)
@@ -823,9 +838,19 @@ contract IntmaxRollup {
         emit SettlementManagerRegistered(manager);
     }
 
+    /// @notice The set-once exit satellite, or zero while none is installed. Read it before
+    ///         depositing: it is the only contract `creditChannelExit` will ever honour.
+    function channelExitMaterializer() external view returns (address) {
+        return _channelExitMaterializer;
+    }
+
     /// @notice One asset write within the materializer's complete atomic H-vector transaction.
-    /// @dev No token call occurs here. The only caller is the set-once audited materializer; its
-    ///      outer frame validates uniqueness/completeness and any later failure reverts all writes.
+    /// @dev No token call occurs here. The only caller is the set-once satellite installed by
+    ///      `registerSettlementManager` while the Rollup held no escrow; this contract does not
+    ///      verify that satellite's code, so the amounts it credits are bound to a proof only by
+    ///      the satellite itself (`CloseFundingMaterializer._materialize` re-hashes them into the
+    ///      verified token-funds digest). Its outer frame validates uniqueness/completeness and
+    ///      any later failure reverts all writes.
     function creditChannelExit(address manager, uint32 tokenIndex, uint256 amount) external releaseRuntime {
         if (msg.sender != _channelExitMaterializer) revert InvalidChannelExitManager();
         if (tokenIndex == 0) {
@@ -876,6 +901,12 @@ contract IntmaxRollup {
     ///         large EIP-2537 verification bytecode lives in its own contract). Deployer-only,
     ///         set EXACTLY ONCE — behaviorally immutable.
     BlobKZGVerifierExt public kzgVerifier;
+
+    /// @notice Number of ERC-20 indices registered so far (append-only). Nonzero closes the
+    ///         exit-materializer install window (`registerSettlementManager`). Appended at the end
+    ///         of storage so earlier slots (tests probe `_channelExitMaterializer` at slot 2) keep
+    ///         their positions.
+    uint32 public registeredTokenCount;
 
     /// @notice Pin the KZG blob-binding satellite. Deployer-only, set EXACTLY ONCE.
     /// @dev SECURITY: must be a deployed CONTRACT — a call to an address with no code succeeds

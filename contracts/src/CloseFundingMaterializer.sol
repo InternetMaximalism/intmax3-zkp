@@ -141,6 +141,9 @@ contract CloseFundingMaterializer {
     uint256 private constant MAX_CHANNEL_TOKENS = 10;
     bytes4 private constant BACKING_STATEMENT_DOMAIN = 0x494d4241; // "IMBA"
     bytes4 private constant BACKING_PROOF_DOMAIN = 0x494d4250; // "IMBP"
+    /// "IMTF" — mirrors the Rust `TOKEN_FUNDS_DIGEST_DOMAIN` and
+    /// `ChannelSettlementVerifier.TOKEN_FUNDS_DIGEST_DOMAIN`.
+    bytes4 private constant TOKEN_FUNDS_DIGEST_DOMAIN = 0x494d5446;
 
     error InvalidRollup();
     error OnlyRollup();
@@ -159,6 +162,9 @@ contract CloseFundingMaterializer {
     error ChannelExitStatementMismatch();
     error ChannelExitTokenCountOutOfRange();
     error ChannelExitDuplicateToken(uint32 tokenIndex);
+    /// The Manager's (registry, amounts) do not hash to the token-funds digest the verified
+    /// CloseAssetBacking proof attests (pass-3 H2, 2026-10-16).
+    error ChannelExitTokenFundsDigestMismatch();
     error CooperativeCloseFundingDeprecated();
     // ABI names retained so old publishers/tests can identify the retired route; the tombstone
     // functions below now always return CooperativeCloseFundingDeprecated before evaluating them.
@@ -447,7 +453,9 @@ contract CloseFundingMaterializer {
             statement.settledTxChain != manager.finalizedSettledTxChain()
                 || statement.tokenFundsDigest != manager.finalizedTokenFundsDigest()
         ) revert BackingPublicInputsMismatch();
-        _materialize(manager, statement.anchorBlockNumber, statement.processedSendBlockNumber);
+        _materialize(
+            manager, statement.anchorBlockNumber, statement.processedSendBlockNumber, statement.tokenFundsDigest
+        );
         uint32 channelId = uint32(manager.channelId());
         lateBalanceStateCommitment[channelId] = statement.balanceStateCommitment;
         lateBalanceAnchorBlock[channelId] = statement.anchorBlockNumber;
@@ -513,9 +521,20 @@ contract CloseFundingMaterializer {
 
     /// @dev Re-entered only by the Rollup's authenticated endpoint. The digest is consumed before
     ///      token credits; any later underflow/mismatch reverts it and every Rollup mutation.
-    function _materialize(ChannelSettlementManager m, uint64 anchorBlockNumber, uint64 processedSendBlockNumber)
-        private
-    {
+    ///
+    ///      SECURITY (pass-3 H2, 2026-10-16): the amounts credited below are read from the
+    ///      Manager, which is bound by ABI answers only. They are therefore re-hashed into the IMTF
+    ///      token-funds digest and compared with `tokenFundsDigest` from the VERIFIED
+    ///      CloseAssetBacking statement, so a Manager — lying, buggy or bound by a compromised
+    ///      deployer key — can credit exactly the fund vector the channel's own Balance proof
+    ///      attests and nothing else. Before this check the proof pinned the digest while the
+    ///      credited amounts were whatever the Manager reported.
+    function _materialize(
+        ChannelSettlementManager m,
+        uint64 anchorBlockNumber,
+        uint64 processedSendBlockNumber,
+        bytes32 tokenFundsDigest
+    ) private {
         address manager = address(m);
         uint32 channelId = uint32(m.channelId());
         if (managerOfChannel[channelId] != manager) revert NotBoundManager();
@@ -551,6 +570,9 @@ contract CloseFundingMaterializer {
             }
             registry[i] = tokenIndex;
             amounts[i] = m.finalizedChannelFundAmount(tokenIndex);
+        }
+        if (_tokenFundsDigest(registry, tokenCount, amounts) != tokenFundsDigest) {
+            revert ChannelExitTokenFundsDigestMismatch();
         }
 
         materializedChannelExit[channelId] = digest;
@@ -630,6 +652,28 @@ contract CloseFundingMaterializer {
             if (limbs[offset + i] != uint32(v >> (224 - 32 * i))) return false;
         }
         return true;
+    }
+
+    /// @dev Byte-exact mirror of the Rust `token_funds_digest` (src/common/channel.rs) and of
+    ///      `ChannelSettlementVerifier.tokenFundsDigest`: one keccak over the FIXED 92-word
+    ///      preimage `[IMTF, registry (10 x u32), token_count (u32), amounts (10 x U256)]`, always
+    ///      full width. Kept local on purpose: the Manager under materialization names its own
+    ///      verifier, so a recompute that called through the Manager would trust the very contract
+    ///      this check exists to doubt.
+    function _tokenFundsDigest(uint32[10] memory tokenRegistry, uint8 tokenCount, uint256[10] memory amounts)
+        private
+        pure
+        returns (bytes32)
+    {
+        bytes memory pre = abi.encodePacked(TOKEN_FUNDS_DIGEST_DOMAIN);
+        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
+            pre = abi.encodePacked(pre, tokenRegistry[t]);
+        }
+        pre = abi.encodePacked(pre, uint32(tokenCount));
+        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
+            pre = abi.encodePacked(pre, amounts[t]);
+        }
+        return keccak256(pre);
     }
 
     function _limbsToBytes32(uint256[] memory limbs, uint256 offset) private pure returns (bytes32 result) {

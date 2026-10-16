@@ -586,6 +586,19 @@ same index with the same siblings, credits the ciphertext, raises `pending_adds`
 → C18. The base side proves `ReceiveTransfer` from the source's pre-send balance proof
 (`src/live_balance_service.rs:1897, 2107-2134`).
 
+**Who may claim an unapplied incoming delta (H1 fix, 2026-10-16).** The receiver wing of `tx_leaf`
+names the receiver twice: by hash-sig identity (`receiver_pk_g`) and by the Poseidon digest of the
+Regev key the delta is encrypted to (`ReceiverBalanceDelta.receiver_regev_pk_digest`,
+`balance_state.rs::tx_leaf_hash`). The sender's co-signers pin that digest to the E-2 recipient key;
+the receiving channel's import refuses a tx whose digest is not the committed key of the slot that
+`receiver_pk_g` names (`state_update_verifier.rs`, fund import and bundle apply;
+`wallet_core.rs::verify_inter_channel_credit_transition` invariant 3b). `PostCloseClaimCircuit` and
+its late-binding variant rebuild the wing from the digest field of the slot leaf they open, so the
+only slot that can satisfy a residual claim or a late receipt is the one the sender addressed.
+Decryption alone never gave this: a delta encrypted with randomness `r = 0` decrypts to the same
+amount under every slot key, which is also why the receive-side verifiers now refuse such deltas
+(`RegevCiphertext::reject_key_independent`) → C18, G13.
+
 **Two-phase commit.** `cosign-inter-transfer` signs A's `InterChannelDebit` and B's
 `InterChannelFundImport` + `InterChannelBundleApply` in one process after checking spent and replay
 ledgers (`channel_member.rs:12006, ~12092-12185`); both post-states are fsynced into the
@@ -718,6 +731,20 @@ materializer once and calls `bindManager`, which requires a finalized rollup hea
 `recordPost` refuses a frozen or exited channel and journals the per-channel predecessor;
 `rollbackPost` restores it in descending order (`:331-349`) → G05.
 
+**Trust boundary of the exit satellite (H2 fix, 2026-10-16).** The rollup never verifies the code of
+the materializer or of a Manager: `registerSettlementManager` learns the materializer from the
+registering Manager's own getter, `bindManager` accepts any contract whose getters answer, and
+`creditChannelExit` honours whoever occupies the set-once slot. Two rules now confine what that trust
+can reach. First, the slot can be filled only while the rollup holds no escrow (`totalEscrowed == 0`
+and no ERC-20 index registered, `registeredTokenCount == 0`); a depositor reads
+`channelExitMaterializer()` and audits the one contract that will ever move the escrow, and a
+deployer key cannot later point a live rollup at a satellite of its choosing. Second,
+`_materialize` re-hashes the Manager-reported `(registry, amounts)` into the IMTF token-funds digest
+and requires it to equal the digest of the verified CloseAssetBacking statement, so a Manager that
+lies about `finalizedChannelFundAmount` credits nothing: the amounts paid are exactly the fund vector
+the channel's own Balance proof attests. Codehash pinning was not used because both contracts carry
+immutables, which make the runtime code hash differ per deployment → N25, G07.
+
 **Statuses** `Active → ClosePending → Closed`; materializer `frozenGeneration` (0 or g) and the
 `materializedChannelExit` latch.
 
@@ -801,8 +828,11 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 | a pre-burn head cannot close after the burn posts | processed-send block ≥ `lastPostedBlock` (§2.5, §2.6) | G12 |
 | a burn cannot post after a freeze | `recordPost` reverts the whole post (§2.1, §2.6) | G05, G12 |
 | each nullifier pays once | rollup `_consumeWithdrawalGuard`, Manager `_accrueWithdrawal` | N21, G13 |
+| an incoming delta is claimable only by the addressed slot | receiver key digest in the tx-leaf wing, rebuilt from the opened slot leaf (§2.3) | C18, G13 |
 | per-token caps | `finalizedChannelFundAmount (+ lateIncomingFundAmount)` | G10, G14 |
 | only the materializer moves escrow to a Manager | `creditChannelExit` caller check | N25 |
+| the materializer is fixed before any escrow exists | install window in `registerSettlementManager` (§2.6) | N25 |
+| a materialized fund vector is the proof-attested one | IMTF recompute in `_materialize` (§2.6) | G07 |
 | no intermediate signed deposit head | single `L1DepositImport` head (§2.3) | G02 |
 | the newest backable head is the one closed | `close` head fallback (§2.5) | G16 |
 
@@ -819,6 +849,11 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   automatic rebuild of the candidate; the journal format makes rebuilding unsafe today.
 - The late-incoming adapter is checked at deployment only for pinning, not for its configuration
   digests; cross-lane (residual + late) real-proof tests do not exist yet.
+- Deployment order is now a contract rule: the settlement stack (`registerSettlementManager`, which
+  installs the exit materializer) must be registered before the first deposit and before
+  `registerToken`; a rollup that already holds escrow can never receive an exit materializer and
+  must be redeployed with the settlement stack. The deployer key keeps every other power listed in
+  §2.1 (producer whitelist, channel and token registration).
 
 ### Appendix A — Code comments known to be stale at `7f129334`
 
