@@ -12,6 +12,55 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const U63_BITS: usize = 63;
+
+#[cfg(test)]
+mod comparator_tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField,
+        iop::witness::PartialWitness,
+        plonk::{
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+            config::PoseidonGoldilocksConfig,
+        },
+    };
+
+    use super::{U63, U63Target};
+
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+    const D: usize = 2;
+
+    /// Does the `a >= b` gadget accept the pair?
+    fn enforce_ge_accepts(a: u64, b: u64) -> bool {
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let x = U63Target::new(&mut builder, true);
+        let y = U63Target::new(&mut builder, true);
+        x.enforce_ge(&mut builder, &y);
+        let data = builder.build::<C>();
+        let mut pw = PartialWitness::new();
+        x.set_witness(&mut pw, U63::new(a).unwrap());
+        y.set_witness(&mut pw, U63::new(b).unwrap());
+        match catch_unwind(AssertUnwindSafe(|| data.prove(pw))) {
+            Ok(Ok(proof)) => data.verify(proof).is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Pass-2 Balance B1 (2026-10-16): `enforce_ge` used to range-check `a - b mod p` to 63 bits,
+    /// which also accepts `a < b` whenever `b - a >= p - 2^63`. A free 63-bit `new_block_r` in the
+    /// receive circuits could therefore jump to `2^63 - 1` and come back down, skipping the
+    /// channel's own sends. The comparator is now bit-wise and cannot wrap.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn enforce_ge_does_not_wrap_modulo_the_field() {
+        assert!(enforce_ge_accepts(7, 5));
+        assert!(enforce_ge_accepts(5, 5));
+        assert!(!enforce_ge_accepts(5, (1u64 << 63) - 1), "5 >= 2^63 - 1 must not prove");
+        assert!(!enforce_ge_accepts(0, 1u64 << 62), "0 >= 2^62 must not prove");
+    }
+}
 const U63_LOW_BITS: usize = 32;
 const U63_HIGH_BITS: usize = U63_BITS - U63_LOW_BITS;
 const U63_MAX_VALUE: u64 = (1u64 << U63_BITS) - 1;
@@ -222,55 +271,63 @@ impl U63Target {
         builder.is_equal(self.value, zero)
     }
 
-    pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
-        &self,
+    // Compare canonical 63-bit operands from low to high. A differing higher
+    // bit overrides the accumulated comparison of all lower bits.
+    fn compare<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        lower: &Self,
+        lhs: Target,
+        rhs: Target,
+        strict: bool,
+    ) -> BoolTarget {
+        let a = builder.split_le(lhs, U63_BITS);
+        let b = builder.split_le(rhs, U63_BITS);
+        let mut greater = builder.constant_bool(!strict);
+        for (a, b) in a.iter().zip(b.iter()) {
+            let equal = builder.is_equal(a.target, b.target);
+            greater = BoolTarget::new_unsafe(builder.select(equal, greater.target, a.target));
+        }
+        greater
+    }
+
+    pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
+        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
     ) {
-        let diff = builder.sub(self.value, lower.value);
-        builder.range_check(diff, U63_BITS);
+        let ge = Self::compare(builder, self.value, lower.value, false);
+        builder.assert_one(ge.target);
     }
 
     pub fn enforce_gt<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-        lower: &Self,
+        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
     ) {
-        let lower_plus_one = builder.add_const(lower.value, F::ONE);
-        self.enforce_ge(
-            builder,
-            &Self {
-                value: lower_plus_one,
-            },
-        );
+        let gt = Self::compare(builder, self.value, lower.value, true);
+        builder.assert_one(gt.target);
+    }
+
+    fn conditional_compare<F: RichField + Extendable<D>, const D: usize>(
+        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
+        condition: BoolTarget, strict: bool,
+    ) {
+        // Mask before decomposition: disabled comparisons must not add range
+        // restrictions to operands supplied through unchecked targets.
+        let zero = builder.zero();
+        let lhs = builder.select(condition, self.value, zero);
+        let rhs = builder.select(condition, lower.value, zero);
+        let comparison = Self::compare(builder, lhs, rhs, strict);
+        let disabled = builder.not(condition);
+        let accepted = builder.or(disabled, comparison);
+        builder.assert_one(accepted.target);
     }
 
     pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-        lower: &Self,
-        condition: BoolTarget,
+        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
     ) {
-        let diff = builder.sub(self.value, lower.value);
-        let zero = builder.zero();
-        let diff_when_true = builder.select(condition, diff, zero);
-        builder.range_check(diff_when_true, U63_BITS);
+        self.conditional_compare(builder, lower, condition, false);
     }
 
     pub fn conditional_gt<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-        lower: &Self,
-        condition: BoolTarget,
+        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
     ) {
-        let lower_plus_one = builder.add_const(lower.value, F::ONE);
-        self.conditional_ge(
-            builder,
-            &Self {
-                value: lower_plus_one,
-            },
-            condition,
-        );
+        self.conditional_compare(builder, lower, condition, true);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(

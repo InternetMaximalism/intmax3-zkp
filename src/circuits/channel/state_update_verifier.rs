@@ -754,6 +754,7 @@ impl InterChannelSendUpdateWitness {
             ));
         }
         ensure_funds_unchanged_except(&self.prev_state, &self.next_state, token_slot)?;
+        ensure_fund_identity_unchanged(&self.prev_state, &self.next_state)?;
         ensure_same_u256(
             "unallocated_confirmed_incoming",
             self.prev_state.unallocated_confirmed_incoming,
@@ -913,6 +914,7 @@ impl InterChannelFundImportUpdateWitness {
             ));
         }
         ensure_funds_unchanged_except(&self.prev_state, &self.next_state, token_slot)?;
+        ensure_fund_identity_unchanged(&self.prev_state, &self.next_state)?;
         if self.next_state.unallocated_confirmed_incoming
             != self.prev_state.unallocated_confirmed_incoming + u64_to_u256(self.amount)
         {
@@ -2007,6 +2009,31 @@ fn resolve_token_slot(
 /// P2 (per-token conservation): every fund position EXCEPT the registry-resolved `token_slot`
 /// must be unchanged across a transition that moves value in exactly one token (TM-2's
 /// "others unchanged" leg, applied to the fund vector).
+/// Pass-2 Regev B1 (2026-10-16): an inter-channel debit/import may move ONE fund amount; the
+/// fund's identity — its channel id and the finalized `intmax_state_root` it is pinned to — must
+/// be carried unchanged. Without this a sender could write an arbitrary root into the debit head;
+/// the close circuit folds that root into IMCH and L1 requires it to be finalized, so the head and
+/// every successor became unclosable while the posted debit raised `lastPostedBlock` past the last
+/// closable predecessor.
+fn ensure_fund_identity_unchanged(
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+) -> Result<(), ChannelStateUpdateError> {
+    if prev_state.channel_fund.channel_id != next_state.channel_fund.channel_id {
+        return Err(ChannelStateUpdateError::InvalidRootTransition(
+            "channel_fund.channel_id must remain unchanged".to_string(),
+        ));
+    }
+    if prev_state.channel_fund.intmax_state_root != next_state.channel_fund.intmax_state_root {
+        return Err(ChannelStateUpdateError::InvalidRootTransition(
+            "channel_fund.intmax_state_root must remain unchanged across an inter-channel \
+             transfer (only an L1 deposit import re-pins it)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_funds_unchanged_except(
     prev_state: &ChannelState,
     next_state: &ChannelState,

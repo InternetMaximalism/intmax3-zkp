@@ -869,6 +869,16 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) â
   secret key / amount witness are erased on drop and redacted in `Debug`). Still open: the
   N > 2 MMCS schedule binding, the regev_plonky3 salt/mask RNG-clone correlation, the ignored
   `eta` parameter and the other dependency-contract items of the review.
+- Pass-2 "B-series" items closed with minimal changes on 2026-10-16: the U63 comparison gadgets are
+  bit-wise (no modular wrap of `block_r`); an inter-channel debit or import must carry the fund's
+  `channel_id` and `intmax_state_root` unchanged (only an L1 deposit import re-pins the root); the
+  deposit-import head builder refuses a credit into a cell already holding
+  `MAX_HOMO_ADDS_BEFORE_REFRESH` credits; the rollup records a channel post only for a sub-block
+  that names a signer (an all-zero `keyIds` block can neither be refused by a frozen channel nor
+  move its `lastPostedBlock`); the `diagnostics` probe uses the decrypted E-1. Left as they were:
+  the Verifier's missing delegate-count ceiling (owner decision of 2026-09-29, pinned by a test),
+  the EIP-7825 finalize margin, the late-failing-proof STARVED classification, one-transaction
+  truncation, and the late-incoming cursor stall â€” each a design change, not a line fix.
 - Deployment order is now a contract rule: the settlement stack (`registerSettlementManager`, which
   installs the exit materializer) must be registered before the first deposit and before
   `registerToken`; a rollup that already holds escrow can never receive an exit materializer and

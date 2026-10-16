@@ -1220,6 +1220,39 @@ fn c2c_rejects_token_relabeled_descriptor_on_all_gates() {
     ));
 }
 
+/// Pass-2 Regev B1 (2026-10-16): the inter-channel debit and the fund import may move one fund
+/// amount, never the fund's identity. A sender that wrote an arbitrary `intmax_state_root` into
+/// the debit head made that head (and every successor) unclosable: the close circuit folds the
+/// root into IMCH and L1 requires it to be finalized, while the posted debit had already raised
+/// `lastPostedBlock`. Both gates now refuse a changed root.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn c2c_refuses_a_fund_root_change_on_send_and_import() {
+    let foreign = bytes32_word(0x7007);
+
+    let mut witness = flow().send.clone();
+    witness.next_state.channel_fund.intmax_state_root = foreign;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    let err = witness
+        .verify(&StructuralTransportVerifier, &VERIFIER)
+        .expect_err("a changed fund root must be refused at the source send gate");
+    assert!(
+        format!("{err:?}").contains("intmax_state_root"),
+        "expected the fund-identity rejection, got {err:?}"
+    );
+
+    let mut witness = flow().import.clone();
+    witness.next_state.channel_fund.intmax_state_root = foreign;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    let err = witness
+        .verify(&StructuralTransportVerifier)
+        .expect_err("a changed fund root must be refused at the fund-import gate");
+    assert!(
+        format!("{err:?}").contains("intmax_state_root"),
+        "expected the fund-identity rejection, got {err:?}"
+    );
+}
+
 /// Negative (TM-16 obligation 1/5) — SYNTHETIC `tx_hash`: `tx_hash` is a DERIVED field, so a
 /// descriptor carrying a value that is not `compute_tx_hash()` over its own fields (a builder that
 /// invented an identifier, or one left over from a pre-TM-16 formula) must be refused at ALL THREE
@@ -1263,15 +1296,21 @@ fn c2c_rejects_synthetic_tx_hash_on_all_gates() {
         "expected the TM-16 recompute rejection, got {err:?}"
     );
 
-    // Destination bundle apply leaves the settle chain unchanged, so again only TM-16 can fire.
+    // Destination bundle apply leaves the settle chain unchanged. Since the Stage-3 accumulator
+    // consumption (`require_incoming_application`) runs before the TM-16 recompute on this leg, a
+    // synthetic tx_hash is refused there first: the IMUI leaf under the witnessed path is
+    // `unapplied_incoming_leaf(real tx_hash)`, not of the synthetic value. Either rejection is
+    // the authenticated-leaf gate; the TM-16 gate itself is pinned on the send and import legs.
     let mut witness = flow().bundle.clone();
     witness.inter_channel_tx.tx_hash = synthetic;
     let err = witness
         .verify(&VERIFIER)
         .expect_err("synthetic tx_hash must be refused at the bundle-apply gate");
+    const IMUI_GATE: &str = "exactly one authenticated unapplied incoming leaf";
     assert!(
-        matches!(&err, ChannelStateUpdateError::InvalidSettledTxChain(m) if m.contains(TM16)),
-        "expected the TM-16 recompute rejection, got {err:?}"
+        matches!(&err, ChannelStateUpdateError::InvalidSettledTxChain(m)
+            if m.contains(TM16) || m.contains(IMUI_GATE)),
+        "expected the TM-16 recompute or the IMUI consumption rejection, got {err:?}"
     );
 }
 

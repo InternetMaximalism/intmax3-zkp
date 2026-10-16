@@ -83,6 +83,15 @@ Step 0 below.
 
 ## Why regen is needed — what each change invalidated
 
+- **U63 (2026-10-16, gadget change — soundness fix, pass-2 Balance B1).**
+  `U63Target::{enforce_ge, enforce_gt, conditional_ge, conditional_gt}` (`src/common/u63.rs`)
+  compare bit by bit instead of range-checking `a - b mod p` to 63 bits, which had accepted
+  `a < b` whenever `b - a >= p - 2^63` (a free 63-bit `new_block_r` could wrap to `2^63 - 1` and
+  back, skipping the channel's own sends). Every circuit using these gadgets rotates: the
+  balance step circuits (send_tx, receive_transfer, receive_deposit), hence switch board and
+  the Balance VK and every consumer (close, cancel-close, close-asset-backing, withdrawal,
+  late-incoming), plus any validity-side user of U63 comparisons. The pending cohort regeneration
+  for C1/H1 covers it; nothing deployable exists between those steps.
 - **H1 (2026-10-16, circuit + wire-format change — soundness fix).** The tx-leaf receiver
   wing now carries the Regev key digest of the key the receiver delta is encrypted to:
   `tx_leaf = keccak(keccak([IMTL, src_pk_g, sender_delta_digest]),

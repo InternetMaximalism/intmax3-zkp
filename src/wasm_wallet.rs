@@ -1084,23 +1084,26 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
 #[cfg(feature = "diagnostics")]
 #[wasm_bindgen]
 pub async fn wallet_feasibility_check() -> Result<String, JsValue> {
-    use crate::regev::{channel_keygen, prove_channel_tx, verify_channel_tx};
+    // The witnessed E-1 prover/verifier this probe used are test-only since C2 (co-signers accept
+    // only the decrypted purposes); the probe measures the DECRYPTED E-1 the wallet actually ships.
+    use crate::regev::{channel_keygen, prove_channel_tx_decrypted, verify_channel_tx_decrypted};
     let mut rng = rand010::rng();
-    let (sender_pk, _s) = channel_keygen(&mut rng);
+    let (sender_pk, sender_sk) = channel_keygen(&mut rng);
     let (recipient_pk, _r) = channel_keygen(&mut rng);
     let before = encrypt_amount(&mut rng, &sender_pk, 100).map_err(js_err)?;
     let amount = encrypt_amount(&mut rng, &recipient_pk, 30).map_err(js_err)?;
     let after = encrypt_amount(&mut rng, &sender_pk, 70).map_err(js_err)?;
-    let proof = prove_channel_tx(
+    let proof = prove_channel_tx_decrypted(
         RegevSecurityLevel::Test,
         &sender_pk,
+        &sender_sk,
         &recipient_pk,
-        (&before.0, &before.1),
+        &before.0,
         (&amount.0, &amount.1),
         (&after.0, &after.1),
     )
     .map_err(js_err)?;
-    verify_channel_tx(
+    verify_channel_tx_decrypted(
         RegevSecurityLevel::Test,
         &sender_pk,
         &recipient_pk,

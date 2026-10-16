@@ -5108,6 +5108,18 @@ fn l1_deposit_import_head(
     let mut head_enc = fund_import_leg.balance_state.enc_balances.clone();
     head_enc[recipient_slot][token_slot] = recipient_after;
     let mut head_pending = fund_import_leg.balance_state.pending_adds.clone();
+    // Pass-2 Regev B2 (2026-10-16): the homomorphic-add budget is enforced in state
+    // (`BalanceState::validate`, `MAX_HOMO_ADDS_BEFORE_REFRESH`), but this builder — and the
+    // co-signer gate that rebuilds the head through it — never checked it, so a 65th credit
+    // produced a head that no later refresh or import could extend (the deposit was consumed by
+    // the live balance before the exit-kit step finally refused it). Refuse here, before anything
+    // is consumed.
+    if head_pending[recipient_slot][token_slot] >= MAX_HOMO_ADDS_BEFORE_REFRESH {
+        return bail(format!(
+            "slot {recipient_slot} token position {token_slot} already holds \
+             {MAX_HOMO_ADDS_BEFORE_REFRESH} unrefreshed credits: refresh before importing"
+        ));
+    }
     head_pending[recipient_slot][token_slot] += 1;
     Ok(ChannelState {
         epoch: prev.epoch + 1,
@@ -10642,6 +10654,33 @@ mod delegate_send_tests {
         );
         verify_inter_channel_send_transition(&snapshot.state, &record, &burn.debit_payload, LEVEL)
             .expect("the co-signer gate accepts the decrypted burn debit");
+    }
+
+    /// Pass-2 Regev B2 (2026-10-16): the import head builder (shared by the co-signer gate's
+    /// rebuild) refuses a credit into a (slot, token) cell that already holds
+    /// `MAX_HOMO_ADDS_BEFORE_REFRESH` unrefreshed credits; a 64th credit is still built. Before
+    /// the fix the 65th head was built, consumed the deposit in the live balance, and could never
+    /// be extended by a refresh or another import.
+    #[test]
+    fn l1_deposit_import_head_refuses_a_credit_past_the_refresh_budget() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b5);
+        let (_record, keys, _members, genesis, _w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 25, [0, 0, 0], [0, 0]);
+        let amount = 7u64;
+        let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
+        let prev = genesis.clone();
+        let mut leg = genesis.clone();
+        leg.unallocated_confirmed_incoming = u64_to_u256(amount);
+
+        leg.balance_state.pending_adds[1][1] = MAX_HOMO_ADDS_BEFORE_REFRESH - 1;
+        let head = l1_deposit_import_head(&prev, &leg, 1, 1, &delta, amount)
+            .expect("the 64th credit is within the budget");
+        assert_eq!(head.balance_state.pending_adds[1][1], MAX_HOMO_ADDS_BEFORE_REFRESH);
+
+        leg.balance_state.pending_adds[1][1] = MAX_HOMO_ADDS_BEFORE_REFRESH;
+        let err = l1_deposit_import_head(&prev, &leg, 1, 1, &delta, amount)
+            .expect_err("a 65th unrefreshed credit must be refused");
+        assert!(err.0.contains("refresh"), "wrong rejection: {err}");
     }
 
     /// TM-7 (builder side): an L1 deposit of base token 55 credits the depositor leaf at the
