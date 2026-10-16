@@ -126,7 +126,8 @@ use intmax3_zkp::{
         verify_base_nonce_available, verify_inter_channel_credit_transition,
         verify_inter_channel_descriptor_matches_debit,
         verify_inter_channel_send_transition_with_lookup, verify_l1_deposit_import_transition,
-        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
+        verify_refresh_transition, verify_send_transition, verify_send_transition_as_recipient,
+        verify_slim_send_tx, verify_slim_send_tx_as_recipient, verify_snapshot,
         verify_state_sig, verify_token_register_state_transition,
     },
 };
@@ -11295,29 +11296,34 @@ fn cosign_gate(state: &CliState, payload: &SendPayload) -> ChannelState {
     if next_state.prev_digest != state.snapshot.state.digest {
         die("payload does not extend the current head");
     }
-    // Verify the transition + E-1 proof once (with recipient decryption if a CLI slot receives).
+    // Verify the transition + E-1 proof once. SECURITY (review C02, 2026-10-16): the PUBLIC
+    // verification (sender A11 hash-sig, decrypted E-1, structural fold) runs BEFORE any
+    // secret-key operation; only an authenticated payload addressed to a CLI slot is decrypted.
     let recipient_is_cli = state
         .controlled
         .iter()
         .find(|c| c.slot == payload.recipient_index);
-    let (sk, expected) = if let Some(c) = recipient_is_cli {
+    if let Some(c) = recipient_is_cli {
         let keys = keys_for(c.keygen_seed);
-        let amt =
-            intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, &payload.channel_tx.enc_amount)
-                .unwrap_or_else(|e| die(e));
-        (Some(keys.regev_sk), Some(amt))
+        verify_send_transition_as_recipient(
+            &state.snapshot.state,
+            &state.snapshot.record,
+            payload,
+            LEVEL,
+            &keys.regev_sk,
+        )
+        .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
     } else {
-        (None, None)
-    };
-    verify_send_transition(
-        &state.snapshot.state,
-        &state.snapshot.record,
-        payload,
-        LEVEL,
-        sk.as_ref(),
-        expected,
-    )
-    .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
+        verify_send_transition(
+            &state.snapshot.state,
+            &state.snapshot.record,
+            payload,
+            LEVEL,
+            None,
+            None,
+        )
+        .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
+    }
     next_state
 }
 
@@ -11575,33 +11581,37 @@ fn cmd_cosign_batch(args: &[String]) {
     // Verify one slim tx against the head, with the CLI-recipient decryption check (same
     // belt-and-braces accounting check cmd_cosign runs) — members/record are OUR OWN snapshot's.
     let verify_one = |tag: &str, slim: &SlimSendPayload| -> Result<(), String> {
-        let (sk, expected) = match state
+        // SECURITY (review C02): public verification first; decrypt only an authenticated tx
+        // addressed to a CLI slot.
+        match state
             .controlled
             .iter()
             .find(|c| c.slot == slim.recipient_index)
         {
             Some(c) => {
                 let keys = keys_for(c.keygen_seed);
-                match intmax3_zkp::regev::decrypt_amount(
+                verify_slim_send_tx_as_recipient(
+                    &head,
+                    &state.snapshot.record,
+                    &state.snapshot.members,
+                    &regev_pks,
+                    slim,
+                    LEVEL,
                     &keys.regev_sk,
-                    &slim.channel_tx.enc_amount,
-                ) {
-                    Ok(amt) => (Some(keys.regev_sk), Some(amt)),
-                    Err(e) => return Err(format!("{tag}: decrypt enc_amount: {e}")),
-                }
+                )
+                .map(|_amount| ())
             }
-            None => (None, None),
-        };
-        verify_slim_send_tx(
-            &head,
-            &state.snapshot.record,
-            &state.snapshot.members,
-            &regev_pks,
-            slim,
-            LEVEL,
-            sk.as_ref(),
-            expected,
-        )
+            None => verify_slim_send_tx(
+                &head,
+                &state.snapshot.record,
+                &state.snapshot.members,
+                &regev_pks,
+                slim,
+                LEVEL,
+                None,
+                None,
+            ),
+        }
         .map_err(|e| format!("{tag}: transition invalid: {e}"))
     };
 

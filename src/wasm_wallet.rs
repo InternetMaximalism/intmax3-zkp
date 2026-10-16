@@ -968,26 +968,29 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
             return Err(js_err("payload does not extend the wallet's current head"));
         }
         let am_recipient = payload.recipient_index == slot;
-        let (sk, expected) = if am_recipient {
-            // We learn the amount by decrypting; pass it as the expected check.
-            let amt = crate::regev::decrypt_amount(
+        // SECURITY (review C02, 2026-10-16): the complete public verification (sender hash-sig,
+        // decrypted E-1, structural fold) runs BEFORE the session's secret key touches the
+        // payload; an unauthenticated payload is rejected without any decryption.
+        if am_recipient {
+            crate::wallet_core::verify_send_transition_as_recipient(
+                &snapshot.state,
+                &snapshot.record,
+                &payload,
+                LEVEL,
                 &session.keys.regev_sk,
-                &payload.channel_tx.enc_amount,
             )
-            .map_err(|e| js_err(format!("cannot decrypt incoming amount: {e}")))?;
-            (Some(&session.keys.regev_sk), Some(amt))
+            .map_err(js_err)?;
         } else {
-            (None, None)
-        };
-        verify_send_transition(
-            &snapshot.state,
-            &snapshot.record,
-            &payload,
-            LEVEL,
-            sk,
-            expected,
-        )
-        .map_err(js_err)?;
+            verify_send_transition(
+                &snapshot.state,
+                &snapshot.record,
+                &payload,
+                LEVEL,
+                None,
+                None,
+            )
+            .map_err(js_err)?;
+        }
 
         let mut next = payload.proposed_next_state.clone();
         // Co-signing is COSIGNER-only: a delegate session must not emit a state signature

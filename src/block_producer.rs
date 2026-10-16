@@ -155,6 +155,12 @@ impl ProductionChannelRegistration {
                     "slot {slot} Falcon identity differs between wallet and validity records"
                 )));
             }
+            // SECURITY (review C04): `poseidon_digest` asserts canonicality; validate first.
+            self.regev_pks[slot].validate().map_err(|e| {
+                ProductionBlockProducerError::InvalidRegistration(format!(
+                    "slot {slot} Regev public key is invalid: {e}"
+                ))
+            })?;
             let digest = Bytes32::from(self.regev_pks[slot].poseidon_digest());
             if entry.regev_pk_digest != digest {
                 return Err(ProductionBlockProducerError::InvalidRegistration(format!(

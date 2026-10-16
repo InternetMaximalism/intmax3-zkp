@@ -1335,6 +1335,15 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
         }
         seen[m.slot as usize] = true;
     }
+    // SECURITY (review C04, 2026-10-16): `RegevPk::digest` / `poseidon_digest` assert
+    // canonicality and length in every build profile, and the member list is peer-supplied
+    // (serde performs no validation). Validate every key BEFORE any digest below, returning an
+    // ordinary error instead of a panic (native release aborts; WASM traps).
+    for m in &snapshot.members {
+        m.regev_pk.validate().map_err(|e| {
+            WalletError(format!("members[slot {}].regev_pk is not a valid Regev key: {e}", m.slot))
+        })?;
+    }
     // regev_pk_root binding (F9-A).
     let regev_pks = regev_pks_array(&snapshot.members);
     if regev_pk_root(&regev_pks) != snapshot.record.regev_pk_root {
@@ -1734,6 +1743,11 @@ pub fn verify_send_transition(
             return bail(format!("duplicate member slot {}", m.slot));
         }
         seen[m.slot as usize] = true;
+        // SECURITY (review C04): peer-supplied keys are hashed by `member_pubkeys_root` below;
+        // the digest asserts canonicality, so validate first and fail with an error.
+        m.regev_pk.validate().map_err(|e| {
+            WalletError(format!("payload members[slot {}].regev_pk is invalid: {e}", m.slot))
+        })?;
     }
     let recomputed_root = member_pubkeys_root(&payload.record, &payload.members)?;
     if recomputed_root != payload.record.member_pubkeys_root {
@@ -1751,6 +1765,27 @@ pub fn verify_send_transition(
         recipient_sk,
         expected_amount,
     )
+}
+
+/// Recipient-side variant of [`verify_send_transition`] (review C02, 2026-10-16): run the
+/// COMPLETE public verification first — record binding, member-set authentication, the sender's
+/// A11 hash-sig, the decrypted E-1 proof and the structural fold — with NO secret-key material,
+/// and only then decrypt `enc_amount` under the recipient's key. Returns the decrypted amount.
+///
+/// SECURITY: the former wrapper pattern decrypted first to learn the `expected_amount` it then
+/// handed to the verifier, so an unauthenticated payload (bad sender signature, bad proof)
+/// still triggered a secret-key operation whose distinguishable failure
+/// (`DecryptOverflow` vs. the later transition error) leaked a predicate on `c2 - c1·s`. Here no
+/// secret key touches a payload that has not passed every public check.
+pub fn verify_send_transition_as_recipient(
+    prev: &ChannelState,
+    trusted_record: &ChannelRecord,
+    payload: &SendPayload,
+    level: RegevSecurityLevel,
+    recipient_sk: &RegevSk,
+) -> WResult<u64> {
+    verify_send_transition(prev, trusted_record, payload, level, None, None)?;
+    decrypt_amount(recipient_sk, &payload.channel_tx.enc_amount).map_err(we)
 }
 
 /// Shared verification core for one in-channel transfer: the sender's A11 hash-sig over the IMPA
@@ -1772,6 +1807,13 @@ fn verify_send_core(
     recipient_sk: Option<&RegevSk>,
     expected_amount: Option<u64>,
 ) -> WResult<()> {
+    // SECURITY (review C04): the peer-supplied `enc_amount` is hashed into the IMPA digest below
+    // and `RegevCiphertext::digest` asserts its shape/canonicality. The slim binary decoder
+    // validates on decode; the fat and JSON paths did not. Validate here, on every path.
+    channel_tx
+        .enc_amount
+        .validate()
+        .map_err(|e| WalletError(format!("channel_tx.enc_amount is invalid: {e}")))?;
     // The sender's REAL authorization over the ChannelTx digest (P3: BabyBear hash-sig, replaces
     // the SPHINCS+ sender signature). The IMPA `signing_digest` preimage is UNCHANGED — it binds
     // `prev.digest`, so the tx authorizes application at EXACTLY this anchor (detail2 §M-3).
@@ -1825,6 +1867,22 @@ fn verify_send_core(
     Ok(())
 }
 
+/// Recipient-side variant of [`verify_slim_send_tx`] (review C02): complete public verification
+/// with no secret key, then decrypt under the recipient's key and return the amount.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_slim_send_tx_as_recipient(
+    prev: &ChannelState,
+    trusted_record: &ChannelRecord,
+    own_members: &[MemberInfo],
+    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    slim: &SlimSendPayload,
+    level: RegevSecurityLevel,
+    recipient_sk: &RegevSk,
+) -> WResult<u64> {
+    verify_slim_send_tx(prev, trusted_record, own_members, regev_pks, slim, level, None, None)?;
+    decrypt_amount(recipient_sk, &slim.channel_tx.enc_amount).map_err(we)
+}
+
 /// Verify one SLIM batch tx (detail2 §M-2) — the DIRECT per-tx check set of abstract2-1 §3.2b.3,
 /// with `members`/`record`/`regev_pks` from the verifier's OWN verified snapshot, never from the
 /// wire.
@@ -1861,6 +1919,12 @@ pub fn verify_slim_send_tx(
     recipient_sk: Option<&RegevSk>,
     expected_amount: Option<u64>,
 ) -> WResult<()> {
+    // 0. SECURITY (review C04): the JSON slim path carries a serde-decoded `enc_amount` that
+    // the IMPA digest below hashes with asserting preconditions; validate it first.
+    slim.channel_tx
+        .enc_amount
+        .validate()
+        .map_err(|e| WalletError(format!("slim channel_tx.enc_amount is invalid: {e}")))?;
     // 1. Anchor binding.
     if slim.anchor_digest != prev.digest {
         return bail("slim tx does not extend the current head (stale anchor)");
@@ -7825,6 +7889,72 @@ mod delegate_send_tests {
         );
     }
 
+    /// Review C04 (2026-10-16): a peer-supplied member key with a non-canonical coefficient
+    /// (`>= q`) must be refused with an ordinary error. Before the fix `verify_snapshot_structure`
+    /// hashed the key first and `RegevPk::digest` asserted, so the wallet panicked (native
+    /// release aborts, WASM traps) instead of rejecting the snapshot.
+    #[test]
+    fn verify_snapshot_returns_an_error_for_a_non_canonical_member_key() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut rng = StdRng::seed_from_u64(0xC0_4A);
+        let (record, _keys, members, state, _w) = setup_delegate_channel(&mut rng, 11, [5, 6, 4]);
+        let mut bad = ChannelSnapshot {
+            record,
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        bad.members[0].regev_pk.a[0] = crate::regev::REGEV_Q;
+        let outcome = catch_unwind(AssertUnwindSafe(|| verify_snapshot(&bad, None)));
+        match outcome {
+            Ok(Err(e)) => assert!(
+                e.to_string().contains("regev_pk"),
+                "rejection must name the key: {e}"
+            ),
+            Ok(Ok(())) => panic!("a non-canonical member key must be refused"),
+            Err(_) => panic!("a non-canonical member key must return an error, not panic"),
+        }
+    }
+
+    /// Review C04: a send payload whose `enc_amount` carries a non-canonical coefficient must be
+    /// refused with an error; before the fix the IMPA signing digest asserted and panicked.
+    #[test]
+    fn verify_send_transition_returns_an_error_for_a_non_canonical_enc_amount() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut rng = StdRng::seed_from_u64(0xC0_4B);
+        let (record, keys, members, genesis, _w) = setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let BuiltSend { mut payload, .. } = build_send_token_decrypted(
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            0,
+            5,
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("build_send");
+        payload.channel_tx.enc_amount.c1[0] = crate::regev::REGEV_Q;
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            verify_send_transition(&snapshot.state, &record, &payload, LEVEL, None, None)
+        }));
+        match outcome {
+            Ok(Err(e)) => assert!(
+                e.to_string().contains("enc_amount"),
+                "rejection must name the ciphertext: {e}"
+            ),
+            Ok(Ok(())) => panic!("a non-canonical enc_amount must be refused"),
+            Err(_) => panic!("a non-canonical enc_amount must return an error, not panic"),
+        }
+    }
+
     /// A signed state and a registration record are only one snapshot when every nested channel id
     /// agrees.  Re-sign each state mutation so these negatives exercise the explicit snapshot seam,
     /// rather than passing merely because `state.digest` or its Falcon signatures became stale.
@@ -8039,6 +8169,56 @@ mod delegate_send_tests {
             n.balance_state.token_registry[1] = 77
         });
         refused("member set", &|n| n.balance_state.member_count += 1);
+    }
+
+    /// Review C02 (2026-10-16): the recipient-side verifier authenticates the payload BEFORE any
+    /// secret-key operation. A payload with the sender's hash-sig removed is rejected on the
+    /// signature, never on decryption; an honest payload yields the decrypted amount.
+    #[test]
+    fn recipient_verification_authenticates_before_decrypting() {
+        let mut rng = StdRng::seed_from_u64(0xC0_2A);
+        let (record, keys, members, genesis, _w) = setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let BuiltSend { payload, .. } = build_send_token_decrypted(
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            0,
+            5,
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("build_send");
+        let amount = verify_send_transition_as_recipient(
+            &snapshot.state,
+            &record,
+            &payload,
+            LEVEL,
+            &keys[1].regev_sk,
+        )
+        .expect("an honest payload verifies and decrypts");
+        assert_eq!(amount, 5);
+
+        let mut unsigned = payload.clone();
+        unsigned.channel_tx.sender_hash_sig.clear();
+        let err = verify_send_transition_as_recipient(
+            &snapshot.state,
+            &record,
+            &unsigned,
+            LEVEL,
+            &keys[1].regev_sk,
+        )
+        .expect_err("an unauthenticated payload must be refused");
+        let text = err.to_string();
+        assert!(text.contains("hash-sig"), "rejected on the sender signature: {text}");
+        assert!(!text.contains("decrypt"), "no decryption may run first: {text}");
     }
 
     #[test]
