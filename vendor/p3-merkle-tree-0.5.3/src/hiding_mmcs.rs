@@ -151,7 +151,13 @@ where
     ) -> Result<(), Self::Error> {
         let (opened_values, (salts, siblings)) = batch_opening.unpack();
 
-        let opened_salted_values = zip_eq(opened_values, salts, MerkleTreeError::WrongBatchSize)?
+        let rows_and_salts = zip_eq(opened_values, salts, MerkleTreeError::WrongBatchSize)?;
+        // Salt columns have a fixed width in the committed matrix. Checking
+        // only the vector count permits alternate variable-length encodings.
+        if salts.iter().any(|salt| salt.len() != SALT_ELEMS) {
+            return Err(MerkleTreeError::WrongWidth);
+        }
+        let opened_salted_values = rows_and_salts
             .map(|(opened, salt)| opened.iter().chain(salt.iter()).copied().collect_vec())
             .collect_vec();
 
@@ -197,6 +203,35 @@ mod tests {
         8,
         SALT_ELEMS,
     >;
+
+    /// Review C07 (2026-10-16): each opened salt must have exactly `SALT_ELEMS` elements. A
+    /// salt with one extra zero hashed to the same leaf under the padding-free sponge, so the
+    /// opening had a second accepted encoding.
+    #[test]
+    fn salt_of_the_wrong_length_is_refused() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        let perm = Perm::new_from_rng_128(&mut rng);
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let mmcs = MyMmcs::new(hash, compress, 0, rng.clone());
+
+        let mat = RowMajorMatrix::<F>::rand(&mut rng, 8, 3);
+        let dims = vec![mat.dimensions()];
+        let (commit, prover_data) = mmcs.commit(vec![mat]);
+        let opening = mmcs.open_batch(2, &prover_data);
+        mmcs.verify_batch(&commit, &dims, 2, (&opening).into())
+            .expect("the honest opening verifies");
+
+        let mut longer = opening.clone();
+        longer.opening_proof.0[0].push(F::ZERO);
+        assert!(
+            matches!(
+                mmcs.verify_batch(&commit, &dims, 2, (&longer).into()),
+                Err(MerkleTreeError::WrongWidth)
+            ),
+            "a salt of SALT_ELEMS + 1 elements must be refused"
+        );
+    }
 
     #[test]
     #[should_panic]

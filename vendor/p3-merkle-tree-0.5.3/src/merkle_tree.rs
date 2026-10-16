@@ -418,24 +418,19 @@ where
     next_digests
 }
 
-/// Compute the padded output length for a compression step.
-///
-/// The output layer must be large enough for the *next* compression step
-/// to form complete groups. There are three cases:
-///
-/// - `raw_len <= 1`: this is the root, no padding needed.
-/// - `raw_len >= n`: pad up to the next multiple of `n`.
-/// - `1 < raw_len < n`: pad to exactly `n` so that the next step can do a
-///   single full N-to-1 compression to produce the root. This is safe
-///   because the extra slots are filled with the default digest — the same
-///   value that `compress` would use as padding internally.
+/// Compute the stored layer length. Binary commitments retain their existing
+/// even padding. Higher arities use power-of-two layers so binary fallback
+/// levels strictly shrink and never skip the rounded height of an injection.
+/// In particular, a layer below N must not be padded back to N: with N=8
+/// and pending height 2 that would repeat the state (8, [2]) forever.
+/// This changes the commitment format for N > 2.
 pub(crate) const fn padded_len(raw_len: usize, n: usize) -> usize {
     if raw_len <= 1 {
         raw_len
-    } else if raw_len >= n {
-        raw_len.div_ceil(n) * n
+    } else if n == 2 {
+        raw_len.div_ceil(2) * 2
     } else {
-        n
+        raw_len.next_power_of_two()
     }
 }
 
@@ -616,27 +611,27 @@ mod tests {
     fn test_padded_len_n4() {
         assert_eq!(padded_len(0, 4), 0);
         assert_eq!(padded_len(1, 4), 1);
-        // Below-arity case: pad to exactly N
-        assert_eq!(padded_len(2, 4), 4);
+        // Below-arity layers permit binary fallback.
+        assert_eq!(padded_len(2, 4), 2);
         assert_eq!(padded_len(3, 4), 4);
-        // At or above arity: pad to next multiple of N
+        // At or above arity: round to a power of two.
         assert_eq!(padded_len(4, 4), 4);
         assert_eq!(padded_len(5, 4), 8);
         assert_eq!(padded_len(7, 4), 8);
         assert_eq!(padded_len(8, 4), 8);
-        assert_eq!(padded_len(9, 4), 12);
+        assert_eq!(padded_len(9, 4), 16);
     }
 
     #[test]
     fn test_padded_len_n8() {
         assert_eq!(padded_len(0, 8), 0);
         assert_eq!(padded_len(1, 8), 1);
-        // Below-arity: all pad to exactly N=8
-        assert_eq!(padded_len(2, 8), 8);
-        assert_eq!(padded_len(3, 8), 8);
+        // Below-arity layers must be allowed to shrink.
+        assert_eq!(padded_len(2, 8), 2);
+        assert_eq!(padded_len(3, 8), 4);
         assert_eq!(padded_len(5, 8), 8);
         assert_eq!(padded_len(7, 8), 8);
-        // At or above arity: next multiple of 8
+        // At or above arity: round to a power of two.
         assert_eq!(padded_len(8, 8), 8);
         assert_eq!(padded_len(9, 8), 16);
         assert_eq!(padded_len(15, 8), 16);
@@ -645,14 +640,13 @@ mod tests {
 
     #[test]
     fn test_padded_len_always_admits_full_groups() {
-        // For any N in {2, 4, 8} and any raw_len > 1,
-        // padded_len must be >= N and divisible by N (so a full compression
-        // group is always possible), OR padded_len == raw_len <= 1 (root).
+        // Every stored non-root layer admits binary groups, and admits N-ary
+        // groups whenever it is at least N.
         for n in [2, 4, 8] {
             for raw_len in 2..=128 {
                 let pl = padded_len(raw_len, n);
                 assert!(
-                    pl >= n && pl.is_multiple_of(n),
+                    pl >= raw_len && pl.is_multiple_of(2) && (pl < n || pl.is_multiple_of(n)),
                     "padded_len({raw_len}, {n}) = {pl} is not a valid multiple of {n}",
                 );
             }

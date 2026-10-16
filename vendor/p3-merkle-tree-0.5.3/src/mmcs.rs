@@ -33,7 +33,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::MerkleTreeError::{
-    CapMismatch, EmptyBatch, IncompatibleHeights, IndexOutOfBounds, WrongBatchSize, WrongHeight,
+    CapMismatch, EmptyBatch, IncompatibleHeights, IndexOutOfBounds, MissingMatrixInjection,
+    WrongBatchSize, WrongHeight,
 };
 use crate::merkle_tree::padded_len;
 use crate::{MerkleCap, MerkleTree};
@@ -112,6 +113,11 @@ pub enum MerkleTreeError {
     /// The computed Merkle digest does not match any entry in the cap.
     #[error("cap mismatch: computed digest does not match any entry in the Merkle cap")]
     CapMismatch,
+
+    /// The opening reached the cap before every committed matrix was injected into the digest
+    /// (a cap above a small matrix's injection layer would leave that matrix unauthenticated).
+    #[error("missing injection: the cap was reached before every matrix was consumed")]
+    MissingMatrixInjection,
 
     /// The cap height is too large for the tree.
     #[error("cap height {cap_height} exceeds tree depth {tree_depth}")]
@@ -326,7 +332,7 @@ where
             return Err(IncompatibleHeights);
         }
 
-        // Get the initial height padded to a multiple of N. As heights_tallest_first is sorted,
+        // Use the same stored-layer padding as the constructor. As heights_tallest_first is sorted,
         // the initial height will be the maximum height.
         let (max_height, mut curr_height_padded) = match heights_tallest_first.peek() {
             Some((_, dims)) => {
@@ -339,6 +345,28 @@ where
 
         if index >= max_height {
             return Err(IndexOutOfBounds { max_height, index });
+        }
+
+        // In the binary configuration, the number of authentication levels is
+        // determined by the matrix height and configured cap height. Do not let
+        // the supplied path choose the level at which a leaf is interpreted.
+        if N == 2 {
+            let expected_proof_len = log2_ceil_usize(max_height).saturating_sub(self.cap_height);
+            if opening_proof.len() != expected_proof_len {
+                return Err(WrongHeight {
+                    expected_proof_len,
+                    num_siblings: opening_proof.len(),
+                });
+            }
+            // Each level halves the logical height, rounding up. The stored
+            // cap layer is padded just as the constructor pads each layer.
+            let mut cap_height = max_height;
+            for _ in 0..expected_proof_len {
+                cap_height = cap_height.div_ceil(2);
+            }
+            if commit.num_roots() != padded_len(cap_height, 2) {
+                return Err(CapMismatch);
+            }
         }
 
         // Hash all matrix openings at the current height.
@@ -360,7 +388,9 @@ where
             let step = if curr_height_padded < N {
                 2
             } else {
-                let n_ary_target = curr_height_padded / N;
+                // Match MerkleTree::new: intermediate matrices are compared
+                // against the next power-of-two height of the candidate layer.
+                let n_ary_target = (curr_height_padded / N).next_power_of_two();
                 // Exclude matrices already at the current layer (consumed in initial hash).
                 let has_intermediate = heights_tallest_first
                     .clone()
@@ -426,6 +456,14 @@ where
             }
         }
 
+        // VENDOR EDIT (review C05, 2026-10-16): every committed matrix must have been folded
+        // into `digest` before the cap is compared. With a cap above a small matrix's
+        // injection layer the published cap does not depend on that matrix at all, so an
+        // opening that stopped here would have authenticated nothing about it.
+        if heights_tallest_first.peek().is_some() {
+            return Err(MissingMatrixInjection);
+        }
+
         // After processing the proof, `index` has been shifted by the proof length.
         // This index now points into the cap layer.
         let cap_index = index;
@@ -470,6 +508,54 @@ mod tests {
     type MyCompress4 = TruncatedPermutation<PermWide, 4, 8, 32>;
     type MyMmcs4 =
         MerkleTreeMmcs<<F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress4, 4, 8>;
+
+    /// Review C06 (2026-10-16): an opening produced for a height-2 commitment must not verify
+    /// against the same commitment when the caller declares height 8. Before the binary
+    /// path-length/cap-size check the traversal was driven by the supplied proof length, so the
+    /// declared dimensions were not binding.
+    #[test]
+    fn binary_opening_is_bound_to_the_declared_height() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let perm = Perm::new_from_rng_128(&mut rng);
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let mmcs = MyMmcs::new(hash, compress, 0);
+
+        let (commit, prover_data) = mmcs.commit_vec(vec![F::ONE, F::TWO]);
+        let opening = mmcs.open_batch(0, &prover_data);
+        let honest = vec![Dimensions { width: 1, height: 2 }];
+        mmcs.verify_batch(&commit, &honest, 0, (&opening).into())
+            .expect("the honest opening verifies");
+
+        let inflated = vec![Dimensions { width: 1, height: 8 }];
+        assert!(
+            mmcs.verify_batch(&commit, &inflated, 0, (&opening).into()).is_err(),
+            "a height-2 opening must not verify under a declared height of 8"
+        );
+    }
+
+    /// Review C05 (2026-10-16): with heights [8, 1] and cap height 1 the height-1 matrix is
+    /// injected only at the root layer, above the published cap, so no opening ever
+    /// authenticates it. Verification must refuse to stop at the cap while a matrix is still
+    /// pending.
+    #[test]
+    fn cap_above_an_injection_layer_is_refused() {
+        let mut rng = SmallRng::seed_from_u64(8);
+        let perm = Perm::new_from_rng_128(&mut rng);
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let mmcs = MyMmcs::new(hash, compress, 1);
+
+        let tall = RowMajorMatrix::<F>::rand(&mut rng, 8, 2);
+        let short = RowMajorMatrix::<F>::rand(&mut rng, 1, 2);
+        let dims = vec![tall.dimensions(), short.dimensions()];
+        let (commit, prover_data) = mmcs.commit(vec![tall, short]);
+        let opening = mmcs.open_batch(3, &prover_data);
+        assert!(
+            mmcs.verify_batch(&commit, &dims, 3, (&opening).into()).is_err(),
+            "an opening that reaches the cap with a matrix still pending must be refused"
+        );
+    }
 
     #[test]
     fn commit_single_1x8() {

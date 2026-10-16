@@ -42,6 +42,60 @@ where
 /// fri in which the input should be rolled in. The second element is the opening.
 type FriOpenings<F> = Vec<(usize, F)>;
 
+/// VENDOR EDIT (review C03, 2026-10-16): validate the proof-derived folding schedule and
+/// return `log_global_max_height`, or `None` when the schedule cannot describe a valid proof:
+/// an arity of zero or above `max_log_arity`, an arithmetic overflow, a domain larger than the
+/// field's two-adic subgroup, or a sampled index width that does not fit a `usize`.
+pub(crate) fn checked_log_global_max_height(
+    log_arities: &[usize],
+    max_log_arity: usize,
+    log_blowup: usize,
+    log_final_poly_len: usize,
+    extra_query_index_bits: usize,
+    two_adicity: usize,
+) -> Option<usize> {
+    if log_arities
+        .iter()
+        .any(|&log_arity| log_arity == 0 || log_arity > max_log_arity)
+    {
+        return None;
+    }
+    let total_log_reduction = log_arities
+        .iter()
+        .try_fold(0usize, |acc, &a| acc.checked_add(a))?;
+    let log_global_max_height = total_log_reduction
+        .checked_add(log_blowup)?
+        .checked_add(log_final_poly_len)?;
+    let sampled_bits = log_global_max_height.checked_add(extra_query_index_bits)?;
+    if log_global_max_height > two_adicity || sampled_bits >= usize::BITS as usize {
+        return None;
+    }
+    Some(log_global_max_height)
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::checked_log_global_max_height;
+
+    #[test]
+    fn schedule_bounds_refuse_oversized_zero_and_overflowing_arities() {
+        // Honest binary schedule: 20 rounds, blowup 2, final poly 0 → height 22 within BabyBear's
+        // two-adicity (27).
+        assert_eq!(checked_log_global_max_height(&[1; 20], 4, 2, 0, 0, 27), Some(22));
+        // An arity above the configured maximum.
+        assert_eq!(checked_log_global_max_height(&[1, 5], 4, 2, 0, 0, 27), None);
+        // A zero arity (no folding) is not a round.
+        assert_eq!(checked_log_global_max_height(&[1, 0], 4, 2, 0, 0, 27), None);
+        // A domain beyond the two-adic subgroup.
+        assert_eq!(checked_log_global_max_height(&[4; 7], 4, 2, 0, 0, 27), None);
+        // Overflow in the summed reduction.
+        assert_eq!(
+            checked_log_global_max_height(&[usize::MAX / 2, usize::MAX / 2, 4], usize::MAX, 2, 0, 0, 27),
+            None
+        );
+    }
+}
+
 /// Verifies a FRI proof.
 ///
 /// Arguments:
@@ -116,8 +170,20 @@ where
 
     // With variable arity, we compute log_global_max_height by summing all log_arities.
     // Each round reduces the domain size by its log_arity.
-    let total_log_reduction: usize = log_arities.iter().sum();
-    let log_global_max_height = total_log_reduction + params.log_blowup + params.log_final_poly_len;
+    //
+    // VENDOR EDIT (review C03, 2026-10-16): the schedule is proof-derived. Bound every arity,
+    // the summed reduction and the sampled bit width BEFORE the value reaches any challenger
+    // sampling or two-adic generator (an oversized height asserted inside `sample_bits` /
+    // `two_adic_generator` and aborted the process instead of returning an error).
+    let log_global_max_height = checked_log_global_max_height(
+        &log_arities,
+        params.max_log_arity,
+        params.log_blowup,
+        params.log_final_poly_len,
+        folding.extra_query_index_bits(),
+        Val::TWO_ADICITY,
+    )
+    .ok_or(FriError::InvalidProofShape)?;
 
     if proof.commit_pow_witnesses.len() != proof.commit_phase_commits.len() {
         return Err(FriError::InvalidProofShape);

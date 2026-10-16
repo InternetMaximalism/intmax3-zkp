@@ -855,6 +855,20 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) â
   automatic rebuild of the candidate; the journal format makes rebuilding unsafe today.
 - The late-incoming adapter is checked at deployment only for pinning, not for its configuration
   digests; cross-lane (residual + late) real-proof tests do not exist yet.
+- Consolidated cryptographic review of 2026-10-16 (reviewed commit `0a2f5a28`): C01 was closed by
+  the C1 circuit fix. Landed afterwards on this branch: C02 (the CLI co-sign gate, the batch
+  verifier and the browser `wallet_cosign` run the full public verification before any recipient
+  decryption, via `verify_send_transition_as_recipient` / `verify_slim_send_tx_as_recipient`);
+  C04 (member keys and `enc_amount` are validated before any asserting digest in
+  `verify_snapshot_structure`, `verify_send_transition`, `verify_slim_send_tx` and the producer
+  registration check); C05/C06/C07 in the vendored `p3-merkle-tree` 0.5.3 (binary path length
+  and cap size derived from the declared dimensions, every matrix must be injected before the
+  cap, salts must have exactly `SALT_ELEMS` elements); C03 in the vendored `p3-fri` 0.5.3 (the
+  proof-derived arity schedule is bounded with checked arithmetic before any sampling); C08
+  (fallible BN128 hash decoding); C09/C10 (secret-derived Falcon temporaries and the Regev
+  secret key / amount witness are erased on drop and redacted in `Debug`). Still open: the
+  N > 2 MMCS schedule binding, the regev_plonky3 salt/mask RNG-clone correlation, the ignored
+  `eta` parameter and the other dependency-contract items of the review.
 - Deployment order is now a contract rule: the settlement stack (`registerSettlementManager`, which
   installs the exit materializer) must be registered before the first deposit and before
   `registerToken`; a rollup that already holds escrow can never receive an exit materializer and
