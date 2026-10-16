@@ -128,6 +128,47 @@ contract FrozenChannelBatchPostTest is Test {
         assertEq(materializer.lastPostedBlock(CHANNEL_A), 3);
     }
 
+    /// Pass-2 Manager B1 (2026-10-16): a sub-block with no signer slot (all-zero keyIds) cannot
+    /// carry a send for its channel, so it must neither be refused by a frozen channel nor move
+    /// that channel's `lastPostedBlock`. Before the fix a producer could label such an empty block
+    /// with any channel id and push that channel's journal past its last real send, which made
+    /// every honest backing proof fail the close ordering rule.
+    function test_unsignedSubBlockNeitherFreezesNorAdvancesTheChannelJournal() external {
+        IntmaxRollup.SubBlock[] memory first = new IntmaxRollup.SubBlock[](1);
+        first[0] = _subBlock(CHANNEL_A, 1);
+        _post(first);
+        assertEq(materializer.lastPostedBlock(CHANNEL_A), 1, "A's signed block is journaled");
+
+        // An unsigned block labelled A does not touch A's journal.
+        IntmaxRollup.SubBlock[] memory empty = new IntmaxRollup.SubBlock[](1);
+        empty[0] = _unsignedSubBlock(CHANNEL_A, 2);
+        _post(empty);
+        assertEq(rollup.blockNumber(), 2, "the unsigned block posts");
+        assertEq(materializer.lastPostedBlock(CHANNEL_A), 1, "an unsigned block never advances the journal");
+
+        // While A is frozen the unsigned block still posts; a signed one is still refused.
+        managerA.requestClose();
+        assertEq(materializer.frozenGeneration(CHANNEL_A), 1, "A is frozen");
+        empty[0] = _unsignedSubBlock(CHANNEL_A, 3);
+        _post(empty);
+        assertEq(rollup.blockNumber(), 3, "an unsigned block posts past the freeze");
+        assertEq(materializer.lastPostedBlock(CHANNEL_A), 1, "journal unchanged");
+        IntmaxRollup.SubBlock[] memory signed = new IntmaxRollup.SubBlock[](1);
+        signed[0] = _subBlock(CHANNEL_A, 4);
+        _postExpectingFrozen(signed);
+    }
+
+    function _unsignedSubBlock(uint32 channelId, uint256 salt) internal view returns (IntmaxRollup.SubBlock memory) {
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 0;
+        return IntmaxRollup.SubBlock({
+            channelId: channelId,
+            timestamp: uint64(block.timestamp),
+            txTreeRoot: keccak256(abi.encode("tx-tree", channelId, salt)),
+            keyIds: ids
+        });
+    }
+
     /// Once the close has materialized (`materializedChannelExit != 0`) there is no cancel: the
     /// sub-block is refused with `ChannelAlreadyExited` for the life of the rollup.
     function test_materializedChannelSubBlockIsRefusedForever() external {

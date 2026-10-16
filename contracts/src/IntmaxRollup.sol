@@ -838,6 +838,14 @@ contract IntmaxRollup {
         emit SettlementManagerRegistered(manager);
     }
 
+    /// @dev True when the sub-block names at least one signer slot (a nonzero keyId).
+    function _hasSigner(uint32[] calldata keyIds) private pure returns (bool) {
+        for (uint256 j = 0; j < keyIds.length; j++) {
+            if (keyIds[j] != 0) return true;
+        }
+        return false;
+    }
+
     /// @notice The set-once exit satellite, or zero while none is installed. Read it before
     ///         depositing: it is the only contract `creditChannelExit` will ever honour.
     function channelExitMaterializer() external view returns (address) {
@@ -1166,7 +1174,12 @@ contract IntmaxRollup {
             currentBlockNumber++;
             // The set-once close satellite rejects a post to a frozen/exited bound channel and
             // journals this exact per-channel predecessor for fraud/timeout rollback.
-            if (exitMaterializer != address(0)) {
+            // Pass-2 Manager B1 (2026-10-16): only a SIGNED sub-block (some nonzero keyId) can
+            // carry a send for its channel — the validity circuit folds a channel leaf only when
+            // a signer slot is set. An all-zero sub-block labelled with another channel's id used
+            // to be recorded all the same, raising that channel's `lastPostedBlock` above its last
+            // real send so no honest backing proof could ever satisfy the close ordering rule.
+            if (exitMaterializer != address(0) && _hasSigner(subBlocks[i].keyIds)) {
                 uint32 postedChannel = subBlocks[i].channelId;
                 assembly ("memory-safe") {
                     let ptr := mload(0x40)
