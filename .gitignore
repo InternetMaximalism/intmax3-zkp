@@ -135,3 +135,7 @@ mainnetblocker.md
 # Local dependency links are runtime-only, including symlinked worktree installs.
 api/node_modules
 node/node_modules
+
+# Vendored crates are tested standalone from inside their directory; never commit their build output.
+vendor/*/target/
+vendor/*/Cargo.lock

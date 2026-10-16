@@ -66,6 +66,10 @@ fn build_twiddles(size: usize) -> Twiddles {
 /// precomputed `roots` table (`roots[i] = g^i`, stride `size/len` per stage).
 fn transform(values: &mut [F], roots: &[F]) {
     let n = values.len();
+    // The one-point transform is the identity. Avoid shifting by usize::BITS.
+    if n == 1 {
+        return;
+    }
     let log_n = n.trailing_zeros() as usize;
 
     for i in 0..n {
@@ -163,6 +167,17 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
     use rand::rngs::SmallRng;
     use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn ntt_singleton_is_identity() {
+        for input in [F::ZERO, F::ONE, F::from_u32(7), -F::ONE] {
+            for inverse in [false, true] {
+                let mut values = [input];
+                ntt(&mut values, inverse);
+                assert_eq!(values, [input]);
+            }
+        }
+    }
 
     #[test]
     fn ntt_roundtrip() {

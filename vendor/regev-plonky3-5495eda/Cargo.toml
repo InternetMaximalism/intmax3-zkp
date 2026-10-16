@@ -45,3 +45,12 @@ parallel = ["dep:rayon", "p3-maybe-rayon/parallel"]
 
 # Vendored into intmax3-zkp (parent `exclude = ["vendor"]`): stand alone for `cargo test` here.
 [workspace]
+
+# Standalone `cargo test --offline` inside the parent repo: resolve the 0.5.3 crates the parent
+# patches to its vendored copies (crates.io sources are not in the offline registry).
+[patch.crates-io]
+p3-field = { path = "../p3-field-0.5.3" }
+p3-fri = { path = "../p3-fri-0.5.3" }
+p3-merkle-tree = { path = "../p3-merkle-tree-0.5.3" }
+p3-uni-stark = { path = "../p3-uni-stark-0.5.3" }
+p3-dft = { path = "../p3-dft-0.5.3" }

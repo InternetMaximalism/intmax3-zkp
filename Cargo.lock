@@ -1906,8 +1906,6 @@ dependencies = [
 [[package]]
 name = "p3-dft"
 version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17771aca44632f9cc11f2718d7ea7ec06794946c4190ef3a985bfc893f14c18a"
 dependencies = [
  "itertools 0.14.0",
  "p3-field 0.5.3",

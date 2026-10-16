@@ -297,6 +297,9 @@ p3-uni-stark = { path = "vendor/plonky3/p3-uni-stark" }
 # MSRV-downgrade fixes for the pinned nightly-2025-03-23 toolchain, reused from
 # the (now retired) external lattice-proof-helper setup.
 p3-field-0503 = { path = "vendor/p3-field-0.5.3", package = "p3-field" }
+# Reconstruct initialized DFT matrix views from the element slice instead of transmuting
+# between generic DenseMatrix instantiations (no layout guarantee for generic aggregates).
+p3-dft-0503 = { path = "vendor/p3-dft-0.5.3", package = "p3-dft" }
 p3-fri-0503 = { path = "vendor/p3-fri-0.5.3", package = "p3-fri" }
 p3-merkle-tree-0503 = { path = "vendor/p3-merkle-tree-0.5.3", package = "p3-merkle-tree" }
 p3-uni-stark-0503 = { path = "vendor/p3-uni-stark-0.5.3", package = "p3-uni-stark" }
