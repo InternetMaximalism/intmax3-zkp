@@ -1,0 +1,4 @@
+# Only used when building *in this directory* (not when regev_plonky3 is a
+# dependency). Lets `wasm-pack test` link getrandom for the wasm portability test.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

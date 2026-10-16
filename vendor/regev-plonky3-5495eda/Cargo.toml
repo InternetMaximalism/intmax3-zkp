@@ -1,0 +1,47 @@
+[package]
+name = "regev_plonky3"
+version = "0.1.0"
+edition = "2021"
+description = "Plonky3-friendly Regev (Ring-LWE) encryption with native-field STARK proofs of correct encryption"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hashbrown = "0.16"
+p3-air = "0.5.3"
+p3-baby-bear = "0.5.3"
+p3-batch-stark = "0.5.3"
+p3-challenger = "0.5.3"
+p3-commit = "0.5.3"
+p3-field = "0.5.3"
+p3-fri = "0.5.3"
+p3-keccak = "0.5.3"
+p3-dft = "0.5.3"
+p3-lookup = "0.5.3"
+p3-matrix = "0.5.3"
+p3-maybe-rayon = "0.5.3"
+p3-merkle-tree = "0.5.3"
+p3-symmetric = "0.5.3"
+p3-uni-stark = "0.5.3"
+p3-util = "0.5.3"
+rand = "0.10.1"
+rand_chacha = "0.10"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+rayon = { version = "1", optional = true }
+
+[dev-dependencies]
+p3-uni-stark = "0.5.3"
+postcard = { version = "1.1", features = ["alloc", "use-std"] }
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+js-sys = "0.3"
+
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon", "p3-maybe-rayon/parallel"]
+
+# Vendored into intmax3-zkp (parent `exclude = ["vendor"]`): stand alone for `cargo test` here.
+[workspace]

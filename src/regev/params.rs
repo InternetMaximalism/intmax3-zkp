@@ -45,6 +45,10 @@ pub const REGEV_Q: u32 = 2_013_265_921;
 // SECURITY: REGEV_Q must equal the upstream field modulus, otherwise canonicality checks
 // (`coeff < REGEV_Q`) would diverge from the actual ring and digest malleability returns.
 const _: () = assert!(REGEV_Q == RegevParams::q());
+// Key generation, encryption and the AIR are specialised to CBD(2); `RegevParams::validate`
+// now rejects anything else, so a changed constant fails at compile time instead of silently
+// leaving the noise distribution unchanged (review 2026-10-16).
+const _: () = assert!(REGEV_ETA == 2);
 
 /// Maximum number of homomorphic additions applied to one balance ciphertext before a refresh
 /// (decrypt + fresh re-encrypt, proven by the refresh AIR batch) is mandatory.

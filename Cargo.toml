@@ -283,6 +283,12 @@ plonky2_maybe_rayon = { path = "contracts/lib/polygon-plonky2/maybe_rayon" }
 plonky2_mle = { path = "contracts/lib/polygon-plonky2/mle" }
 starky = { path = "contracts/lib/polygon-plonky2/starky" }
 
+# Vendored copy of the pinned rev 5495eda with two local repairs (2026-10-17): the hiding
+# config derives one independent RNG per randomness purpose instead of cloning one ChaCha20
+# state, and `RegevParams::validate` rejects `eta != 2`.
+[patch."https://github.com/leohio/regv-plonky3.git"]
+regev_plonky3 = { path = "vendor/regev-plonky3-5495eda" }
+
 [patch.crates-io]
 p3-merkle-tree = { path = "vendor/plonky3/p3-merkle-tree" }
 p3-fri = { path = "vendor/plonky3/p3-fri" }
