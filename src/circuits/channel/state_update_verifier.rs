@@ -690,9 +690,18 @@ impl InterChannelSendUpdateWitness {
                 "receiver delta key digest != the E-2 recipient key digest".to_string(),
             ));
         }
-        receiver_delta.amount.reject_key_independent().map_err(|err| {
-            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!("receiver delta: {err}"))
-        })?;
+        // A burn's receiver is the UNCLAIMABLE phantom at `BURN_CHANNEL_ID`, encrypted to the
+        // padding key (`a = 0`, so its `c1 = e1` is small by construction and nobody can ever
+        // claim it); the screen applies to every real destination.
+        let is_burn = self.inter_channel_tx.destination_channel_id.channel_id()
+            == crate::constants::BURN_CHANNEL_ID as u32;
+        if !is_burn {
+            receiver_delta.amount.reject_key_independent().map_err(|err| {
+                ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                    "receiver delta: {err}"
+                ))
+            })?;
+        }
         // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
         // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
         // Normal C2C pushes the tx leaf. A burn pushes the channel- and nonce-bound IMD2

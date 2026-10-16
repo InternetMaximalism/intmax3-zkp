@@ -517,6 +517,12 @@ transition, `:296-297`) → C01, C24; `settled_tx_chain`, `settled_tx_accumulato
 C20. **H1** = Poseidon over the 37-element **IMB2** header (counts, registry, chain, accumulator root,
 `state_version`, slot-tree root); each slot leaf (**IMS2**, 104 elements) hashes its ciphertext
 digests, pk digest, `pending_adds` and recipient (`:514-573, 816-870`) → C03.
+The per-slot `regev_pk_digests` entry is the key every claim circuit binds the witnessed Regev key
+to, so a wallet must never adopt a state that commits someone else's key at its slot:
+`verify_snapshot_structure` requires `regev_pk_digests[slot] == poseidon_digest(members[slot].regev_pk)`
+for every active slot, and `verify_snapshot_own_slot` requires it to be the importing wallet's own
+key digest, for cosigners and delegates alike (`src/wallet_core.rs`, 2026-10-16; before that only
+the genesis-only cosigner signing path checked the own digest) → C01, C24.
 
 **`ChannelState` signing digest (IMCH)** commits: channel id, `epoch`, `small_block_number`,
 `close_freeze_nonce`, the fund vector `channel_fund.amounts: [U256; 10]` (aligned to the registry,

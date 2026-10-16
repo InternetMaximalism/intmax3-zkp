@@ -1357,6 +1357,24 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
         .balance_state
         .validate()
         .map_err(|e| WalletError(format!("{e:?}")))?;
+    // SECURITY (pass-3 Medium, 2026-10-16): the signed `BalanceState` commits a Regev key digest
+    // per active slot, and that digest — not the record's member list — is what every claim
+    // circuit binds the witnessed key to inside H1 (withdrawal_claim_pis.rs,
+    // post_close_claim_pis.rs). Nothing above cross-linked the two: a cosigner set could sign a
+    // state carrying a foreign digest at a delegate's slot while `members[slot].regev_pk` and
+    // `regev_pk_root` still named the delegate's real key, so the delegate's view stayed normal
+    // and its slot became unclaimable at close. Require the two key sources to agree at every
+    // active slot. (`validate()` leaves active-slot digests arbitrary on purpose; this is the
+    // snapshot-level check that pins them.)
+    for m in &snapshot.members {
+        let committed = snapshot.state.balance_state.regev_pk_digests[m.slot as usize];
+        if committed != Bytes32::from(m.regev_pk.poseidon_digest()) {
+            return bail(format!(
+                "regev_pk_digests[{}] is not the digest of that slot's member Regev key",
+                m.slot
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1376,6 +1394,17 @@ fn verify_snapshot_own_slot(
         }
         if snapshot.record.member_pk_gs[slot as usize] != keys.pk_g() {
             return bail("my slot's pk_g in the record does not match my key");
+        }
+        // SECURITY (pass-3 Medium): the digest the claim circuits will bind this slot's key to
+        // must be MY key's digest — checked here for members AND delegates (the structural check
+        // above compares it with the member list; this one compares it with the key in hand, so a
+        // wallet never adopts a state it could not later claim from).
+        if snapshot.state.balance_state.regev_pk_digests[slot as usize]
+            != Bytes32::from(keys.regev_pk.poseidon_digest())
+        {
+            return bail(
+                "my slot's regev_pk_digests entry in the signed state is not my key's digest",
+            );
         }
         // Confirm we can decrypt our own balance slot (no panic / valid ciphertext) at EVERY
         // active token position (multitoken §N-2: unused positions are the canonical zero
@@ -7748,6 +7777,52 @@ mod delegate_send_tests {
         add_signature(&mut genesis, g1);
 
         (record, keys, members, genesis, witnesses)
+    }
+
+    /// pass-3 Medium (2026-10-16): the cosigner set signs a genesis whose delegate slot carries the
+    /// Poseidon digest of a FOREIGN Regev key while `members[2].regev_pk` (and the record's
+    /// `regev_pk_root`) still name the delegate's real key. The delegate's balance decrypts, the
+    /// member list anchors, every signature verifies — but every claim circuit binds the witnessed
+    /// key to the slot-leaf digest inside H1, so the slot is unclaimable at close. Both the
+    /// delegate's own-slot check and the structural check must refuse it.
+    #[test]
+    fn verify_snapshot_refuses_a_slot_whose_committed_key_digest_is_not_the_members_key() {
+        let mut rng = StdRng::seed_from_u64(0xD16E57);
+        let (record, keys, members, state, _w) = setup_delegate_channel(&mut rng, 11, [5, 6, 4]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&snapshot, Some((&keys[2], 2))).expect("control: the delegate verifies");
+
+        let foreign = MemberKeys::generate(&mut rng);
+        let mut bad = snapshot.clone();
+        bad.state.balance_state.regev_pk_digests[2] =
+            Bytes32::from(foreign.regev_pk.poseidon_digest());
+        bad.state.member_signatures.clear();
+        bad.state.digest = bad.state.signing_digest();
+        for slot in 0..bad.record.member_count {
+            let sig = sign_state(&keys[slot as usize], slot, &bad.state).unwrap();
+            add_signature(&mut bad.state, sig);
+        }
+        // The substitution is invisible to everything the delegate could check before: its slot
+        // still decrypts and its key is still the one in the member list.
+        assert_eq!(decrypt_balance(&keys[2], &bad, 2).unwrap(), 4);
+
+        let own = verify_snapshot(&bad, Some((&keys[2], 2)))
+            .expect_err("the delegate must refuse a state committing a foreign key at its slot");
+        assert!(
+            own.to_string().contains("regev_pk_digests"),
+            "own-slot rejection must name the digest: {own}"
+        );
+        let structural = verify_snapshot(&bad, None)
+            .expect_err("any verifier must refuse a member list whose key differs from the committed digest");
+        assert!(
+            structural.to_string().contains("regev_pk_digests"),
+            "structural rejection must name the digest: {structural}"
+        );
     }
 
     /// A signed state and a registration record are only one snapshot when every nested channel id
