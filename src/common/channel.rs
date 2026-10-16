@@ -757,6 +757,17 @@ impl ChannelTx {
 #[serde(rename_all = "camelCase")]
 pub struct ReceiverBalanceDelta {
     pub receiver_pk_g: Bytes32,
+    /// Poseidon digest (`RegevPk::poseidon_digest`) of the Regev public key `amount` is
+    /// encrypted to — the SAME value the destination channel's signed `BalanceState` commits in
+    /// `regev_pk_digests[slot]` for the addressed member.
+    ///
+    /// SECURITY (pass-3 H1, 2026-10-16): this digest rides in the tx leaf's receiver wing, so
+    /// the post-close residual claim and the late-incoming lane can only be satisfied by the
+    /// slot whose committed key digest equals the key the sender encrypted to. Without it the
+    /// claim circuits bound the opened slot to the delta only through decryption, and a
+    /// key-independent delta (encryption randomness `r = 0`) decrypts identically under every
+    /// slot key, so any slot holder could claim another member's unapplied incoming delta.
+    pub receiver_regev_pk_digest: Bytes32,
     /// Positive delta encrypted to the receiver's `RegevPk` (detail2 §C-6).
     pub amount: RegevCiphertext,
 }
@@ -861,6 +872,7 @@ impl InterChannelTx {
                     .flat_map(|delta| {
                         [
                             delta.receiver_pk_g.to_u32_vec(),
+                            delta.receiver_regev_pk_digest.to_u32_vec(),
                             delta.amount.digest().to_u32_vec(),
                         ]
                         .concat()
@@ -888,6 +900,7 @@ impl InterChannelTx {
             self.source_pk_g,
             self.sender_delta_ct.digest(),
             receiver.receiver_pk_g,
+            receiver.receiver_regev_pk_digest,
             receiver.amount.digest(),
         ))
     }
@@ -2404,6 +2417,7 @@ mod tests {
             recipient_memo: vec![],
             receiver_deltas: vec![ReceiverBalanceDelta {
                 receiver_pk_g: pubkey_hash(21),
+                receiver_regev_pk_digest: pubkey_hash(31),
                 amount: ciphertext(32),
             }],
             channel_update_zkp: envelope(TransitionProofRole::ChannelStateUpdate, 7),
@@ -2556,6 +2570,7 @@ mod tests {
                 tx.source_pk_g,
                 tx.sender_delta_ct.digest(),
                 tx.receiver_deltas[0].receiver_pk_g,
+                tx.receiver_deltas[0].receiver_regev_pk_digest,
                 tx.receiver_deltas[0].amount.digest(),
             )
         );

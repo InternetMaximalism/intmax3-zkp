@@ -12512,6 +12512,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
         descriptor.source_pk_g,
         payload.inter_channel_tx.sender_delta_ct.digest(),
         descriptor.receiver_pk_g,
+        Bytes32::from(descriptor.receiver_pk.poseidon_digest()),
         descriptor.receiver_delta.digest(),
     );
     let burn_aux_data = burn_descriptor(

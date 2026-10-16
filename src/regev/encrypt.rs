@@ -96,6 +96,32 @@ impl RegevCiphertext {
         Ok(())
     }
 
+    /// Screen against KEY-INDEPENDENT deltas (pass-3 H1, 2026-10-16; defence in depth).
+    ///
+    /// A fresh encryption is `c1 = a·r + e1`. The live E-2b AIR only constrains `r` to be
+    /// ternary, so a sender may choose `r = 0`, leaving `c1 = e1` with every centered
+    /// coefficient in `[-2, 2]`. Such a ciphertext decrypts to the same plaintext under EVERY
+    /// ternary secret key (`c2 - c1·s = Δ·m + e2 - e1·s`, `|e1·s|_∞ ≤ 2n`), so decryption
+    /// under a slot's key proves nothing about which slot the delta was meant for. The tx-leaf
+    /// receiver wing now carries the receiver's key digest (the binding fix); this screen
+    /// additionally refuses deltas whose `c1` has every centered coefficient within
+    /// ±[`DEGENERATE_SMALL_BOUND`](super::keys::DEGENERATE_SMALL_BOUND). For an honest
+    /// encryption with `r ≠ 0`, `a·r` is pseudo-random mod q, so all `n = 2048` coefficients
+    /// landing in a window of width `2^21` out of `q ≈ 2^31` has probability about `2^-20480`.
+    /// Mirrors [`RegevPk::reject_degenerate`](super::keys::RegevPk::reject_degenerate) for keys.
+    pub fn reject_key_independent(&self) -> Result<(), RegevError> {
+        self.validate()?;
+        let bound = super::keys::DEGENERATE_SMALL_BOUND;
+        let small = |c: u32| c <= bound || REGEV_Q - c <= bound;
+        if self.c1.iter().all(|&c| small(c)) {
+            return Err(RegevError::InvalidCiphertext(format!(
+                "key-independent ciphertext: every centered coefficient of c1 lies within ±{bound} \
+                 (encryption randomness r = 0 or degenerate)"
+            )));
+        }
+        Ok(())
+    }
+
     /// Host admission for a newly accepted balance. The existing withdrawal gadget requires
     /// a nonzero c1 polynomial. Canonical zero remains valid as an EMPTY slot: it carries no
     /// money to claim and receiving a normal ciphertext replaces it by homomorphic identity.
@@ -305,6 +331,33 @@ mod tests {
 
     use super::*;
     use crate::regev::{MAX_HOMO_ADDS_BEFORE_REFRESH, channel_keygen};
+
+    /// pass-3 H1: an honest fresh encryption passes the key-independence screen; a ciphertext
+    /// built with `r = 0` (and the all-zero padding ciphertext) is refused, although both decrypt
+    /// correctly under the recipient's key.
+    #[test]
+    fn reject_key_independent_screens_zero_randomness_ciphertexts() {
+        let mut rng = SmallRng::seed_from_u64(77);
+        let (pk, sk) = channel_keygen(&mut rng);
+        let (honest, _) = encrypt_amount(&mut rng, &pk, 21).unwrap();
+        honest.reject_key_independent().unwrap();
+
+        let delta = channel_regev_params().delta() as u64;
+        let q = REGEV_Q as u64;
+        let message = encode_amount(21);
+        let noise = |i: usize| ((((i % 5) as i64 - 2) + q as i64) % q as i64) as u64;
+        let key_independent = RegevCiphertext {
+            c1: (0..REGEV_N).map(|i| noise(i) as u32).collect(),
+            c2: (0..REGEV_N)
+                .map(|i| ((delta * message[i] as u64 + noise(i + 3)) % q) as u32)
+                .collect(),
+        };
+        assert_eq!(decrypt_amount(&sk, &key_independent).unwrap(), 21);
+        let (_, other_sk) = channel_keygen(&mut rng);
+        assert_eq!(decrypt_amount(&other_sk, &key_independent).unwrap(), 21);
+        assert!(key_independent.reject_key_independent().is_err());
+        assert!(RegevCiphertext::padding().reject_key_independent().is_err());
+    }
 
     #[test]
     fn encrypt_decrypt_roundtrip() {

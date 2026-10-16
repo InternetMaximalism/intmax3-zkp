@@ -868,9 +868,12 @@ mod tests {
         // Inter-channel transfers carry a nonzero aux_data (= tx leaf hash, detail2 §C-6); the
         // received transfer at index 0 uses one so the chain fold is exercised.
         let inter_channel_aux = if late {
+            let receiver_key_digest = Bytes32::from(crate::regev::RegevPk {
+                a: binding_witness.regev_a.clone(), b: binding_witness.regev_b.clone(),
+            }.poseidon_digest());
             crate::common::balance_state::tx_leaf_hash(binding_witness.source_pk_g,
                 binding_witness.sender_delta_digest, binding_witness.public_inputs.receiver_pk_g,
-                binding_witness.receiver_delta_digest)
+                receiver_key_digest, binding_witness.receiver_delta_digest)
         } else { Bytes32::from_u32_slice(&[11, 22, 33, 44, 55, 66, 77, 88]).unwrap() };
         for i in 0..MAX_NUM_TRANSFERS_PER_TX {
             let amount = if late && i == 0 { U256::from(binding_witness.public_inputs.amount) } else { U256::from((i as u32) + 1) };
@@ -1198,8 +1201,12 @@ mod tests {
             // Signature/proof verification alone is insufficient: composition must reject it.
             let mut unrelated = binding_witness.clone();
             unrelated.source_pk_g = Bytes32::from_u32_slice(&[99;8]).unwrap();
+            let unrelated_key_digest = Bytes32::from(crate::regev::RegevPk {
+                a: unrelated.regev_a.clone(), b: unrelated.regev_b.clone(),
+            }.poseidon_digest());
             let leaf = crate::common::balance_state::tx_leaf_hash(unrelated.source_pk_g,
-                unrelated.sender_delta_digest, unrelated.public_inputs.receiver_pk_g, unrelated.receiver_delta_digest);
+                unrelated.sender_delta_digest, unrelated.public_inputs.receiver_pk_g,
+                unrelated_key_digest, unrelated.receiver_delta_digest);
             unrelated.public_inputs.incoming_tx_hash = crate::common::channel::inter_channel_tx_hash(
                 ChannelId::new(unrelated.source_channel_id as u64).unwrap(), unrelated.public_inputs.receiver_channel_id,
                 unrelated.public_inputs.token_index, unrelated.tx_tree_root, leaf);

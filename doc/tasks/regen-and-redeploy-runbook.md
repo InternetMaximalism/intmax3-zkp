@@ -83,6 +83,22 @@ Step 0 below.
 
 ## Why regen is needed — what each change invalidated
 
+- **H1 (2026-10-16, circuit + wire-format change — soundness fix).** The tx-leaf receiver
+  wing now carries the Regev key digest of the key the receiver delta is encrypted to:
+  `tx_leaf = keccak(keccak([IMTL, src_pk_g, sender_delta_digest]),
+  keccak([IMTL, receiver_pk_g, receiver_regev_pk_digest, receiver_delta_digest]))`
+  (`balance_state.rs::tx_leaf_hash`; `ReceiverBalanceDelta.receiver_regev_pk_digest` is a new
+  signed field of every `InterChannelTx`, so the IMI5 signing digest changes too).
+  `PostCloseClaimCircuit` (both the 58-PI residual variant and the 66-PI late-binding variant)
+  rebuilds that wing from the digest of the slot leaf it OPENS, so a residual or late claim can
+  only be proven from the slot whose committed key the sender addressed. Rotates the
+  **post-close claim** VK and the **late-incoming** VK (which pins the binding VK), their MLE
+  wrappers, pinned adapters and configs (`contracts/test/data/post_close_claim*.json`, the
+  late-incoming fixtures), and every checked-in fixture that embeds an `InterChannelTx`,
+  `tx_leaf`, `tx_hash` or settled-tx chain built from one (close-stack fixtures, wire-v3 cohort).
+  Native gates added alongside (no VK effect): the sender-side, import-side and bundle-side
+  verifiers pin the digest to the addressed slot's registered key and refuse key-independent
+  (`r = 0`) deltas (`RegevCiphertext::reject_key_independent`).
 - **C1 (2026-10-15, circuit change — soundness fix).** Three added constraints, each
   rotating a core VK and therefore the whole cohort:
   1. `validity_circuit.rs` now verifies the N-of-N `AggListCircuit` proof with the CYCLIC

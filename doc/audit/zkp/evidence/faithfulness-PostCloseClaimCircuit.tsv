@@ -45,7 +45,7 @@ connect receiverDeltaDigest	post_close_claim_circuit.rs:483	connect	ok	ct_digest
 decryption true	post_close_claim_circuit.rs:486-494	gadget	not-static	decryption_core pins the polynomial lengths, canonicity and non-degeneracy internally
 connect amount.hi,lo	post_close_claim_circuit.rs:496-497	connect	ok	amount PI to_vec is [hi, lo], each connected to the matching core output
 connect sharedNativeNullifier	post_close_claim_circuit.rs:510	connect	ok	shared_native_nullifier.connect(shared_native_nullifier PI)
-register 57	post_close_claim_circuit.rs:512 / :137-153	public-inputs	ok	the 57 registered wires are exactly the ten groups, in to_vec order
+register 58	post_close_claim_circuit.rs:512 / :137-153	public-inputs	ok	the 58 wires are the ten groups followed by the version-2 constant
 build standard_recursion_zk_config	post_close_claim_circuit.rs:513	no-gate	trivial	builder.build emits no constraint; Lean holds = True
 tx recompute chain wiring	post_close_claim_circuit.rs:330-401	aliasing	ok	sender/receiver wing -> tx_leaf -> push(tx_tree_root, ·) -> push(ids, ·)
 accumulator root is the PI root	post_close_claim_circuit.rs:414-418	aliasing	ok	the inclusion root is `final_settled_tx_accumulator_root.to_hash_out`, the SAME PI that rides in the recomputed H1

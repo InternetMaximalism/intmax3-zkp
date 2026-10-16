@@ -678,6 +678,21 @@ impl InterChannelSendUpdateWitness {
             ));
         }
         let receiver_delta = &self.inter_channel_tx.receiver_deltas[0];
+        // SECURITY (pass-3 H1): the receiver wing of the tx leaf names the key the delta is
+        // encrypted to. The sender-side co-signers pin it to the E-2 recipient key they verify
+        // below, so the leaf, the E-2 transcript and the destination's committed slot key all
+        // name ONE key; and the delta itself must depend on that key (no `r = 0` encryption
+        // that would decrypt identically under every slot).
+        if receiver_delta.receiver_regev_pk_digest
+            != Bytes32::from(self.destination_recipient_pk.poseidon_digest())
+        {
+            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(
+                "receiver delta key digest != the E-2 recipient key digest".to_string(),
+            ));
+        }
+        receiver_delta.amount.reject_key_independent().map_err(|err| {
+            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!("receiver delta: {err}"))
+        })?;
         // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
         // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
         // Normal C2C pushes the tx leaf. A burn pushes the channel- and nonce-bound IMD2
@@ -911,16 +926,44 @@ impl InterChannelFundImportUpdateWitness {
                 "transport proof bytes must match transport_proof".to_string(),
             ));
         }
-        let receiver_user_id = self
-            .inter_channel_tx
-            .receiver_deltas
-            .first()
-            .map(|delta| delta.receiver_pk_g)
+        let receiver_delta = self.inter_channel_tx.receiver_deltas.first().ok_or_else(|| {
+            ChannelStateUpdateError::InvalidReceiverDeltaBundle(
+                "fund import requires the receiver delta entry".to_string(),
+            )
+        })?;
+        let receiver_user_id = receiver_delta.receiver_pk_g;
+        // SECURITY (pass-3 H1): the addressed member (`receiver_pk_g`) and the key the delta is
+        // encrypted to (`receiver_regev_pk_digest`, the tx-leaf receiver wing) must name the SAME
+        // slot of THIS channel's signed state. The import is where the tx enters the receiving
+        // channel: refusing a mismatch here means no imported residual can ever be claimed from a
+        // slot other than the one the sender addressed, whatever key the delta decrypts under.
+        let active = self.receiver_channel_record.member_count as usize
+            + self.receiver_channel_record.delegate_count as usize;
+        let recipient_index = self
+            .receiver_channel_record
+            .member_pk_gs
+            .iter()
+            .take(active.min(MAX_CHANNEL_MEMBERS))
+            .position(|pk_g| *pk_g == receiver_user_id)
             .ok_or_else(|| {
                 ChannelStateUpdateError::InvalidReceiverDeltaBundle(
-                    "fund import requires the receiver delta entry".to_string(),
+                    "fund import: receiver_pk_g is not an active member of the receiving channel"
+                        .to_string(),
                 )
             })?;
+        if self.prev_state.balance_state.regev_pk_digests[recipient_index]
+            != receiver_delta.receiver_regev_pk_digest
+        {
+            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                "fund import: receiver delta key digest != this channel's committed key at slot \
+                 {recipient_index}"
+            )));
+        }
+        receiver_delta.amount.reject_key_independent().map_err(|err| {
+            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                "fund import: receiver delta: {err}"
+            ))
+        })?;
         let public_inputs = ChannelStateUpdatePublicInputs {
             kind: ChannelTransitionKind::InterChannelFundImport,
             channel_id: self.prev_state.channel_id,
@@ -1088,6 +1131,19 @@ impl ReceiverBundleApplyUpdateWitness {
                 ),
             ));
         }
+        // SECURITY (pass-3 H1): the tx-leaf receiver wing's key digest must be the root-checked
+        // key of the slot being credited — the same key the E-2 statement below is verified under.
+        if receiver_delta.receiver_regev_pk_digest
+            != Bytes32::from(self.regev_pks[self.recipient_index].poseidon_digest())
+        {
+            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                "receiver delta key digest does not match the registered key at member index {}",
+                self.recipient_index
+            )));
+        }
+        receiver_delta.amount.reject_key_independent().map_err(|err| {
+            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!("receiver delta: {err}"))
+        })?;
         // The preceding fund-import step already folded this one logical incoming transfer. The
         // bundle applies its ciphertext delta without advancing the base settle chain.
         // Its accumulator update consumes the matching unapplied entitlement.

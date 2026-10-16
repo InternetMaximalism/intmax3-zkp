@@ -886,16 +886,26 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 
 /// detail2 §C-6 `TxLeafHash`:
 /// `hash( hash([TX_LEAF_DOMAIN, source_pubkey_hash(8), sender_delta_digest]),
-///        hash([TX_LEAF_DOMAIN, receiver_pubkey_hash(8), receiver_delta_digest]) )`.
+///        hash([TX_LEAF_DOMAIN, receiver_pubkey_hash(8), receiver_regev_pk_digest(8),
+///              receiver_delta_digest]) )`.
 ///
 /// SECURITY: both wings carry the member SPHINCS+ pubkey hash AND the Regev delta-ciphertext
 /// digest, so the chain leaf binds the sending member, the receiving member and both hidden
 /// balance deltas. The leaf is computable at small-block signing time (flowSend1 step 6) — unlike
 /// the base-layer nullifier, which embeds the (then unknown) block number.
+///
+/// SECURITY (pass-3 H1, 2026-10-16): the receiver wing ALSO carries the Poseidon digest of the
+/// Regev key the receiver delta is encrypted to. The post-close claim circuits rebuild this wing
+/// from the digest field of the slot leaf they open (`balance_slot_leaf_hash`), so a residual or
+/// late claim can only be proven from the slot whose committed key is the key the sender used.
+/// The sender-side and import-side verifiers pin the digest to the addressed member's registered
+/// key, so the two 8-limb identities (`pk_g`, key digest) can never name different members.
+/// The two wings have different widths (17 vs 25 words); keccak is length-separating.
 pub fn tx_leaf_hash(
     source_pk_g: Bytes32,
     sender_delta_digest: Bytes32,
     receiver_pk_g: Bytes32,
+    receiver_regev_pk_digest: Bytes32,
     receiver_delta_digest: Bytes32,
 ) -> Bytes32 {
     let sender_wing = hash_words(
@@ -910,6 +920,7 @@ pub fn tx_leaf_hash(
         &[
             vec![TX_LEAF_DOMAIN],
             receiver_pk_g.to_u32_vec(),
+            receiver_regev_pk_digest.to_u32_vec(),
             receiver_delta_digest.to_u32_vec(),
         ]
         .concat(),
@@ -1509,19 +1520,22 @@ mod tests {
         let receiver = pubkey_hash(21);
         let d_send = ciphertext(11).digest();
         let d_recv = ciphertext(12).digest();
+        let k_recv = pubkey_hash(31);
 
-        let leaf = tx_leaf_hash(sender, d_send, receiver, d_recv);
-        assert_eq!(leaf, tx_leaf_hash(sender, d_send, receiver, d_recv));
+        let leaf = tx_leaf_hash(sender, d_send, receiver, k_recv, d_recv);
+        assert_eq!(leaf, tx_leaf_hash(sender, d_send, receiver, k_recv, d_recv));
         // Swapping the wings (who sends / who receives) must change the leaf.
-        assert_ne!(leaf, tx_leaf_hash(receiver, d_recv, sender, d_send));
+        assert_ne!(leaf, tx_leaf_hash(receiver, d_recv, sender, k_recv, d_send));
         // Each component is binding.
         assert_ne!(
             leaf,
-            tx_leaf_hash(pubkey_hash(11), d_send, receiver, d_recv)
+            tx_leaf_hash(pubkey_hash(11), d_send, receiver, k_recv, d_recv)
         );
-        assert_ne!(leaf, tx_leaf_hash(sender, d_recv, receiver, d_recv));
-        assert_ne!(leaf, tx_leaf_hash(sender, d_send, pubkey_hash(22), d_recv));
-        assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, d_send));
+        assert_ne!(leaf, tx_leaf_hash(sender, d_recv, receiver, k_recv, d_recv));
+        assert_ne!(leaf, tx_leaf_hash(sender, d_send, pubkey_hash(22), k_recv, d_recv));
+        // The receiver's Regev key digest is binding (pass-3 H1).
+        assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, pubkey_hash(32), d_recv));
+        assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, k_recv, d_send));
     }
 
     #[test]

@@ -247,7 +247,11 @@ fn genesis_state(
             member_count: E2E_ACTIVE as u8,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances_token0(&[ct0, ct1, ct2]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(
+                &(0..E2E_ACTIVE)
+                    .map(|i| Bytes32::from(pks[i].poseidon_digest()))
+                    .collect::<Vec<_>>(),
+            ),
             // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives);
             // carried UNCHANGED by every later state in this flow.
             recipients: BalanceState::pad_recipients(
@@ -383,7 +387,7 @@ fn build_flow() -> FlowFixture {
                 bob_after,
                 a0.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: a0.balance_state.regev_pk_digests,
             // B-1b: recipients are carried UNCHANGED across a transition.
             recipients: a0.balance_state.recipients,
             settled_tx_chain: a0.balance_state.settled_tx_chain,
@@ -451,6 +455,7 @@ fn build_flow() -> FlowFixture {
         user(a_id, 10),
         sender_delta.0.digest(),
         user(b_id, 21),
+        Bytes32::from(b_pks[0].poseidon_digest()),
         receiver_delta.0.digest(),
     );
     let tx_tree_root = bytes32_word(301);
@@ -473,7 +478,7 @@ fn build_flow() -> FlowFixture {
                 a1.balance_state.enc_balances[1][0].clone(),
                 a1.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: a1.balance_state.regev_pk_digests,
             // B-1b: recipients are carried UNCHANGED across a transition.
             recipients: a1.balance_state.recipients,
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
@@ -534,6 +539,7 @@ fn build_flow() -> FlowFixture {
         recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: user(b_id, 21),
+            receiver_regev_pk_digest: Bytes32::from(b_pks[0].poseidon_digest()),
             amount: receiver_delta.0.clone(),
         }],
         channel_update_zkp: state_update_envelope(e2_proof),
@@ -608,7 +614,7 @@ fn build_flow() -> FlowFixture {
             ]),
             // The import already chained this logical receive; bundle application is not another
             // base settlement.
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: b1.balance_state.regev_pk_digests,
             settled_tx_chain: b1.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: applied_root,
             state_version: 2,
@@ -1544,6 +1550,7 @@ fn degenerate_sender_e2_witnesses() -> (
         user(a_id, 10),
         sender_delta.0.digest(),
         user(b_id, 21),
+        Bytes32::from(b_pks[0].poseidon_digest()),
         receiver_delta.0.digest(),
     );
     let tx_tree_root = bytes32_word(301);
@@ -1565,7 +1572,7 @@ fn degenerate_sender_e2_witnesses() -> (
                 a0.balance_state.enc_balances[1][0].clone(),
                 a0.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: a0.balance_state.regev_pk_digests,
             recipients: a0.balance_state.recipients,
             settled_tx_chain: settled_tx_chain_push(a0.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -1621,6 +1628,7 @@ fn degenerate_sender_e2_witnesses() -> (
         recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: user(b_id, 21),
+            receiver_regev_pk_digest: Bytes32::from(b_pks[0].poseidon_digest()),
             amount: receiver_delta.0.clone(),
         }],
         channel_update_zkp: state_update_envelope(e2_proof),
@@ -1681,7 +1689,7 @@ fn degenerate_sender_e2_witnesses() -> (
                 b1.balance_state.enc_balances[1][0].clone(),
                 b1.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: b1.balance_state.regev_pk_digests,
             settled_tx_chain: b1.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: applied_root,
             state_version: 2,

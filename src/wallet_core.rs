@@ -2626,10 +2626,14 @@ fn build_inter_channel_send_with(
 
     // The tx leaf chained into settled_tx_chain (detail2 §C-6): binds both participants + both
     // delta ciphertext digests.
+    // (pass-3 H1) The receiver wing also names the key the delta was encrypted to, so only the
+    // destination slot committing that key digest can ever claim it.
+    let destination_recipient_pk_digest = Bytes32::from(destination_recipient_pk.poseidon_digest());
     let tx_leaf = tx_leaf_hash(
         sender_pk_g,
         sender_delta_ct.digest(),
         destination_recipient_pk_g,
+        destination_recipient_pk_digest,
         receiver_delta_ct.digest(),
     );
 
@@ -2802,6 +2806,7 @@ fn build_inter_channel_send_with(
         recipient_memo: Vec::new(),
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: destination_recipient_pk_g,
+            receiver_regev_pk_digest: destination_recipient_pk_digest,
             amount: receiver_delta_ct.clone(),
         }],
         channel_update_zkp: ChannelProofEnvelope {
@@ -4581,11 +4586,31 @@ pub fn verify_inter_channel_credit_transition(
         return bail("invariant 3: descriptor receiver_pk_g != B member at recipient_slot");
     }
 
-    // (5 cont.) B independently recomputes the SAME tx leaf the sender chained.
+    // (3b) SECURITY (pass-3 H1): the key digest the sender wrote into the receiver wing MUST be
+    // the key B's OWN signed state commits at `recipient_slot`. B takes the digest from its own
+    // `BalanceState`, never from the descriptor, so a delta encrypted to (or merely labelled with)
+    // another slot's key — which a key-independent `r = 0` delta would let any slot claim after
+    // close — is refused before B signs the import.
+    let b_recipient_key_digest =
+        b_prev.balance_state.regev_pk_digests[descriptor.recipient_slot as usize];
+    if receiver_delta.receiver_regev_pk_digest != b_recipient_key_digest {
+        return bail("invariant 3b: receiver_delta key digest != B's committed key at recipient_slot");
+    }
+    if Bytes32::from(descriptor.receiver_pk.poseidon_digest()) != b_recipient_key_digest {
+        return bail("invariant 3b: descriptor receiver_pk != B's committed key at recipient_slot");
+    }
+    receiver_delta
+        .amount
+        .reject_key_independent()
+        .map_err(|e| WalletError(format!("invariant 3b: receiver delta: {e}")))?;
+
+    // (5 cont.) B independently recomputes the SAME tx leaf the sender chained, with ITS OWN
+    // committed key digest in the receiver wing.
     let recomputed_leaf = tx_leaf_hash(
         descriptor.source_pk_g,
         descriptor.sender_delta_ct.digest(),
         descriptor.receiver_pk_g,
+        b_recipient_key_digest,
         descriptor.receiver_delta.digest(),
     );
     let tx_leaf_from_tx = inter_channel_tx
@@ -9328,10 +9353,12 @@ mod delegate_send_tests {
         let close_intent_digest = Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         let tx_tree_root = Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap();
 
+        let receiver_regev_pk_digest = Bytes32::from(receiver_pk.poseidon_digest());
         let tx_leaf = tx_leaf_hash(
             source_pk_g,
             sender_delta_ct.digest(),
             receiver_pk_g,
+            receiver_regev_pk_digest,
             delta_ct.digest(),
         );
         // TM-16 / Phase 5a: a NON-GENESIS token (base 55, destination registry slot 1) — the
@@ -9386,6 +9413,7 @@ mod delegate_send_tests {
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
                 receiver_pk_g,
+                receiver_regev_pk_digest,
                 amount: delta_ct.clone(),
             }],
             channel_update_zkp: ChannelProofEnvelope {

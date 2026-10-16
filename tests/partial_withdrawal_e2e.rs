@@ -849,6 +849,7 @@ fn partial_withdrawal_e2e_anvil() {
         desc.source_pk_g,
         desc.sender_delta_ct.digest(),
         desc.receiver_pk_g,
+        Bytes32::from(desc.receiver_pk.poseidon_digest()),
         desc.receiver_delta.digest(),
     );
     let burn_aux_data = burn_descriptor(

@@ -366,7 +366,8 @@ where
         // ── Stage 3: recompute incoming_tx_hash in-circuit from the witnessed delta. ──
         //
         // tx_leaf = keccak( keccak([IMTL, src_pk_g, sender_delta_digest]),
-        //                   keccak([IMTL, receiver_pk_g, receiver_delta_digest]) )
+        //                   keccak([IMTL, receiver_pk_g, receiver_regev_pk_digest,
+        //                           receiver_delta_digest]) )
         // tx_hash = push( ids, push(tx_tree_root, tx_leaf) ), push = keccak([IMTC, a, b])
         //   where ids = Bytes32[ 0,0,0,0,0,0, destination_channel_id, source_channel_id ].
         let source_pk_g = Bytes32Target::new(&mut builder, true);
@@ -374,6 +375,15 @@ where
         let receiver_delta_digest = Bytes32Target::new(&mut builder, true);
         let tx_tree_root = Bytes32Target::new(&mut builder, true);
         let source_channel_id = u32_limb(&mut builder);
+
+        // ── Decryption Stage 2 KEY handles, allocated up front: the receiver wing of the tx
+        // leaf is rebuilt from the Poseidon digest of the SAME witnessed (a, b) that the opened
+        // slot leaf commits below (pass-3 H1, 2026-10-16). This is what ties the opened slot to
+        // the tx's receiver: a key-independent delta (r = 0) decrypts under every slot key, so
+        // decryption alone never bound the claimant to the addressed member.
+        let regev_a: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
+        let regev_b: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
+        let pk_digest = regev_pk_poseidon_digest_gadget::<F, D>(&mut builder, &regev_a, &regev_b);
 
         let tx_leaf_domain = builder.constant(F::from_canonical_u32(TX_LEAF_DOMAIN));
         let sender_wing_inputs = [
@@ -383,9 +393,12 @@ where
         ]
         .concat();
         let sender_wing = Bytes32Target::from_slice(&builder.keccak256::<C>(&sender_wing_inputs));
+        // receiver_wing = keccak([IMTL, receiver_pk_g, receiver_regev_pk_digest, receiver_delta_digest])
+        // where receiver_regev_pk_digest is the OPENED slot's key digest (not a free witness).
         let receiver_wing_inputs = [
             vec![tx_leaf_domain],
             public_inputs.receiver_pk_g.to_vec(),
+            pk_digest.to_vec(),
             receiver_delta_digest.to_vec(),
         ]
         .concat();
@@ -502,21 +515,22 @@ where
         builder.connect(is_active.target, one);
 
         // ── Decryption Stage 2 (closes post-close over-claim): bind amount to the delta plaintext.
-        let regev_a: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
-        let regev_b: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
+        // (`regev_a` / `regev_b` / `pk_digest` were allocated above, where the tx-leaf receiver
+        // wing consumes the digest.)
         let delta_c1: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
         let delta_c2: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
 
         // (pk binding, MUST-FIX #1) poseidon_digest(a, b) is a FIELD of the receiver's slot leaf,
         // which MUST be included at `receiver_member_index` in the H1-committed slot-tree root —
         // replacing the retired 1024-slot one-hot select with a height-10 Merkle inclusion.
+        // (pass-3 H1) The same digest is the receiver wing's key limb above, so the leaf opened
+        // here is the slot the sender addressed, not merely a slot whose key decrypts the delta.
         //
         // SECURITY (B-1b — delegate recipient binding): the leaf's recipient field IS the claim's
         // `recipient` PI, so the exposed L1 payout address must equal the cosigner-signed per-slot
         // exit address inside the finalized H1. Receivers may be delegates, which have no
         // `registeredRecipientOf` entry under Option B — this connection is their only recipient
         // binding. (The Manager-side switch to paying this PI is B-2.)
-        let pk_digest = regev_pk_poseidon_digest_gadget::<F, D>(&mut builder, &regev_a, &regev_b);
         let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
             &mut builder,
             &pk_digest,
@@ -813,8 +827,8 @@ pub mod test_fixture {
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
         },
         regev::{
-            REGEV_N, REGEV_Q, RegevCiphertext, RegevSecurityLevel, channel_keygen, encrypt_amount,
-            prove_withdraw_claim,
+            REGEV_N, REGEV_Q, RegevCiphertext, RegevSecurityLevel, channel_keygen,
+            decrypt_amount, encrypt_amount, prove_withdraw_claim,
         },
         utils::trees::incremental_merkle_tree::IncrementalMerkleTree,
         wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
@@ -863,11 +877,56 @@ pub mod test_fixture {
     /// key, the recomputed tx_hash inserted into a real accumulator) and the matching
     /// `PostCloseClaimFullWitness`. SHARED by the unit tests and the fixture-generator binary.
     pub fn build_full_witness() -> PostCloseClaimFullWitness {
+        build_full_witness_with(false)
+    }
+
+    /// A ciphertext built with encryption randomness `r = 0`: `c1 = e1`, `c2 = Δ·m + e2` with
+    /// CBD-sized noise. The key never enters it, so it decrypts to `amount` under EVERY ternary
+    /// secret key (worst-case key-independent noise `2·n + 2 = 4098 ≪ Δ/2`). The live E-2b AIR
+    /// only constrains `r` to be ternary, so a sender can produce exactly this delta.
+    pub fn key_independent_ciphertext(amount: u64) -> RegevCiphertext {
+        let delta = crate::regev::channel_regev_params().delta() as u64;
+        let q = REGEV_Q as u64;
+        let message = crate::regev::encrypt::encode_amount(amount);
+        // Small centered noise in {-2, -1, 0, 1, 2}, nonzero somewhere so c1 is not the zero
+        // polynomial (the decryption gadget refuses c1 == 0).
+        let noise = |i: usize, phase: usize| -> u64 {
+            let centered = ((i + phase) % 5) as i64 - 2;
+            ((centered + q as i64) % q as i64) as u64
+        };
+        let c1 = (0..REGEV_N).map(|i| noise(i, 0) as u32).collect();
+        let c2 = (0..REGEV_N)
+            .map(|i| ((delta * message[i] as u64 + noise(i, 3)) % q) as u32)
+            .collect();
+        RegevCiphertext { c1, c2 }
+    }
+
+    /// `cross_slot_attack = false`: the honest receiver (slot 0) claims its own delta.
+    /// `cross_slot_attack = true` (pass-3 H1): the delta is addressed to slot 0's identity
+    /// (`receiver_pk_g`, the nullifier) but is key-independent, and the holder of slot 1 claims it
+    /// with slot 1's key, slot 1's leaf and slot 1's L1 recipient.
+    pub fn build_full_witness_with(cross_slot_attack: bool) -> PostCloseClaimFullWitness {
         let mut rng = SmallRng::seed_from_u64(0x9C105E);
         let (receiver_pk, receiver_sk) = channel_keygen(&mut rng);
-        let (other_pk, _) = channel_keygen(&mut rng);
+        let (other_pk, other_sk) = channel_keygen(&mut rng);
         let amount = 21u64;
-        let (delta_ct, _) = encrypt_amount(&mut rng, &receiver_pk, amount).unwrap();
+        let delta_ct = if cross_slot_attack {
+            let ct = key_independent_ciphertext(amount);
+            assert_eq!(decrypt_amount(&receiver_sk, &ct).unwrap(), amount);
+            assert_eq!(decrypt_amount(&other_sk, &ct).unwrap(), amount);
+            ct
+        } else {
+            encrypt_amount(&mut rng, &receiver_pk, amount).unwrap().0
+        };
+        let (claimant_pk, claimant_sk, claimant_index) = if cross_slot_attack {
+            (other_pk.clone(), other_sk, 1usize)
+        } else {
+            (receiver_pk.clone(), receiver_sk, 0usize)
+        };
+        let recipients = [
+            Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+        ];
         let receiver_pk_g = pubkey_hash(11);
         let source_pk_g = pubkey_hash(10);
         let closed_channel_id = ChannelId::new(7).unwrap();
@@ -878,10 +937,14 @@ pub mod test_fixture {
 
         // The REAL tx_leaf / tx_hash (the circuit recomputes the same). TM-16: the canonical
         // token-bearing fold from `common::channel` — the token limb rides in ids limb 5.
+        // The sender addressed slot 0 (`receiver_pk_g`) and wrote slot 0's key digest into the
+        // receiver wing — in the attack too: the attacker in slot 1 cannot change the signed tx.
+        let receiver_regev_pk_digest = Bytes32::from(receiver_pk.poseidon_digest());
         let tx_leaf = tx_leaf_hash(
             source_pk_g,
             sender_delta_ct.digest(),
             receiver_pk_g,
+            receiver_regev_pk_digest,
             delta_ct.digest(),
         );
         let tx_hash = inter_channel_tx_hash(
@@ -937,6 +1000,7 @@ pub mod test_fixture {
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
                 receiver_pk_g,
+                receiver_regev_pk_digest,
                 amount: delta_ct.clone(),
             }],
             channel_update_zkp: ChannelProofEnvelope {
@@ -950,8 +1014,8 @@ pub mod test_fixture {
         };
         let claim_proof = prove_withdraw_claim(
             RegevSecurityLevel::Test,
-            &receiver_pk,
-            &receiver_sk,
+            &claimant_pk,
+            &claimant_sk,
             &delta_ct,
             amount,
         )
@@ -965,7 +1029,7 @@ pub mod test_fixture {
             close_intent_digest,
             incoming_tx_hash: tx_hash,
             receiver_pk_g,
-            l1_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            l1_recipient: recipients[claimant_index],
             receiver_amount: delta_ct.clone(),
             shared_native_nullifier,
             recipient_memo: vec![5, 6],
@@ -983,10 +1047,7 @@ pub mod test_fixture {
                 Bytes32::from(other_pk.poseidon_digest()),
             ]),
             // B-1b: the receiver's (slot 0) leaf-bound exit address = the claim's l1_recipient.
-            recipients: BalanceState::pad_recipients(&[
-                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
-                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
-            ]),
+            recipients: BalanceState::pad_recipients(&recipients),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
@@ -1004,18 +1065,36 @@ pub mod test_fixture {
             close_intent_digest,
             closed_channel_id,
             source_tx: source_tx.clone(),
-            claim,
-            receiver_pk: receiver_pk.clone(),
+            claim: claim.clone(),
+            receiver_pk: claimant_pk.clone(),
             amount,
             final_balance_state: final_balance_state.clone(),
-            receiver_member_index: 0,
+            receiver_member_index: claimant_index,
         };
-        let public_inputs: PostCloseClaimPublicInputs =
-            native.to_public_inputs(RegevSecurityLevel::Test).unwrap();
+        // The public inputs are written down directly so the CIRCUIT is what the attack test
+        // exercises; the honest path additionally checks the native mirror agrees.
+        let public_inputs = PostCloseClaimPublicInputs {
+            close_intent_digest,
+            receiver_channel_id: closed_channel_id,
+            incoming_tx_hash: tx_hash,
+            receiver_pk_g,
+            recipient: claim.l1_recipient,
+            shared_native_nullifier,
+            amount,
+            final_balance_state_h1: final_balance_state.h1(),
+            final_settled_tx_accumulator_root: accumulator_root,
+            token_index: FIXTURE_TOKEN_INDEX,
+        };
+        if !cross_slot_attack {
+            assert_eq!(
+                native.to_public_inputs(RegevSecurityLevel::Test).unwrap(),
+                public_inputs
+            );
+        }
 
-        // H1 Poseidon-root form: the slot tree + the receiver's (slot 0) inclusion proof.
+        // H1 Poseidon-root form: the slot tree + the claimant's slot inclusion proof.
         let slot_tree = final_balance_state.slot_tree();
-        let receiver_member_index = 0usize;
+        let receiver_member_index = claimant_index;
 
         PostCloseClaimFullWitness {
             public_inputs,
@@ -1041,11 +1120,11 @@ pub mod test_fixture {
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
             receiver_member_index,
-            regev_a: receiver_pk.a.clone(),
-            regev_b: receiver_pk.b.clone(),
+            regev_a: claimant_pk.a.clone(),
+            regev_b: claimant_pk.b.clone(),
             delta_c1: delta_ct.c1.clone(),
             delta_c2: delta_ct.c2.clone(),
-            regev_s: receiver_sk.s.clone(),
+            regev_s: claimant_sk.s.clone(),
         }
     }
 }
@@ -1086,6 +1165,29 @@ mod tests {
         // TM-16: the token PI (limb 56) is the descriptor's base token, proven from the anchor.
         assert_eq!(actual[56], FIXTURE_TOKEN_INDEX as u64);
         assert_eq!(actual[57], 2);
+    }
+
+    /// Negative (pass-3 H1, 2026-10-16): the delta is addressed to slot 0's identity
+    /// (`receiver_pk_g`, hence the nullifier) but was built key-independent (`r = 0`), so it
+    /// decrypts to the public amount under slot 1's key as well. Slot 1's holder opens slot 1's
+    /// leaf, proves decryption under slot 1's key and names slot 1's L1 recipient. Nothing in the
+    /// unfixed circuit tied the opened slot to the tx's receiver, so this proved; the receiver
+    /// wing of the tx leaf now carries the receiver's Regev key digest, rebuilt in-circuit from
+    /// the OPENED slot's digest, so the cross-slot witness has no satisfying assignment.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_claim_from_a_slot_other_than_the_addressed_receiver_is_refused() {
+        let circuit = circuit();
+        let witness = build_full_witness_with(true);
+        assert_eq!(witness.receiver_member_index, 1);
+        let result = match circuit.fill_witness(&witness) {
+            Ok(pw) => catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw))),
+            Err(_) => Ok(Err(anyhow::anyhow!("fill_witness rejected"))),
+        };
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a slot other than the addressed receiver must not be able to claim the delta"
+        );
     }
 
     /// A raw/applied entry must fail even when both final roots and the Merkle opening are
@@ -1162,10 +1264,15 @@ mod tests {
         let circuit = circuit();
         let mut witness = build_full_witness();
         let other_token = 7u32;
+        let receiver_key_digest = crate::ethereum_types::bytes32::Bytes32::from(
+            crate::regev::RegevPk { a: witness.regev_a.clone(), b: witness.regev_b.clone() }
+                .poseidon_digest(),
+        );
         let tx_leaf = tx_leaf_hash(
             witness.source_pk_g,
             witness.sender_delta_digest,
             witness.public_inputs.receiver_pk_g,
+            receiver_key_digest,
             witness.receiver_delta_digest,
         );
         let variant_hash = inter_channel_tx_hash(

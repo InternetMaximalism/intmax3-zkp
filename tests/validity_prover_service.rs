@@ -122,12 +122,14 @@ fn next_descriptor(
     let source = snapshot.record.channel_id;
     let destination = ChannelId::new(source.as_u64() + 100).expect("destination channel");
     let receiver_pk_g = keys[1].pk_g();
+    let receiver_regev_pk_digest = Bytes32::from(keys[1].regev_pk.poseidon_digest());
     let sender_delta = RegevCiphertext::padding();
     let receiver_delta = RegevCiphertext::padding();
     let tx_leaf = tx_leaf_hash(
         keys[0].pk_g(),
         sender_delta.digest(),
         receiver_pk_g,
+        receiver_regev_pk_digest,
         receiver_delta.digest(),
     );
     // F-AUX-1: the BASE-layer recipient is the DESTINATION CHANNEL's base account, NOT the
@@ -201,6 +203,7 @@ fn next_descriptor(
         recipient_memo: Vec::new(),
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g,
+            receiver_regev_pk_digest,
             amount: receiver_delta.clone(),
         }],
         channel_update_zkp: ChannelProofEnvelope {

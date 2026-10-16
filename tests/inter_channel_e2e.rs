@@ -452,6 +452,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         a_keys[0].pk_g(),
         sender_delta.0.digest(),
         b_keys[0].pk_g(),
+        Bytes32::from(b_pks[0].poseidon_digest()),
         receiver_delta.0.digest(),
     );
     let base_transfer = inter_channel_base_transfer(b_keys[0].pk_g(), 0, AMT, tx_leaf);
@@ -531,6 +532,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: b_keys[0].pk_g(),
+            receiver_regev_pk_digest: Bytes32::from(b_pks[0].poseidon_digest()),
             amount: receiver_delta.0.clone(),
         }],
         channel_update_zkp: ChannelProofEnvelope {

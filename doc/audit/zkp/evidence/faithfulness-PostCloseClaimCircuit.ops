@@ -42,7 +42,7 @@ range sourceChannel	range	ok
 range sourcePk,senderDigest,receiverDigest,txRoot	range	ok
 range stateVersion	range	ok
 range tokenIndex	range	ok
-register 57	public-inputs	ok
+register 58	public-inputs	ok
 tx recompute chain wiring	aliasing	ok
 virtual a,b,c1,c2	width	ok
 virtual incomingTxIndex	range	ok

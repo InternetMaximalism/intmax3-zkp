@@ -514,6 +514,7 @@ fn burn_send_base_chain_matches_channel() {
         desc.source_pk_g,
         desc.sender_delta_ct.digest(),
         desc.receiver_pk_g,
+        Bytes32::from(desc.receiver_pk.poseidon_digest()),
         desc.receiver_delta.digest(),
     );
 
@@ -600,6 +601,7 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
         desc.source_pk_g,
         desc.sender_delta_ct.digest(),
         desc.receiver_pk_g,
+        Bytes32::from(desc.receiver_pk.poseidon_digest()),
         desc.receiver_delta.digest(),
     );
 

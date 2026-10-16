@@ -379,6 +379,7 @@ fn unified_inter_channel_transfer_e2e() {
         a_keys[0].pk_g(),
         sdelta.0.digest(),
         a_keys[1].pk_g(),
+        Bytes32::from(dest_pk.poseidon_digest()),
         rdelta.0.digest(),
     );
 
@@ -472,6 +473,7 @@ fn unified_inter_channel_transfer_e2e() {
         recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: a_keys[1].pk_g(),
+            receiver_regev_pk_digest: Bytes32::from(dest_pk.poseidon_digest()),
             amount: rdelta.0.clone(),
         }],
         channel_update_zkp: ChannelProofEnvelope {

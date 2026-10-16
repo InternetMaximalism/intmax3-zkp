@@ -138,9 +138,14 @@ impl PostCloseClaimWitness {
             return Err(PostCloseClaimWitnessError::TxHashRecomputeMismatch);
         }
 
-        // The claimed ciphertext must be the receiver's delta of the signed source tx.
+        // The claimed ciphertext must be the receiver's delta of the signed source tx, and
+        // (pass-3 H1) the key digest the sender wrote into that delta must be the witnessed
+        // receiver key: the circuit rebuilds the tx-leaf receiver wing from the OPENED slot's
+        // digest, so a claim from any other slot has no satisfying witness.
+        let receiver_pk_digest = Bytes32::from(self.receiver_pk.poseidon_digest());
         let matching_delta = self.source_tx.receiver_deltas.iter().any(|delta| {
             delta.receiver_pk_g == self.claim.receiver_pk_g
+                && delta.receiver_regev_pk_digest == receiver_pk_digest
                 && delta.amount == self.claim.receiver_amount
         });
         if !matching_delta {
@@ -168,7 +173,7 @@ impl PostCloseClaimWitness {
         }
         let committed_pk_digest =
             self.final_balance_state.regev_pk_digests[self.receiver_member_index];
-        if committed_pk_digest != Bytes32::from(self.receiver_pk.poseidon_digest()) {
+        if committed_pk_digest != receiver_pk_digest {
             return Err(PostCloseClaimWitnessError::ReceiverDeltaMismatch);
         }
         // SECURITY (B-1b): the claim's L1 payout address MUST be the cosigner-signed per-slot
@@ -299,6 +304,140 @@ mod tests {
         }
     }
 
+    /// pass-3 H1: the native mirror refuses a claim whose witnessed receiver key is not the key
+    /// digest the sender wrote into the receiver wing — even when that key is a registered slot
+    /// key of the closed channel and the E-3 proof verifies under it.
+    #[test]
+    fn post_close_claim_refuses_a_receiver_key_other_than_the_addressed_one() {
+        let mut rng = SmallRng::seed_from_u64(89);
+        let (addressed_pk, _) = channel_keygen(&mut rng);
+        let (claimant_pk, claimant_sk) = channel_keygen(&mut rng);
+        let amount = 21u64;
+        // A key-independent delta (r = 0) decrypts under the claimant's key too.
+        let delta_ct = crate::circuits::channel::post_close_claim_circuit::test_fixture::key_independent_ciphertext(amount);
+        assert_eq!(crate::regev::decrypt_amount(&claimant_sk, &delta_ct).unwrap(), amount);
+        let receiver_pk_g = pubkey_hash(11);
+        let mut source_tx = sample_source_tx(
+            receiver_pk_g,
+            Bytes32::from(addressed_pk.poseidon_digest()),
+            delta_ct.clone(),
+        );
+        source_tx.tx_hash = source_tx.compute_tx_hash().unwrap();
+        let claim_proof = prove_withdraw_claim(
+            RegevSecurityLevel::Test,
+            &claimant_pk,
+            &claimant_sk,
+            &delta_ct,
+            amount,
+        )
+        .unwrap();
+        let claim = PostCloseIncomingClaim {
+            close_intent_digest: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            incoming_tx_hash: source_tx.tx_hash,
+            receiver_pk_g,
+            l1_recipient: Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+            receiver_amount: delta_ct,
+            shared_native_nullifier: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            recipient_memo: vec![],
+            claim_proof,
+        };
+        let final_balance_state = BalanceState {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: 2,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ciphertext(1), ciphertext(2)]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(addressed_pk.poseidon_digest()),
+                Bytes32::from(claimant_pk.poseidon_digest()),
+            ]),
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+            ]),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 42])
+                .unwrap(),
+            state_version: 9,
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
+            token_registry: {
+                let mut registry = BalanceState::single_token_registry(0);
+                registry[1] = source_tx.token_index;
+                registry
+            },
+            token_count: 2,
+        };
+        let witness = PostCloseClaimWitness {
+            close_intent_digest: claim.close_intent_digest,
+            closed_channel_id: ChannelId::new(7).unwrap(),
+            source_tx,
+            claim,
+            receiver_pk: claimant_pk,
+            amount,
+            final_balance_state,
+            receiver_member_index: 1,
+        };
+        assert!(matches!(
+            witness.to_public_inputs(RegevSecurityLevel::Test),
+            Err(PostCloseClaimWitnessError::ReceiverDeltaMismatch)
+        ));
+    }
+
+    /// A source tx whose single receiver delta carries the given identity, key digest and
+    /// ciphertext (TM-16 token 5; `tx_hash` left for the caller to recompute).
+    fn sample_source_tx(
+        receiver_pk_g: Bytes32,
+        receiver_regev_pk_digest: Bytes32,
+        delta_ct: RegevCiphertext,
+    ) -> InterChannelTx {
+        InterChannelTx {
+            tx_inclusion_proof: MerkleInclusionProof {
+                siblings: vec![],
+                leaf_index: U256::default(),
+            },
+            signed_small_block: SignedSmallBlock {
+                message: SmallBlockRootMessage {
+                    channel_id: ChannelId::new(5).unwrap(),
+                    bp_member_slot: 0,
+                    bp_pk_g: pubkey_hash(10),
+                    small_block_number: 1,
+                    prev_small_block_root: Bytes32::default(),
+                    tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+                    state_commitment_root: Bytes32::default(),
+                    medium_epoch_hint: 3,
+                    close_freeze_nonce: 0,
+                },
+                signatures: vec![],
+                aggregated_signature_proof: vec![1],
+                medium_block_number: 3,
+                confirmation_proof: vec![2],
+            },
+            sender_delta_ct: ciphertext(1),
+            source_channel_id: ChannelId::new(5).unwrap(),
+            destination_channel_id: ChannelId::new(7).unwrap(),
+            token_index: 5,
+            destination_base_transfer_salt: crate::common::salt::Salt::default(),
+            base_nonce: 1,
+            source_pk_g: pubkey_hash(10),
+            seal: Bytes32::default(),
+            tx_hash: Bytes32::default(),
+            intmax_transfer_commitment: Bytes32::default(),
+            recipient_memo: vec![1, 2],
+            receiver_deltas: vec![ReceiverBalanceDelta {
+                receiver_pk_g,
+                receiver_regev_pk_digest,
+                amount: delta_ct,
+            }],
+            channel_update_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof: vec![3],
+            },
+            transport_proof: vec![5],
+            sender_hash_sig: Vec::new(),
+            sender_pk_b: Bytes32::default(),
+        }
+    }
+
     #[test]
     fn post_close_claim_verifies_e3_proof_and_roundtrips() {
         let mut rng = SmallRng::seed_from_u64(88);
@@ -345,6 +484,7 @@ mod tests {
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
                 receiver_pk_g,
+                receiver_regev_pk_digest: Bytes32::from(receiver_pk.poseidon_digest()),
                 amount: delta_ct.clone(),
             }],
             channel_update_zkp: ChannelProofEnvelope {
