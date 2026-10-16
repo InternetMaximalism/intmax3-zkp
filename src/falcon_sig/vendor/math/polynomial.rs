@@ -657,6 +657,20 @@ impl<F: Zeroize> Zeroize for Polynomial<F> {
 
 impl<F: Zeroize> ZeroizeOnDrop for Polynomial<F> {}
 
+// VENDOR EDIT (review C09, 2026-10-16): `Polynomial<F>` cannot carry a `Drop` that erases
+// (a `Drop` impl may not be narrower than the type, and `Complex64` has no `Zeroize`), so
+// the `ZeroizeOnDrop` marker above never erased anything by itself. Secret-derived complex
+// temporaries in signing are wiped explicitly with this helper before they are released;
+// the volatile writes keep the compiler from eliding the stores ahead of deallocation.
+impl Polynomial<num_complex::Complex64> {
+    pub fn wipe(&mut self) {
+        for c in self.coefficients.iter_mut() {
+            // SAFETY: `c` is a valid, exclusively borrowed element of the vector.
+            unsafe { core::ptr::write_volatile(c, num_complex::Complex64::new(0.0, 0.0)) };
+        }
+    }
+}
+
 // TESTS
 // ================================================================================================
 

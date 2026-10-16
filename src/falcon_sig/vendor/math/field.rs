@@ -8,6 +8,14 @@ use super::{Inverse, MODULUS, fft::CyclotomicFourier};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FalconFelt(u32);
 
+// VENDOR EDIT (review C09, 2026-10-16): lets `Polynomial<FalconFelt>` (the secret basis in field
+// form during public-key derivation) be held in a `Zeroizing` guard.
+impl crate::falcon_sig::compat::zeroize::Zeroize for FalconFelt {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl FalconFelt {
     pub const fn new(value: i16) -> Self {
         let gtz_bool = value >= 0;

@@ -173,9 +173,34 @@ impl RegevPk {
 /// SECURITY: intentionally NOT `Serialize`/`Deserialize` and never part of any digest — the
 /// secret key must never leave the member's process through the state, witness, or wire formats
 /// of this crate.
-#[derive(Clone, Debug)]
+///
+/// SECURITY (review C10, 2026-10-16): `Debug` is redacted (length only) so a stray `{:?}` in a
+/// log or error cannot disclose the key, and the buffer is zeroized on drop. Clones (the
+/// transition witnesses hold `Option<RegevSk>`) are independent owners and are zeroized when
+/// they drop in turn.
+#[derive(Clone)]
 pub struct RegevSk {
     pub s: Vec<i8>,
+}
+
+impl core::fmt::Debug for RegevSk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RegevSk").field("s", &format_args!("<{} secret coefficients>", self.s.len())).finish()
+    }
+}
+
+impl zeroize::Zeroize for RegevSk {
+    fn zeroize(&mut self) {
+        use zeroize::Zeroize as _;
+        self.s.zeroize();
+    }
+}
+
+impl Drop for RegevSk {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.s.zeroize();
+    }
 }
 
 /// Generate a fresh channel key pair with the channel parameter set.

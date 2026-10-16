@@ -66,19 +66,73 @@ fn hash_out_to_bytes<F: Field>(hash: PoseidonBN128HashOut<F>) -> Vec<u8> {
     limbs.to_vec()
 }
 
+/// Why a BN128 hash could not be decoded (review C08, 2026-10-16). Every variant used to be an
+/// `unwrap()` panic, which on a `panic = "abort"` native build terminates the process that
+/// deserializes untrusted proof/fixture material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BN128HashDecodeError {
+    /// The byte string is not exactly 32 bytes.
+    WrongLength(usize),
+    /// The decimal string is not a base-10 integer.
+    NotDecimal,
+    /// The integer does not fit in 32 little-endian bytes.
+    TooLarge,
+    /// The 32-byte value is not a canonical scalar (`>= r`).
+    NonCanonical,
+}
+
+impl fmt::Display for BN128HashDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongLength(n) => write!(f, "BN128 hash must be 32 bytes, got {n}"),
+            Self::NotDecimal => write!(f, "BN128 hash must be a base-10 integer string"),
+            Self::TooLarge => write!(f, "BN128 hash integer does not fit in 32 bytes"),
+            Self::NonCanonical => write!(f, "BN128 hash is not a canonical scalar (>= r)"),
+        }
+    }
+}
+
+impl std::error::Error for BN128HashDecodeError {}
+
+impl<F: RichField> PoseidonBN128HashOut<F> {
+    /// Fallible decoding of a 32-byte little-endian canonical scalar (review C08).
+    pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, BN128HashDecodeError> {
+        let sized_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| BN128HashDecodeError::WrongLength(bytes.len()))?;
+        let fr_repr = FrRepr(sized_bytes);
+        // `from_repr` yields an empty `CtOption` for a non-canonical representation (>= r).
+        let fr = Option::<Fr>::from(Fr::from_repr(fr_repr)).ok_or(BN128HashDecodeError::NonCanonical)?;
+        Ok(Self {
+            value: fr,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Fallible decoding of the base-10 string form `Serialize` emits (review C08).
+    pub fn try_from_decimal_str(s: &str) -> Result<Self, BN128HashDecodeError> {
+        let big_int = BigUint::parse_bytes(s.as_bytes(), 10).ok_or(BN128HashDecodeError::NotDecimal)?;
+        let mut bytes = big_int.to_bytes_le();
+        if bytes.len() > 32 {
+            return Err(BN128HashDecodeError::TooLarge);
+        }
+        bytes.resize(32, 0);
+        Self::try_from_bytes(&bytes)
+    }
+}
+
 impl<F: RichField> GenericHashOut<F> for PoseidonBN128HashOut<F> {
     fn to_bytes(&self) -> Vec<u8> {
         hash_out_to_bytes(*self)
     }
 
+    /// The trait method is infallible by signature. Callers decoding UNTRUSTED bytes must use
+    /// [`PoseidonBN128HashOut::try_from_bytes`] first; this method panics with a named reason on
+    /// a wrong length or a non-canonical scalar (review C08).
     fn from_bytes(bytes: &[u8]) -> Self {
-        let sized_bytes: [u8; 32] = bytes.try_into().unwrap();
-        let fr_repr = FrRepr(sized_bytes);
-        let fr = Fr::from_repr(fr_repr).unwrap();
-
-        Self {
-            value: fr,
-            _phantom: PhantomData,
+        match Self::try_from_bytes(bytes) {
+            Ok(hash) => hash,
+            Err(e) => panic!("PoseidonBN128HashOut::from_bytes on invalid input: {e}"),
         }
     }
 
@@ -132,24 +186,10 @@ impl<'de, F: RichField> Deserialize<'de> for PoseidonBN128HashOut<F> {
             }
         }
 
-        let deserialized_str = deserializer
-            .deserialize_str(PoseidonBN128HashOutVisitor)
-            .unwrap();
-        let big_int = BigUint::parse_bytes(deserialized_str.as_bytes(), 10).unwrap();
-
-        let mut bytes = big_int.to_bytes_le();
-        for _i in bytes.len()..32 {
-            bytes.push(0);
-        }
-
-        let sized_bytes: [u8; 32] = bytes.try_into().unwrap();
-        let fr_repr = FrRepr(sized_bytes);
-        let fr = Fr::from_repr(fr_repr).unwrap();
-
-        Ok(Self {
-            value: fr,
-            _phantom: PhantomData,
-        })
+        // Review C08: every failure is reported through serde instead of panicking — a wrong
+        // JSON type, a non-decimal string, an integer wider than 32 bytes, or a value >= r.
+        let deserialized_str = deserializer.deserialize_str(PoseidonBN128HashOutVisitor)?;
+        Self::try_from_decimal_str(&deserialized_str).map_err(serde::de::Error::custom)
     }
 }
 
@@ -227,6 +267,43 @@ impl<F: RichField> Hasher<F> for PoseidonBN128Hash {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    const BN254_SCALAR_MODULUS: &str =
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+    const BN254_SCALAR_MODULUS_MINUS_ONE: &str =
+        "21888242871839275222246405745257275088548364400416034343698204186575808495616";
+
+    /// Review C08 (2026-10-16): every malformed encoding is an ordinary error. Before the fix the
+    /// four invalid cases below panicked inside `Deserialize` / `from_bytes`.
+    #[test]
+    fn invalid_bn128_hash_encodings_are_errors_not_panics() {
+        type H = PoseidonBN128HashOut<GoldilocksField>;
+        // Valid boundary values round-trip through the decimal form.
+        for s in ["0", BN254_SCALAR_MODULUS_MINUS_ONE] {
+            let hash: H = serde_json::from_str(&format!("\"{s}\"")).expect("canonical value decodes");
+            let again: H = serde_json::from_str(&serde_json::to_string(&hash).unwrap()).unwrap();
+            assert_eq!(hash, again);
+        }
+        // A JSON integer instead of a string.
+        assert!(serde_json::from_str::<H>("7").is_err());
+        // A non-decimal string.
+        assert!(serde_json::from_str::<H>("\"0x1f\"").is_err());
+        // Exactly the modulus: 32 bytes but not canonical.
+        assert_eq!(
+            H::try_from_decimal_str(BN254_SCALAR_MODULUS),
+            Err(BN128HashDecodeError::NonCanonical)
+        );
+        assert!(serde_json::from_str::<H>(&format!("\"{BN254_SCALAR_MODULUS}\"")).is_err());
+        // Wider than 32 bytes.
+        assert_eq!(
+            H::try_from_decimal_str(&format!("{BN254_SCALAR_MODULUS}000")),
+            Err(BN128HashDecodeError::TooLarge)
+        );
+        // Binary: all-0xff is non-canonical; a short slice is the wrong length.
+        assert_eq!(H::try_from_bytes(&[0xffu8; 32]), Err(BN128HashDecodeError::NonCanonical));
+        assert_eq!(H::try_from_bytes(&[0u8; 31]), Err(BN128HashDecodeError::WrongLength(31)));
+        assert!(H::try_from_bytes(&[0u8; 32]).is_ok());
+    }
 
     #[test]
     fn test_byte_methods() {

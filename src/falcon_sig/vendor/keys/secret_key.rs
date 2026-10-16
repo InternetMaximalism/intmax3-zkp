@@ -178,11 +178,14 @@ impl SecretKey {
 
     /// Derives the public key corresponding to this secret key using h = g /f [mod ϕ][mod p].
     fn compute_pub_key_poly(&self) -> PublicKey {
-        let g: Polynomial<FalconFelt> = self.secret_key[0].clone().into();
-        let g_fft = g.fft();
-        let minus_f: Polynomial<FalconFelt> = self.secret_key[1].clone().into();
-        let f = -minus_f;
-        let f_fft = f.fft();
+        // VENDOR EDIT (review C09): every secret-derived copy lives in a `Zeroizing` guard so
+        // it is erased when this frame ends, not merely deallocated.
+        let g: Zeroizing<Polynomial<FalconFelt>> = Zeroizing::new(self.secret_key[0].clone().into());
+        let g_fft = Zeroizing::new(g.fft());
+        let minus_f: Zeroizing<Polynomial<FalconFelt>> =
+            Zeroizing::new(self.secret_key[1].clone().into());
+        let f = Zeroizing::new(-(*minus_f).clone());
+        let f_fft = Zeroizing::new(f.fft());
         let h_fft = g_fft.hadamard_div(&f_fft);
         h_fft.ifft().into()
     }
@@ -196,20 +199,28 @@ impl SecretKey {
         let c_over_q_fft = c.map(|cc| Complex::new(one_over_q * cc.value() as f64, 0.0)).fft();
 
         // B = [[FFT(g), -FFT(f)], [FFT(G), -FFT(F)]]
-        let [g_fft, minus_f_fft, big_g_fft, minus_big_f_fft] = to_complex_fft(&self.secret_key);
-        let t0 = c_over_q_fft.hadamard_mul(&minus_big_f_fft);
-        let t1 = -c_over_q_fft.hadamard_mul(&minus_f_fft);
+        // VENDOR EDIT (review C09): the complex copies of the secret basis, the target vector
+        // and every per-iteration lattice temporary are secret-derived; `Complex64` has no
+        // `Zeroize`, so they are wiped explicitly (`Polynomial::wipe`) before they are released.
+        let [mut g_fft, mut minus_f_fft, mut big_g_fft, mut minus_big_f_fft] =
+            to_complex_fft(&self.secret_key);
+        let mut t0 = c_over_q_fft.hadamard_mul(&minus_big_f_fft);
+        let mut t1 = -c_over_q_fft.hadamard_mul(&minus_f_fft);
 
-        loop {
-            let bold_s = loop {
-                let z = ffsampling(&(t0.clone(), t1.clone()), &self.tree, rng);
-                let t0_min_z0 = t0.clone() - z.0;
-                let t1_min_z1 = t1.clone() - z.1;
+        let signature = loop {
+            let mut bold_s = loop {
+                let mut z = ffsampling(&(t0.clone(), t1.clone()), &self.tree, rng);
+                let mut t0_min_z0 = t0.clone() - z.0.clone();
+                let mut t1_min_z1 = t1.clone() - z.1.clone();
+                z.0.wipe();
+                z.1.wipe();
 
                 // s = (t-z) * B
-                let s0 = t0_min_z0.hadamard_mul(&g_fft) + t1_min_z1.hadamard_mul(&big_g_fft);
+                let mut s0 = t0_min_z0.hadamard_mul(&g_fft) + t1_min_z1.hadamard_mul(&big_g_fft);
                 let s1 =
                     t0_min_z0.hadamard_mul(&minus_f_fft) + t1_min_z1.hadamard_mul(&minus_big_f_fft);
+                t0_min_z0.wipe();
+                t1_min_z1.wipe();
 
                 // compute the norm of (s0||s1) and note that they are in FFT representation
                 let length_squared: f64 =
@@ -218,10 +229,13 @@ impl SecretKey {
                         / (N as f64);
 
                 if length_squared > (SIG_L2_BOUND as f64) {
+                    s0.wipe();
                     continue;
                 }
 
-                break [-s0, s1];
+                // s0 is never published; only s2 = s1 leaves this function.
+                s0.wipe();
+                break [s0, s1];
             };
 
             let s2 = bold_s[1].ifft();
@@ -232,11 +246,19 @@ impl SecretKey {
                 .collect::<Vec<i16>>()
                 .try_into()
                 .expect("The number of coefficients should be equal to N");
+            bold_s[0].wipe();
 
             if let Ok(s2) = SignaturePoly::try_from(&s2_coef) {
-                return s2;
+                break s2;
             }
-        }
+        };
+        g_fft.wipe();
+        minus_f_fft.wipe();
+        big_g_fft.wipe();
+        minus_big_f_fft.wipe();
+        t0.wipe();
+        t1.wipe();
+        signature
     }
 
     // VENDOR EDIT: upstream's `generate_seed` (the RFC-6979-style derandomization seed) is
@@ -373,7 +395,10 @@ impl Deserializable for SecretKey {
 
 /// Computes the complex FFT of the secret key polynomials.
 fn to_complex_fft(basis: &[Polynomial<i16>; 4]) -> [Polynomial<Complex<f64>>; 4] {
-    let [g, f, big_g, big_f] = basis.clone();
+    // VENDOR EDIT (review C09): the integer copy of the secret basis is erased when this
+    // frame ends; the caller wipes the complex forms it returns.
+    let basis = Zeroizing::new(basis.clone());
+    let [g, f, big_g, big_f] = &*basis;
     let g_fft = g.map(|cc| Complex64::new(*cc as f64, 0.0)).fft();
     let minus_f_fft = f.map(|cc| -Complex64::new(*cc as f64, 0.0)).fft();
     let big_g_fft = big_g.map(|cc| Complex64::new(*cc as f64, 0.0)).fft();

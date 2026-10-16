@@ -169,10 +169,50 @@ impl RegevCiphertext {
 /// sender. The `ReceiverWitnessShare` structure of the old SIS layer is deliberately not ported
 /// (detail2 §A-1): the receiver learns the amount by decrypting with their own key, not by
 /// receiving randomness shares.
-#[derive(Clone, Debug)]
+///
+/// SECURITY (review C10, 2026-10-16): `Debug` prints only the vector lengths — the randomness,
+/// noise halves and message bits are the sender's secret opening of the ciphertext — and every
+/// buffer is zeroized on drop (the field-element quotients are overwritten with volatile writes
+/// before deallocation).
+#[derive(Clone)]
 pub struct AmountWitness {
     pub amount: u64,
     pub witness: EncryptionWitness,
+}
+
+impl core::fmt::Debug for AmountWitness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AmountWitness")
+            .field("amount", &format_args!("<redacted>"))
+            .field("r", &format_args!("<{} secret entries>", self.witness.r.len()))
+            .field("e1", &format_args!("<{} secret entries>", self.witness.e1u.len()))
+            .field("e2", &format_args!("<{} secret entries>", self.witness.e2u.len()))
+            .field("m", &format_args!("<{} secret bits>", self.witness.m.len()))
+            .finish()
+    }
+}
+
+impl Drop for AmountWitness {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.amount.zeroize();
+        let w = &mut self.witness;
+        w.r.zeroize();
+        w.e1u.zeroize();
+        w.e1v.zeroize();
+        w.e2u.zeroize();
+        w.e2v.zeroize();
+        w.m.zeroize();
+        // `F` carries no `Zeroize` impl: overwrite through volatile writes so the stores are
+        // not elided before deallocation, then release.
+        for v in [&mut w.k1, &mut w.k2] {
+            for x in v.iter_mut() {
+                // SAFETY: `x` is a valid, exclusively borrowed element.
+                unsafe { core::ptr::write_volatile(x, F::ZERO) };
+            }
+            v.clear();
+        }
+    }
 }
 
 /// Encode a u64 amount as the canonical little-endian binary message polynomial (D1: 1 bit per
@@ -253,11 +293,16 @@ pub fn decrypt_amount(sk: &RegevSk, ct: &RegevCiphertext) -> Result<u64, RegevEr
     }
     let upstream_ct = to_upstream_ct(ct)?;
     let params = channel_regev_params();
-    let upstream_sk = UpstreamSecretKey { s: sk.s.clone() };
+    // Review C10: the upstream key is a second copy of the secret; erase it right after use.
+    let mut upstream_sk = UpstreamSecretKey { s: sk.s.clone() };
     // Decode the digits ourselves instead of calling `regev_plonky3::decrypt_value`: the
     // upstream decoder panics on high nonzero digits, and a panic reachable from an
     // adversarially crafted ciphertext is a DoS vector — we return `DecryptOverflow` instead.
     let digits = regev_plonky3::decrypt(&params, &upstream_sk, &upstream_ct);
+    {
+        use zeroize::Zeroize as _;
+        upstream_sk.s.zeroize();
+    }
     let mut value: u128 = 0;
     for (i, &d) in digits.iter().enumerate() {
         if d == 0 {
