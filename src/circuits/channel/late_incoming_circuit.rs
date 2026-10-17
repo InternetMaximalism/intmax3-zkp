@@ -88,7 +88,17 @@ pub struct LateIncomingCircuit<
     extended: ExtendedPublicStateTarget,
     balance_vd: VerifierCircuitData<F, C, D>,
     binding_vd: VerifierCircuitData<F, C, D>,
+    #[cfg(test)]
+    probe: LateIncomingFaithfulnessProbe,
 }
+// Test-only handles retain the actual constructor targets; no gates are added.
+#[cfg(test)]
+struct LateIncomingFaithfulnessProbe {
+    previous: Bytes32Target,
+    next: Bytes32Target,
+    root: Bytes32Target,
+}
+
 impl<F, C, const D: usize> LateIncomingCircuit<F, C, D>
 where
     F: RichField + Extendable<D>,
@@ -168,6 +178,8 @@ where
             extended,
             balance_vd: balance_vd.clone(),
             binding_vd: binding_vd.clone(),
+            #[cfg(test)]
+            probe: LateIncomingFaithfulnessProbe { previous: prev, next, root },
         }
     }
 
@@ -237,5 +249,79 @@ mod tests {
         assert!(LateIncomingPublicInputs::from_u64_slice(&v[..58]).is_err());
         v[58] = 2;
         assert!(LateIncomingPublicInputs::from_u64_slice(&v).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "authenticated-tail-receive"))]
+mod native_connection_certificate {
+    use super::*;
+    use crate::{
+        circuits::balance::{balance_pis::BALANCE_PUBLIC_INPUTS_LEN, spend_circuit::SpendCircuit},
+        faithfulness::RepView,
+        utils::cyclic::TestCyclicCircuit,
+    };
+    use plonky2::{field::{goldilocks_field::GoldilocksField, types::PrimeField64},
+        iop::target::Target, plonk::config::PoseidonGoldilocksConfig};
+
+    /// Executes the actual constructor with a test Balance VK and a 66-PI test
+    /// binding VK. This is a structural certificate, not a production VK or a
+    /// cryptographic soundness test for the supplied test verifier circuits.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn export_late_incoming_connection_certificate() {
+        type F = GoldilocksField;
+        type C = PoseidonGoldilocksConfig;
+        const D: usize = 2;
+        let common = TestCyclicCircuit::<F,C,D>::generate_cd(BALANCE_PUBLIC_INPUTS_LEN);
+        let balance = TestCyclicCircuit::<F,C,D>::new(
+            CircuitConfig::standard_recursion_config(), BALANCE_PUBLIC_INPUTS_LEN, &common);
+        let balance_vd = balance.data.verifier_data();
+        let spend = SpendCircuit::<F,C,D>::new();
+        let mut binding_builder = CircuitBuilder::<F,D>::new(CircuitConfig::standard_recursion_zk_config());
+        let binding_inputs = binding_builder.add_virtual_targets(66);
+        binding_builder.register_public_inputs(&binding_inputs);
+        let binding = binding_builder.build::<C>();
+        let c = LateIncomingCircuit::<F,C,D>::new(&balance_vd, &spend.data.verifier_data(), &binding.verifier_data());
+        let view = RepView::new(&c.data);
+        let previous = BalanceFullPublicInputsTarget::from_pis(
+            &c.receive.prev_balance_proof.public_inputs, &balance_vd.common.config);
+        let q = &c.binding.public_inputs;
+        let amount = c.receive.transfer_witness.transfer.amount.to_vec();
+        let aux = c.receive.transfer_witness.transfer.aux_data.to_vec();
+        assert_eq!(q.len(), 66);
+        assert!(view.is_const(q[57],3));
+        assert!(view.same(q[8], previous.pis.channel_id.value));
+        assert!(view.same(q[56], c.receive.transfer_witness.transfer.token_index));
+        assert!(view.same_slices(&q[58..66], &aux));
+        assert!(view.all_zero(&amount[..6]));
+        assert!(view.same(amount[6],q[38]) && view.same(amount[7],q[39]));
+        let expected = [vec![q[8]], q[0..8].to_vec(), q[40..48].to_vec(),
+            c.probe.previous.to_vec(), c.probe.next.to_vec(), c.probe.root.to_vec(),
+            vec![c.extended.inner.block_number.value], c.receive.update_private_state.nullifier.to_vec(),
+            q[25..30].to_vec(), vec![q[56]], q[38..40].to_vec(),
+            vec![view.public_inputs()[58]]].concat();
+        assert_eq!(expected.len(),59);
+        assert!(view.public_inputs_are(&expected));
+        assert!(view.is_one(view.public_inputs()[58]));
+        let ids = |ts: &[Target]| ts.iter().map(|t| view.rep(*t)).collect::<Vec<_>>();
+        let cert = serde_json::json!({
+            "schema": 1,
+            "scope": "actual LateIncomingCircuit constructor with test Balance and test binding verifier keys; structural connections only",
+            "circuit_digest": c.data.verifier_only.circuit_digest.elements.map(|x| x.to_canonical_u64()),
+            "degree_bits": c.data.common.degree_bits(),
+            "num_wires": c.data.common.config.num_wires,
+            "binding": ids(q), "previous": ids(&c.probe.previous.to_vec()),
+            "next": ids(&c.probe.next.to_vec()), "root": ids(&c.probe.root.to_vec()),
+            "anchor": view.rep(c.extended.inner.block_number.value),
+            "nullifier": ids(&c.receive.update_private_state.nullifier.to_vec()),
+            "previous_channel": view.rep(previous.pis.channel_id.value),
+            "token": view.rep(c.receive.transfer_witness.transfer.token_index),
+            "amount": ids(&amount), "aux": ids(&aux), "public_inputs": ids(view.public_inputs()),
+            "zero": view.rep(amount[0]), "one": view.rep(view.public_inputs()[58]), "three": view.rep(q[57]),
+        });
+        if let Ok(path) = std::env::var("INTMAX_LATE_CERTIFICATE_OUT") {
+            std::fs::write(path, serde_json::to_string_pretty(&cert).unwrap()+"\n").unwrap();
+        }
+        println!("late connection certificate checked: 66 binding PIs, 59 registered PIs, degree_bits={}",c.data.common.degree_bits());
     }
 }
