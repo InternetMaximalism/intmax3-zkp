@@ -1,0 +1,262 @@
+{
+  "captured_at_utc": "2026-10-16T11:01:47.278682+00:00",
+  "repository": "/Users/andropov/repos/intmax3-zkp",
+  "branch": "main",
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "origin_main_checked_via_git_ls_remote": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "scope_primary": [
+    "src/regev/encrypt.rs",
+    "src/regev/keys.rs",
+    "src/regev/params.rs",
+    "src/regev/mod.rs"
+  ],
+  "primary_files_equal_head": true,
+  "upstream": {
+    "commit": "5495edab5aa8ec7eae02a35e3098ddee384a1f58",
+    "local_patch": "vendor/regev-plonky3-5495eda",
+    "regev_rs_identical_to_pinned_git": true
+  },
+  "working_tree_note": "Existing dirty Cargo patches activate local Regev singleton-NTT and p3-dft sources, and prior Merkle-tree repairs. Other pre-existing worktree changes were not reverted. Tests ran against the current working-tree dependency graph, not an untouched HEAD checkout.",
+  "files": [
+    {
+      "path": "src/regev/encrypt.rs",
+      "sha256": "1257e98bf94edade055a9b8c3a52904a85fe7f99a9c095e865af1db65e906003",
+      "bytes": 18539,
+      "lines": 439,
+      "head_sha256": "1257e98bf94edade055a9b8c3a52904a85fe7f99a9c095e865af1db65e906003",
+      "equals_head": true
+    },
+    {
+      "path": "src/regev/keys.rs",
+      "sha256": "ce8e44d82ee9c1b496e2f8776c7aa00cd7fad6ff3ccc92a491a9aed2b2eb41ef",
+      "bytes": 8198,
+      "lines": 205,
+      "head_sha256": "ce8e44d82ee9c1b496e2f8776c7aa00cd7fad6ff3ccc92a491a9aed2b2eb41ef",
+      "equals_head": true
+    },
+    {
+      "path": "src/regev/params.rs",
+      "sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
+      "bytes": 4211,
+      "lines": 84,
+      "head_sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
+      "equals_head": true
+    },
+    {
+      "path": "src/regev/mod.rs",
+      "sha256": "84056287026e553ac87db346e7d731c770db3ec89e68d45b7b7b4659563b5d44",
+      "bytes": 2563,
+      "lines": 51,
+      "head_sha256": "84056287026e553ac87db346e7d731c770db3ec89e68d45b7b7b4659563b5d44",
+      "equals_head": true
+    },
+    {
+      "path": "vendor/regev-plonky3-5495eda/src/regev.rs",
+      "sha256": "69fb4725f46f71378299dfc496813e0f9cf3ab96ef30d5691a5d3a5bccba568a",
+      "bytes": 10568,
+      "lines": 309,
+      "head_sha256": null,
+      "equals_head": false
+    },
+    {
+      "path": "vendor/regev-plonky3-5495eda/src/params.rs",
+      "sha256": "0adb97a6bb9c3f15227b4b0ac26b97e3969f199a841fbe053d6fb631a12736c5",
+      "bytes": 3847,
+      "lines": 101,
+      "head_sha256": null,
+      "equals_head": false
+    },
+    {
+      "path": "vendor/regev-plonky3-5495eda/src/ntt.rs",
+      "sha256": "a1218ba89d986db43a49a708158d6748002041cb7d2064533636e89a6664ae76",
+      "bytes": 6345,
+      "lines": 204,
+      "head_sha256": null,
+      "equals_head": false
+    },
+    {
+      "path": "src/wallet_core.rs",
+      "sha256": "24d393584ae35fcfd28da48a8d0cee1604ff2c98f28a76dd6df2cdf0ac493e78",
+      "bytes": 586689,
+      "lines": 12576,
+      "head_sha256": "24d393584ae35fcfd28da48a8d0cee1604ff2c98f28a76dd6df2cdf0ac493e78",
+      "equals_head": true
+    },
+    {
+      "path": "src/wasm_wallet.rs",
+      "sha256": "64c98690b79a3b032911fa797d7a9febd7b3dadc0dd3dff16ad63175f5c0393f",
+      "bytes": 52389,
+      "lines": 1114,
+      "head_sha256": "64c98690b79a3b032911fa797d7a9febd7b3dadc0dd3dff16ad63175f5c0393f",
+      "equals_head": true
+    },
+    {
+      "path": "src/bin/channel_member.rs",
+      "sha256": "83cf6c0ed55e7c75fb8d7f85c7c9121511f76941fcb70adac5f5f4b50a05e327",
+      "bytes": 964312,
+      "lines": 22033,
+      "head_sha256": "83cf6c0ed55e7c75fb8d7f85c7c9121511f76941fcb70adac5f5f4b50a05e327",
+      "equals_head": true
+    },
+    {
+      "path": "src/block_producer.rs",
+      "sha256": "9444173d21bac78ad6c8b06e2267def4b13243e3981cffb7106b07610037fc8a",
+      "bytes": 62756,
+      "lines": 1399,
+      "head_sha256": "9444173d21bac78ad6c8b06e2267def4b13243e3981cffb7106b07610037fc8a",
+      "equals_head": true
+    },
+    {
+      "path": "src/block_producer_service.rs",
+      "sha256": "e1283ee0b08f41f1f83f7147b91dfbaa04b1f4ea1e2e16b3e9ec6bd48e5f449e",
+      "bytes": 101058,
+      "lines": 2524,
+      "head_sha256": "e1283ee0b08f41f1f83f7147b91dfbaa04b1f4ea1e2e16b3e9ec6bd48e5f449e",
+      "equals_head": true
+    },
+    {
+      "path": "src/live_balance_service.rs",
+      "sha256": "25e859eb73361797a1f9a8900cc3f1a60ea6e5d67dd63a6f929f90495bee41c6",
+      "bytes": 186606,
+      "lines": 4096,
+      "head_sha256": "25e859eb73361797a1f9a8900cc3f1a60ea6e5d67dd63a6f929f90495bee41c6",
+      "equals_head": true
+    },
+    {
+      "path": "src/common/channel.rs",
+      "sha256": "b8fd286167c567d3c011a90622b658cdb362389ac21a3566c24c6bf155f2d10b",
+      "bytes": 139444,
+      "lines": 3002,
+      "head_sha256": "b8fd286167c567d3c011a90622b658cdb362389ac21a3566c24c6bf155f2d10b",
+      "equals_head": true
+    },
+    {
+      "path": "src/common/balance_state.rs",
+      "sha256": "a49f5f3f10737aa8dde4dabbff90cf7d94f126e90d84102c327bd9390f9509e4",
+      "bytes": 92898,
+      "lines": 1901,
+      "head_sha256": "a49f5f3f10737aa8dde4dabbff90cf7d94f126e90d84102c327bd9390f9509e4",
+      "equals_head": true
+    },
+    {
+      "path": "src/circuits/channel/state_update_verifier.rs",
+      "sha256": "ccb90517cf60764e1f4cb7a597d9b0c066841c5b9f0c08ecbeaf3c93fc0d0f61",
+      "bytes": 179228,
+      "lines": 3816,
+      "head_sha256": "ccb90517cf60764e1f4cb7a597d9b0c066841c5b9f0c08ecbeaf3c93fc0d0f61",
+      "equals_head": true
+    },
+    {
+      "path": "hosting/wallet/wallet-relay.js",
+      "sha256": "0ac625047dabdd7cf0fec104ae62bde4e8a85114118949d60f65d31ac41617c5",
+      "bytes": 115595,
+      "lines": 1936,
+      "head_sha256": "0ac625047dabdd7cf0fec104ae62bde4e8a85114118949d60f65d31ac41617c5",
+      "equals_head": true
+    },
+    {
+      "path": "hosting/wallet/send-receipts.js",
+      "sha256": "6055999e779185a647f789f4173818629dd9a195ab107f0ccbacc02311fbd82c",
+      "bytes": 1280,
+      "lines": 22,
+      "head_sha256": "6055999e779185a647f789f4173818629dd9a195ab107f0ccbacc02311fbd82c",
+      "equals_head": true
+    },
+    {
+      "path": "hosting/wallet/batch-window.js",
+      "sha256": "b54c18841ed6406bf052d3a538e2dd8ebf9752ca5ece3292792a39daea825f85",
+      "bytes": 4045,
+      "lines": 90,
+      "head_sha256": "b54c18841ed6406bf052d3a538e2dd8ebf9752ca5ece3292792a39daea825f85",
+      "equals_head": true
+    },
+    {
+      "path": "api/server.js",
+      "sha256": "d9fc0c6078cb29e7e4e6eb4ee637b4b075a3acf2a0a4483bf2a4b10e9f01083b",
+      "bytes": 6785,
+      "lines": 143,
+      "head_sha256": "d9fc0c6078cb29e7e4e6eb4ee637b4b075a3acf2a0a4483bf2a4b10e9f01083b",
+      "equals_head": true
+    },
+    {
+      "path": "api/lib/security.js",
+      "sha256": "5f841e5b7df7dec2039b8becd2cbf7f3fa28aca4b3d620b71b1760b939fabb48",
+      "bytes": 4987,
+      "lines": 115,
+      "head_sha256": "5f841e5b7df7dec2039b8becd2cbf7f3fa28aca4b3d620b71b1760b939fabb48",
+      "equals_head": true
+    },
+    {
+      "path": "api/routes/channel-send.js",
+      "sha256": "923fdd371778d5a13ccb2b232e534f31251ae46bda70071f66618cc6b2f33299",
+      "bytes": 2946,
+      "lines": 67,
+      "head_sha256": "923fdd371778d5a13ccb2b232e534f31251ae46bda70071f66618cc6b2f33299",
+      "equals_head": true
+    },
+    {
+      "path": "doc/docs/sig-cluster-vs-delegates.md",
+      "sha256": "c017eeaf52f155a1cd9b5a2e1bb6cca942991974d36a3bde1190d8afc24521ea",
+      "bytes": 2602,
+      "lines": 33,
+      "head_sha256": "c017eeaf52f155a1cd9b5a2e1bb6cca942991974d36a3bde1190d8afc24521ea",
+      "equals_head": true
+    },
+    {
+      "path": "doc/docs/regev-noise-analysis.md",
+      "sha256": "ca00f411621d456c40554a2dee10eb229e76b7b3e0b0ea96b025639f556cf91b",
+      "bytes": 8816,
+      "lines": 208,
+      "head_sha256": "ca00f411621d456c40554a2dee10eb229e76b7b3e0b0ea96b025639f556cf91b",
+      "equals_head": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c",
+      "bytes": 17054,
+      "lines": 334,
+      "head_sha256": "9a27f0d43fc4cc768ff918dc756798c5d29b126b3341e1cded3b6e5fc2c4a037",
+      "equals_head": false
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6",
+      "bytes": 93110,
+      "lines": 3894,
+      "head_sha256": "e2589ef15ad209c06dd4e43f8bfb5e0d887eb046f57e92f069a90e43391c21c2",
+      "equals_head": false
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "0f2f8c18549999b30c47ea4a358cb97e7374f982468633a38b5e8bfc9fb86015",
+      "bytes": 106,
+      "lines": 4,
+      "head_sha256": "0f2f8c18549999b30c47ea4a358cb97e7374f982468633a38b5e8bfc9fb86015",
+      "equals_head": true
+    },
+    {
+      "path": "vendor/p3-merkle-tree-0.5.3/src/merkle_tree.rs",
+      "sha256": "30e722c5f3c2b8f4f738866e0b77268cf53267f5f3f8e5c74a4e4840e69327c5",
+      "bytes": 24173,
+      "lines": 655,
+      "head_sha256": "0484b42c0ae68a19c08a00950ac76fca99c8d00be25c54c95039c06dc54d1fa9",
+      "equals_head": false
+    },
+    {
+      "path": "vendor/p3-merkle-tree-0.5.3/src/hiding_mmcs.rs",
+      "sha256": "4d68603db9323121a5a305d7f3896b438688e6ee696675c5384f626a70b22769",
+      "bytes": 8503,
+      "lines": 240,
+      "head_sha256": "b60cb5b607b8cac87d3a4fc1b72d1e0ef08dd287de97fdbcba2ef22177c4ec74",
+      "equals_head": false
+    },
+    {
+      "path": "vendor/p3-merkle-tree-0.5.3/src/mmcs.rs",
+      "sha256": "299842e9dbad0dc5ec105c20c9758f00435030a6d774b1e3ce43fd063ce768c6",
+      "bytes": 48489,
+      "lines": 1253,
+      "head_sha256": "0cd595eb3a1f110ec9bc74c90a0dd34391df7ecc8c9d4ac5e8f2aabe3774f2d6",
+      "equals_head": false
+    }
+  ]
+}

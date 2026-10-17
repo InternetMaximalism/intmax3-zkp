@@ -1,0 +1,30 @@
+{
+  "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib wrapper_config:: -- --test-threads=1",
+  "passed": 6,
+  "failed": 0,
+  "ignored": 0,
+  "tests": [
+    "wrapper_config::plonky2_config::tests::test_byte_methods",
+    "wrapper_config::plonky2_config::tests::test_serialization",
+    "wrapper_config::poseidon_bn128::merkle_tree_tests::test_cap_height_eq_log2_len",
+    "wrapper_config::poseidon_bn128::merkle_tree_tests::test_cap_height_too_big",
+    "wrapper_config::poseidon_bn128::merkle_tree_tests::test_merkle_trees",
+    "wrapper_config::poseidon_bn128::permutation_tests::test_permuation"
+  ],
+  "log": "cargo-wrapper-config-tests.log",
+  "toolchain": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)",
+  "decoder_probe": {
+    "valid_cases_passed": 2,
+    "malformed_cases_panicked": 4,
+    "panic_strategy": "abort (explicit probe choice)",
+    "production_reachability": "No active BN128 config caller found; public library API remains exported.",
+    "log": "decoder-probe/probe-results.log"
+  },
+  "constant_checks": {
+    "entries_equal_to_pinned_reference": 512,
+    "nonzero_M_square_minors": 69,
+    "invertible_sparse_matrices": 56,
+    "P_invertible": true,
+    "gcd_5_r_minus_1": 1
+  }
+}

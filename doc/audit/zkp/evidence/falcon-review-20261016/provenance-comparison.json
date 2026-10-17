@@ -1,0 +1,79 @@
+[
+  {
+    "path": "math/mod.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/mod.rs",
+    "upstream_sha256": "06b7a7442be788e938c334f6f4b00871e19b8f9d41616cf7a5e39c6d8a4f1e87",
+    "local_sha256": "ff44e7d17138ad4fddc8c3cc1607221a714fd86c1d177fb566a6f97642c59f5c",
+    "identical": false
+  },
+  {
+    "path": "math/ffsampling.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/ffsampling.rs",
+    "upstream_sha256": "a4698278f1d1d9b24e8fd942e75ddf9f4e2b287325543ff192b212680d84aaad",
+    "local_sha256": "f18b3489c8dab056a54eeaf7a3bdc93fd59b04e92e710159072bca38712e6347",
+    "identical": false
+  },
+  {
+    "path": "math/polynomial.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/polynomial.rs",
+    "upstream_sha256": "5b6485f3a33f32b9b64e2d0a1a2e1812da7e7b9f046bafaa4a5b3cf86a4d4a54",
+    "local_sha256": "a2616bf7ca36c920b34b471ce37d09dd5336900ab4d3c506888961b3f0c5d82a",
+    "identical": false
+  },
+  {
+    "path": "math/fft.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/fft.rs",
+    "upstream_sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd",
+    "local_sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd",
+    "identical": true
+  },
+  {
+    "path": "math/field.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/field.rs",
+    "upstream_sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20",
+    "local_sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20",
+    "identical": true
+  },
+  {
+    "path": "math/samplerz.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/math/samplerz.rs",
+    "upstream_sha256": "25ca4f74c9358def261143f1177167999d136c997e4bba067a77ee03cfcdadaf",
+    "local_sha256": "8d738ed329af385159161461c865d4c92a2c1438f267d60595ba9eeb707ac19a",
+    "identical": false
+  },
+  {
+    "path": "keys/secret_key.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/keys/secret_key.rs",
+    "upstream_sha256": "331cd6e56267b156abc7b6fd2b12c38572c7ccc828d08b1ed0f0b6dc8aeeca53",
+    "local_sha256": "f4006db53dbf5e89ae81a470511d029e49e376386ca15063245bfb54fff4e4ff",
+    "identical": false
+  },
+  {
+    "path": "keys/public_key.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/keys/public_key.rs",
+    "upstream_sha256": "619ffd8c956128ca8ba95345540bd6335f8829308e04f8effb8951f641f3c9a4",
+    "local_sha256": "427c573daef5fedffeb83d3fc79b8b75f6185abc08fbeb230d229936aa9730a7",
+    "identical": false
+  },
+  {
+    "path": "signature.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/signature.rs",
+    "upstream_sha256": "349ddb74c47229a5c04e3f1ba494ee6ac96a597efa42cec34fdffef4cf04034d",
+    "local_sha256": "eb8ed7567777196558a96dfee98af0443241191582a750f42e4bb81a2b3f3a7f",
+    "identical": false
+  },
+  {
+    "path": "hash_to_point.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/hash_to_point.rs",
+    "upstream_sha256": "f2c7aca85b3d407a1541ab1c8e17708de5534eca569aa296ad8f9951f82d95fa",
+    "local_sha256": "d3a0944ec37bb8d2214f2cb9acc92b36638d01751508a7138ff6ba48009915ba",
+    "identical": false
+  },
+  {
+    "path": "mod.rs",
+    "upstream_url": "https://raw.githubusercontent.com/0xMiden/crypto/475092a8476bf4c806424579e5d9225b12941c1a/miden-crypto/src/dsa/falcon512_poseidon2/mod.rs",
+    "upstream_sha256": "e17a7ea5e8a76324a8a01a6eecc5ca1c3bc5524f69a46e30424174b7efc1e68a",
+    "local_sha256": "51630877113af960074ae9508fb679067f5fa0ca54dbf4a9441f2ff5b6291058",
+    "identical": false
+  }
+]

@@ -1,0 +1,75 @@
+{
+  "unique_passed": 14,
+  "failed": 0,
+  "toolchain": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)",
+  "runs": [
+    {
+      "log": "encrypt-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib regev::encrypt::tests",
+      "passed": 7,
+      "test_names": [
+        "regev::encrypt::tests::digest_is_stable",
+        "regev::encrypt::tests::decrypt_with_wrong_key_does_not_return_the_amount",
+        "regev::encrypt::tests::non_canonical_ciphertexts_are_rejected_everywhere",
+        "regev::encrypt::tests::homomorphic_addition_decrypts_to_sum",
+        "regev::encrypt::tests::encrypt_decrypt_roundtrip",
+        "regev::encrypt::tests::sixty_four_stacked_additions_of_wide_amounts_decrypt",
+        "regev::encrypt::tests::sixty_four_stacked_additions_of_max_digit_amounts_decrypt"
+      ],
+      "summary": "ok. 7 passed; 0 failed; 0 ignored; 0 measured; 769 filtered out; finished in 0.03s"
+    },
+    {
+      "log": "keys-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib regev::keys::tests",
+      "passed": 3,
+      "test_names": [
+        "regev::keys::tests::keygen_produces_valid_canonical_keys",
+        "regev::keys::tests::pk_validate_rejects_non_canonical_and_wrong_length",
+        "regev::keys::tests::pk_root_is_deterministic_and_order_sensitive"
+      ],
+      "summary": "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 773 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "params-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib regev::params::tests",
+      "passed": 1,
+      "test_names": [
+        "regev::params::tests::channel_params_are_consistent_with_upstream"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "domain-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib constants::tests::all_domain_constants_pairwise_distinct",
+      "passed": 1,
+      "test_names": [
+        "constants::tests::all_domain_constants_pairwise_distinct"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "zero-witness-test.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib canonical_zero_ciphertext_opens_under_zero_witness",
+      "passed": 1,
+      "test_names": [
+        "regev::transfer_stark::tests::canonical_zero_ciphertext_opens_under_zero_witness"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.09s"
+    },
+    {
+      "log": "budget-validation.log",
+      "command": "RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 common::balance_state::tests::validate_enforces_canonicality_and_add_budget --exact --test-threads=1",
+      "passed": 1,
+      "test_names": [
+        "common::balance_state::tests::validate_enforces_canonicality_and_add_budget"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.14s"
+    }
+  ],
+  "arithmetic_check": {
+    "command": "python3 check_rounding.py",
+    "output": "rounding.log",
+    "scope": "Integer inequalities for all 256 digits and every error within the 65-term bound, plus u128 bound."
+  },
+  "limits": "Existing tests do not reproduce the source-confirmed pre-proof decryption oracle or panic paths. No new ciphertext or proof payload was generated."
+}

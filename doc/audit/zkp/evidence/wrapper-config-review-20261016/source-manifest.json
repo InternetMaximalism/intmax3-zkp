@@ -1,0 +1,180 @@
+{
+  "date": "2026-10-16",
+  "branch": "main",
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "remote_main_verified_this_review": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "plonky2_submodule_head": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2",
+  "scope_files": 5,
+  "scope_lines": 2706,
+  "build_context": "Tests use the current working-tree Cargo patches and dependency graph; unrelated existing modifications were preserved.",
+  "files": [
+    {
+      "path": "src/wrapper_config/mod.rs",
+      "sha256": "ba31703119738b7b2bd230049771bc94f3f510df57bcc679f69902b5507b8736",
+      "bytes": 97,
+      "lines": 4,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/wrapper_config/poseidon_bn128.rs",
+      "sha256": "2812cfa7b5513d45a07255f77ef88e711d2455ad7b500660e443aa3544a87fec",
+      "bytes": 10420,
+      "lines": 294,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/wrapper_config/poseidon_bn128_constants.rs",
+      "sha256": "2d56e14ae6cde06088943cd13e4f61d0a3d79e447e788b0c41a5be453f3551be",
+      "bytes": 80752,
+      "lines": 2111,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/wrapper_config/plonky2_config.rs",
+      "sha256": "4b6772abb0304e8d1e3ece6ca7cdb6cead053de8d6f18f1e9d8fbf898cf8ee65",
+      "bytes": 8468,
+      "lines": 266,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/wrapper_config/utils.rs",
+      "sha256": "6728ae60adb3c78a2af5feeb239f63907a4f2390c27b9d402d9bd1aded911e9e",
+      "bytes": 1327,
+      "lines": 31,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "ea4e9cb7cc5c3a20c83e2cee63aacc73e24c66d5bfe06927827da7baab325842",
+      "bytes": 4555,
+      "lines": 107,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/utils/wrapper.rs",
+      "sha256": "81d36a6b126e0dd3b91c53ea994029895dbcf4b0bc49965c6218b2ff1487d428",
+      "bytes": 1977,
+      "lines": 58,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/utils/mle_prover.rs",
+      "sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
+      "bytes": 60699,
+      "lines": 1399,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/wallet_core.rs",
+      "sha256": "24d393584ae35fcfd28da48a8d0cee1604ff2c98f28a76dd6df2cdf0ac493e78",
+      "bytes": 586689,
+      "lines": 12576,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/validity_prover_service.rs",
+      "sha256": "d3ea9a2425f40eba4eeedae716e7b7eff2f9f65a1712bd814f4d2fb4d81d408e",
+      "bytes": 139338,
+      "lines": 3501,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "src/bin/generate_e2e_fixture.rs",
+      "sha256": "4640abdeb62b10328cee1b773d16eb6841d1da0b6323be1e498b81f757e7070e",
+      "bytes": 12685,
+      "lines": 283,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "tests/mle_onchain_e2e.rs",
+      "sha256": "b88b5cca24ed08e2eb707e831b69911abe32b8e1958c17edca08d77e423d06b1",
+      "bytes": 4473,
+      "lines": 122,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/src/IntmaxRollup.sol",
+      "sha256": "3ceaadd5bf806d55b68983450ecf7fd036a56662002a84e7c7c21d9225fa8915",
+      "bytes": 132740,
+      "lines": 2359,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/src/IPinnedMleVerifierV2.sol",
+      "sha256": "c8140a09df809bfe64d0502f9a9a54290909e1e24738673178a01130d2082235",
+      "bytes": 787,
+      "lines": 21,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/plonk/config.rs",
+      "sha256": "bcedf12f67be280ac45aaa68aab69d0e80ae9b4f42decc40ae0d624565c13fb3",
+      "bytes": 4712,
+      "lines": 126,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/plonk/get_challenges.rs",
+      "sha256": "7f3488e37b444e4e11ea46f0c558569b3a6f095dbaa618f6ac752693ad065d6c",
+      "bytes": 14106,
+      "lines": 376,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/iop/challenger.rs",
+      "sha256": "bb3b1d88a81886b94a099f3c72b0561c2da2d10522c5494e35d6ce41a5383059",
+      "bytes": 13527,
+      "lines": 387,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/util/serialization/mod.rs",
+      "sha256": "8a62f22f23d8cbaf4440b0c9e13b50885c5e83c8713d63d41046e79e1ce893b8",
+      "bytes": 72871,
+      "lines": 2247,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/fri/validate_shape.rs",
+      "sha256": "dc0193fc452aec3156baf14164887dcd685cbbaeb7f900ad2d0ed01c483f1048",
+      "bytes": 2664,
+      "lines": 85,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/fri/verifier.rs",
+      "sha256": "4e9a6d2274f375614ab214d1376632cc7720ae8550742fd39c75c99df852124b",
+      "bytes": 8782,
+      "lines": 261,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c",
+      "bytes": 17054,
+      "lines": 334,
+      "equals_relevant_HEAD": false
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6",
+      "bytes": 93110,
+      "lines": 3894,
+      "equals_relevant_HEAD": false
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "0f2f8c18549999b30c47ea4a358cb97e7374f982468633a38b5e8bfc9fb86015",
+      "bytes": 106,
+      "lines": 4,
+      "equals_relevant_HEAD": true
+    },
+    {
+      "path": "doc/docs/sig-cluster-vs-delegates.md",
+      "sha256": "c017eeaf52f155a1cd9b5a2e1bb6cca942991974d36a3bde1190d8afc24521ea",
+      "bytes": 2602,
+      "lines": 33,
+      "equals_relevant_HEAD": true
+    }
+  ]
+}

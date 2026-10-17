@@ -1,0 +1,55 @@
+src/regev/hash_sig.rs:132:/// `IM..` digests, the Goldilocks `DOMAIN_PK_G/SIG_G`). Because each domain occupies a FIXED state
+src/circuits/channel/cancel_close_circuit.rs:10://! Phase 2, replacing the retired `poseidon_sig::aggregate` proof at identical PI offsets —
+src/circuits/channel/cancel_close_circuit.rs:753:        /// `SingleSigCircuit` + `SigAggregator` pair).
+src/constants.rs:197:// `poseidon_sig::tests::domain_constants_are_pairwise_distinct` (the repo-wide non-collision
+src/constants.rs:414:            ("IMPG DOMAIN_PK_G (poseidon_sig/mod.rs)", 0x494d_5047),
+src/constants.rs:415:            ("IMSG DOMAIN_SIG_G (poseidon_sig/mod.rs)", 0x494d_5347),
+src/common/channel.rs:1560:/// `SingleSigCircuit` proof) cannot pass a check that only ever asked for "some bytes".
+src/common/channel.rs:2309:        // not "non-empty". A retired-scheme blob (a ~76 KB `SingleSigCircuit` proof) and a
+src/common/balance_state.rs:46:// `poseidon_sig::tests::domain_constants_are_pairwise_distinct`) — same treatment as the retired
+src/circuits/validity/block_hash_chain/update_channel_tree.rs:34:    poseidon_sig::list::{chain_step_target, list_chain_step},
+src/circuits/validity/block_hash_chain/update_channel_tree.rs:473:            // `poseidon_sig::list` step, `falcon_sig::agg_list` leaf). The matching aggregate-list
+src/circuits/validity/block_hash_chain/update_channel_tree.rs:1094:        // the updating bp slot) into `bp_sig_chain` using the shared `poseidon_sig::list` chain
+src/wallet_core.rs:138:// Previously re-exported from `poseidon_sig::circuit`, which was deleted with the retired
+src/wallet_core.rs:268:/// This is ~5 ms of native arithmetic. It replaces the retired `SingleSigCircuit` proving step
+src/wallet_core.rs:281:///      `SingleSigCircuit` proof blob is rejected by POLICY, before any parsing (O-9 / TM-C8);
+src/wallet_core.rs:5643:///     each blob exactly `FALCON_COSIGN_BLOB_BYTES` (TM-C8/O-9: a retired ~76 KB `SingleSigCircuit`
+src/wallet_core.rs:7822:    /// A REAL legacy `SingleSigCircuit` proof blob — the old cosign wire object — captured just
+src/wallet_core.rs:8965:    /// TM-C8 / O-9 (test 4f): the blob is versioned and fixed-length. A retired `SingleSigCircuit`
+src/poseidon_sig/mod.rs:6://! (`GoldilocksSecretKey` + `circuit::SingleSigCircuit`, the "the proof IS the signature" scheme)
+src/poseidon_sig/mod.rs:17://! - [`DOMAIN_PK_G`] / [`DOMAIN_SIG_G`] — RETIRED domain constants, kept RESERVED so the repo-wide
+src/poseidon_sig/mod.rs:22://! A legacy `SingleSigCircuit` proof blob captured before the deletion lives at
+src/poseidon_sig/mod.rs:29:/// public keys under, `pk = H(DOMAIN_PK_G ‖ sk)`. ASCII "IMPG". Nothing derives from it any more;
+src/poseidon_sig/mod.rs:33:pub const DOMAIN_PK_G: u32 = 0x494d_5047;
+src/poseidon_sig/mod.rs:35:/// RETIRED (falcon-sig Phase 4), kept RESERVED — see [`DOMAIN_PK_G`]. The domain the deleted
+src/poseidon_sig/mod.rs:36:/// scheme hashed message signatures under, `sig = H(DOMAIN_SIG_G ‖ sk ‖ m)`. ASCII "IMSG".
+src/poseidon_sig/mod.rs:37:pub const DOMAIN_SIG_G: u32 = 0x494d_5347;
+src/poseidon_sig/list.rs:19://! directly in-circuit; it previously recursively verified a `SingleSigCircuit` proof). The format
+src/poseidon_sig/list.rs:126:        assert_ne!(LIST_LEAF_DOMAIN, super::super::DOMAIN_PK_G);
+src/poseidon_sig/list.rs:127:        assert_ne!(LIST_LEAF_DOMAIN, super::super::DOMAIN_SIG_G);
+src/circuits/validity/block_hash_chain/ext_public_state.rs:48:    /// hash chain (`poseidon_sig::list`) covers every signing block's
+src/circuits/channel/close_circuit.rs:16://!    DIRECTLY in-circuit and re-exposes the retired `poseidon_sig::aggregate` statement
+src/circuits/channel/close_circuit.rs:806:        // and offsets to the retired `poseidon_sig::aggregate` level-4 statement).
+src/circuits/channel/close_circuit.rs:1219:        /// `SingleSigCircuit` + `SigAggregator` pair).
+src/circuits/channel/close_circuit.rs:2478:    // to live here, building a REAL legacy `SingleSigCircuit` proof in-process. That circuit —
+src/falcon_sig/agg_list.rs:74:    poseidon_sig::list::{chain_step_target, list_chain_step},
+src/falcon_sig/agg_list.rs:860:            crate::poseidon_sig::list::LIST_LEAF_DOMAIN
+src/falcon_sig/agg_list.rs:864:            crate::poseidon_sig::list::LIST_LEAF_DOMAIN
+src/falcon_sig/agg_list.rs:869:        let imll: Bytes32 = crate::poseidon_sig::list::list_leaf(m, pk).into();
+src/falcon_sig/list.rs:4://! chain the retired `SingleSigCircuit`-based list produced (format-stable, see
+src/falcon_sig/list.rs:5://! [`crate::poseidon_sig::list`]):
+src/falcon_sig/list.rs:18://! BEFORE: [`ListStepCircuit`] recursively verified one `poseidon_sig::circuit::SingleSigCircuit`
+src/falcon_sig/list.rs:90:    poseidon_sig::list::{chain_step_target, leaf_target},
+src/falcon_sig/list.rs:137:        // `SingleSigCircuit` proof at a constant VK.)
+src/falcon_sig/list.rs:209:/// [`crate::poseidon_sig::list::list_commitment`].
+src/falcon_sig/list.rs:273:        poseidon_sig::list::{LIST_LEAF_DOMAIN, list_commitment},
+src/falcon_sig/mod.rs:79:/// particular the first byte of a legacy ~76 KB `SingleSigCircuit` proof blob — is rejected by
+src/falcon_sig/mod.rs:393:    /// [`FalconSigError::UnsupportedVersion`] error — so a legacy `SingleSigCircuit` proof blob
+src/falcon_sig/mod.rs:481:/// length and before any structural parsing — so a legacy ~76 KB `SingleSigCircuit` proof blob is
+src/falcon_sig/mod.rs:710:            crate::poseidon_sig::DOMAIN_PK_G,  // IMPG
+src/falcon_sig/mod.rs:711:            crate::poseidon_sig::DOMAIN_SIG_G, // IMSG
+src/falcon_sig/mod.rs:777:    /// A REAL legacy `SingleSigCircuit` proof blob (77,872 bytes) captured from the tree at
+src/falcon_sig/mod.rs:1028:    /// legacy-proof-sized random blob (~76 KB stand-in for an old `SingleSigCircuit` proof)
+src/falcon_sig/agg.rs:9://! This module restores the RETIRED `poseidon_sig::aggregate` binary-tree aggregator
+src/falcon_sig/agg.rs:34://! over the retired aggregator, whose leaf (`SingleSigCircuit`) had a bespoke `[pk(8), m(8)]`
+src/falcon_sig/agg.rs:150:// `poseidon_sig::aggregate` at level 3)

@@ -1,0 +1,26 @@
+[
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/doc/audit/zkp/evidence/wrapper-config-review-20261016/reference/poseidon.go",
+    "sha256": "27eb2372bead7c5728db063a4a3aaf193d76dc8f7e71d89363550a01dad992eb"
+  },
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/doc/audit/zkp/evidence/wrapper-config-review-20261016/reference/constants.go",
+    "sha256": "784271613dcfaa99912b009f7dbe2570ea7782930589c950464123f47cc8e6bc"
+  },
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/doc/audit/zkp/evidence/wrapper-config-review-20261016/reference/element.go",
+    "sha256": "e667beb63f72cc72dd47e9e531bd7b4833a8c456a8213941f3440fda0f5b5dfe"
+  },
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/src/wrapper_config/poseidon_bn128.rs",
+    "sha256": "2812cfa7b5513d45a07255f77ef88e711d2455ad7b500660e443aa3544a87fec"
+  },
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/src/wrapper_config/poseidon_bn128_constants.rs",
+    "sha256": "2d56e14ae6cde06088943cd13e4f61d0a3d79e447e788b0c41a5be453f3551be"
+  },
+  {
+    "path": "/Users/andropov/repos/intmax3-zkp/src/wrapper_config/utils.rs",
+    "sha256": "6728ae60adb3c78a2af5feeb239f63907a4f2390c27b9d402d9bd1aded911e9e"
+  }
+]

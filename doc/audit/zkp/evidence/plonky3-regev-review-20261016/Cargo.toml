@@ -1,0 +1,30 @@
+[package]
+name = "regev-audit-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+regev_plonky3 = { path = "../../../../../vendor/regev-plonky3-5495eda", default-features = false }
+p3-baby-bear = "0.5.3"
+p3-field = "0.5.3"
+p3-matrix = "0.5.3"
+p3-air = "0.5.3"
+p3-batch-stark = "0.5.3"
+p3-lookup = "0.5.3"
+p3-commit = "0.5.3"
+p3-challenger = "0.5.3"
+p3-uni-stark = "0.5.3"
+rand = "0.10.1"
+rand_chacha = "0.10"
+postcard = { version = "1.1", features=["alloc", "use-std"] }
+
+[patch.crates-io]
+p3-field = { path = "../../../../../vendor/p3-field-0.5.3" }
+p3-dft = { path = "../../../../../vendor/p3-dft-0.5.3" }
+p3-fri = { path = "../../../../../vendor/p3-fri-0.5.3" }
+p3-merkle-tree = { path = "../../../../../vendor/p3-merkle-tree-0.5.3" }
+p3-uni-stark = { path = "../../../../../vendor/p3-uni-stark-0.5.3" }
+p3-poseidon2-air = { path = "../../../../../vendor/p3-poseidon2-air-0.5.3" }
+
+[workspace]
+resolver = "2"

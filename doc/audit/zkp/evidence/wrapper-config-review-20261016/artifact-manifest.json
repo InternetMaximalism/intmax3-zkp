@@ -1,0 +1,112 @@
+[
+  {
+    "path": "caller-search.txt",
+    "bytes": 2973,
+    "sha256": "0cd12b8807ecf3cf34c54935d169701cd65c7595c9426f80ed78ac11714622ec"
+  },
+  {
+    "path": "cargo-wrapper-config-tests.log",
+    "bytes": 73652,
+    "sha256": "0bcf73d1aace139faff28b709f949cb5a322fdb1ff9e06be9175dd566e69c2f6"
+  },
+  {
+    "path": "compare_constants.py",
+    "bytes": 3355,
+    "sha256": "6c7792dab825e2c258bfff794a99544955a5d7cb905b43027cbd216567629b3f"
+  },
+  {
+    "path": "constant-comparison.log",
+    "bytes": 363,
+    "sha256": "926dc43a4e34af99f2570910002b7285e4e6b8a46d9bb0d26657ca098c5c654d"
+  },
+  {
+    "path": "decoder-probe/compile-command.txt",
+    "bytes": 1128,
+    "sha256": "e05a94ef936ffe6a4d7090aa7d8e8570b8329222c97d2657452c71ad7d3e676d"
+  },
+  {
+    "path": "decoder-probe/compile.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "decoder-probe/probe-results.log",
+    "bytes": 1703,
+    "sha256": "3c357a77f55cca4a5cc3b549ee51c01fae793360c9b8d9cd163bf32c33d616b3"
+  },
+  {
+    "path": "decoder-probe/probe.rs",
+    "bytes": 1095,
+    "sha256": "f265f3d1a7bc281b07531faa366a67c9bbbbe756a680e16ac6ddd242d6081400"
+  },
+  {
+    "path": "decoder-probe/run-command.txt",
+    "bytes": 352,
+    "sha256": "cbdd47ff55aef59e7065c8312b7463ad54c235029672ac6912db8ab7f140d10a"
+  },
+  {
+    "path": "decoder-probe/run-probe.py",
+    "bytes": 561,
+    "sha256": "90be12e4166201edf3d107a77271c6cc1cc5badf727113e0937d8420f885e541"
+  },
+  {
+    "path": "existing-wrapper-config-tests.log",
+    "bytes": 1059,
+    "sha256": "46f7bce82a132180de8299f58273724aa431a4dae7690d155ee9e07e6b6ff478"
+  },
+  {
+    "path": "head.txt",
+    "bytes": 41,
+    "sha256": "c43dbe3826220558d52d9e37f4de40d41a7fa8f00aea81c0d643014b10a6bf66"
+  },
+  {
+    "path": "legacy-route-search.txt",
+    "bytes": 1117,
+    "sha256": "ecba464e00114ec5da34b681944ba0447fd371a95d991a0cb00400edb6b2d733"
+  },
+  {
+    "path": "reference/constants.go",
+    "bytes": 1709327,
+    "sha256": "784271613dcfaa99912b009f7dbe2570ea7782930589c950464123f47cc8e6bc"
+  },
+  {
+    "path": "reference/element.go",
+    "bytes": 25904,
+    "sha256": "e667beb63f72cc72dd47e9e531bd7b4833a8c456a8213941f3440fda0f5b5dfe"
+  },
+  {
+    "path": "reference/poseidon.go",
+    "bytes": 5567,
+    "sha256": "27eb2372bead7c5728db063a4a3aaf193d76dc8f7e71d89363550a01dad992eb"
+  },
+  {
+    "path": "reference/source-hashes.json",
+    "bytes": 1177,
+    "sha256": "b742e3332e0d350612fe74a2ed9fe58572b853b249fb7a29e0a6395148ff102a"
+  },
+  {
+    "path": "reference-provenance.json",
+    "bytes": 865,
+    "sha256": "a3eedf46ca510e408f85183f922458d3d347c0d2d9dd98999d003bc55e0bab6b"
+  },
+  {
+    "path": "source-manifest.json",
+    "bytes": 5890,
+    "sha256": "6133c104575ffdb333f0639bca8b0e75072e59c32b61268e22d89b79762f9ee7"
+  },
+  {
+    "path": "target-dirty-paths.txt",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "test-command.txt",
+    "bytes": 270,
+    "sha256": "4e9208b6d2e393d3d3310b52b0a1339859204d66073200eae86796e2de18d165"
+  },
+  {
+    "path": "test-results.json",
+    "bytes": 1240,
+    "sha256": "76458c1641c1b74935941da953c06ef1a5cc094d0c60c7671a02d8c8fe853d62"
+  }
+]

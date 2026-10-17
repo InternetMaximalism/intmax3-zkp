@@ -1,0 +1,5 @@
+Working directory: /Users/andropov/repos/intmax3-zkp
+
+/Users/andropov/.cargo/bin/rustc --edition=2024 -C panic=abort /private/tmp/intmax3-wrapper-config-review-20261016-hasher/probe.rs -L dependency=/Users/andropov/repos/intmax3-zkp/target/release/deps --extern plonky2=/Users/andropov/repos/intmax3-zkp/target/release/deps/libplonky2-40bd1c4af251fcb9.rlib --extern num=/Users/andropov/repos/intmax3-zkp/target/release/deps/libnum-9cd89b999b43327f.rlib --extern serde=/Users/andropov/repos/intmax3-zkp/target/release/deps/libserde-e3cbeffae35a0a6e.rlib --extern ff=/Users/andropov/repos/intmax3-zkp/target/release/deps/libff-2fb26a95fcfbb5b8.rlib --extern lazy_static=/Users/andropov/repos/intmax3-zkp/target/release/deps/liblazy_static-e1e9e126a4e6ee1f.rlib --extern serde_json=/Users/andropov/repos/intmax3-zkp/target/release/deps/libserde_json-4811fe8de63bba1e.rlib -o /private/tmp/intmax3-wrapper-config-review-20261016-hasher/probe
+
+The successful invocation captured combined stdout/stderr in compile.log (empty on success). This is the successful argument order, including the pinned-toolchain dependency artifact paths.

@@ -1,0 +1,4 @@
+RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 wrapper_config:: --test-threads=1 --nocapture
+stdout/stderr: existing-wrapper-config-tests.log
+Exit status: 0
+Result: 6 passed; 0 failed; 0 ignored; 0 measured; 770 filtered out; finished in 0.05s

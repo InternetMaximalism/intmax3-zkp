@@ -1,0 +1,219 @@
+{
+  "captured_at_utc": "2026-10-16T11:22:54.124042+00:00",
+  "repository": "/Users/andropov/repos/intmax3-zkp",
+  "branch": "main",
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "origin_main_checked_via_git_ls_remote": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "plonky2_submodule_head": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2",
+  "scope_primary": [
+    "src/poseidon_sig/mod.rs",
+    "src/poseidon_sig/list.rs"
+  ],
+  "primary_files_equal_head": true,
+  "working_tree_note": "Unrelated existing changes preserved; current Cargo patches and dependency graph used for tests. Target and traced production source files match HEAD; tests are not a separate untouched-HEAD build.",
+  "files": [
+    {
+      "path": "src/poseidon_sig/mod.rs",
+      "sha256": "9971c6a2953957b977cb25ad366cfefe5bb339b1075aa152c844094fb9bc4b9b",
+      "bytes": 2309,
+      "lines": 37,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/poseidon_sig/list.rs",
+      "sha256": "f84a82e9c574b04b10644c803db4b30759741da3fb81f44f3a6ef795c2246db3",
+      "bytes": 7169,
+      "lines": 140,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/utils/poseidon_hash_out.rs",
+      "sha256": "ce711aa5941098b87a772684925a9cfa013bab1eb146f80504d6c3b8dd79b0cf",
+      "bytes": 21195,
+      "lines": 620,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/utils/conversion.rs",
+      "sha256": "77675761a786d8be90d09480c06757b64d0ac74281bd75a86c9963ad52f2e80c",
+      "bytes": 1324,
+      "lines": 59,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/ethereum_types/bytes32.rs",
+      "sha256": "44aee98cdc11a8a3ebab630ce0161435f858d65b0ec4a07cb6666e91fd1458b9",
+      "bytes": 10382,
+      "lines": 325,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/ethereum_types/u32limb_trait.rs",
+      "sha256": "3c7aa778411de5dff1323f277557b93931634e0e295f57369fe180f34cc0492c",
+      "bytes": 11296,
+      "lines": 368,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/falcon_sig/list.rs",
+      "sha256": "7560fd10bc072ed4751b6d2fdb9ea3c09c5a7ba09e680d2559547b8ce7975a45",
+      "bytes": 24135,
+      "lines": 528,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/falcon_sig/agg_list.rs",
+      "sha256": "f68281dd2ea7f6bbdde2a92cdb9e9733657486af48852baad851d76b32e0232e",
+      "bytes": 42547,
+      "lines": 912,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/falcon_sig/gadget.rs",
+      "sha256": "e380bf8c579ecd9caa65bd8ab375be6ba829dd312addcd3c5d13a11ff1011620",
+      "bytes": 93054,
+      "lines": 2053,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/falcon_sig/mod.rs",
+      "sha256": "6d0138e230e676dc0bf866839095527b35045b7e58e60d91ffe4ae3a3a1f832c",
+      "bytes": 67725,
+      "lines": 1378,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/constants.rs",
+      "sha256": "46b95af22f810479e109c9a7a322f8caa533798c73f507fad968cd65f5c5ac3a",
+      "bytes": 30166,
+      "lines": 530,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/wallet_core.rs",
+      "sha256": "24d393584ae35fcfd28da48a8d0cee1604ff2c98f28a76dd6df2cdf0ac493e78",
+      "bytes": 586689,
+      "lines": 12576,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/update_channel_tree.rs",
+      "sha256": "bc07c7d1a287a50da2bd40e4b31237df7ad9202a915b10a918859cdf0cb785d8",
+      "bytes": 123772,
+      "lines": 2569,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/validity_circuit.rs",
+      "sha256": "7f9e7c8cad10f20707e3a8852dcbf68f8ee5802dffb51b879314637f7b6a71ac",
+      "bytes": 19923,
+      "lines": 453,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/ext_public_state.rs",
+      "sha256": "946f9de0287b941324a8c702566eea1827c517f35b42f83b8f93cf82bc7aaa81",
+      "bytes": 11764,
+      "lines": 324,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/block_step.rs",
+      "sha256": "e184e457d91501922cd5883e9495e16eaf84383f90b6dc407ce845d07a4d65bd",
+      "bytes": 49557,
+      "lines": 1169,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/channel_state_message.rs",
+      "sha256": "81ae6124b05bf08bc48de86b84b86668466629eb1b451db1f7914166a0999b10",
+      "bytes": 33321,
+      "lines": 707,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/utils/hash_chain/cyclic_chain_circuit.rs",
+      "sha256": "74c4367d3377e88c0629b52cccd9868e9bfb1729c209320965218052246e4133",
+      "bytes": 5666,
+      "lines": 149,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/utils/recursively_verifiable.rs",
+      "sha256": "7c2b8859d5b0084c3014108ff573b9df7ca0c10423fcc19f345c695ab523ce89",
+      "bytes": 3385,
+      "lines": 87,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/circuits/witness/block_witness_generator.rs",
+      "sha256": "9e6d6b747ee9079dc1ecc820d84654d8dcc9e04ce0a6cb09f8b69c7ff582371a",
+      "bytes": 117094,
+      "lines": 2456,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/validity_prover_service.rs",
+      "sha256": "d3ea9a2425f40eba4eeedae716e7b7eff2f9f65a1712bd814f4d2fb4d81d408e",
+      "bytes": 139338,
+      "lines": 3501,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/block_producer.rs",
+      "sha256": "9444173d21bac78ad6c8b06e2267def4b13243e3981cffb7106b07610037fc8a",
+      "bytes": 62756,
+      "lines": 1399,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "src/common/channel.rs",
+      "sha256": "b8fd286167c567d3c011a90622b658cdb362389ac21a3566c24c6bf155f2d10b",
+      "bytes": 139444,
+      "lines": 3002,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "doc/docs/sig-cluster-vs-delegates.md",
+      "sha256": "c017eeaf52f155a1cd9b5a2e1bb6cca942991974d36a3bde1190d8afc24521ea",
+      "bytes": 2602,
+      "lines": 33,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c",
+      "bytes": 17054,
+      "lines": 334,
+      "equals_relevant_head": false
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6",
+      "bytes": 93110,
+      "lines": 3894,
+      "equals_relevant_head": false
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "0f2f8c18549999b30c47ea4a358cb97e7374f982468633a38b5e8bfc9fb86015",
+      "bytes": 106,
+      "lines": 4,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/hash/hashing.rs",
+      "sha256": "83b6d64a310ec718a7d072f6e43191cf671131c4314cc8bacad264929788ba1b",
+      "bytes": 5358,
+      "lines": 145,
+      "equals_relevant_head": true
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/hash/poseidon.rs",
+      "sha256": "f90ec69dcc376382730b41d60e0364f940ddaff1476e27dc393b3f44c37975ca",
+      "bytes": 36412,
+      "lines": 958,
+      "equals_relevant_head": true
+    }
+  ]
+}

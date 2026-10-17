@@ -1,0 +1,33 @@
+tests/mle_onchain_e2e.rs:8://! 2. Wraps it 2x with WrapperCircuit (PoseidonBN128)
+src/wrapper_config/plonky2_config.rs:42:use crate::wrapper_config::{
+src/wrapper_config/plonky2_config.rs:43:    poseidon_bn128::{GOLDILOCKS_ELEMENTS, RATE, permution},
+src/wrapper_config/plonky2_config.rs:49:pub struct PoseidonBN128GoldilocksConfig;
+src/wrapper_config/plonky2_config.rs:50:impl GenericConfig<2> for PoseidonBN128GoldilocksConfig {
+src/wrapper_config/plonky2_config.rs:53:    type Hasher = PoseidonBN128Hash;
+src/wrapper_config/plonky2_config.rs:58:pub struct PoseidonBN128HashOut<F: Field> {
+src/wrapper_config/plonky2_config.rs:63:fn hash_out_to_bytes<F: Field>(hash: PoseidonBN128HashOut<F>) -> Vec<u8> {
+src/wrapper_config/plonky2_config.rs:69:impl<F: RichField> GenericHashOut<F> for PoseidonBN128HashOut<F> {
+src/wrapper_config/plonky2_config.rs:99:impl<F: RichField> Serialize for PoseidonBN128HashOut<F> {
+src/wrapper_config/plonky2_config.rs:113:impl<'de, F: RichField> Deserialize<'de> for PoseidonBN128HashOut<F> {
+src/wrapper_config/plonky2_config.rs:118:        struct PoseidonBN128HashOutVisitor;
+src/wrapper_config/plonky2_config.rs:120:        impl Visitor<'_> for PoseidonBN128HashOutVisitor {
+src/wrapper_config/plonky2_config.rs:136:            .deserialize_str(PoseidonBN128HashOutVisitor)
+src/wrapper_config/plonky2_config.rs:157:pub struct PoseidonBN128Hash;
+src/wrapper_config/plonky2_config.rs:158:impl<F: RichField> Hasher<F> for PoseidonBN128Hash {
+src/wrapper_config/plonky2_config.rs:160:    type Hash = PoseidonBN128HashOut<F>;
+src/wrapper_config/plonky2_config.rs:187:        PoseidonBN128HashOut {
+src/wrapper_config/plonky2_config.rs:220:        PoseidonBN128HashOut {
+src/wrapper_config/plonky2_config.rs:239:        let hash = PoseidonBN128HashOut::<F> {
+src/wrapper_config/plonky2_config.rs:246:        let hash_from_bytes = PoseidonBN128HashOut::<F>::from_bytes(&bytes);
+src/wrapper_config/plonky2_config.rs:256:        let hash = PoseidonBN128HashOut::<GoldilocksField> {
+src/wrapper_config/plonky2_config.rs:262:        let deserialized: PoseidonBN128HashOut<GoldilocksField> =
+src/wrapper_config/mod.rs:2:pub mod poseidon_bn128;
+src/wrapper_config/mod.rs:3:pub mod poseidon_bn128_constants;
+src/wrapper_config/poseidon_bn128.rs:28:use crate::wrapper_config::{
+src/wrapper_config/poseidon_bn128.rs:29:    poseidon_bn128_constants::{C_CONSTANTS, M_MATRIX, P_MATRIX, S_CONSTANTS},
+src/wrapper_config/poseidon_bn128.rs:141:    use crate::wrapper_config::utils::Fr;
+src/wrapper_config/poseidon_bn128.rs:229:    use crate::wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig;
+src/wrapper_config/poseidon_bn128.rs:255:        type C = PoseidonBN128GoldilocksConfig;
+src/wrapper_config/poseidon_bn128.rs:268:        type C = PoseidonBN128GoldilocksConfig;
+src/wrapper_config/poseidon_bn128.rs:283:        type C = PoseidonBN128GoldilocksConfig;
+src/wrapper_config/poseidon_bn128_constants.rs:28:use crate::wrapper_config::utils::Fr;

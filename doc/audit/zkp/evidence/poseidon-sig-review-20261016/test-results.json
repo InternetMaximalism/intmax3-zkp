@@ -1,0 +1,132 @@
+{
+  "unique_existing_tests_passed": 20,
+  "failed": 0,
+  "toolchain": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)",
+  "test_binary": "target/release/deps/intmax3_zkp-4f37c18a5dc1a257",
+  "runs": [
+    {
+      "log": "chain-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib poseidon_sig::list::tests",
+      "passed": 2,
+      "test_names": [
+        "poseidon_sig::list::tests::duplicate_entries_are_accepted_at_chain_level",
+        "poseidon_sig::list::tests::native_chain_is_order_sensitive_and_deterministic"
+      ],
+      "summary": "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "conversion-tests.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --offline --release --locked --lib utils::poseidon_hash_out::tests",
+      "passed": 13,
+      "test_names": [
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_from_u64_slice",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_hash_inputs_u64",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_hash_inputs_u32",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_to_u64_vec",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_bytes32_conversion",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_bytes32_reduce",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_from_u64_slice_invalid_length",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_rand",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_serialization",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_target_hash_inputs",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_target_circuit_operations",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_target_bytes32_conversion",
+        "utils::poseidon_hash_out::tests::test_poseidon_hash_out_safe_split_lo_and_hi"
+      ],
+      "summary": "ok. 13 passed; 0 failed; 0 ignored; 0 measured; 763 filtered out; finished in 0.03s"
+    },
+    {
+      "log": "falcon-list-roundtrip.log",
+      "command": "/Users/andropov/.cargo/bin/cargo test --locked --offline --release --lib falcon_sig::list::tests::recursive_list_matches_native_commitment -- --exact --nocapture",
+      "passed": 1,
+      "test_names": [
+        "falcon_sig::list::tests::recursive_list_matches_native_commitment"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 18.36s"
+    },
+    {
+      "log": "domains-registry.log",
+      "command": [
+        "/Users/andropov/repos/intmax3-zkp/target/release/deps/intmax3_zkp-4f37c18a5dc1a257",
+        "constants::tests::all_domain_constants_pairwise_distinct",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "passed": 1,
+      "test_names": [
+        "constants::tests::all_domain_constants_pairwise_distinct"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "falcon-domains.log",
+      "command": [
+        "/Users/andropov/repos/intmax3-zkp/target/release/deps/intmax3_zkp-4f37c18a5dc1a257",
+        "falcon_sig::tests::falcon_domains_do_not_collide",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "passed": 1,
+      "test_names": [
+        "falcon_sig::tests::falcon_domains_do_not_collide"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.00s"
+    },
+    {
+      "log": "legacy-parser.log",
+      "command": [
+        "/Users/andropov/repos/intmax3-zkp/target/release/deps/intmax3_zkp-4f37c18a5dc1a257",
+        "falcon_sig::tests::legacy_single_sig_proof_blob_rejected_on_version_gate",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "passed": 1,
+      "test_names": [
+        "falcon_sig::tests::legacy_single_sig_proof_blob_rejected_on_version_gate"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.71s"
+    },
+    {
+      "log": "legacy-wallet.log",
+      "command": [
+        "/Users/andropov/repos/intmax3-zkp/target/release/deps/intmax3_zkp-4f37c18a5dc1a257",
+        "wallet_core::delegate_send_tests::legacy_single_sig_blob_rejected_by_verify_state_sig",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "passed": 1,
+      "test_names": [
+        "wallet_core::delegate_send_tests::legacy_single_sig_blob_rejected_by_verify_state_sig"
+      ],
+      "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 775 filtered out; finished in 0.26s"
+    }
+  ],
+  "limits": "Existing positive list roundtrip verifies honest completeness/native-circuit equality, not rejection of the previously reported terminal cyclic-VK composition defect.",
+  "supplemental_probe": {
+    "original_command": "CARGO_TARGET_DIR=/Users/andropov/repos/intmax3-zkp/target /Users/andropov/.cargo/bin/cargo run --offline --release --manifest-path /private/tmp/intmax3-poseidon-review-20261016-native/fixture/Cargo.toml",
+    "saved_manifest": "fixture/Cargo.toml",
+    "source": "fixture/src/main.rs",
+    "original_source_included_by_path": "src/poseidon_sig/mod.rs",
+    "log": "boundary-probe.log",
+    "exit_code": 0,
+    "verified_proofs": 2,
+    "checks": [
+      "Exact native/original target leaf and compression for three ordered pairs including all-zero and all-u32-max inputs.",
+      "Canonical field/Bytes32 round-trip at0,1,p-2,p-1."
+    ],
+    "fixture_files": [
+      {
+        "path": "fixture/Cargo.toml",
+        "sha256": "ab5d35b125393439bf3fced0a4e140253e5ca7b629c42c45994fb51987ce6506"
+      },
+      {
+        "path": "fixture/Cargo.lock",
+        "sha256": "f72038d0be6e6ea7a208d577b2a9a4fefb4af91443e773e7b1e141e6a11a1053"
+      },
+      {
+        "path": "fixture/src/main.rs",
+        "sha256": "ebe9c3115d0fb492a6ab4810ff188baf3fe9b5c2a58cf0b7e01e465ae0bffd4f"
+      }
+    ]
+  }
+}

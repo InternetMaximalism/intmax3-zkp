@@ -1,0 +1,10 @@
+contracts/src/IntmaxRollup.sol:34:///  On-chain verification is MLE/WHIR-only (Groth16 removed). The validity public inputs are
+contracts/src/IntmaxRollup.sol:95:    ///      verification has been MLE/WHIR-only since Groth16 was removed, so it was an exact
+contracts/src/IntmaxRollup.sol:2282:    /// limbs — the soundness binding that replaces the removed Groth16 PI binding.
+src/bin/generate_e2e_fixture.rs:91:    // Accept `--skip-groth16` for backward compatibility with the WHIR-era
+src/bin/generate_e2e_fixture.rs:92:    // pipeline. The current MLE-based pipeline never invokes gnark/Groth16
+src/bin/generate_e2e_fixture.rs:93:    // (Groth16 fixtures are tracked separately), so the flag is effectively a
+src/bin/generate_e2e_fixture.rs:96:    let skip_groth16 = std::env::args().any(|a| a == "--skip-groth16");
+src/bin/generate_e2e_fixture.rs:97:    if skip_groth16 {
+src/bin/generate_e2e_fixture.rs:99:            "[e2e] --skip-groth16 accepted (no-op on MLE pipeline; Groth16 \
+src/bin/generate_e2e_fixture.rs:100:             fixtures are managed separately under contracts/test/data/e2e_groth16.json)"

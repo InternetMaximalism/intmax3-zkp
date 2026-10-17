@@ -1,0 +1,5 @@
+Working directory: /Users/andropov/repos/intmax3-zkp
+
+python3 /private/tmp/intmax3-wrapper-config-review-20261016-hasher/run-probe.py
+
+The saved Python body is identical to the original stdin heredoc execution. Each decoder boundary runs in a separate subprocess, and core dumps are disabled. This command was saved for reproduction and was not rerun.

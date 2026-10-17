@@ -1,0 +1,158 @@
+{
+  "audit_date": "2026-10-16",
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "remote_main_verified": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "plonky2_submodule_head": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2",
+  "falcon_upstream_pin": "475092a8476bf4c806424579e5d9225b12941c1a",
+  "scope_note": "Source version snapshot; not exhaustive linewise or cryptographic certification.",
+  "files": [
+    {
+      "path": "src/falcon_sig/agg.rs",
+      "sha256": "dbcd34e136c8e8127e7732099f4fd8ed83d3c673524869926a0e02eb0a071f15"
+    },
+    {
+      "path": "src/falcon_sig/agg_list.rs",
+      "sha256": "f68281dd2ea7f6bbdde2a92cdb9e9733657486af48852baad851d76b32e0232e"
+    },
+    {
+      "path": "src/falcon_sig/batch.rs",
+      "sha256": "a04a278402fea31288431979182bedaf113d268c26734b4316cf9f18fd852a09"
+    },
+    {
+      "path": "src/falcon_sig/compat.rs",
+      "sha256": "8f27826819c899bfd36e723d5c4c2612883d4fa47bcc3eec7977b3324627e55f"
+    },
+    {
+      "path": "src/falcon_sig/gadget.rs",
+      "sha256": "e380bf8c579ecd9caa65bd8ab375be6ba829dd312addcd3c5d13a11ff1011620"
+    },
+    {
+      "path": "src/falcon_sig/list.rs",
+      "sha256": "7560fd10bc072ed4751b6d2fdb9ea3c09c5a7ba09e680d2559547b8ce7975a45"
+    },
+    {
+      "path": "src/falcon_sig/mod.rs",
+      "sha256": "6d0138e230e676dc0bf866839095527b35045b7e58e60d91ffe4ae3a3a1f832c"
+    },
+    {
+      "path": "src/falcon_sig/testdata/README.md",
+      "sha256": "7080209455d0c3a0419f729befeb1a3cce138fe9ccd095bdc40b10e09291c221"
+    },
+    {
+      "path": "src/falcon_sig/vendor/README.md",
+      "sha256": "c3ef338b49500c774552847a770076e81758b5261447d74f0c641f470c7803c9"
+    },
+    {
+      "path": "src/falcon_sig/vendor/hash_to_point.rs",
+      "sha256": "d3a0944ec37bb8d2214f2cb9acc92b36638d01751508a7138ff6ba48009915ba"
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/mod.rs",
+      "sha256": "d8d4a83bc1eba3ce0c464ae28d3b4fb58afda14c25050b8d7919d2e0b7dddd38"
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/public_key.rs",
+      "sha256": "427c573daef5fedffeb83d3fc79b8b75f6185abc08fbeb230d229936aa9730a7"
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/secret_key.rs",
+      "sha256": "f4006db53dbf5e89ae81a470511d029e49e376386ca15063245bfb54fff4e4ff"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/ffsampling.rs",
+      "sha256": "f18b3489c8dab056a54eeaf7a3bdc93fd59b04e92e710159072bca38712e6347"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/fft.rs",
+      "sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/field.rs",
+      "sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/mod.rs",
+      "sha256": "ff44e7d17138ad4fddc8c3cc1607221a714fd86c1d177fb566a6f97642c59f5c"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/polynomial.rs",
+      "sha256": "a2616bf7ca36c920b34b471ce37d09dd5336900ab4d3c506888961b3f0c5d82a"
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/samplerz.rs",
+      "sha256": "8d738ed329af385159161461c865d4c92a2c1438f267d60595ba9eeb707ac19a"
+    },
+    {
+      "path": "src/falcon_sig/vendor/mod.rs",
+      "sha256": "51630877113af960074ae9508fb679067f5fa0ca54dbf4a9441f2ff5b6291058"
+    },
+    {
+      "path": "src/falcon_sig/vendor/signature.rs",
+      "sha256": "eb8ed7567777196558a96dfee98af0443241191582a750f42e4bb81a2b3f3a7f"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "0f2f8c18549999b30c47ea4a358cb97e7374f982468633a38b5e8bfc9fb86015"
+    },
+    {
+      "path": "src/utils/recursively_verifiable.rs",
+      "sha256": "7c2b8859d5b0084c3014108ff573b9df7ca0c10423fcc19f345c695ab523ce89"
+    },
+    {
+      "path": "src/utils/cyclic.rs",
+      "sha256": "3eb7043a3ff6c25118a22411174d421394f220aab224ccd5d0a4fc8e3cbce0a8"
+    },
+    {
+      "path": "src/utils/dummy.rs",
+      "sha256": "329ae3ff43dc34159b81f5d6960064f34473f5718caf5a9f9691d6574733af28"
+    },
+    {
+      "path": "src/utils/hash_chain/cyclic_chain_circuit.rs",
+      "sha256": "74c4367d3377e88c0629b52cccd9868e9bfb1729c209320965218052246e4133"
+    },
+    {
+      "path": "src/utils/poseidon_hash_out.rs",
+      "sha256": "ce711aa5941098b87a772684925a9cfa013bab1eb146f80504d6c3b8dd79b0cf"
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/validity_circuit.rs",
+      "sha256": "7f9e7c8cad10f20707e3a8852dcbf68f8ee5802dffb51b879314637f7b6a71ac"
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/update_channel_tree.rs",
+      "sha256": "bc07c7d1a287a50da2bd40e4b31237df7ad9202a915b10a918859cdf0cb785d8"
+    },
+    {
+      "path": "src/validity_prover_service.rs",
+      "sha256": "d3ea9a2425f40eba4eeedae716e7b7eff2f9f65a1712bd814f4d2fb4d81d408e"
+    },
+    {
+      "path": "src/circuits/channel/close_circuit.rs",
+      "sha256": "590b25407aed54dcfcc287e520224196f25fe52409fa559a8b5580f1d1b5068a"
+    },
+    {
+      "path": "src/circuits/channel/cancel_close_circuit.rs",
+      "sha256": "ab20970c90eb73108ef13fb73799fbe5b70e705ac36791db6fde5110165163f3"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/recursion/cyclic_recursion.rs",
+      "sha256": "cc9b817aea3c8320884cbf6c0c411b3d6157c45bd0aa9334665ced511f3ab782"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/plonky2/src/plonk/circuit_data.rs",
+      "sha256": "df9f1cc94fbcb02110379abc62430a976f0539339feabf05b206e7225bedf35c"
+    },
+    {
+      "path": "src/wallet_core.rs",
+      "sha256": "24d393584ae35fcfd28da48a8d0cee1604ff2c98f28a76dd6df2cdf0ac493e78"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "audit_date": "2026-10-16",
+  "distinct_passed": 61,
+  "tests": [
+    {
+      "name": "native",
+      "command": "cargo test --release --locked --offline --lib falcon_sig::tests -- --skip bench_keygen_sign_verify",
+      "passed": 13,
+      "failed": 0,
+      "log": "native.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "hardening",
+      "command": "cargo test --release --locked --offline --lib falcon_sig::review_hardening_tests",
+      "passed": 4,
+      "failed": 0,
+      "log": "hardening.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "vendor",
+      "command": "cargo test --release --locked --offline --lib falcon_sig::vendor",
+      "passed": 3,
+      "failed": 0,
+      "log": "vendor.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "gadget",
+      "command": "cargo test --release --locked --offline --lib falcon_sig::gadget::tests:: -- --skip falcon_sig_circuit_measure_1_3_16 --nocapture",
+      "passed": 22,
+      "failed": 0,
+      "log": "gadget.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "batch",
+      "command": "RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::batch::tests:: --skip batch_measure --test-threads=1 --nocapture",
+      "passed": 12,
+      "failed": 0,
+      "log": "batch.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "tree",
+      "command": "RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::agg::tests::agg_happy_ --test-threads=1 --nocapture",
+      "passed": 3,
+      "failed": 0,
+      "log": "tree.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "list",
+      "command": "RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::list::tests::recursive_list_matches_native_commitment --exact --test-threads=1 --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "log": "list.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "agg-list",
+      "command": "RUST_MIN_STACK=33554432 target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::agg_list::tests::cyclic_wrapper_builds_and_round_trips --exact --test-threads=1 --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "log": "agg-list.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "agg-list-format",
+      "command": "target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::agg_list::tests::fold_is_sensitive_to_every_component --exact --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "log": "agg-list-format.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    },
+    {
+      "name": "agg-list-parser",
+      "command": "target/release/deps/intmax3_zkp-4f37c18a5dc1a257 falcon_sig::agg_list::tests::public_input_parser_rejects_malformed_statements --exact --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "log": "agg-list-parser.log",
+      "note": "Existing tests; no new end-to-end forged validity proof generated.",
+      "command_role": "Reproduction command for the recorded existing test selection"
+    }
+  ]
+}
