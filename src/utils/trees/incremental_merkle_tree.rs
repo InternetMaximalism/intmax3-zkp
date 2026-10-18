@@ -227,7 +227,27 @@ impl<'de, V: Leafable> Deserialize<'de> for IncrementalMerkleTree<V> {
     where
         D: Deserializer<'de>,
     {
+        use serde::de::Error as _;
         let packed = IncrementalMerkleTreePacked::deserialize(deserializer)?;
+        // SECURITY (soundness review 2026-10-18): peer-supplied JSON (channel snapshots) reaches
+        // this path. `new(height)` runs `height` Poseidon compressions and `push` asserts
+        // `index < 1 << height`, so an absurd height or more leaves than the tree holds used to
+        // burn unbounded CPU or panic (wasm trap / native abort) inside deserialization. Refuse
+        // both with an ordinary error before building anything. Indices are `u64`, so a height of
+        // 64 or more can never be addressed.
+        if packed.height >= 64 {
+            return Err(D::Error::custom(format!(
+                "incremental Merkle tree height {} is not addressable (max 63)",
+                packed.height
+            )));
+        }
+        if (packed.leaves.len() as u128) > (1u128 << packed.height) {
+            return Err(D::Error::custom(format!(
+                "incremental Merkle tree of height {} cannot hold {} leaves",
+                packed.height,
+                packed.leaves.len()
+            )));
+        }
         Ok(Self::unpack(packed))
     }
 }

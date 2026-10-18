@@ -871,6 +871,24 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 /// carry a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and
 /// withdraw at close, distinguished from members ONLY by slot index. With `delegate_count = 0`
 /// this is byte-for-byte the legacy `0..member_count` loop.
+/// SECURITY (soundness review 2026-10-18): `member_pubkeys_root` hashes `record.member_pk_gs[slot]`,
+/// never `members[i].pk_g`, so a peer-supplied member list anchored by both roots may still carry
+/// ANOTHER participant's Falcon identity at a slot. `verify_inter_channel_tx_sender_hash_sig`
+/// resolves the sender through that field (A11), so every gate that anchors a member list to a
+/// record must also bind each entry's `pk_g` to the registered one. Callers have already made the
+/// slots bijective over the active region.
+fn require_member_pk_gs_match_record(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<()> {
+    for m in members {
+        let slot = m.slot as usize;
+        if slot >= MAX_CHANNEL_MEMBERS || m.pk_g != record.member_pk_gs[slot] {
+            return bail(format!(
+                "members[slot {slot}].pk_g is not the record's registered pk_g for that slot"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<Bytes32> {
     let mut tree = MemberTree::init_wallet_membership();
     let active = record.member_count as usize + record.delegate_count as usize;
@@ -1312,6 +1330,23 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
     if snapshot.state.balance_state.channel_id != channel_id {
         return bail("snapshot channel_id mismatch: balance_state.channel_id != record.channel_id");
     }
+    // SECURITY (soundness review 2026-10-18): the record is UNSIGNED; only the BalanceState header
+    // under the member signatures commits `member_count` / `delegate_count`. Every count-driven
+    // check below (`verify_all_signatures` loops `0..record.member_count`) would otherwise trust a
+    // presenter who relabels a co-signer as a delegate (same keys, roots unchanged) and so lowers
+    // the N-of-N quorum. Pin the record's counts to the signed state's before using them.
+    let bs = &snapshot.state.balance_state;
+    if snapshot.record.member_count != bs.member_count
+        || snapshot.record.delegate_count != bs.delegate_count
+    {
+        return bail(format!(
+            "record member_count/delegate_count ({}/{}) differ from the signed balance state ({}/{})",
+            snapshot.record.member_count,
+            snapshot.record.delegate_count,
+            bs.member_count,
+            bs.delegate_count
+        ));
+    }
     snapshot
         .record
         .validate()
@@ -1335,6 +1370,7 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
         }
         seen[m.slot as usize] = true;
     }
+    require_member_pk_gs_match_record(&snapshot.record, &snapshot.members)?;
     // SECURITY (review C04, 2026-10-16): `RegevPk::digest` / `poseidon_digest` assert
     // canonicality and length in every build profile, and the member list is peer-supplied
     // (serde performs no validation). Validate every key BEFORE any digest below, returning an
@@ -1360,6 +1396,16 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
         return bail(
             "member_pubkeys_root mismatch: the member (pk_g, pk_b, regev_pk) set is not anchored to the record",
         );
+    }
+    // SECURITY (soundness review 2026-10-18): the accumulator tree is peer-supplied. Its shape is
+    // pinned here; its ROOT is checked where the tree is consumed (`require_accumulator_push`,
+    // `verify_inter_channel_credit_states`), because the relay pins snapshots with a placeholder
+    // tree (`live_balance_service.rs`, `default_settled_tx_accumulator()`).
+    if snapshot.settled_tx_accumulator.height() != SETTLED_TX_ACCUMULATOR_HEIGHT {
+        return bail(format!(
+            "settled_tx_accumulator height {} is not {SETTLED_TX_ACCUMULATOR_HEIGHT}",
+            snapshot.settled_tx_accumulator.height()
+        ));
     }
     snapshot
         .state
@@ -3272,6 +3318,7 @@ pub fn verify_aggregate_manifest(
         if member_pubkeys_root(record, members)? != record.member_pubkeys_root {
             return bail("aggregate manifest: member set not anchored to the trusted record");
         }
+        require_member_pk_gs_match_record(record, members)?;
         verify_inter_channel_tx_sender_hash_sig(tx, level, members)?;
         // (3) canonical rebuild + commitment binding; every leaf's signed small block must commit
         //     the SHARED aggregated root. Retired wire fields must be canonical zero per leaf,
@@ -4310,6 +4357,7 @@ pub fn verify_inter_channel_send_transition_with_lookup(
         }
         seen[m.slot as usize] = true;
     }
+    require_member_pk_gs_match_record(trusted_record, &debit_payload.members)?;
     let regev_pks = regev_pks_array(&debit_payload.members);
     if regev_pk_root(&regev_pks) != trusted_record.regev_pk_root {
         return bail("regev_pk_root mismatch: member Regev keys not anchored to the record");
@@ -5164,11 +5212,12 @@ fn l1_deposit_import_head(
 ///
 /// `recipient_delta` is the co-signer's OWN derivation of the deposit's delta ciphertext (the
 /// CLI derives it from the shared deterministic seed) — never a wire-trusted copy; the digest
-/// equality binds the proposal to it. The accumulator root is the one field taken from the
-/// proposal (push-faithfulness remains the import builder's persisted-tree obligation, as
-/// before); every other field of both legs is derived here.
+/// equality binds the proposal to it. `prev_accumulator` is the co-signer's OWN persisted tree:
+/// the proposal's accumulator root must be the push of the deposit nullifier onto it. Every
+/// field of both legs is therefore derived or bound here.
 pub fn verify_l1_deposit_import_transition(
     prev: &ChannelState,
+    prev_accumulator: &IncrementalMerkleTree<Bytes32>,
     record: &ChannelRecord,
     deposit: &Deposit,
     import_state: &ChannelState,
@@ -5183,6 +5232,16 @@ pub fn verify_l1_deposit_import_transition(
     let amount = deposit.amount.to_u32_vec();
     let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
     let deposit_nullifier = deposit.nullifier();
+    // SECURITY (soundness review 2026-10-18): the accumulator root used to be the ONE field taken
+    // verbatim from the proposal and copied into the rebuilt head, so rebuild-equality could never
+    // reject a root carrying a fabricated IMUI leaf (claimable from escrow after close). It must
+    // be exactly the push of this deposit's nullifier onto the co-signer's OWN persisted tree.
+    require_accumulator_push(
+        prev_accumulator,
+        deposit_nullifier,
+        import_state.balance_state.settled_tx_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("l1 deposit co-signer gate (accumulator): {e:?}")))?;
     // TM-7 (general registry resolution): resolve on the SIGNED prev registry, which is what the
     // leg is derived from (immutable across the import per verify_balance_state_common).
     let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
@@ -8068,6 +8127,7 @@ mod delegate_send_tests {
             assert!(built.fund_import_leg.member_signatures.is_empty());
             verify_l1_deposit_import_transition(
                 &snapshot.state,
+                &snapshot.settled_tx_accumulator,
                 &snapshot.record,
                 &deposit,
                 &built.import_state,
@@ -10747,6 +10807,7 @@ mod delegate_send_tests {
         // The head rebuild-equality ignores signatures by construction.
         verify_l1_deposit_import_transition(
             prev,
+            &snapshot.settled_tx_accumulator,
             &snapshot.record,
             &deposit(T1_INDEX),
             &built.import_state,
@@ -10761,6 +10822,7 @@ mod delegate_send_tests {
         }
         verify_l1_deposit_import_transition(
             prev,
+            &snapshot.settled_tx_accumulator,
             &snapshot.record,
             &deposit(T1_INDEX),
             &signed_head,
@@ -10870,6 +10932,7 @@ mod delegate_send_tests {
         // The co-signer gate rebuilds the fund leg itself and accepts only the canonical head.
         verify_l1_deposit_import_transition(
             &snapshot.state,
+            &snapshot.settled_tx_accumulator,
             &snapshot.record,
             &deposit,
             &head,
@@ -10887,6 +10950,7 @@ mod delegate_send_tests {
         assert!(
             verify_l1_deposit_import_transition(
                 &snapshot.state,
+                &snapshot.settled_tx_accumulator,
                 &snapshot.record,
                 &deposit,
                 &legacy_two_step,
@@ -10900,6 +10964,7 @@ mod delegate_send_tests {
         assert!(
             verify_l1_deposit_import_transition(
                 &snapshot.state,
+                &snapshot.settled_tx_accumulator,
                 &snapshot.record,
                 &deposit,
                 &fund_leg,
@@ -10940,6 +11005,7 @@ mod delegate_send_tests {
         let gate = |head: &ChannelState| {
             verify_l1_deposit_import_transition(
                 &snapshot.state,
+                &snapshot.settled_tx_accumulator,
                 &snapshot.record,
                 &deposit,
                 head,
@@ -11836,6 +11902,199 @@ mod delegate_send_tests {
             matches!(&slim, Err(e) if e.0.contains("ProofVerification")),
             "the slim send gate must refuse a witnessed E-1 from a degenerate key: {slim:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Soundness review 2026-10-18 (wallet_core.rs): red tests for the three Medium findings and
+    // the L1 import gate's accumulator root.
+    // -----------------------------------------------------------------------------------------
+
+    /// A snapshot's `record` is unsigned; only the signed `BalanceState` header commits
+    /// `member_count` / `delegate_count`. Two of three co-signers relabel the third as a delegate
+    /// (record 2+1 over the same keys, roots recomputed) and present a state the third never
+    /// signed. Every verifier must refuse: the record's counts must equal the signed state's.
+    #[test]
+    fn verify_snapshot_refuses_a_record_whose_counts_differ_from_the_signed_state() {
+        let mut rng = StdRng::seed_from_u64(0x2026_1018_01);
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let (record, members) = build_delegate_record(31, &keys, 3, 0);
+        let mut cts = Vec::new();
+        for (i, bal) in [5u64, 6, 4].iter().enumerate() {
+            cts.push(encrypt_amount(&mut rng, &keys[i].regev_pk, *bal).unwrap().0);
+        }
+        let pkds: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let mut genesis = assemble_active_genesis(&record, &cts, &pkds, 15);
+        for slot in 0..3u8 {
+            let sig = sign_state(&keys[slot as usize], slot, &genesis).unwrap();
+            add_signature(&mut genesis, sig);
+        }
+        let honest = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis.clone(),
+            members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&honest, None).expect("control: the 3-of-3 signed genesis verifies");
+
+        // The colluders' record: same keys, slot 2 relabeled as a delegate. The members list and
+        // both roots are unchanged by construction (roots are over the active region).
+        let (relabeled, relabeled_members) = build_delegate_record(31, &keys, 2, 1);
+        assert_eq!(relabeled.member_pubkeys_root, record.member_pubkeys_root);
+        assert_eq!(relabeled.regev_pk_root, record.regev_pk_root);
+        let mut two_of_three = genesis.clone();
+        two_of_three.member_signatures.clear();
+        for slot in 0..2u8 {
+            let sig = sign_state(&keys[slot as usize], slot, &two_of_three).unwrap();
+            add_signature(&mut two_of_three, sig);
+        }
+        let forged = ChannelSnapshot {
+            record: relabeled,
+            state: two_of_three,
+            members: relabeled_members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let err = verify_snapshot(&forged, None)
+            .expect_err("a record whose counts differ from the signed BalanceState must be refused");
+        assert!(
+            err.to_string().contains("member_count"),
+            "rejection must name the count mismatch: {err}"
+        );
+    }
+
+    /// `member_pubkeys_root` is computed from `record.member_pk_gs[slot]`, never from
+    /// `members[i].pk_g`, so a member list may carry another participant's `pk_g` at a slot and
+    /// still anchor. `verify_inter_channel_tx_sender_hash_sig` resolves the sender through that
+    /// field. The structural gate must bind every `members[i].pk_g` to the record.
+    #[test]
+    fn verify_snapshot_refuses_a_member_list_whose_pk_g_is_not_the_records() {
+        let mut rng = StdRng::seed_from_u64(0x2026_1018_02);
+        let (record, keys, members, state, _w) = setup_delegate_channel(&mut rng, 32, [5, 6, 4]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("control: honest snapshot verifies");
+
+        let mut relabeled = snapshot.clone();
+        // The delegate (slot 2) claims the member at slot 0's Falcon identity while keeping its
+        // own pk_b and Regev key: both roots still anchor.
+        relabeled.members[2].pk_g = snapshot.members[0].pk_g;
+        let err = verify_snapshot(&relabeled, None)
+            .expect_err("members[slot].pk_g must equal record.member_pk_gs[slot]");
+        assert!(err.to_string().contains("pk_g"), "rejection must name pk_g: {err}");
+    }
+
+    /// Peer-supplied snapshot JSON: `IncrementalMerkleTree` deserialization must return an error
+    /// (never panic, never run an unbounded number of hashes) for an impossible height / leaf
+    /// count, and the snapshot gate must pin the tree's height.
+    #[test]
+    fn snapshot_accumulator_json_is_rejected_not_panicked_and_its_height_is_pinned() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let leaf = serde_json::to_string(&Bytes32::default()).unwrap();
+        // height 0 admits one leaf; two leaves used to hit `assert!(index < 1 << height)`.
+        let two_leaves_height_zero = format!(r#"{{"height":0,"leaves":[{leaf},{leaf}]}}"#);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            serde_json::from_str::<IncrementalMerkleTree<Bytes32>>(&two_leaves_height_zero).is_err()
+        }));
+        assert_eq!(
+            outcome.ok(),
+            Some(true),
+            "two leaves in a height-0 tree must be a deserialization error, not a panic"
+        );
+        // An absurd height must be refused before any hashing (it used to run `height` Poseidon
+        // compressions and then overflow the `1 << height` shift).
+        let huge = format!(r#"{{"height":100000000,"leaves":[{leaf}]}}"#);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            serde_json::from_str::<IncrementalMerkleTree<Bytes32>>(&huge).is_err()
+        }));
+        assert_eq!(outcome.ok(), Some(true), "an absurd height must be a deserialization error");
+
+        // The structural gate pins height and root: a lagging / foreign tree is refused.
+        let mut rng = StdRng::seed_from_u64(0x2026_1018_03);
+        let (record, _keys, members, state, _w) = setup_delegate_channel(&mut rng, 33, [5, 6, 4]);
+        let honest = ChannelSnapshot {
+            record,
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&honest, None).expect("control: genesis snapshot verifies");
+        // The ROOT is deliberately not pinned here: the relay pins snapshots with a placeholder
+        // tree and every consumer of the tree re-derives the root it needs
+        // (`require_accumulator_push`, `verify_inter_channel_credit_states`).
+        let mut wrong_height = honest.clone();
+        wrong_height.settled_tx_accumulator =
+            IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT - 1);
+        assert!(
+            verify_snapshot(&wrong_height, None).is_err(),
+            "an accumulator of the wrong height must be refused"
+        );
+    }
+
+    /// The L1 import co-signer gate used to take `settled_tx_accumulator_root` verbatim from the
+    /// proposal and copy it into the canonical head it rebuilds, so rebuild-equality could never
+    /// reject a forged root. It must now be the push of the deposit nullifier onto the
+    /// co-signer's own tree.
+    #[test]
+    fn l1_deposit_import_gate_refuses_a_proposal_with_a_foreign_accumulator_root() {
+        let mut rng = StdRng::seed_from_u64(0x2026_1018_04);
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 34, [40, 0, 0], [0, 0]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let amount = 4_242u64;
+        let deposit = Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 0,
+            amount: U256::from(amount),
+            aux_data: Bytes32::default(),
+        };
+        let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
+        let built = build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &delta, LEVEL)
+            .expect("deposit import builds");
+        verify_l1_deposit_import_transition(
+            &snapshot.state,
+            &snapshot.settled_tx_accumulator,
+            &snapshot.record,
+            &deposit,
+            &built.import_state,
+            1,
+            &delta,
+        )
+        .expect("control: the honest head passes the gate");
+
+        // The proposer swaps in a tree that also holds a fabricated IMUI leaf.
+        let mut forged_tree = snapshot.settled_tx_accumulator.clone();
+        forged_tree.push(deposit.nullifier());
+        forged_tree.push(crate::common::balance_state::unapplied_incoming_leaf(
+            Bytes32::from_u32_slice(&[0xBAD; 8]).unwrap(),
+        ));
+        let mut forged = built.import_state.clone();
+        forged.balance_state.settled_tx_accumulator_root = Bytes32::from(forged_tree.get_root());
+        forged.digest = forged.signing_digest();
+        let err = verify_l1_deposit_import_transition(
+            &snapshot.state,
+            &snapshot.settled_tx_accumulator,
+            &snapshot.record,
+            &deposit,
+            &forged,
+            1,
+            &delta,
+        )
+        .expect_err("a proposal whose accumulator root is not the nullifier push must be refused");
+        assert!(err.to_string().contains("accumulator"), "rejection must name the accumulator: {err}");
     }
 }
 

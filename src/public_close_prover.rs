@@ -137,7 +137,7 @@ pub struct PublicCloseProofBundle {
     /// Canonical inner proof from the signed-head exit kit. Retaining it keeps the output bundle
     /// independently re-wrappable even if the original public backing endpoint later disappears.
     pub backing_proof: Vec<u8>,
-    /// Exactly 34 raw Goldilocks limbs, in `CloseAssetBackingPublicInputs` wire order.
+    /// Exactly 35 raw Goldilocks limbs, in `CloseAssetBackingPublicInputs` wire order.
     pub backing_public_inputs: Vec<u64>,
     pub backing_mle_json: String,
     /// Proof-free wire-v3 deployment config of the wrapped CloseAssetBacking circuit: the exact
@@ -831,7 +831,7 @@ pub fn export_backing_mle_config(
 }
 
 /// Recursively wrap the already self-verified backing proof and generate the exact wire-v3 PCS
-/// artifact consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 34
+/// artifact consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 35
 /// public inputs verbatim; checking the exported JSON again prevents serialization or pipeline
 /// drift from weakening the Solidity strict-limb binding.
 ///
@@ -1166,8 +1166,9 @@ mod tests {
     #[test]
     fn backing_composition_requires_one_exact_signed_h_vector() {
         let inputs = backing_inputs();
-        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 34);
-        assert_eq!(inputs.to_u64_vec().len(), 34);
+        // 35 limbs since 8acbe309 added processed_send_block_number (index 26).
+        assert_eq!(CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, 35);
+        assert_eq!(inputs.to_u64_vec().len(), 35);
         validate_signed_head_backing_composition(
             &inputs,
             inputs.channel_id,

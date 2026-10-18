@@ -49,7 +49,7 @@ connectFreezeSuccessor	close_circuit.rs:610	connect	ok	the incremented nonce is 
 connectCloseNonceToFreeze	close_circuit.rs:618-620	connect	ok	close_nonce.connect(close_freeze_nonce)
 zeroSnapshot2	close_circuit.rs:621-623	constant	ok	every snapshot limb is connected to the constant 0
 zeroBurnHash8	close_circuit.rs:624-626	constant	ok	every burn_tx_hash limb is connected to the constant 0
-zeroUnallocated8	close_circuit.rs:627-629	constant	ok	every unallocated_confirmed_incoming limb is connected to the constant 0
+authenticatedUnallocated8	ChannelCloseCircuit::new IMCH preimage	connect	ok	unallocated incoming is signed in IMCH; the historical zero-unallocated Lean model needs revision
 recomputeH1AndConnect	close_circuit.rs:644-656	connect	ok	recomputed_h1.connect(final_balance_state_h1)
 recomputeImchAndConnect	close_circuit.rs:665-687	connect	ok	state_digest.connect(final_channel_state_digest)
 recomputeImclAndConnect	close_circuit.rs:689-701	connect	ok	close_withdrawal_digest.connect(close_withdrawal_digest PI)

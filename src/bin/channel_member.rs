@@ -18263,6 +18263,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     // leg) is refused even though this CLI also happens to be the builder.
     verify_l1_deposit_import_transition(
         &state.snapshot.state,
+        &state.snapshot.settled_tx_accumulator,
         &state.snapshot.record,
         &deposit,
         &import_state,
