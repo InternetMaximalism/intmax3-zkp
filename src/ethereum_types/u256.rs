@@ -5,7 +5,7 @@ use plonky2::{
     iop::target::{BoolTarget, Target},
     plonk::circuit_builder::CircuitBuilder,
 };
-use plonky2_bn254::fields::{biguint::BigUintTarget, fq::FqTarget};
+use plonky2_bn254::fields::biguint::BigUintTarget;
 use plonky2_u32::gadgets::{
     arithmetic_u32::{CircuitBuilderU32, U32Target},
     multiple_comparison::list_le_circuit,
@@ -150,11 +150,12 @@ impl From<U256> for BigUint {
     }
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> From<U256Target> for FqTarget<F, D> {
-    fn from(value: U256Target) -> Self {
-        FqTarget::from_slice(&value.to_vec().into_iter().rev().collect::<Vec<_>>())
-    }
-}
+// ETH-01 (follow-up review 2026-10-17): the former `From<U256Target> for FqTarget` called
+// `FqTarget::from_slice`, which marks its input as already reduced modulo the BN254 base field
+// although a range-checked U256 may be >= q, so equality/zero predicates on the result were wrong
+// for q and q + 1 (verified in the review's fixture). It had no caller; it is removed rather than
+// kept as a trap. A future conversion must either constrain `x < q` or reduce before marking the
+// result as reduced.
 
 impl From<U256Target> for BigUintTarget {
     fn from(value: U256Target) -> Self {

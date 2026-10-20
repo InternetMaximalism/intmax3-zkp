@@ -84,13 +84,18 @@ impl Withdrawal {
     }
 
     pub fn from_u64_slice(slice: &[u64]) -> Result<Withdrawal, super::error::CommonError> {
-        let u32_slice: Vec<u32> = slice
+        // COMMON-06 (follow-up review 2026-10-17): an oversized word used to `assert!` (abort
+        // under panic=abort) instead of returning the declared error.
+        let u32_slice = slice
             .iter()
             .map(|&x| {
-                assert!(x <= u32::MAX as u64);
-                x as u32
+                u32::try_from(x).map_err(|_| {
+                    super::error::CommonError::InvalidData(format!(
+                        "withdrawal limb {x} does not fit in u32"
+                    ))
+                })
             })
-            .collect();
+            .collect::<Result<Vec<u32>, _>>()?;
         Self::from_u32_slice(&u32_slice)
     }
 

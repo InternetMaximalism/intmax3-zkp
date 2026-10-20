@@ -59,8 +59,18 @@ impl Tx {
                 input.len()
             )));
         }
-        let transfer_tree_root = PoseidonHashOut::from_u64_slice(&input[0..4]).unwrap();
-        let nonce = input[4] as u32;
+        let transfer_tree_root = PoseidonHashOut::from_u64_slice(&input[0..4]).map_err(|e| {
+            crate::common::error::CommonError::InvalidData(format!(
+                "invalid transfer tree root: {e}"
+            ))
+        })?;
+        // COMMON-03 (follow-up review 2026-10-17): `as u32` aliased `2^32` to nonce 0.
+        let nonce = u32::try_from(input[4]).map_err(|_| {
+            crate::common::error::CommonError::InvalidData(format!(
+                "tx nonce {} does not fit in u32",
+                input[4]
+            ))
+        })?;
         Ok(Self {
             transfer_tree_root,
             nonce,
@@ -276,18 +286,41 @@ impl ChannelAction {
             )));
         }
 
+        // COMMON-03 (follow-up review 2026-10-17): `as u32` aliased `2^32` to kind 0.
+        let kind_word = u32::try_from(input[0]).map_err(|_| {
+            crate::common::error::CommonError::InvalidData(format!(
+                "channel action kind {} does not fit in u32",
+                input[0]
+            ))
+        })?;
+        let kind = ChannelActionKind::from_u32(kind_word)?;
+        // COMMON-05: a ChannelClose carries `ChannelId::dummy()` (zero) as its destination by
+        // construction (`to_channel_close_action`), which the nonzero channel-id constructor
+        // refused, so a valid close action never round-tripped. Accept exactly the zero sentinel
+        // for a close and keep requiring a real channel id for every other kind.
+        let destination_channel_id = if kind == ChannelActionKind::ChannelClose {
+            if input[2] != 0 {
+                return Err(crate::common::error::CommonError::InvalidData(format!(
+                    "channel close destination must be the zero sentinel, got {}",
+                    input[2]
+                )));
+            }
+            ChannelId::dummy()
+        } else {
+            ChannelId::from_u64(input[2]).map_err(|e| {
+                crate::common::error::CommonError::InvalidData(format!(
+                    "invalid destination channel id: {e}"
+                ))
+            })?
+        };
         Ok(Self {
-            kind: ChannelActionKind::from_u32(input[0] as u32)?,
+            kind,
             source_channel_id: ChannelId::from_u64(input[1]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!(
                     "invalid source channel id: {e}"
                 ))
             })?,
-            destination_channel_id: ChannelId::from_u64(input[2]).map_err(|e| {
-                crate::common::error::CommonError::InvalidData(format!(
-                    "invalid destination channel id: {e}"
-                ))
-            })?,
+            destination_channel_id,
             tx_hash: Bytes32::from_u64_slice(&input[3..11]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!("invalid tx hash: {e}"))
             })?,
@@ -441,14 +474,22 @@ impl TxV2 {
             )));
         }
 
+        // COMMON-03 (follow-up review 2026-10-17): `as u32` aliased `2^32` to class 0 / nonce 0.
+        let narrow = |word: u64, what: &str| {
+            u32::try_from(word).map_err(|_| {
+                crate::common::error::CommonError::InvalidData(format!(
+                    "tx v2 {what} {word} does not fit in u32"
+                ))
+            })
+        };
         Ok(Self {
-            tx_class: TxClass::from_u32(input[0] as u32)?,
+            tx_class: TxClass::from_u32(narrow(input[0], "class")?)?,
             transfer_tree_root: PoseidonHashOut::from_u64_slice(&input[1..5]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!(
                     "invalid transfer tree root: {e}"
                 ))
             })?,
-            nonce: input[5] as u32,
+            nonce: narrow(input[5], "nonce")?,
             channel_action_root: PoseidonHashOut::from_u64_slice(&input[6..10]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!(
                     "invalid channel action root: {e}"

@@ -316,12 +316,15 @@ pub trait U32LimbTargetTrait<const NUM_LIMBS: usize>: Clone + Copy {
         &self,
         pw: &impl Witness<F>,
     ) -> Result<V> {
+        // ETH-02 (follow-up review 2026-10-17): `as u32` discarded the high bits of an unchecked
+        // limb before the constructor could reject it (`2^32 + 7` extracted as `Ok(7)`). Keep the
+        // canonical u64 and let the checked constructor refuse oversized limbs.
         let mut limbs = vec![];
         for target in self.to_vec().iter() {
             let value = pw.get_target(*target);
-            limbs.push(value.to_canonical_u64() as u32);
+            limbs.push(value.to_canonical_u64());
         }
-        V::from_u32_slice(&limbs)
+        V::from_u64_slice(&limbs)
     }
 
     fn constant<F: RichField + Extendable<D>, const D: usize, V: U32LimbTrait<NUM_LIMBS>>(

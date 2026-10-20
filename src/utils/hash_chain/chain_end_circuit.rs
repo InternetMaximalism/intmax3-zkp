@@ -54,8 +54,10 @@ impl ChainEndProofPublicInputs {
                 slice.len()
             )));
         }
-        let last_hash = Bytes32::from_u32_slice(&slice[0..BYTES32_LEN]).unwrap();
-        let proof_submitter = Address::from_u32_slice(&slice[BYTES32_LEN..]).unwrap();
+        let last_hash = Bytes32::from_u32_slice(&slice[0..BYTES32_LEN])
+            .map_err(|e| HashChainError::InvalidData(format!("invalid last hash: {e}")))?;
+        let proof_submitter = Address::from_u32_slice(&slice[BYTES32_LEN..])
+            .map_err(|e| HashChainError::InvalidData(format!("invalid proof submitter: {e}")))?;
         Ok(Self {
             last_hash,
             proof_submitter,
@@ -70,13 +72,16 @@ impl ChainEndProofPublicInputs {
                 slice.len()
             )));
         }
+        // UTILS-04 (follow-up review 2026-10-17): an oversized limb used to `assert!` instead of
+        // returning the declared error.
         let inputs = slice
             .iter()
             .map(|&x| {
-                assert!(x <= u32::MAX as u64);
-                x as u32
+                u32::try_from(x).map_err(|_| {
+                    HashChainError::InvalidData(format!("limb {x} does not fit in u32"))
+                })
             })
-            .collect::<Vec<u32>>();
+            .collect::<Result<Vec<u32>, _>>()?;
         Self::from_u32_slice(&inputs)
     }
 

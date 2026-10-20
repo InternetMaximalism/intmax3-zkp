@@ -375,7 +375,11 @@ impl LeafableTarget for PublicStateTarget {
     fn empty_leaf<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
     ) -> Self {
-        Self::constant(builder, &PublicState::default())
+        // COMMON-04 (follow-up review 2026-10-17): this used to embed `PublicState::default()`,
+        // whose roots are initialised tree roots, while the native `Leafable::empty_leaf` is all
+        // zero; a padded tree therefore had different native and circuit roots. Mirror the native
+        // empty leaf exactly. (No production circuit pads a PublicState tree, so no VK moves.)
+        Self::constant(builder, &PublicState::empty_leaf())
     }
 
     fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
@@ -485,18 +489,27 @@ impl FullPublicState {
             self.channel_reg_hash_chain,
         )?;
 
+        // COMMON-07 (follow-up review 2026-10-17): validate every fallible input BEFORE the first
+        // mutation, so an `Err` leaves the public state untouched instead of half-advanced (the
+        // channel id used to be validated inside the per-key loop, after the block was appended).
+        let block_number = self.block_number.as_u64() + 1;
+        let next_block_number =
+            BlockNumber::new(block_number).expect("block number should fit within 63 bits");
+        if key_ids.iter().any(|&key_id| key_id != 0) {
+            ChannelId::new(channel_id as u64)?;
+        }
+        let next_block_hash_chain = block
+            .hash_with_prev_hash(self.block_hash_chain)
+            .expect("hashing should not fail");
+
         // update public state tree
         let prev_public_state = self.to_public_state();
         self.public_state_tree.push(prev_public_state);
 
         // add block
-        let block_number = self.block_number.as_u64() + 1;
-        self.block_number =
-            BlockNumber::new(block_number).expect("block number should fit within 63 bits");
+        self.block_number = next_block_number;
         self.blocks.push(block.clone());
-        self.block_hash_chain = block
-            .hash_with_prev_hash(self.block_hash_chain)
-            .expect("hashing should not fail");
+        self.block_hash_chain = next_block_hash_chain;
 
         // update user tree
         for &key_id in key_ids {

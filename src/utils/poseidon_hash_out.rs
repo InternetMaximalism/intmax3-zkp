@@ -66,6 +66,12 @@ impl PoseidonHashOut {
                 input.len()
             )));
         }
+        // UTILS-03 (follow-up review 2026-10-17): the word `p` (the Goldilocks modulus) was
+        // accepted here, giving an object unequal to zero whose field conversion IS zero (same
+        // hash, different bytes). Require canonical limbs like the Bytes32 and serde decoders do.
+        if let Some(i) = input.iter().position(|&x| x >= GOLDILOCKS_ORDER) {
+            return Err(PoseidonHashOutError::NonCanonicalElement(i));
+        }
         Ok(Self {
             elements: input.try_into().unwrap(),
         })

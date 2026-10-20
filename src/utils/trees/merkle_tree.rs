@@ -68,6 +68,14 @@ impl<V: Leafable> MerkleTree<V> {
     }
 
     pub(crate) fn update_leaf(&mut self, index: u64, leaf_hash: HashOut<V>) {
+        // UTILS-02 (follow-up review 2026-10-17): a path only consumes `height` bits, so an index
+        // with higher bits set used to store nodes under a key that is never read by `get_root`
+        // (a retrievable leaf that does not change the root). Reject before any mutation.
+        assert!(
+            index_in_domain(index, self.height),
+            "Merkle index {index} is outside a height-{} tree",
+            self.height
+        );
         let mut path = BitPath::new(self.height as u32, index);
         let mut h = leaf_hash;
         self.node_hashes.insert(path, h);
@@ -83,6 +91,11 @@ impl<V: Leafable> MerkleTree<V> {
     }
 
     pub(crate) fn prove(&self, index: u64) -> MerkleProof<V> {
+        assert!(
+            index_in_domain(index, self.height),
+            "Merkle index {index} is outside a height-{} tree",
+            self.height
+        );
         let mut path = BitPath::new(self.height as u32, index);
         let mut siblings = vec![];
         for _ in 0..self.height {
@@ -96,6 +109,11 @@ impl<V: Leafable> MerkleTree<V> {
 #[derive(Clone, Debug)]
 pub struct MerkleProof<V: Leafable> {
     pub siblings: Vec<HashOut<V>>,
+}
+
+/// `index < 2^height` without shifting by 64 or more.
+pub(crate) fn index_in_domain(index: u64, height: usize) -> bool {
+    height >= 64 || index < (1u64 << height)
 }
 
 impl<V: Leafable> Serialize for MerkleProof<V>
@@ -133,7 +151,12 @@ impl<V: Leafable> MerkleProof<V> {
     pub fn height(&self) -> usize {
         self.siblings.len()
     }
+    /// The root this proof yields for `leaf_data` at `index`. Callers must keep `index` inside
+    /// the proof's domain (`index < 2^height`); [`MerkleProof::verify`] enforces it and refuses
+    /// an out-of-range index, because the path consumes only `height` bits and would otherwise
+    /// alias `index` with `index mod 2^height` (UTILS-02).
     pub fn get_root(&self, leaf_data: &V, index: u64) -> HashOut<V> {
+        debug_assert!(index_in_domain(index, self.height()), "Merkle index out of domain");
         let mut path = BitPath::new(self.height() as u32, index);
         let mut state = leaf_data.hash();
         for sibling in self.siblings.iter() {
@@ -153,6 +176,12 @@ impl<V: Leafable> MerkleProof<V> {
         index: u64,
         merkle_root: HashOut<V>,
     ) -> Result<(), MerkleProofError> {
+        if !index_in_domain(index, self.height()) {
+            return Err(MerkleProofError::VerificationFailed(format!(
+                "Merkle index {index} is outside a height-{} proof domain",
+                self.height()
+            )));
+        }
         let proof_root = self.get_root(leaf_data, index);
         if proof_root != merkle_root {
             return Err(MerkleProofError::VerificationFailed(format!(

@@ -78,10 +78,19 @@ pub enum U63Error {
     InvalidU64SliceLength(usize, usize),
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct U63(u64);
+
+/// COMMON-02 (follow-up review 2026-10-17): the derived decoder bypassed [`U63::new`], so JSON
+/// `9223372036854775808` built a `U63` whose `as_u64()` is `2^63` while `to_u32_vec()` masks it to
+/// `[0, 0]` (one object, two encodings). Decode through the constructor; the wire format stays a
+/// bare `u64`.
+impl<'de> Deserialize<'de> for U63 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u64::deserialize(deserializer)?;
+        U63::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl U63 {
     pub fn new(value: u64) -> Result<Self, U63Error> {

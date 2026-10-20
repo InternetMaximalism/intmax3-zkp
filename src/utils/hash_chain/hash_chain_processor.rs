@@ -56,13 +56,26 @@ where
         single_proof: &ProofWithPublicInputs<F, C, D>,
         prev_proof: &Option<ProofWithPublicInputs<F, C, D>>,
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
-        let prev_hash = if prev_proof.is_some() {
-            Bytes32::from_u64_slice(
-                &prev_proof.as_ref().unwrap().public_inputs[0..BYTES32_LEN].to_u64_vec(),
-            )
-            .unwrap()
-        } else {
-            Bytes32::default()
+        // UTILS-04 (follow-up review 2026-10-17): validate the previous proof's public-input
+        // shape and limbs instead of slicing/unwrapping (a short vector panicked on the slice, an
+        // oversized limb at the unwrap).
+        let prev_hash = match prev_proof {
+            Some(prev) => {
+                if prev.public_inputs.len() < BYTES32_LEN {
+                    return Err(HashChainError::InvalidData(format!(
+                        "previous proof has {} public inputs, need at least {BYTES32_LEN}",
+                        prev.public_inputs.len()
+                    ))
+                    .into());
+                }
+                Bytes32::from_u64_slice(&prev.public_inputs[0..BYTES32_LEN].to_u64_vec())
+                    .map_err(|e| {
+                        HashChainError::InvalidData(format!(
+                            "previous proof hash limbs are not u32: {e}"
+                        ))
+                    })?
+            }
+            None => Bytes32::default(),
         };
         let inner_proof = self
             .inner_circuit
