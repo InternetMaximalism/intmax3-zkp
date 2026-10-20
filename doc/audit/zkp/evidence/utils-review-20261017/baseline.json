@@ -1,0 +1,13 @@
+{
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "remote_main": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "scope_files": 30,
+  "scope_lines": 7549,
+  "scope_status": "",
+  "dependency_hashes": {
+    "Cargo.toml": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c",
+    "Cargo.lock": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6"
+  },
+  "rustc": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)",
+  "polygon_plonky2_commit": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2"
+}

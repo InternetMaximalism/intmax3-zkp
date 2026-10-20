@@ -1,0 +1,103 @@
+diff --git a/src/common/u63.rs b/src/common/u63.rs
+index 57918f38..8b43e9c6 100644
+--- a/src/common/u63.rs
++++ b/src/common/u63.rs
+@@ -222,55 +222,63 @@ impl U63Target {
+         builder.is_equal(self.value, zero)
+     }
+ 
+-    pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
+-        &self,
++    // Compare canonical 63-bit operands from low to high. A differing higher
++    // bit overrides the accumulated comparison of all lower bits.
++    fn compare<F: RichField + Extendable<D>, const D: usize>(
+         builder: &mut CircuitBuilder<F, D>,
+-        lower: &Self,
++        lhs: Target,
++        rhs: Target,
++        strict: bool,
++    ) -> BoolTarget {
++        let a = builder.split_le(lhs, U63_BITS);
++        let b = builder.split_le(rhs, U63_BITS);
++        let mut greater = builder.constant_bool(!strict);
++        for (a, b) in a.iter().zip(b.iter()) {
++            let equal = builder.is_equal(a.target, b.target);
++            greater = BoolTarget::new_unsafe(builder.select(equal, greater.target, a.target));
++        }
++        greater
++    }
++
++    pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
++        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
+     ) {
+-        let diff = builder.sub(self.value, lower.value);
+-        builder.range_check(diff, U63_BITS);
++        let ge = Self::compare(builder, self.value, lower.value, false);
++        builder.assert_one(ge.target);
+     }
+ 
+     pub fn enforce_gt<F: RichField + Extendable<D>, const D: usize>(
+-        &self,
+-        builder: &mut CircuitBuilder<F, D>,
+-        lower: &Self,
++        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
+     ) {
+-        let lower_plus_one = builder.add_const(lower.value, F::ONE);
+-        self.enforce_ge(
+-            builder,
+-            &Self {
+-                value: lower_plus_one,
+-            },
+-        );
++        let gt = Self::compare(builder, self.value, lower.value, true);
++        builder.assert_one(gt.target);
+     }
+ 
+-    pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
+-        &self,
+-        builder: &mut CircuitBuilder<F, D>,
+-        lower: &Self,
+-        condition: BoolTarget,
++    fn conditional_compare<F: RichField + Extendable<D>, const D: usize>(
++        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
++        condition: BoolTarget, strict: bool,
+     ) {
+-        let diff = builder.sub(self.value, lower.value);
++        // Mask before decomposition: disabled comparisons must not add range
++        // restrictions to operands supplied through unchecked targets.
+         let zero = builder.zero();
+-        let diff_when_true = builder.select(condition, diff, zero);
+-        builder.range_check(diff_when_true, U63_BITS);
++        let lhs = builder.select(condition, self.value, zero);
++        let rhs = builder.select(condition, lower.value, zero);
++        let comparison = Self::compare(builder, lhs, rhs, strict);
++        let disabled = builder.not(condition);
++        let accepted = builder.or(disabled, comparison);
++        builder.assert_one(accepted.target);
++    }
++
++    pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
++        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
++    ) {
++        self.conditional_compare(builder, lower, condition, false);
+     }
+ 
+     pub fn conditional_gt<F: RichField + Extendable<D>, const D: usize>(
+-        &self,
+-        builder: &mut CircuitBuilder<F, D>,
+-        lower: &Self,
+-        condition: BoolTarget,
++        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
+     ) {
+-        let lower_plus_one = builder.add_const(lower.value, F::ONE);
+-        self.conditional_ge(
+-            builder,
+-            &Self {
+-                value: lower_plus_one,
+-            },
+-            condition,
+-        );
++        self.conditional_compare(builder, lower, condition, true);
+     }
+ 
+     pub fn select<F: RichField + Extendable<D>, const D: usize>(

@@ -1,0 +1,21 @@
+{
+  "utils_unit_tests": {
+    "passed": 70,
+    "failed": 0
+  },
+  "mle_gate_support": {
+    "passed": 6,
+    "failed": 12,
+    "reason": "legacy top-level gates/whirParams are absent from current wire-v3 fixtures"
+  },
+  "boundary_fixture": "passed diagnostic assertions",
+  "panic_cases": {
+    "incremental_decode": -6,
+    "snapshot_decode": -6,
+    "chain_end_decode": -6
+  },
+  "all_scope_sources_match_head": true,
+  "scope_sources_unchanged": true,
+  "root_manifests_unchanged": true,
+  "report_links_valid": true
+}

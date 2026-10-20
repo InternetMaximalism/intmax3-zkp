@@ -1,0 +1,14 @@
+{
+  "incremental_decode": {
+    "returncode": -6,
+    "panic": "thread 'main' panicked at /Users/andropov/repos/intmax3-zkp/src/utils/trees/incremental_merkle_tree.rs:72:9:\nassertion failed: index < (1u64 << (self.height() as u64))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+  },
+  "snapshot_decode": {
+    "returncode": -6,
+    "panic": "thread 'main' panicked at /Users/andropov/repos/intmax3-zkp/src/utils/trees/incremental_merkle_tree.rs:72:9:\nassertion failed: index < (1u64 << (self.height() as u64))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+  },
+  "chain_end_decode": {
+    "returncode": -6,
+    "panic": "thread 'main' panicked at /Users/andropov/repos/intmax3-zkp/src/utils/hash_chain/chain_end_circuit.rs:76:17:\nassertion failed: x <= u32::MAX as u64\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+  }
+}

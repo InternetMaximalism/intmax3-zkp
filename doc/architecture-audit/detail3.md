@@ -1,9 +1,13 @@
 # detail3 — Intmax3 detailed design specification (current implementation)
 
-**Describes:** branch `claude/bold-hertz-0f2708` at commit `7f129334` (2026-10-15), which contains the
-three fixes `8acbe309` (close ordered against a burn by the processed-send block), `9ef32e3c` (an L1
-deposit import is one signed head) and `7f129334` (close falls back to the newest backable head; a
-validity candidate carrying a frozen channel's block is refused before L1).
+**Describes:** branch `claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
+`861d44c5` on `claude/abstract-detail-spec-audit-738841`). Written against `7f129334` (2026-10-15:
+`8acbe309` close ordered against a burn by the processed-send block, `9ef32e3c` an L1 deposit import is
+one signed head, `7f129334` close falls back to the newest backable head) and brought up to date with
+the 28 commits that followed (§2.9): the pass-1 circuit/contract fixes (C1–C3), the pass-3 settlement
+fixes (H1, H2, M1), the 2026-10-16 cryptographic review (C01–C10, RNG separation, `eta`), the "B-series"
+minimal fixes, the regenerated wire-v3 fixture cohort, the wallet-core snapshot/import gates, and the
+2026-10-17 follow-up reviews of `src/common`, `src/utils`, `src/ethereum_types`.
 
 **Supersedes:** the "current" sections of [abstract2-1.md](./abstract2-1.md) and
 [detail2.md](./detail2.md). Where those documents and this one disagree, this one describes the code.
@@ -94,6 +98,21 @@ citations are `path:line` in the tree named above; line numbers drift with later
   base and 0.001 ETH per block).
 - **N30** Finality for the off-chain services means the RPC's *finalized* tag, bound to the rollup's
   latest finalized block number and root; "latest" is never treated as durable.
+- **N31** A sub-block that names no signer is not a channel post: it cannot be refused on behalf of a
+  frozen channel and it does not move that channel's last-posted block.
+- **N32** The fraud verdict on a posted proof is decided by what the verifier returned, not by how much
+  gas was left: a verification that completed and rejected the proof is *invalid* even if it used most
+  of its budget; only a run that really ran out of gas is *starved*, and a starved run never convicts.
+- **N33** A fraud proof must fit under the EIP-7825 per-transaction gas cap, and the reporter is paid
+  only out of the offender's bond, never from escrow. The close-intent submission does not yet fit
+  under that cap (§2.8).
+- **N34** Deployment order is a contract rule: the settlement stack must be attached to the rollup
+  before its first deposit and before any token is registered. A rollup that already holds escrow can
+  never receive an exit materializer, and the token-registration script refuses to run on one unless
+  told explicitly that the rollup will never carry channels.
+- **N35** Every verifying key and every checked-in proof belong to one *cohort* (16 proof-free
+  configurations, 16 full proofs, 18 companion files) that is regenerated together whenever any
+  circuit changes; the close tests derive the settlement contract addresses from that cohort.
 
 ### 1.2 Channels and inter-channel payments
 
@@ -176,6 +195,21 @@ citations are `path:line` in the tree named above; line numbers drift with later
   byte; every recovery path compares the exact before and after digests, never "the newest file".
 - **C30** The channel's own hash chain of settled transactions and the balance proof's chain must be
   identical for a head to be exit-capable; this is what ties a signed state to the rollup's view.
+- **C31** A channel snapshot presented to a wallet or a service is trusted only after four structural
+  checks, before any signature is counted: the unsigned registration record agrees with the signed
+  state on the number of signers and delegates; every listed participant's identity is the one
+  registered for its slot; every key is well formed before it is hashed; and the settled-transaction
+  tree has the expected shape. Only then are the N-of-N signatures verified.
+- **C32** Co-signers accept only the *decrypted* form of a sender's proof, in which the sender proves
+  it decrypted its own cell; the older *witnessed* form, satisfiable with a degenerate key, is refused.
+- **C33** The lattice parameters are fixed (dimension 2048, noise parameter 2, 256 plaintext digits);
+  a parameter set naming anything else is rejected. The hiding proofs draw their leaf salts and their
+  masking randomness from independent random streams, so a published salt reveals nothing about a mask.
+- **C34** Numbers decoded from any wire or public-input encoding are canonical: a word that does not
+  fit its field is an error, never silently reduced, so one object never has two encodings. Decoding
+  peer-supplied data never panics; malformed input is an ordinary error returned before verification.
+- **C35** After a close, a claim for an imported-but-unapplied payment names the receiver's lattice
+  key, so the claim cannot be redirected to another participant's slot.
 
 ### 1.3 Deposit into a channel, and the close game
 
@@ -231,6 +265,12 @@ citations are `path:line` in the tree named above; line numbers drift with later
   refused by the publisher before any Ethereum transaction, with an operator-readable error.
 - **G20** Devnet exceptions (chain 31337) shorten the challenge period and allow unguarded posting;
   they are not available on public chains.
+- **G21** When a co-signer approves a deposit import it rebuilds the whole import head from its own
+  ledger, including the settled-transaction tree, and signs only that rebuild; nothing is copied from
+  the proposal, so a proposer cannot smuggle in an extra "unapplied incoming" leaf that would later
+  be claimable from escrow.
+- **G22** The exit moves exactly the amounts the backing proof attests: the materializer recomputes
+  the fund digest from the proof's own vector and refuses any other vector.
 
 ### 1.4 Diagrams
 
@@ -866,9 +906,13 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   cap, salts must have exactly `SALT_ELEMS` elements); C03 in the vendored `p3-fri` 0.5.3 (the
   proof-derived arity schedule is bounded with checked arithmetic before any sampling); C08
   (fallible BN128 hash decoding); C09/C10 (secret-derived Falcon temporaries and the Regev
-  secret key / amount witness are erased on drop and redacted in `Debug`). Still open: the
-  N > 2 MMCS schedule binding, the regev_plonky3 salt/mask RNG-clone correlation, the ignored
-  `eta` parameter and the other dependency-contract items of the review.
+  secret key / amount witness are erased on drop and redacted in `Debug`). Closed on 2026-10-17:
+  the salt/mask RNG-clone correlation (`regev_plonky3` is vendored at
+  `vendor/regev-plonky3-5495eda`; the hiding config derives one ChaCha20 child per purpose) and the
+  ignored `eta` (`RegevParams::validate` rejects `eta != 2`; `REGEV_ETA == 2` is a compile-time
+  assertion). The two pre-existing dependency repairs the review named (Regev NTT singleton,
+  `p3-dft` view reconstruction) are landed. Still open, unreachable from production: the N > 2 MMCS
+  schedule binding (every production MMCS is binary).
 - Pass-2 "B-series" items closed with minimal changes on 2026-10-16: the U63 comparison gadgets are
   bit-wise (no modular wrap of `block_r`); an inter-channel debit or import must carry the fund's
   `channel_id` and `intmax_state_root` unchanged (only an L1 deposit import re-pins the root); the
@@ -877,15 +921,68 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   that names a signer (an all-zero `keyIds` block can neither be refused by a frozen channel nor
   move its `lastPostedBlock`); the `diagnostics` probe uses the decrypted E-1. Left as they were:
   the Verifier's missing delegate-count ceiling (owner decision of 2026-09-29, pinned by a test),
-  the EIP-7825 finalize margin, the late-failing-proof STARVED classification, one-transaction
-  truncation, and the late-incoming cursor stall — each a design change, not a line fix.
+  the EIP-7825 margin, one-transaction truncation, and the late-incoming cursor stall — each a
+  design change, not a line fix. The STARVED classification was fixed on 2026-10-17 (→ N32; submodule
+  `7437d3d5`).
+- EIP-7825 (measured 2026-10-16): `submitCloseIntent` with the real 103-limb close proof costs
+  19,073,837 gas including intrinsic (`ManagerCloseGas`), under the 20M envelope but above the
+  2^24 = 16,777,216 per-transaction cap of Fusaka chains; `withdrawNative` and multi-block finalize
+  are in the same situation. Fraud proofs were brought under the cap (`aa03f0c0`).
+- Wallet-core soundness review (2026-10-18, static, six reviewers): no Critical/High. Fixed on
+  2026-10-19 (→ C31, G21): record/state participant-count agreement, per-slot `pk_g` binding of a
+  presented member list (snapshot, debit gate, aggregate manifest), bounded accumulator
+  deserialization, and the L1 import gate's accumulator root. Left as design items: a zero-amount
+  send is a valid transition and consumes one unit of the recipient's credit budget (64 such sends
+  force a refresh); a cell credited past 2^64 base units can no longer be decrypted by its owner and
+  nothing caps credits at that bound (the sender must give the value away); `verify_all_signatures`
+  tolerates duplicate or extra signature entries that the close prover later refuses (liveness); the
+  inter-channel send witness does not pin `small_block_number + 1` (the producer refuses the head);
+  the integrated `withdraw` flow registers synthetic recipients and exactly three signers.
+- Follow-up reviews of `src/common`, `src/utils`, `src/ethereum_types` (2026-10-17, 13 records): all
+  closed on 2026-10-20 (`861d44c5`) → C34; regressions in
+  `src/common/follow_up_review_2026_10_19_tests.rs`. None was an end-to-end forgery.
+- Formal-verification bookkeeping is behind the code: the Lean source manifest
+  (`doc/audit/lean-current-source-manifest.json`) reports 60 of 497 files drifted (already drifted
+  at the branch base for `IntmaxRollup.sol`), and the submodule's `paper/mle_whir_v1_security.md`
+  addendum still presents the retired 128-bit profile as current while the schema is target 105
+  (aggregate 101.53 bits at 21 variables). Neither affects the code; both need the Lean line's
+  refresh.
 - Deployment order is now a contract rule: the settlement stack (`registerSettlementManager`, which
   installs the exit materializer) must be registered before the first deposit and before
   `registerToken`; a rollup that already holds escrow can never receive an exit materializer and
   must be redeployed with the settlement stack. The deployer key keeps every other power listed in
   §2.1 (producer whitelist, channel and token registration).
 
-### Appendix A — Code comments known to be stale at `7f129334`
+### 2.9 Changes since `7f129334` (2026-10-15 → 2026-10-20)
+
+Grouped by the Overview lines they realise; commit ids are on `claude/abstract-detail-spec-audit-738841`
+(the same patches are on `claude/bold-hertz-0f2708`).
+
+- **Circuits / contracts, pass 1:** `f5f14ff4` aggregated-list verifier data bound, tx index pinned to
+  the channel id, sender proof ordered (C1 → N11); `aa03f0c0` fraud proofs under the EIP-7825 cap,
+  reporter paid from the bond (C3 → N15, N33); `5957f094` decrypted-only E-1/E-2 (C2 → C32).
+- **Settlement, pass 3:** `60df5b5e` post-close / late-incoming claim slot bound to the receiver's
+  Regev key (H1 → C35, G14); `3ef40ed8` materialized amounts bound to the backing proof, exit
+  materializer installable only before escrow (H2 → G22, N34); `3fc6e5e9` per-slot Regev digest must
+  be the slot member's key, burns exempt from the key-independent rejection (M1 → C31).
+- **Cryptographic review 2026-10-16:** `cb6cbe28` verify before decrypt, validate before digest
+  (C02, C04 → C10); `bd4fa490` fallible BN128 decoding, zeroized secrets (C08–C10); `702c8c88`
+  vendored `p3-merkle-tree` / `p3-fri` boundary checks (C03, C05–C07); `36ebfac0` independent hiding
+  randomness and `eta == 2` (→ C33); `78f90a0a` NTT singleton and DFT view repairs.
+- **B-series:** `ff6ca4b4` bit-wise U63 comparators, fund identity pinned across inter-channel
+  transfers, 65th credit refused (→ N20, C08, C18); `fe3ecf8f` unsigned sub-block is not a post (→ N31).
+- **Cohort and guards:** `5f1946da` regenerated wire-v3 cohort, `RegisterTokens` deploy-order rule,
+  `pw_close_intent` family retired (→ N34, N35); `67ccfe26` forge guard green (C-2 pin became a
+  feasibility-gated liveness floor; the dead duplicate-row probe became a distinct-rows check);
+  submodule `fa7b0d5d`, `7437d3d5` (HEAD soundness review, STARVED classification → N32).
+- **Wallet core:** `717abffd` snapshot counts and `pk_g` binding, bounded tree deserialization, L1
+  import root bound to the co-signer's tree (→ C31, C34, G21); `2cf2c7b6` ported settlement / codec /
+  U63 tests and the late-incoming connection certificate.
+- **Follow-up reviews:** `861d44c5` canonical decoders, atomic block application, native Merkle index
+  domain, indexed-tree sentinel, canonical Poseidon limbs, fallible hash-chain APIs, removed the
+  unsound `U256 → Fq` conversion, non-truncating witness extraction (→ C34).
+
+### Appendix A — Code comments known to be stale at `039e9e63`
 
 These were found while reconciling this document with the code; the code behaves as this document
 says, the comments do not.

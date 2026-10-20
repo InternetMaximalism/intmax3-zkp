@@ -1,0 +1,42 @@
+[
+  {
+    "mode": "u64-add-overflow",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "u64-sub-underflow",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "u256-add-overflow",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "u256-sub-underflow",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "limb-range",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "byte-range",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "cmp-range",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  },
+  {
+    "mode": "cmp-wrong-result",
+    "returncode": 0,
+    "outcome": "rejected_with_error"
+  }
+]

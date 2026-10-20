@@ -1,0 +1,84 @@
+{
+  "source_checks": [
+    {
+      "path": "src/ethereum_types/address.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/bytes16.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/bytes32.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/error.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/mod.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/u256.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/u32limb_trait.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "src/ethereum_types/u64.rs",
+      "sha256_unchanged": true,
+      "matches_head": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256_unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256_unchanged": true
+    }
+  ],
+  "inspected_dependency_files": [
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2_bn254-6d6b3459202b0930/18044f3/src/fields/fq.rs",
+      "sha256": "d3f124edd695611b6b76b607fe2d7df8b7f11c632c4b9a67eef3fb62f947bfec"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2_bn254-6d6b3459202b0930/18044f3/src/fields/biguint.rs",
+      "sha256": "56ba104fedd477acd200092010626922cff8f81e9e3f93fd26df9126955c80f2"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2-u32-47aef7027007316d/d0b3bfd/src/gadgets/arithmetic_u32.rs",
+      "sha256": "9d5887f067f09b387432a8685b27265e18a720fe817617631150e67ba8d6d442"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2-u32-47aef7027007316d/d0b3bfd/src/gadgets/multiple_comparison.rs",
+      "sha256": "4c1eda1be2ce7141072281a069bedddbe88dede55be390fa78ab7162bdbe5c21"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2-u32-47aef7027007316d/d0b3bfd/src/gates/comparison.rs",
+      "sha256": "2aaa8a0ec1588791edde145ed3df966cad57db149557c601a32caa9331de6f78"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2-u32-47aef7027007316d/d0b3bfd/src/gates/subtraction_u32.rs",
+      "sha256": "4a6dcde620cdc78237de7e4cde9d6905df45fefc35fa84c960cab4219a924f51"
+    },
+    {
+      "path": "/Users/andropov/.cargo/git/checkouts/plonky2-u32-47aef7027007316d/d0b3bfd/src/gates/add_many_u32.rs",
+      "sha256": "62d90a416dc83358a61a8524d3b76ee90b8ba22cd682707a4613899389e0790a"
+    }
+  ],
+  "plonky2_commit": "3a20a05fb99d2653c4d37debb4f1ead2f422dfb2",
+  "rustc": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)"
+}

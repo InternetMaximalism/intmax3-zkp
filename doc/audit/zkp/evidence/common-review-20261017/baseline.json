@@ -1,0 +1,12 @@
+{
+  "head": "0a2f5a284c0ae6cf6d23e53b810240151e696724",
+  "branch": "main",
+  "scope_files": 27,
+  "scope_lines": 9903,
+  "dependency_hashes": {
+    "Cargo.toml": "f8137c9dc34833b9a3c7d93b558dce05439fb348f01284e5891e908fc2f9576c",
+    "Cargo.lock": "3a6017b70183c1bb7c35666eb7bf4bc5f6f5d8250f3f7ee72f071a938dfe8bf6"
+  },
+  "rustc": "rustc 1.87.0-nightly (b48576b4d 2025-03-22)",
+  "status": " M Cargo.lock\n M Cargo.toml\n M src/common/u63.rs\n"
+}
