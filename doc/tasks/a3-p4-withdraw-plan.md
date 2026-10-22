@@ -1,6 +1,6 @@
 # A-3 P4 `withdraw` — implementation plan + threat model
 
-Parent documents: `doc/tasks/a3-close-lifecycle-spec.md` / `doc/tasks/a3-impl-todo.md` / `doc/tasks/a3-p4-withdraw-handoff.md`.
+Parent documents: `doc/tasks/a3-close-lifecycle-spec.md` / `doc/tasks/a3-impl-todo.md`.
 Decisions (user-approved): **Q1 = embed the whole pipeline in withdraw**, **Q2 = the builders live in wallet_core**, **Q3 = fully automated, including anvil**.
 
 ## 0. Goal (completion criteria)

@@ -1,6 +1,6 @@
 # MLE/WHIR close path: 20,000,000-gas envelope at about 100-bit security (2026-09-04)
 
-Supersedes the gas section of `mle-whir-pcs-repair-progress-handoff-2026-09-04.md`. Branch:
+Branch:
 `codex/mle-whir-pcs-repair-20260904` (parent) with submodule branch
 `codex/whir-leaf-consistency-20260830`.
 

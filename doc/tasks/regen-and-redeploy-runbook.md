@@ -2,7 +2,7 @@
 
 > **RELEASE STATUS (2026-09-03): NO-GO.** The commit-before-challenge MLE/WHIR wire-v3
 > implementation and its compact proof boundary are integrated, but the independent
-> cryptographic review required by `doc/audit/mle-whir-pcs-repair-handoff.md` is not recorded.
+> cryptographic review is not recorded.
 > `IntmaxRollup.releaseRuntime` is pinned to the deployment chain (`deploymentChainId`, set from
 > the adapters pinned with `MLE_VERIFIER_CHAIN_ID`); this runbook's acceptance runs stay on `31337`.
 > Do not open deposits, publish blocks, finalize, withdraw, or move settlement value on a public

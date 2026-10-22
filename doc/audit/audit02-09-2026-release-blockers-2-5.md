@@ -27,8 +27,7 @@
 This report covers the production close-proof availability path, terminal live-withdrawal
 production, Rollup-to-Manager channel-scoped backing, direct delegate/browser claim recovery,
 shared L1-signer durability, exact payout behavior, and retirement of the old in-place member-set
-update prototype. The proof-system repair handoff remains in
-`doc/audit/mle-whir-pcs-repair-handoff.md`.
+update prototype.
 
 The working checkout also contained an independent, unfinished PCS repair. Its submodule changes,
 new proof fields, generated fixtures, and mixed Solidity ABI hunks were deliberately excluded from

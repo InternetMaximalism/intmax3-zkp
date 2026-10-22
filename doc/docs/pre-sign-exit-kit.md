@@ -10,7 +10,7 @@
 A channel head `H` is signer-independently exitable only while someone holds its exit kit: the
 Balance proof plus the whole-vector backing proof whose statement key is
 `(channel_id, settled_tx_chain, token_funds_digest)` of `H` (see
-`doc/tasks/signer-independent-exit-handoff.md`). The live balance service proves that kit when it
+[detail3 §2.5](../architecture-audit/detail3.md)). The live balance service proves that kit when it
 adopts an N-of-N head. For an ordinary in-channel transition (`InChannelSend`, `InChannelBatch`,
 `BalanceRefresh`) the successor keeps the statement key, so the predecessor's kit still backs it
 and the CLI only has to check that a verified receipt for the predecessor is durable.

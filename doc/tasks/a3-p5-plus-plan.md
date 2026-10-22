@@ -1,7 +1,7 @@
 # A-3 P5 and beyond — plan (relay + full E2E + stub revert + cleanup)
 
 Base documents: `doc/tasks/a3-close-lifecycle-spec.md` (the approved full scope), `doc/tasks/a3-impl-todo.md` (progress).
-Prerequisite: P1–P4 complete (P4 is closed out by `withdraw` in `doc/tasks/a3-p4-withdraw-handoff.md`).
+Prerequisite: P1–P4 complete (P4 is closed out by `withdraw`).
 
 ---
 
