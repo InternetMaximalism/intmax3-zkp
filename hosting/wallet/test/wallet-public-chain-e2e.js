@@ -1,6 +1,6 @@
 'use strict';
 // Production-topology acceptance for a PUBLIC-CHAIN wallet relay, run against the rehearsal chain
-// (public-chain-rehearsal.sh: anvil with Sepolia's chain id behind the public-RPC limits proxy).
+// (public-chain-rehearsal.sh: anvil with a non-devnet chain id behind the public-RPC limits proxy).
 //
 // It differs from wallet-tail-e2e.js (the devnet acceptance) in the ways production differs:
 //   * channels are bootstrapped by the operator (bootstrap-real-chain.js): genesis with an

@@ -2,7 +2,7 @@
 # Rehearse the PUBLIC-CHAIN deployment end to end on a local anvil, before touching the testnet.
 #
 # `deploy-settlement` and the relay choose their code path from the chain id (31337 = devnet,
-# anything else = the real-chain path), so an anvil started with Sepolia's chain id runs exactly
+# anything else = the real-chain path), so an anvil started with any other chain id runs exactly
 # the production path: DeployCloseCli, the PREPARED/ACTIVE settlement binding, finalized reads,
 # live registration, bootstrap-real-chain.js and wallet-relay.js off devnet. The first Sepolia
 # deployment met a dozen defects on that path because it had never run before; this script is
@@ -10,9 +10,11 @@
 # proxy (rpc-limits-proxy.js) enforces publicnode's eth_getLogs range cap.
 #
 # Usage: public-chain-rehearsal.sh <step>   (run the steps in order; each is re-runnable)
-#   build      build the binaries exactly as deploy-relay-host.sh does (a no-op when fresh): a
-#              rehearsal of a stale build rehearses something that will not be deployed
-#   chain      start anvil (chain id REHEARSAL_CHAIN_ID, default 11155111) + the limits proxy, pre-mine history, operator keystore
+#   build      build the binaries exactly as deploy-relay-host.sh does (a no-op when fresh), and the
+#              browser (pkg/) and Node (pkg-node/) wallet WASM: a rehearsal of a stale build
+#              rehearses something that will not be deployed
+#   chain      start anvil (chain id REHEARSAL_CHAIN_ID, default 31338) + the limits proxy, pre-mine history, operator keystore;
+#              never Sepolia's 11155111: a wallet on this Mac would take the anvil for Sepolia
 #   rollup     feature-config contracts copy + Deploy.s.sol, its validity verifier pinned to the
 #              producer's own exported configuration (never the arity-[2] test fixture)
 #   backing    setup-backing (empty genesis) for every channel
@@ -20,17 +22,20 @@
 #   bootstrap  bootstrap-real-chain.js up to the envelope, public_close_prover, then settlement,
 #              L1 registration and exit kits
 #   relay      start wallet-relay.js (HTTPS :$RELAY_PORT, HTTP :$RELAY_PORT+1)
+#   rebuild    instead of rollup..relay: run hosting/wallet/rebuild-public-rollup.sh itself (the
+#              script a circuit-changing release runs on the host) against this chain, with the
+#              host's systemctl standing for this script's relay step
 #   env        print the environment (source it to run CLI commands by hand)
 #
-# Requires: Foundry v1.5.1 and TAIL_CONFIGS=<dir with the feature-built *_config.json fixtures>
-# (generate_*_fixture --mle-config-only under the same feature). `build` produces
+# Requires: Foundry v1.5.1, and for `rollup` TAIL_CONFIGS=<dir with the feature-built *_config.json
+# fixtures> (generate_*_fixture --mle-config-only under the same feature; `rebuild` generates its own). `build` produces
 # target/release/{channel_member,block_producer_service,public_close_prover,export_late_incoming_config}.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 R="${REHEARSAL_DIR:?set REHEARSAL_DIR to an empty scratch directory}"
 CHANNELS="${REHEARSAL_CHANNELS:-7 8}"
-CHAIN_ID="${REHEARSAL_CHAIN_ID:-11155111}"
+CHAIN_ID="${REHEARSAL_CHAIN_ID:-31338}"
 ANVIL_PORT="${ANVIL_PORT:-8597}"
 PROXY_PORT="${PROXY_PORT:-8598}"
 RELAY_PORT="${RELAY_PORT:-8610}"
@@ -90,6 +95,13 @@ step_build() {
     --bin export_late_incoming_config > "$R/build.log" 2>&1) || { tail -30 "$R/build.log"; exit 1; }
   grep -q "Finished" "$R/build.log" || { tail -30 "$R/build.log"; exit 1; }
   echo "build: $(tail -1 "$R/build.log")"
+  # The wallets are WASM: the relay serves pkg/ to the browser (as deploy-relay-host.sh ships it)
+  # and the E2E's Node wallet loads pkg-node/. Either left from an older tree rehearses old wallet
+  # code against new binaries (a pkg-node/ older than the receiver-key binding failed every
+  # inter-channel send).
+  (cd "$REPO" && hosting/build-wallet-wasm.sh > "$R/build-wasm.log" 2>&1) || { tail -30 "$R/build-wasm.log"; exit 1; }
+  (cd "$REPO" && hosting/build-wallet-node-wasm.sh > "$R/build-node-wasm.log" 2>&1) || { tail -30 "$R/build-node-wasm.log"; exit 1; }
+  echo "wasm: pkg/ and pkg-node/ rebuilt"
 }
 
 step_chain() {
@@ -212,6 +224,32 @@ step_relay() {
   grep "wallet relay on" "$R/relay.log" || { tail -30 "$R/relay.log"; exit 1; }
 }
 
+# The host's layout as deploy-relay-host.sh leaves it (contracts-tail/ with whatever configs the
+# replaced rollup used, the operator env in the relay home), then the rebuild script. `sudo
+# systemctl stop|start` resolves to a stand-in that stops or starts this rehearsal's relay.
+step_rebuild() {
+  load_env
+  if [ ! -d "$CONTRACTS" ]; then
+    rsync -a --exclude broadcast/ --exclude cache/ --exclude out/ "$REPO/contracts/" "$CONTRACTS/"
+  fi
+  mkdir -p "$R/relayhome" "$R/shim"
+  [ -f "$R/relayhome/bootstrap.env" ] || environment > "$R/relayhome/bootstrap.env"
+  grep -q '^export LATE_INCOMING_VERIFIER=' "$R/relayhome/bootstrap.env" \
+    || echo "export LATE_INCOMING_VERIFIER=0x0000000000000000000000000000000000000000" >> "$R/relayhome/bootstrap.env"
+  cat > "$R/shim/sudo" <<SHIM
+#!/usr/bin/env bash
+[ "\$1" = systemctl ] || { echo "unexpected: sudo \$*" >&2; exit 1; }
+case "\$2" in
+  stop) [ -f "$R/relay.pid" ] && kill "\$(cat "$R/relay.pid")" 2>/dev/null; rm -f "$R/relay.pid"; sleep 1 ;;
+  start) REHEARSAL_DIR="$R" exec "$REPO/hosting/wallet/test/public-chain-rehearsal.sh" relay ;;
+  *) echo "unexpected: sudo \$*" >&2; exit 1 ;;
+esac
+SHIM
+  chmod +x "$R/shim/sudo"
+  PATH="$R/shim:$PATH" RELAY_HOME="$R/relayhome" RELAY_HEALTH_URL="https://127.0.0.1:$RELAY_PORT/api/health" \
+    REBUILD_ARCHIVE="${REBUILD_ARCHIVE:-rehearsal}" "$REPO/hosting/wallet/rebuild-public-rollup.sh"
+}
+
 case "${1:-}" in
   build) step_build ;;
   chain) step_chain ;;
@@ -220,6 +258,7 @@ case "${1:-}" in
   late) step_late ;;
   bootstrap) step_bootstrap ;;
   relay) step_relay ;;
+  rebuild) step_rebuild ;;
   env) environment ;;
-  *) sed -n '2,27p' "$0"; exit 2 ;;
+  *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

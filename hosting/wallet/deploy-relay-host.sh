@@ -5,10 +5,19 @@
 # nothing guaranteed that the host ran what the repository says (a root package.json existed
 # only on the host; single files lagged). This ships `git archive HEAD`, verifies every tracked
 # file on the host against a sha256 manifest of that commit, installs the declared Node
-# dependencies, builds the binaries with the protocol feature, refreshes the public files and
-# restarts the relay, then waits for its health endpoint.
+# dependencies, builds the binaries with the protocol feature, refreshes the public files and the
+# browser wasm package and restarts the relay, then waits for its health endpoint.
+#
+# The wasm package (pkg/, not tracked) is built HERE from the same clean tree with
+# hosting/build-wallet-wasm.sh and verified on the host against its own sha256 manifest: the
+# browser proves against the binaries it ships with, and a package left from an earlier deploy
+# would keep running old wallet code next to new binaries.
 #
 # Usage: DEPLOY_HOST=user@host DEPLOY_KEY=path/to/key.pem hosting/wallet/deploy-relay-host.sh
+# A release whose circuits changed cannot finalize on the deployed rollup (its verifiers are pinned
+# and immutable): deploy it with DEPLOY_NEW_ROLLUP=1, which installs the tree and binaries, skips
+# the re-verification against the rollup being replaced and leaves the relay STOPPED; then run
+# hosting/wallet/rebuild-public-rollup.sh on the host, which rebuilds on a new rollup and starts it.
 # Host layout (see doc/docs/deploy-runbook.md, public-testnet bring-up): ~/intmax3-zkp with its
 # submodules checked out, contracts-tail/ (contracts + feature-built test/data), wallet-live-work/,
 # systemd unit intmax-wallet-relay with EnvironmentFile ~/relay/relay.env.
@@ -60,9 +69,15 @@ for name, prefixes in (("manifest.sha256", [""]), ("submodules.sha256", [s for s
                 manifest.write(f"{digest(path)}  {path}\n")
 PY
 echo "$REV" > "$WORKDIR/REVISION"
+echo "[deploy] building the browser wasm package from $REV"
+hosting/build-wallet-wasm.sh > "$WORKDIR/wasm-build.log" 2>&1 || { tail -30 "$WORKDIR/wasm-build.log"; exit 1; }
+# No AppleDouble (._*) entries or xattr headers: GNU tar on the host would extract them as files.
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$WORKDIR/pkg.tar.gz" -C pkg .
+(cd pkg && find . -type f -print0 | sort -z | xargs -0 shasum -a 256) > "$WORKDIR/pkg.sha256"
 
-"${SCP[@]}" "$WORKDIR/tree.tar.gz" "$WORKDIR/manifest.sha256" "$WORKDIR/submodules.sha256" "$WORKDIR/REVISION" "$HOST:/tmp/"
-"${SSH[@]}" "DIR=$DIR bash -s" <<'REMOTE'
+"${SCP[@]}" "$WORKDIR/tree.tar.gz" "$WORKDIR/manifest.sha256" "$WORKDIR/submodules.sha256" "$WORKDIR/REVISION" \
+  "$WORKDIR/pkg.tar.gz" "$WORKDIR/pkg.sha256" "$HOST:/tmp/"
+"${SSH[@]}" "DIR=$DIR NEW_ROLLUP=${DEPLOY_NEW_ROLLUP:-0} bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
 cd "$HOME/$DIR"
@@ -75,6 +90,11 @@ sha256sum --quiet -c /tmp/submodules.sha256
 tar -xzf /tmp/tree.tar.gz -C .
 echo "[deploy] verifying $(wc -l < /tmp/manifest.sha256) tracked files against the commit"
 sha256sum --quiet -c /tmp/manifest.sha256
+echo "[deploy] verifying $(wc -l < /tmp/pkg.sha256) wasm package files"
+rm -rf /tmp/deploy-pkg && mkdir /tmp/deploy-pkg && tar -xzf /tmp/pkg.tar.gz -C /tmp/deploy-pkg
+(cd /tmp/deploy-pkg && sha256sum --quiet -c /tmp/pkg.sha256)
+[ "$(cd /tmp/deploy-pkg && find . -type f | wc -l)" = "$(wc -l < /tmp/pkg.sha256)" ] \
+  || { echo "[deploy] the wasm package holds files outside its manifest" >&2; exit 1; }
 echo "[deploy] node dependencies (declared manifests only)"
 (cd hosting/wallet && npm ci --ignore-scripts --no-audit --no-fund > /dev/null)
 (cd node && npm ci --ignore-scripts --no-audit --no-fund > /dev/null)
@@ -87,7 +107,9 @@ cargo build --release --locked --features authenticated-tail-receive \
 # whose validity circuits no longer match the deployed rollup never goes live. Without a record the
 # deployment offers no deposits and there is nothing to re-verify.
 WORK_DIR=$(grep -h '^INTMAX_WORK_DIR=' "$HOME/relay/relay.env" | cut -d= -f2- || true)
-if [ -f "${WORK_DIR:-$HOME/$DIR/wallet-live-work}/producer/validity-deployment.json" ]; then
+if [ "$NEW_ROLLUP" = 1 ]; then
+  echo "[deploy] DEPLOY_NEW_ROLLUP=1: not re-verifying against the rollup being replaced"
+elif [ -f "${WORK_DIR:-$HOME/$DIR/wallet-live-work}/producer/validity-deployment.json" ]; then
   echo "[deploy] re-verifying the rollup's validity verifier against the new build"
   (set -a; . "$HOME/relay/relay.env"; set +a; node hosting/wallet/verify-validity-deployment.js > /tmp/deploy-verify.log 2>&1) || {
     tail -5 /tmp/deploy-verify.log
@@ -105,7 +127,17 @@ rm -rf contracts-tail/out contracts-tail/cache
 cp hosting/wallet/wallet-live.html hosting/wallet/public/index.html
 cp hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs \
   hosting/wallet/wallet-outbox.js hosting/wallet/wallet-transactions.js hosting/wallet/public/
+PKG_DIR=$(grep -h '^RELAY_PKG_DIR=' "$HOME/relay/relay.env" | cut -d= -f2- || true)
+PKG_DIR="${PKG_DIR:-$HOME/$DIR/pkg}"
+mkdir -p "$PKG_DIR"
+rsync -a --delete /tmp/deploy-pkg/ "$PKG_DIR/"
+echo "[deploy] wasm package installed in $PKG_DIR"
 cp /tmp/REVISION DEPLOYED_REVISION
+if [ "$NEW_ROLLUP" = 1 ]; then
+  echo "[deploy] installed $(cat DEPLOYED_REVISION); the relay stays stopped. Next, on the host:"
+  echo "  REBUILD_ARCHIVE=<name> nohup hosting/wallet/rebuild-public-rollup.sh > ~/relay/rebuild.log 2>&1 &"
+  exit 0
+fi
 sudo systemctl start intmax-wallet-relay
 for _ in $(seq 1 60); do curl -skf https://localhost/api/health > /dev/null && break; sleep 2; done
 curl -skf https://localhost/api/health

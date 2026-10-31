@@ -314,8 +314,9 @@ the PREPARED write it restarts at the same nonce; once anything was sent it resu
 validated broadcast artifact.
 
 **Rehearse first, every time.** `hosting/wallet/test/public-chain-rehearsal.sh` runs this whole
-procedure on a local anvil started with Sepolia's chain id (so every chain-id-gated branch takes
-its production path), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, and
+procedure on a local anvil with a non-devnet chain id (`REHEARSAL_CHAIN_ID`, default 31338: every
+chain-id-gated branch takes its production path, and a wallet on the same machine never mistakes
+the anvil for Sepolia), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, and
 finality that advances an epoch at a time). Its first step builds the binaries exactly as the deploy
 does: a rehearsal of a stale local build rehearses something that will not be deployed.
 `hosting/wallet/test/wallet-public-chain-e2e.js` then drives the production topology through
@@ -328,8 +329,25 @@ before signing. Do not deploy what has not passed it.
 `git archive HEAD`, verifies every tracked file (and every submodule file) on the host against the
 commit's sha256 manifest, installs the declared Node dependencies (`hosting/wallet/package.json`,
 `node/package.json`), builds the binaries with the protocol feature, refreshes the public files,
-restarts `intmax-wallet-relay` and waits for `/api/health`. The host records the commit in
+installs the browser wasm package (built locally from the same clean tree by
+`hosting/build-wallet-wasm.sh`, verified on the host against its sha256 manifest) into
+`RELAY_PKG_DIR`, restarts `intmax-wallet-relay` and waits for `/api/health`. The host records the commit in
 `DEPLOYED_REVISION`. Never scp single files onto the host.
+
+**A release whose circuits changed needs a new rollup.** The rollup's validity and withdrawal
+verifiers, and the late-incoming and close verifiers, pin circuit configurations and have no
+setter, so a plonky2 update or a circuit change cannot finalize anything on the deployed rollup
+(the deploy's re-verification refuses it). Deploy such a release with `DEPLOY_NEW_ROLLUP=1`
+(tree, binaries and wasm package installed, no re-verification, relay left stopped), then on the
+host run `REBUILD_ARCHIVE=<name> nohup hosting/wallet/rebuild-public-rollup.sh`. It archives the
+old rollup's relay state, generates the feature-built `*_config.json` set with this build into
+`contracts-tail/test/data`, deploys the rollup (validity verifier pinned to the producer's export;
+`BASE_STAKE_WEI` / `POST_STAKE_WEI` override the 0.1 + 0.001 ETH bond), runs `setup-backing`,
+exports the late-incoming config and deploys its verifier (recorded in `~/relay/bootstrap.env`),
+bootstraps the channels and starts the relay: the same order the rehearsal runs. Rehearse the
+script itself first: `public-chain-rehearsal.sh build`, `chain`, then `rebuild` runs it against the
+rehearsal chain, followed by the E2E. Balances on the replaced rollup stay there; users Clear and
+rejoin.
 
 **Deposits are offered only into a verified rollup.** At startup the relay re-checks
 `validity-deployment.json` against the chain, the served rollup, the producer's arities, the exact
