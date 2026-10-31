@@ -24,10 +24,12 @@ pub struct IndexedMerkleTree(IncrementalMerkleTree<IndexedMerkleLeaf>);
 /// `IndexedMerkleLeaf::default()` at index 0, and `low_index` / `insert` rely on it. The derived
 /// decoder accepted `{"height":2,"leaves":[]}`, a tree no constructor can produce. Require the
 /// sentinel after decoding (the inner tree's decoder already bounds height and leaf count).
+/// The sentinel is identified by its key 0 only: every insertion whose low leaf it is rewrites its
+/// `next_index` / `next_key`, so after the first insertion it no longer equals the default leaf.
 impl<'de> Deserialize<'de> for IndexedMerkleTree {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let inner = IncrementalMerkleTree::<IndexedMerkleLeaf>::deserialize(deserializer)?;
-        if inner.leaves().first() != Some(&IndexedMerkleLeaf::default()) {
+        if inner.leaves().first().map(|leaf| leaf.key) != Some(U256::default()) {
             return Err(serde::de::Error::custom(
                 "indexed Merkle tree must start with the sentinel leaf at index 0",
             ));

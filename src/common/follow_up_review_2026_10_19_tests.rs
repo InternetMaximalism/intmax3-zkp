@@ -25,6 +25,7 @@ use crate::{
     },
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
+        u256::U256,
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
@@ -183,6 +184,34 @@ fn indexed_merkle_tree_json_without_the_sentinel_is_rejected() {
         serde_json::from_str::<IndexedMerkleTree>(r#"{"height":2,"leaves":[]}"#).is_err(),
         "a tree without the sentinel at index 0 is not a constructor-reachable state"
     );
+    assert!(
+        serde_json::from_str::<IndexedMerkleTree>(
+            r#"{"height":2,"leaves":[{"nextIndex":0,"key":"5","nextKey":"0","value":0}]}"#
+        )
+        .is_err(),
+        "a first leaf with a non-zero key is not the sentinel"
+    );
+}
+
+/// UTILS-01: the sentinel check must accept every constructor-reachable tree. An insertion rewrites
+/// the sentinel's next pointers, and the live balance snapshot (bincode) and the channel backing
+/// (JSON) carry nullifier trees with insertions: a decoder that compared the sentinel with the
+/// default leaf refused them, and every live channel failed to reload after a relay restart.
+#[test]
+fn indexed_merkle_tree_with_insertions_round_trips_through_both_codecs() {
+    let mut tree = IndexedMerkleTree::new(32);
+    for key in [5u32, 3, 9] {
+        tree.insert(U256::from(key), 0).unwrap();
+    }
+    let json = serde_json::to_string(&tree).unwrap();
+    let from_json: IndexedMerkleTree = serde_json::from_str(&json).expect("JSON round-trip");
+    assert_eq!(from_json.get_root(), tree.get_root());
+    let bytes = bincode::serde::encode_to_vec(&tree, bincode::config::standard()).unwrap();
+    let (from_bincode, consumed) =
+        bincode::serde::decode_from_slice::<IndexedMerkleTree, _>(&bytes, bincode::config::standard())
+            .expect("bincode round-trip");
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(from_bincode.get_root(), tree.get_root());
 }
 
 /// UTILS-02: a proof does not verify at an index outside its domain.
