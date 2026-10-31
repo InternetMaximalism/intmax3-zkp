@@ -122,7 +122,8 @@ test('the background settlement proves, publishes and pays, in that order, to a 
     ['stage', 7, { locked: true }],
     ['publish', 7, { prove: false }],
     ['finalized?'],
-    ['payout', 7, { locked: true }],
+    // The payout CLI touches no channel state: the channel is not held while it pays (5382bebd).
+    ['payout', 7, { locked: false }],
     ['cli', 7, 'pw-finalize', {}],
     ['pull', { withdrawal_amount: '18446744073709551615', withdrawal_token_index: 55, withdrawal_recipient: RECIPIENT.toLowerCase() }, '0xrollup7'],
   ]);
