@@ -110,8 +110,11 @@ log "config $CFG sha256 $SHA"
 # forge retries the estimate only immediately. Wait and --resume the same run instead.
 # Fees: forge's estimator tips ~1 gwei, while Sepolia includes 2-wei tips (2026-11-03: base fee 18
 # wei, the lowest decile of tips 2 wei); at the repriced gas the rollup deploy alone (169M gas) cost
-# 0.169 ETH that way. Tip FORGE_PRIORITY_FEE_WEI (default 1 mwei) under a FORGE_MAX_FEE_WEI cap.
-FORGE_FEES=(--with-gas-price "${FORGE_MAX_FEE_WEI:-10000000000}" --priority-gas-price "${FORGE_PRIORITY_FEE_WEI:-1000000}")
+# 0.169 ETH that way. Tip FORGE_PRIORITY_FEE_WEI (default 1 mwei). No default fee cap: forge
+# derives the max fee from the base fee, and the node refuses a transaction whose gas limit x max fee
+# exceeds the balance (a 10-gwei cap asked 0.467 ETH of a 0.423 ETH balance for a 47M-gas CREATE).
+FORGE_FEES=(--priority-gas-price "${FORGE_PRIORITY_FEE_WEI:-1000000}")
+[ -z "${FORGE_MAX_FEE_WEI:-}" ] || FORGE_FEES+=(--with-gas-price "$FORGE_MAX_FEE_WEI")
 forge_broadcast() {
   local log=$1 attempt; shift
   (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
