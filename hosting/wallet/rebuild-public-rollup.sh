@@ -108,16 +108,20 @@ log "config $CFG sha256 $SHA"
 # transaction's block yet: a constructor checking the contract created one transaction earlier
 # then reverts (observed: InvalidPinnedMleVerifierCore for a core mined the block before), and
 # forge retries the estimate only immediately. Wait and --resume the same run instead.
+# Fees: forge's estimator tips ~1 gwei, while Sepolia includes 2-wei tips (2026-11-03: base fee 18
+# wei, the lowest decile of tips 2 wei); at the repriced gas the rollup deploy alone (169M gas) cost
+# 0.169 ETH that way. Tip FORGE_PRIORITY_FEE_WEI (default 1 mwei) under a FORGE_MAX_FEE_WEI cap.
+FORGE_FEES=(--with-gas-price "${FORGE_MAX_FEE_WEI:-10000000000}" --priority-gas-price "${FORGE_PRIORITY_FEE_WEI:-1000000}")
 forge_broadcast() {
   local log=$1 attempt; shift
   (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-    --broadcast --slow --skip-simulation) > "$log" 2>&1 && return 0
+    --broadcast --slow --skip-simulation "${FORGE_FEES[@]}") > "$log" 2>&1 && return 0
   for attempt in 1 2 3 4 5; do
     tail -5 "$log" | grep -q 'Failed to estimate gas' || break
     log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
     sleep 30
     (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-      --broadcast --slow --skip-simulation --resume) >> "$log" 2>&1 && return 0
+      --broadcast --slow --skip-simulation "${FORGE_FEES[@]}" --resume) >> "$log" 2>&1 && return 0
   done
   tail -30 "$log"
   return 1

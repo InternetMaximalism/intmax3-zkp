@@ -17148,6 +17148,23 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             // will reject. It also applies twice its value to the SCRIPT contract's initcode,
             // which forge otherwise exempts, and DeployCloseCli is far above 100 000 bytes.
         ]);
+        // Fees: forge's estimator tips ~1 gwei, while Sepolia includes 2-wei tips (2026-11-03: base
+        // fee 18 wei), and the repriced deploys burn hundreds of millions of gas. Tip
+        // FORGE_PRIORITY_FEE_WEI (default 1 mwei) under a FORGE_MAX_FEE_WEI cap (default 10 gwei),
+        // as rebuild-public-rollup.sh does.
+        let fee_env = |name: &str, default: &str| {
+            let value = std::env::var(name).unwrap_or_else(|_| default.to_string());
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                die(format!("{name} must be a decimal wei amount, got {value:?}"));
+            }
+            value
+        };
+        forge.args([
+            "--with-gas-price".to_string(),
+            fee_env("FORGE_MAX_FEE_WEI", "10000000000"),
+            "--priority-gas-price".to_string(),
+            fee_env("FORGE_PRIORITY_FEE_WEI", "1000000"),
+        ]);
         if deploy_mode == RealSettlementDeployMode::Resume {
             forge.arg("--resume");
             eprintln!(
