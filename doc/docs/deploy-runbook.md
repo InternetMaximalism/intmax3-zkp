@@ -326,8 +326,10 @@ ones), intra- and inter-channel sends, receive-after-send, a relay restart, and 
 before signing. Do not deploy what has not passed it.
 
 **Deploy.** `DEPLOY_HOST=ubuntu@<ip> DEPLOY_KEY=<pem> hosting/wallet/deploy-relay-host.sh` ships
-`git archive HEAD`, verifies every tracked file (and every submodule file) on the host against the
-commit's sha256 manifest, installs the declared Node dependencies (`hosting/wallet/package.json`,
+`git archive HEAD` and the pinned tree of every submodule (the host has no `.git`, so a submodule
+bump reaches it only this way), verifies every tracked file and every submodule file on the host
+against the commit's sha256 manifests, replaces the host's submodule checkouts with the verified
+trees, installs the declared Node dependencies (`hosting/wallet/package.json`,
 `node/package.json`), builds the binaries with the protocol feature, refreshes the public files,
 installs the browser wasm package (built locally from the same clean tree by
 `hosting/build-wallet-wasm.sh`, verified on the host against its sha256 manifest) into
@@ -340,8 +342,8 @@ setter, so a plonky2 update or a circuit change cannot finalize anything on the 
 (the deploy's re-verification refuses it). Deploy such a release with `DEPLOY_NEW_ROLLUP=1`
 (tree, binaries and wasm package installed, no re-verification, relay left stopped), then on the
 host run `REBUILD_ARCHIVE=<name> nohup hosting/wallet/rebuild-public-rollup.sh`. It archives the
-old rollup's relay state, generates the feature-built `*_config.json` set with this build into
-`contracts-tail/test/data`, deploys the rollup (validity verifier pinned to the producer's export;
+old rollup's relay state (including the old `contracts-tail/test/data`), refreshes that directory
+from this release and generates the feature-built `*_config.json` set with this build into it, deploys the rollup (validity verifier pinned to the producer's export;
 `BASE_STAKE_WEI` / `POST_STAKE_WEI` override the 0.1 + 0.001 ETH bond), runs `setup-backing`,
 exports the late-incoming config and deploys its verifier (recorded in `~/relay/bootstrap.env`),
 bootstraps the channels and starts the relay: the same order the rehearsal runs. Rehearse the

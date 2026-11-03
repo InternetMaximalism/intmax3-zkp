@@ -3,8 +3,9 @@
 #
 # Until now the testnet host was updated by scp-ing individual files and rebuilding by hand, so
 # nothing guaranteed that the host ran what the repository says (a root package.json existed
-# only on the host; single files lagged). This ships `git archive HEAD`, verifies every tracked
-# file on the host against a sha256 manifest of that commit, installs the declared Node
+# only on the host; single files lagged). This ships `git archive HEAD` and the pinned tree of every
+# submodule, verifies every tracked file on the host against a sha256 manifest of that commit (and
+# of the pinned submodule commits), installs the declared Node
 # dependencies, builds the binaries with the protocol feature, refreshes the public files and the
 # browser wasm package and restarts the relay, then waits for its health endpoint.
 #
@@ -68,6 +69,14 @@ for name, prefixes in (("manifest.sha256", [""]), ("submodules.sha256", [s for s
                     continue
                 manifest.write(f"{digest(path)}  {path}\n")
 PY
+# Submodules are not in `git archive HEAD`, and the host has no .git to fetch them with: ship the
+# pinned tree of each one, so a submodule bump reaches the host. The host checks the trees against
+# submodules.sha256 in a staging directory before it replaces its checkouts with them.
+mkdir "$WORKDIR/sub"
+git submodule foreach --recursive --quiet \
+  "git archive --format=tar --prefix=\"\$displaypath/\" HEAD | tar -xf - -C '$WORKDIR/sub'"
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$WORKDIR/submodules.tar.gz" -C "$WORKDIR/sub" .
+git submodule foreach --quiet 'echo "$displaypath"' > "$WORKDIR/submodule-paths"
 echo "$REV" > "$WORKDIR/REVISION"
 echo "[deploy] building the browser wasm package from $REV"
 hosting/build-wallet-wasm.sh > "$WORKDIR/wasm-build.log" 2>&1 || { tail -30 "$WORKDIR/wasm-build.log"; exit 1; }
@@ -76,7 +85,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$WORKDIR/pkg.tar.gz" -C pkg .
 (cd pkg && find . -type f -print0 | sort -z | xargs -0 shasum -a 256) > "$WORKDIR/pkg.sha256"
 
 "${SCP[@]}" "$WORKDIR/tree.tar.gz" "$WORKDIR/manifest.sha256" "$WORKDIR/submodules.sha256" "$WORKDIR/REVISION" \
-  "$WORKDIR/pkg.tar.gz" "$WORKDIR/pkg.sha256" "$HOST:/tmp/"
+  "$WORKDIR/submodules.tar.gz" "$WORKDIR/submodule-paths" "$WORKDIR/pkg.tar.gz" "$WORKDIR/pkg.sha256" "$HOST:/tmp/"
 "${SSH[@]}" "DIR=$DIR NEW_ROLLUP=${DEPLOY_NEW_ROLLUP:-0} bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
@@ -85,11 +94,20 @@ cd "$HOME/$DIR"
 # short swap at the end. Sources and binaries replaced under a running relay are compatible for
 # that window: its JavaScript is already loaded, the daemon keeps its executable's old inode, and
 # a CLI change must stay command-compatible with the previous relay (review it as such).
-echo "[deploy] verifying $(wc -l < /tmp/submodules.sha256) submodule files against the pinned checkout"
-sha256sum --quiet -c /tmp/submodules.sha256
+echo "[deploy] verifying $(wc -l < /tmp/submodules.sha256) submodule files of the pinned commits"
+rm -rf /tmp/deploy-sub && mkdir /tmp/deploy-sub && tar -xzf /tmp/submodules.tar.gz -C /tmp/deploy-sub
+(cd /tmp/deploy-sub && sha256sum --quiet -c /tmp/submodules.sha256)
+[ "$(cd /tmp/deploy-sub && find . -type f | wc -l)" = "$(wc -l < /tmp/submodules.sha256)" ] \
+  || { echo "[deploy] the submodule trees hold files outside their manifest" >&2; exit 1; }
 tar -xzf /tmp/tree.tar.gz -C .
 echo "[deploy] verifying $(wc -l < /tmp/manifest.sha256) tracked files against the commit"
 sha256sum --quiet -c /tmp/manifest.sha256
+# Replace each submodule checkout with its verified tree, so files a bump removed go too. `.git`
+# entries are left alone: they point into the machine the host was provisioned from.
+while read -r sub; do
+  mkdir -p "$sub" && rsync -a --delete --exclude .git "/tmp/deploy-sub/$sub/" "$sub/"
+done < /tmp/submodule-paths
+sha256sum --quiet -c /tmp/submodules.sha256
 echo "[deploy] verifying $(wc -l < /tmp/pkg.sha256) wasm package files"
 rm -rf /tmp/deploy-pkg && mkdir /tmp/deploy-pkg && tar -xzf /tmp/pkg.tar.gz -C /tmp/deploy-pkg
 (cd /tmp/deploy-pkg && sha256sum --quiet -c /tmp/pkg.sha256)

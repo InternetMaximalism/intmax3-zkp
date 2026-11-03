@@ -9,7 +9,8 @@
 #
 #   archive    the old rollup's relay state (wallet-live-work, broadcasts, validity export)
 #   configs    the feature-built proof-free *_config.json set (generate_*_fixture --mle-config-only),
-#              installed into contracts-tail/test/data, which every deploy script reads
+#              installed into contracts-tail/test/data (refreshed from this release), which every
+#              deploy script reads
 #   rollup     Deploy.s.sol with the validity verifier pinned to the producer's exported config
 #   backing    setup-backing (empty genesis) per channel
 #   late       the late-incoming config exported from the channel Balance VD + its verifier
@@ -48,7 +49,7 @@ if [ ! -d "$A" ]; then
   [ -d "$WORK" ] && mv "$WORK" "$A/wallet-live-work"
   [ -d "$CONTRACTS/broadcast" ] && mv "$CONTRACTS/broadcast" "$A/broadcast"
   [ -d "$DA" ] && mv "$DA" "$A/proof-da-output"
-  mkdir -p "$A/test-data" && cp "$DATA"/*_config.json "$A/test-data/"
+  cp -a "$DATA" "$A/test-data"
 fi
 sudo systemctl stop "$RELAY_SERVICE"
 
@@ -77,6 +78,9 @@ if [ ! -f "$STATE/configs.done" ]; then
   ) > "$STATE/configs.log" 2>&1 || { tail -30 "$STATE/configs.log"; exit 1; }
   [ "$(find "$STATE/configs/contracts/test/data" -name '*_config.json' | wc -l | tr -d ' ')" = 16 ] \
     || { echo "expected 16 configs, got: $(ls "$STATE/configs/contracts/test/data")" >&2; exit 1; }
+  # The deploy leaves contracts-tail/test/data as the replaced rollup had it: take the rest of it
+  # from this release too, as the rehearsal does, rather than run on the old cohort's fixtures.
+  rsync -a --delete "$REPO/contracts/test/data/" "$DATA/"
   rm -f "$DATA"/*_config.json
   cp "$STATE/configs/contracts/test/data"/*_config.json "$DATA/"
   (cd "$DATA" && shasum -a 256 ./*_config.json) | tee "$STATE/configs.sha256"
