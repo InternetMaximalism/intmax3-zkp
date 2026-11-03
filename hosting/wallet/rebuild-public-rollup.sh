@@ -110,21 +110,29 @@ log "config $CFG sha256 $SHA"
 # forge retries the estimate only immediately. Wait and --resume the same run instead.
 # Fees: forge's estimator tips ~1 gwei, while Sepolia includes 2-wei tips (2026-11-03: base fee 18
 # wei, the lowest decile of tips 2 wei); at the repriced gas the rollup deploy alone (169M gas) cost
-# 0.169 ETH that way. Tip FORGE_PRIORITY_FEE_WEI (default 1 mwei). No default fee cap: forge
-# derives the max fee from the base fee, and the node refuses a transaction whose gas limit x max fee
-# exceeds the balance (a 10-gwei cap asked 0.467 ETH of a 0.423 ETH balance for a 47M-gas CREATE).
-FORGE_FEES=(--priority-gas-price "${FORGE_PRIORITY_FEE_WEI:-1000000}")
-[ -z "${FORGE_MAX_FEE_WEI:-}" ] || FORGE_FEES+=(--with-gas-price "$FORGE_MAX_FEE_WEI")
+# 0.169 ETH that way. Tip FORGE_PRIORITY_FEE_WEI (default 1 mwei) under a max fee of
+# FORGE_MAX_FEE_WEI, by default twice the current base fee plus the tip. Both are explicit: given
+# only the tip, forge keeps its own max-fee estimate, which falls below a 1 mwei tip when its
+# fee-history tip estimate does ("max priority fee per gas higher than max fee per gas"), and a
+# large fixed cap is refused because the node reserves gas limit x max fee from the balance (a
+# 10-gwei cap asked 0.467 ETH of a 0.423 ETH balance for a 47M-gas CREATE).
+forge_fees() {
+  local tip=${FORGE_PRIORITY_FEE_WEI:-1000000} base
+  base=$(cast base-fee --rpc-url "$RPC" | awk '{print $1}')
+  echo --priority-gas-price "$tip" --with-gas-price "${FORGE_MAX_FEE_WEI:-$((2 * base + tip))}"
+}
 forge_broadcast() {
-  local log=$1 attempt; shift
+  local log=$1 attempt fees; shift
+  read -ra fees <<< "$(forge_fees)"
   (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-    --broadcast --slow --skip-simulation "${FORGE_FEES[@]}") > "$log" 2>&1 && return 0
+    --broadcast --slow --skip-simulation "${fees[@]}") > "$log" 2>&1 && return 0
   for attempt in 1 2 3 4 5; do
     tail -5 "$log" | grep -q 'Failed to estimate gas' || break
     log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
     sleep 30
+    read -ra fees <<< "$(forge_fees)"
     (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-      --broadcast --slow --skip-simulation "${FORGE_FEES[@]}" --resume) >> "$log" 2>&1 && return 0
+      --broadcast --slow --skip-simulation "${fees[@]}" --resume) >> "$log" 2>&1 && return 0
   done
   tail -30 "$log"
   return 1

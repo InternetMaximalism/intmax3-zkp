@@ -17150,23 +17150,34 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         ]);
         // Fees: forge's estimator tips ~1 gwei, while Sepolia includes 2-wei tips (2026-11-03: base
         // fee 18 wei), and the repriced deploys burn hundreds of millions of gas. Tip
-        // FORGE_PRIORITY_FEE_WEI (default 1 mwei), as rebuild-public-rollup.sh does. The max fee
-        // stays forge's (derived from the base fee) unless FORGE_MAX_FEE_WEI is set: the node
-        // refuses a transaction whose gas limit x max fee exceeds the balance.
-        let fee_env = |name: &str| {
-            std::env::var(name).ok().filter(|value| !value.is_empty()).inspect(|value| {
-                if !value.bytes().all(|b| b.is_ascii_digit()) {
-                    die(format!("{name} must be a decimal wei amount, got {value:?}"));
-                }
+        // FORGE_PRIORITY_FEE_WEI (default 1 mwei) under a max fee of FORGE_MAX_FEE_WEI, by default
+        // twice the current base fee plus the tip, as rebuild-public-rollup.sh does. Both are
+        // explicit: forge's own max-fee estimate can fall below the tip ("max priority fee per gas
+        // higher than max fee per gas"), and the node refuses a transaction whose gas limit x max
+        // fee exceeds the balance, so a large fixed cap fails too.
+        let fee_env = |name: &str| -> Option<u128> {
+            std::env::var(name).ok().filter(|value| !value.is_empty()).map(|value| {
+                value.parse::<u128>().unwrap_or_else(|_| {
+                    die(format!("{name} must be a decimal wei amount, got {value:?}"))
+                })
             })
         };
+        let tip = fee_env("FORGE_PRIORITY_FEE_WEI").unwrap_or(1_000_000);
+        let max_fee = fee_env("FORGE_MAX_FEE_WEI").unwrap_or_else(|| {
+            let base = cast(&["base-fee", "--rpc-url", rpc]);
+            let base = base
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u128>().ok())
+                .unwrap_or_else(|| die(format!("unreadable base fee {base:?}")));
+            2 * base + tip
+        });
         forge.args([
             "--priority-gas-price".to_string(),
-            fee_env("FORGE_PRIORITY_FEE_WEI").unwrap_or_else(|| "1000000".to_string()),
+            tip.to_string(),
+            "--with-gas-price".to_string(),
+            max_fee.to_string(),
         ]);
-        if let Some(max_fee) = fee_env("FORGE_MAX_FEE_WEI") {
-            forge.args(["--with-gas-price".to_string(), max_fee]);
-        }
         if deploy_mode == RealSettlementDeployMode::Resume {
             forge.arg("--resume");
             eprintln!(
