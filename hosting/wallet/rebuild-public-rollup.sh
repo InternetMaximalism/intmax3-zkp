@@ -104,6 +104,24 @@ log "config $CFG sha256 $SHA"
 # foundry.toml's evm_version. Sepolia's fork of 2026-10-06 charges ~1,540 gas per deployed code
 # byte and ~111k per new storage slot: the simulated limit ran the first verifier CREATE out of
 # gas (5.15M simulated, 32.2M estimated by the chain).
+# A load-balanced RPC can answer that estimate from a node that has not imported the previous
+# transaction's block yet: a constructor checking the contract created one transaction earlier
+# then reverts (observed: InvalidPinnedMleVerifierCore for a core mined the block before), and
+# forge retries the estimate only immediately. Wait and --resume the same run instead.
+forge_broadcast() {
+  local log=$1 attempt; shift
+  (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
+    --broadcast --slow --skip-simulation) > "$log" 2>&1 && return 0
+  for attempt in 1 2 3 4 5; do
+    tail -5 "$log" | grep -q 'Failed to estimate gas' || break
+    log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
+    sleep 30
+    (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
+      --broadcast --slow --skip-simulation --resume) >> "$log" 2>&1 && return 0
+  done
+  tail -30 "$log"
+  return 1
+}
 ART=$CONTRACTS/broadcast/Deploy.s.sol/$CHAIN_ID/run-latest.json
 # A run that stopped on a failed transaction leaves its artifact behind: deploy again unless every
 # transaction of the artifact has a successful receipt.
@@ -112,9 +130,8 @@ deployed() {
 }
 if ! deployed; then
   log "deploying the rollup"
-  (cd "$CONTRACTS" && FRAUD_TREASURY=$CLI_RECIPIENT_SLOT_0 WALLET_VALIDITY_CONFIG="$CFG" WALLET_VALIDITY_CONFIG_SHA256="$SHA" \
-    forge script script/Deploy.s.sol --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" --broadcast --slow --skip-simulation \
-    > "$STATE/rollup.log" 2>&1) || { tail -30 "$STATE/rollup.log"; exit 1; }
+  FRAUD_TREASURY=$CLI_RECIPIENT_SLOT_0 WALLET_VALIDITY_CONFIG="$CFG" WALLET_VALIDITY_CONFIG_SHA256="$SHA" \
+    forge_broadcast "$STATE/rollup.log" script/Deploy.s.sol || exit 1
 fi
 ROLLUP=$(node -e 'const a=require(process.argv[1]);const t=a.transactions.find(t=>t.contractName==="IntmaxRollup"&&t.transactionType==="CREATE");process.stdout.write(t.contractAddress)' "$ART")
 log "rollup $ROLLUP (base stake $(cast call "$ROLLUP" 'baseStake()(uint256)' --rpc-url "$RPC"), post stake $(cast call "$ROLLUP" 'postStake()(uint256)' --rpc-url "$RPC"))"
@@ -139,9 +156,7 @@ if [ ! -f "$STATE/late_incoming_verifier" ]; then
   "$REPO/target/release/export_late_incoming_config" "$WORK/ch$FIRST/balance_vd.bin" "$LATE_MLE_CONFIG_PATH" \
     > "$STATE/late-export.log" 2>&1 || { tail -20 "$STATE/late-export.log"; exit 1; }
   log "deploying the late-incoming verifier"
-  (cd "$CONTRACTS" && forge script script/DeployLateIncomingVerifier.s.sol --rpc-url "$RPC" \
-    --account "$INTMAX_L1_ACCOUNT" --broadcast --slow --skip-simulation > "$STATE/late.log" 2>&1) \
-    || { tail -30 "$STATE/late.log"; exit 1; }
+  forge_broadcast "$STATE/late.log" script/DeployLateIncomingVerifier.s.sol || exit 1
   grep -oE "LATE_INCOMING_VERIFIER 0x[0-9a-fA-F]{40}" "$STATE/late.log" | tail -1 | cut -d' ' -f2 > "$STATE/late_incoming_verifier"
 fi
 export LATE_INCOMING_VERIFIER; LATE_INCOMING_VERIFIER=$(cat "$STATE/late_incoming_verifier")

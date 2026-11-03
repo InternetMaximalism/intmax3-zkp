@@ -61,6 +61,12 @@ const OPERATOR_DELEGATE_LABEL = ch => String(900000 + ch);
 const FINALITY_RETRY_MS = 60 * 1000;
 const FINALITY_RETRIES = 60;
 const RETRYABLE_FINALITY = /not finalized yet|retry after the finalized head advances|durable L1 head advanced during the pinned state read/;
+// forge estimates each transaction's gas on the chain after the previous one is mined; a
+// load-balanced RPC can answer from a node that has not imported that block yet, and the estimate
+// of a call into the contract just created reverts. The CLI then resumes the same run (its nonce
+// moved), once the node has caught up.
+const RETRYABLE_ESTIMATE = /Failed to estimate gas for tx/;
+const ESTIMATE_RETRIES = 5;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function step(ch, name, message) { console.log(`[ch${ch}] ${name}: ${message}`); }
@@ -130,7 +136,7 @@ async function settlement(ch, bundleDir) {
     // head (~13 min on Sepolia after the broadcast), or finality advanced while it read the stack
     // back at one pinned head (Sepolia finalizes an epoch at a time, so a readback can straddle
     // one). Both are waits, not failures: retry the same command, which resumes from its journal.
-    for (let attempt = 1; ; attempt++) {
+    for (let attempt = 1, estimateFailures = 0; ; attempt++) {
       try {
         cli(ch, ['deploy-settlement', RPC], {
           INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir,
@@ -142,6 +148,11 @@ async function settlement(ch, bundleDir) {
         break;
       } catch (e) {
         const text = String((e && (e.stderr || e.message)) || e);
+        if (RETRYABLE_ESTIMATE.test(text) && ++estimateFailures <= ESTIMATE_RETRIES) {
+          step(ch, 'settlement', `a gas estimate failed; resuming the broadcast (attempt ${estimateFailures})`);
+          await sleep(FINALITY_RETRY_MS);
+          continue;
+        }
         if (!RETRYABLE_FINALITY.test(text) || attempt >= FINALITY_RETRIES) throw e;
         step(ch, 'settlement', `waiting for L1 finality (attempt ${attempt})`);
         await sleep(FINALITY_RETRY_MS);
