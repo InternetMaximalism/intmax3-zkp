@@ -18477,9 +18477,15 @@ fn cmd_publish_wallet_validity(args: &[String]) {
             rpc,
             "--broadcast",
             "--slow",
-            // attestProofData and finalize write storage: take their gas limits from the chain's
-            // eth_estimateGas, not forge's evm_version-priced simulation (see deploy-settlement).
-            "--skip-simulation",
+            // NOT --skip-simulation: `finalize` catches a failed verification (out of gas included)
+            // and returns after emitting FinalizeRejected, so the cheapest gas at which it does not
+            // revert is the rejecting one, and eth_estimateGas finds that (rehearsal: 6.6M limit,
+            // FinalizeRejected(MleVerificationFailed); the accepted finalize used 16.8M). The
+            // simulated gas of the accepted run is the right base. Twice it, not 1.3x: the
+            // simulation prices by foundry.toml's evm_version, and Sepolia's fork of 2026-10-06
+            // charges ~111k (was 22.1k) per new storage slot.
+            "--gas-estimate-multiplier",
+            "200",
         ])
         .env("ROLLUP", &rollup)
         .env("SUB_ID", &sub_id)
