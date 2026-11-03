@@ -99,12 +99,22 @@ mkdir -p "$DA"
 CFG=$DA/$(basename "$CFG")
 SHA=0x$(shasum -a 256 "$CFG" | cut -d' ' -f1)
 log "config $CFG sha256 $SHA"
+# --skip-simulation: each transaction's gas limit comes from the chain's eth_estimateGas, made
+# after the previous one is mined (--slow), not from forge's local simulation, which prices by
+# foundry.toml's evm_version. Sepolia's fork of 2026-10-06 charges ~1,540 gas per deployed code
+# byte and ~111k per new storage slot: the simulated limit ran the first verifier CREATE out of
+# gas (5.15M simulated, 32.2M estimated by the chain).
 ART=$CONTRACTS/broadcast/Deploy.s.sol/$CHAIN_ID/run-latest.json
-if [ ! -f "$ART" ]; then
+# A run that stopped on a failed transaction leaves its artifact behind: deploy again unless every
+# transaction of the artifact has a successful receipt.
+deployed() {
+  [ -f "$ART" ] && node -e 'const a=require(process.argv[1]); process.exit(a.transactions.length > 0 && a.transactions.every(t => (a.receipts || []).some(r => r.transactionHash === t.hash && r.status === "0x1")) ? 0 : 1)' "$ART"
+}
+if ! deployed; then
   log "deploying the rollup"
   (cd "$CONTRACTS" && FRAUD_TREASURY=$CLI_RECIPIENT_SLOT_0 WALLET_VALIDITY_CONFIG="$CFG" WALLET_VALIDITY_CONFIG_SHA256="$SHA" \
-    forge script script/Deploy.s.sol --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" --broadcast --slow > "$STATE/rollup.log" 2>&1) \
-    || { tail -30 "$STATE/rollup.log"; exit 1; }
+    forge script script/Deploy.s.sol --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" --broadcast --slow --skip-simulation \
+    > "$STATE/rollup.log" 2>&1) || { tail -30 "$STATE/rollup.log"; exit 1; }
 fi
 ROLLUP=$(node -e 'const a=require(process.argv[1]);const t=a.transactions.find(t=>t.contractName==="IntmaxRollup"&&t.transactionType==="CREATE");process.stdout.write(t.contractAddress)' "$ART")
 log "rollup $ROLLUP (base stake $(cast call "$ROLLUP" 'baseStake()(uint256)' --rpc-url "$RPC"), post stake $(cast call "$ROLLUP" 'postStake()(uint256)' --rpc-url "$RPC"))"
@@ -130,7 +140,8 @@ if [ ! -f "$STATE/late_incoming_verifier" ]; then
     > "$STATE/late-export.log" 2>&1 || { tail -20 "$STATE/late-export.log"; exit 1; }
   log "deploying the late-incoming verifier"
   (cd "$CONTRACTS" && forge script script/DeployLateIncomingVerifier.s.sol --rpc-url "$RPC" \
-    --account "$INTMAX_L1_ACCOUNT" --broadcast --slow > "$STATE/late.log" 2>&1) || { tail -30 "$STATE/late.log"; exit 1; }
+    --account "$INTMAX_L1_ACCOUNT" --broadcast --slow --skip-simulation > "$STATE/late.log" 2>&1) \
+    || { tail -30 "$STATE/late.log"; exit 1; }
   grep -oE "LATE_INCOMING_VERIFIER 0x[0-9a-fA-F]{40}" "$STATE/late.log" | tail -1 | cut -d' ' -f2 > "$STATE/late_incoming_verifier"
 fi
 export LATE_INCOMING_VERIFIER; LATE_INCOMING_VERIFIER=$(cat "$STATE/late_incoming_verifier")

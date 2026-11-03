@@ -17138,6 +17138,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             // registrations target contracts created earlier in the same run), and a public
             // network can reorder or drop a parallel batch.
             "--slow",
+            // Gas limits from the chain's eth_estimateGas, made after the previous transaction is
+            // mined (--slow), not from forge's local simulation, which prices by foundry.toml's
+            // evm_version. Sepolia's fork of 2026-10-06 charges ~1,540 gas per deployed code byte
+            // and ~111k per new storage slot, so simulated limits run deploys out of gas.
+            "--skip-simulation",
             // No --code-size-limit here (unlike the anvil paths): a public chain enforces EIP-170
             // and EIP-3860 itself, so a raised simulation limit only hides a deployment the chain
             // will reject. It also applies twice its value to the SCRIPT contract's initcode,
@@ -18472,6 +18477,9 @@ fn cmd_publish_wallet_validity(args: &[String]) {
             rpc,
             "--broadcast",
             "--slow",
+            // attestProofData and finalize write storage: take their gas limits from the chain's
+            // eth_estimateGas, not forge's evm_version-priced simulation (see deploy-settlement).
+            "--skip-simulation",
         ])
         .env("ROLLUP", &rollup)
         .env("SUB_ID", &sub_id)
