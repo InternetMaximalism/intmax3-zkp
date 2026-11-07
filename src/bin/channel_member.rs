@@ -18375,6 +18375,92 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     );
 }
 
+/// EIP-7825 (Osaka): a chain that enforces it refuses any transaction whose gas LIMIT exceeds 2^24
+/// before executing it, whatever the transaction would actually use. Mainnet enforces it; Sepolia's
+/// fork of 2026-10-06 does not.
+const EIP7825_TX_GAS_LIMIT_CAP: u64 = 1 << 24;
+
+/// The per-transaction gas limit cap to respect: `L1_TX_GAS_LIMIT_CAP` when set (0 = none), else
+/// EIP-7825's.
+fn l1_tx_gas_limit_cap() -> Option<u64> {
+    match std::env::var("L1_TX_GAS_LIMIT_CAP") {
+        Ok(value) if !value.is_empty() => {
+            let cap = value.parse::<u64>().unwrap_or_else(|_| {
+                die(format!("L1_TX_GAS_LIMIT_CAP must be a decimal gas amount, got {value:?}"))
+            });
+            (cap > 0).then_some(cap)
+        }
+        _ => Some(EIP7825_TX_GAS_LIMIT_CAP),
+    }
+}
+
+/// The largest simulated gas among the transactions of a `forge script` broadcast record (0 when
+/// it sends none).
+fn max_simulated_gas(record: &serde_json::Value) -> u64 {
+    record["transactions"]
+        .as_array()
+        .unwrap_or_else(|| die("forge script record has no transactions array"))
+        .iter()
+        .map(|tx| {
+            parse_u64_quantity(
+                tx["transaction"]["gas"].as_str().unwrap_or_else(|| die("forge transaction without gas")),
+                "simulated gas",
+            )
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// The `--gas-estimate-multiplier` (percent, at most `preferred`) under which forge's gas limit
+/// `simulated * multiplier / 100` stays within `cap` for the largest simulated transaction. `None`
+/// when even the bare simulated gas exceeds the cap.
+fn capped_gas_multiplier(max_simulated: u64, preferred: u64, cap: Option<u64>) -> Option<u64> {
+    let (Some(cap), true) = (cap, max_simulated > 0) else {
+        return Some(preferred);
+    };
+    let fitting = u64::try_from(u128::from(cap) * 100 / u128::from(max_simulated)).unwrap_or(u64::MAX);
+    (fitting >= 100).then(|| fitting.min(preferred))
+}
+
+#[cfg(test)]
+mod tx_gas_limit_cap_tests {
+    use super::{capped_gas_multiplier, max_simulated_gas, EIP7825_TX_GAS_LIMIT_CAP};
+
+    const CAP: Option<u64> = Some(EIP7825_TX_GAS_LIMIT_CAP);
+
+    #[test]
+    fn keeps_the_preferred_multiplier_when_it_fits() {
+        assert_eq!(capped_gas_multiplier(8_000_000, 200, CAP), Some(200));
+        assert_eq!(capped_gas_multiplier(30_000_000, 200, None), Some(200));
+        assert_eq!(capped_gas_multiplier(0, 200, CAP), Some(200));
+    }
+
+    #[test]
+    fn lowers_the_multiplier_until_the_largest_limit_fits() {
+        // attestProofData simulated at 15,400,187 in the 2026-11-03 rehearsal.
+        let multiplier = capped_gas_multiplier(15_400_187, 200, CAP).unwrap();
+        assert_eq!(multiplier, 108);
+        assert!(15_400_187 * multiplier / 100 <= EIP7825_TX_GAS_LIMIT_CAP);
+        assert!(15_400_187 * (multiplier + 1) / 100 > EIP7825_TX_GAS_LIMIT_CAP);
+    }
+
+    #[test]
+    fn refuses_a_transaction_that_cannot_fit_at_all() {
+        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP + 1, 200, CAP), None);
+        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP, 200, CAP), Some(100));
+    }
+
+    #[test]
+    fn reads_the_largest_simulated_gas_of_a_forge_record() {
+        let record = serde_json::json!({"transactions": [
+            {"transaction": {"gas": "0xeafec3"}},
+            {"transaction": {"gas": "0x8f0d18"}},
+        ]});
+        assert_eq!(max_simulated_gas(&record), 0xeafec3);
+        assert_eq!(max_simulated_gas(&serde_json::json!({"transactions": []})), 0);
+    }
+}
+
 // Publishes the resident producer's validity candidate: one blob post per producer block (each
 // with that block's own pending-chain checkpoint), then proof-DA attestation and finalization.
 // Off the devnet every post is `postBlockAndSubmitGuarded`, bound to the rollup head it extends,
@@ -18495,42 +18581,69 @@ fn cmd_publish_wallet_validity(args: &[String]) {
         ));
     }
     let (sub_id, sidecars) = last.unwrap();
-    let mut forge = Command::new("forge");
-    forge
-        .current_dir(&contracts)
-        .args([
-            "script",
-            "script/WalletL1Lifecycle.s.sol",
-            "--sig",
-            "finalizeValidity()",
-            "--rpc-url",
-            rpc,
-            "--broadcast",
-            "--slow",
-            // NOT --skip-simulation: `finalize` catches a failed verification (out of gas included)
-            // and returns after emitting FinalizeRejected, so the cheapest gas at which it does not
-            // revert is the rejecting one, and eth_estimateGas finds that (rehearsal: 6.6M limit,
-            // FinalizeRejected(MleVerificationFailed); the accepted finalize used 16.8M). The
-            // simulated gas of the accepted run is the right base. Twice it, not 1.3x: the
-            // simulation prices by foundry.toml's evm_version, and Sepolia's fork of 2026-10-06
-            // charges ~111k (was 22.1k) per new storage slot.
-            "--gas-estimate-multiplier",
-            "200",
-        ])
-        .env("ROLLUP", &rollup)
-        .env("SUB_ID", &sub_id)
-        .env("BLOB_SIDECARS", &sidecars)
-        .env("WALLET_VPIS_PATH", &vpis_path)
-        .env("WALLET_VALIDITY_PATH", &mle_path);
-    signer.get().append_to_command(&mut forge);
-    let output = forge.output().unwrap_or_else(|e| die(e));
-    if !output.status.success() {
+    // NOT --skip-simulation: `finalize` catches a failed verification (out of gas included) and
+    // returns after emitting FinalizeRejected, so the cheapest gas at which it does not revert is
+    // the rejecting one, and eth_estimateGas finds that (rehearsal: 6.6M limit,
+    // FinalizeRejected(MleVerificationFailed); the accepted finalize used 16.8M). The simulated gas
+    // of the accepted run is the right base, and forge gives each transaction that gas times
+    // --gas-estimate-multiplier as its limit.
+    let run_finalize_script = |broadcast: bool, multiplier: u64| {
+        let multiplier = multiplier.to_string();
+        let mut forge = Command::new("forge");
+        forge
+            .current_dir(&contracts)
+            .args([
+                "script",
+                "script/WalletL1Lifecycle.s.sol",
+                "--sig",
+                "finalizeValidity()",
+                "--rpc-url",
+                rpc,
+                "--slow",
+                "--gas-estimate-multiplier",
+                &multiplier,
+            ])
+            .env("ROLLUP", &rollup)
+            .env("SUB_ID", &sub_id)
+            .env("BLOB_SIDECARS", &sidecars)
+            .env("WALLET_VPIS_PATH", &vpis_path)
+            .env("WALLET_VALIDITY_PATH", &mle_path);
+        if broadcast {
+            forge.arg("--broadcast");
+        }
+        signer.get().append_to_command(&mut forge);
+        let output = forge.output().unwrap_or_else(|e| die(e));
+        if !output.status.success() {
+            die(format!(
+                "wallet validity finalize: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    };
+    // Twice the simulation, not 1.3x: the simulation prices by foundry.toml's evm_version, and
+    // Sepolia's fork of 2026-10-06 charges ~111k (was 22.1k) per new storage slot. But an EIP-7825
+    // chain refuses any transaction whose LIMIT exceeds 2^24 before running it, and attestProofData
+    // alone simulates at ~15.4M. So simulate first (forge records each transaction's simulated gas
+    // under dry-run/), then lower the multiplier until the largest transaction fits under the cap.
+    run_finalize_script(false, 100);
+    let dry_run = contracts.join(format!(
+        "broadcast/WalletL1Lifecycle.s.sol/{chain_id}/dry-run/finalizeValidity-latest.json"
+    ));
+    let simulated = max_simulated_gas(&read_json::<serde_json::Value>(dry_run.to_str().unwrap()));
+    let cap = l1_tx_gas_limit_cap();
+    let multiplier = capped_gas_multiplier(simulated, 200, cap).unwrap_or_else(|| {
         die(format!(
-            "wallet validity finalize: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+            "wallet validity finalize: a transaction simulates at {simulated} gas, above the \
+             {cap:?} per-transaction gas limit cap (EIP-7825; L1_TX_GAS_LIMIT_CAP=0 lifts it on a \
+             chain that does not enforce one)"
+        ))
+    });
+    eprintln!(
+        "[validity] largest simulated transaction {simulated} gas; gas limits at {multiplier}% of \
+         the simulation (cap {cap:?})"
+    );
+    run_finalize_script(true, multiplier);
     // The candidate is finalized at or after its last post. Public RPCs cap eth_getLogs ranges,
     // so scan forward from that receipt in bounded windows instead of from genesis.
     let topic = format!(
