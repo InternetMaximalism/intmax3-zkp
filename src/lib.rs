@@ -43,6 +43,7 @@ pub mod public_close_publisher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod public_validity_publisher;
 pub mod regev;
+pub mod slot_view;
 pub mod utils;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod validity_prover_service;

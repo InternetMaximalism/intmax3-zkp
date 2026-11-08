@@ -127,6 +127,39 @@ mod token_matrix_serde {
         TokenPendingAdds, zero_ciphertext, zero_token_row,
     };
 
+    pub mod row {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            row: &TokenCiphertexts,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            let sparse: BTreeMap<u8, &RegevCiphertext> = row
+                .iter()
+                .enumerate()
+                .filter(|(_, ct)| *ct != zero_ciphertext())
+                .map(|(t, ct)| (t as u8, ct))
+                .collect();
+            sparse.serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<TokenCiphertexts, D::Error> {
+            let mut sparse: BTreeMap<u8, RegevCiphertext> = BTreeMap::deserialize(deserializer)?;
+            if sparse.keys().any(|&t| t as usize >= MAX_CHANNEL_TOKENS) {
+                return Err(D::Error::custom(format!(
+                    "slot row has a token position >= MAX_CHANNEL_TOKENS = {MAX_CHANNEL_TOKENS}"
+                )));
+            }
+            Ok(std::array::from_fn(|t| {
+                sparse
+                    .remove(&(t as u8))
+                    .unwrap_or_else(|| zero_ciphertext().clone())
+            }))
+        }
+    }
+
     pub mod ciphertexts {
         use super::*;
 
@@ -521,33 +554,35 @@ impl BalanceState {
     ///   elements), settled_tx_chain (8 u32 limbs), settled_tx_accumulator_root (8 u32 limbs),
     ///   split_u64(state_version) (hi, lo)]`
     pub fn h1_header_preimage(&self) -> Vec<u64> {
-        let root = self.slot_tree_root();
-        let mut inputs: Vec<u64> = vec![
-            BALANCE_STATE_DOMAIN_V2 as u64,
-            self.channel_id.to_u32_vec()[0] as u64,
-            self.member_count as u64,
-            // delegate_count is committed IMMEDIATELY AFTER member_count, fixing the
-            // member/delegate/padding region split under the member signatures.
-            self.delegate_count as u64,
-            // SECURITY (TM-9): token_count + the FULL zero-padded registry ride in the signed
-            // header right after the member/delegate counts — the active/unused token boundary
-            // and the local-slot -> base-token mapping are fixed under the same signatures that
-            // bind the balances, mirroring the member_count/delegate_count discipline.
-            self.token_count as u64,
-        ];
-        inputs.extend(self.token_registry.iter().map(|&t| t as u64));
-        inputs.extend(root.elements);
-        inputs.extend(self.settled_tx_chain.to_u32_vec().iter().map(|&w| w as u64));
-        // Stage 3: the settled-tx accumulator root sits IMMEDIATELY AFTER settled_tx_chain and
-        // BEFORE state_version, mirroring the retired keccak header order.
-        inputs.extend(
-            self.settled_tx_accumulator_root
-                .to_u32_vec()
-                .iter()
-                .map(|&w| w as u64),
-        );
-        inputs.extend(split_u64(self.state_version).iter().map(|&w| w as u64));
-        inputs
+        self.header().h1_header_preimage()
+    }
+
+    /// Every H1 header field, with the slot rows replaced by their Merkle root. A participant that
+    /// holds only its own slot (plus the slot's Merkle path) recomputes H1 from this header and
+    /// the root its path yields, so [`Self::h1`] and [`BalanceStateHeader::h1`] MUST share one
+    /// preimage encoding (they do: `h1` delegates here).
+    pub fn header(&self) -> BalanceStateHeader {
+        BalanceStateHeader {
+            channel_id: self.channel_id,
+            member_count: self.member_count,
+            delegate_count: self.delegate_count,
+            token_count: self.token_count,
+            token_registry: self.token_registry,
+            slot_tree_root: self.slot_tree_root(),
+            settled_tx_chain: self.settled_tx_chain,
+            settled_tx_accumulator_root: self.settled_tx_accumulator_root,
+            state_version: self.state_version,
+        }
+    }
+
+    /// One slot's committed row (the four values its balance-slot leaf hashes).
+    pub fn slot_row(&self, slot: usize) -> SlotRow {
+        SlotRow {
+            regev_pk_digest: self.regev_pk_digests[slot],
+            enc_balances: self.enc_balances[slot].clone(),
+            pending_adds: self.pending_adds[slot],
+            recipient: self.recipients[slot],
+        }
     }
 
     /// H1 v2 (detail2 §C-2 + D3, pad-to-MAX deviation D6, decryption Stage 1, Stage 3
@@ -570,7 +605,7 @@ impl BalanceState {
     /// multitoken Phase 2); parity is pinned by
     /// `h1_gadget::tests::recompute_h1_matches_native_balance_state_h1_randomized`.
     pub fn h1(&self) -> Bytes32 {
-        Bytes32::from(PoseidonHashOut::hash_inputs_u64(&self.h1_header_preimage()))
+        self.header().h1()
     }
 
     /// Canonicality / budget check. MUST run on every balance state that crosses a trust
@@ -827,6 +862,84 @@ pub fn balance_slot_leaf_preimage(
     inputs.extend_from_slice(pending_adds);
     inputs.extend(recipient.to_u32_vec());
     inputs
+}
+
+/// The H1 header of a [`BalanceState`]: every field H1 commits, with the slot rows replaced by
+/// their balance-slot Merkle root. This is what a delegate holds instead of the full state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceStateHeader {
+    pub channel_id: ChannelId,
+    pub member_count: u8,
+    pub delegate_count: u16,
+    pub token_count: u8,
+    pub token_registry: [u32; MAX_CHANNEL_TOKENS],
+    pub slot_tree_root: PoseidonHashOut,
+    pub settled_tx_chain: Bytes32,
+    pub settled_tx_accumulator_root: Bytes32,
+    pub state_version: u64,
+}
+
+impl BalanceStateHeader {
+    /// The FIXED-width v2 H1 header preimage; see [`BalanceState::h1_header_preimage`].
+    pub fn h1_header_preimage(&self) -> Vec<u64> {
+        let mut inputs: Vec<u64> = vec![
+            BALANCE_STATE_DOMAIN_V2 as u64,
+            self.channel_id.to_u32_vec()[0] as u64,
+            self.member_count as u64,
+            // delegate_count is committed IMMEDIATELY AFTER member_count, fixing the
+            // member/delegate/padding region split under the member signatures.
+            self.delegate_count as u64,
+            // SECURITY (TM-9): token_count + the FULL zero-padded registry ride in the signed
+            // header right after the member/delegate counts.
+            self.token_count as u64,
+        ];
+        inputs.extend(self.token_registry.iter().map(|&t| t as u64));
+        inputs.extend(self.slot_tree_root.elements);
+        inputs.extend(self.settled_tx_chain.to_u32_vec().iter().map(|&w| w as u64));
+        // Stage 3: the settled-tx accumulator root sits IMMEDIATELY AFTER settled_tx_chain and
+        // BEFORE state_version.
+        inputs.extend(
+            self.settled_tx_accumulator_root
+                .to_u32_vec()
+                .iter()
+                .map(|&w| w as u64),
+        );
+        inputs.extend(split_u64(self.state_version).iter().map(|&w| w as u64));
+        inputs
+    }
+
+    pub fn h1(&self) -> Bytes32 {
+        Bytes32::from(PoseidonHashOut::hash_inputs_u64(&self.h1_header_preimage()))
+    }
+
+    pub fn active_slots(&self) -> usize {
+        self.member_count as usize + self.delegate_count as usize
+    }
+}
+
+/// One slot's committed row: the four values its balance-slot leaf hashes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotRow {
+    pub regev_pk_digest: Bytes32,
+    #[serde(with = "token_matrix_serde::row")]
+    pub enc_balances: TokenCiphertexts,
+    pub pending_adds: TokenPendingAdds,
+    pub recipient: Address,
+}
+
+impl SlotRow {
+    /// The slot's balance-slot leaf, identical to the leaf [`BalanceState::slot_leaf_hashes`]
+    /// produces for the same row (an all-default row hashes to the padding leaf).
+    pub fn leaf_hash(&self) -> PoseidonHashOut {
+        balance_slot_leaf_hash(
+            self.regev_pk_digest,
+            &BalanceState::token_ct_digests(&self.enc_balances),
+            &self.pending_adds,
+            self.recipient,
+        )
+    }
 }
 
 /// The per-slot v2 leaf of the H1 balance-slot Poseidon Merkle tree (member slot order; the leaf

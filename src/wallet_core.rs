@@ -303,7 +303,7 @@ pub fn verify_state_sig(pk_g: Bytes32, digest: &Bytes32, sig: &[u8]) -> WResult<
 /// (`decompose_digest_to_limbs`), the SAME map the verifier recomputes; the proof's public values
 /// bind `[pk_b ‖ m]`. Production verification uses `RegevSecurityLevel::Production` — but the
 /// `level` is the caller's (tests pass `Test`).
-fn sign_channel_tx_sender(
+pub(crate) fn sign_channel_tx_sender(
     keys: &MemberKeys,
     tx_digest: &Bytes32,
     level: RegevSecurityLevel,
@@ -2198,6 +2198,47 @@ pub struct RefreshPayload {
     pub record: ChannelRecord,
 }
 
+/// The refresh successor of `prev`: `slot`'s ciphertext at `token_slot` replaced by `new_ct`, its
+/// add counter reset, epoch and state version bumped, `h2_tag` zero. Shared by the wallet builder
+/// and the co-signer's slim-refresh inflation so both rebuild the identical state.
+pub fn refresh_next_state(
+    prev: &ChannelState,
+    slot: u16,
+    token_slot: u8,
+    new_ct: RegevCiphertext,
+) -> WResult<ChannelState> {
+    let ts = token_slot as usize;
+    if ts >= MAX_CHANNEL_TOKENS || ts >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "refresh token_slot {ts} out of range (token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
+    if slot as usize >= prev.balance_state.enc_balances.len() {
+        return bail("refresh slot out of range");
+    }
+    let mut enc_balances = prev.balance_state.enc_balances.clone();
+    enc_balances[slot as usize][ts] = new_ct;
+    let mut pending_adds = prev.balance_state.pending_adds.clone();
+    pending_adds[slot as usize][ts] = 0;
+    Ok(ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds,
+            ..prev.balance_state.clone()
+        },
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        // §C-2 (no small block): the next-state h2_tag MUST be zero; a preceding inter-channel
+        // send leaves a NON-zero h2_tag that must not be inherited.
+        h2_tag: Bytes32::default(),
+        ..prev.clone()
+    }
+    .with_computed_digest())
+}
+
 /// Build a balance-refresh for `slot` (this wallet's own slot): re-encrypt the current balance to a
 /// FRESH ciphertext (clean digits, same value), prove `old_ct ≡ new_ct` (RefreshAir), and propose
 /// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the
@@ -2232,28 +2273,7 @@ pub fn build_refresh(
     let (new_ct, new_witness, proof) =
         prove_balance_refresh_witnessed(rng, level, pk, &keys.regev_sk, old_ct).map_err(we)?;
 
-    let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[slot as usize][ts] = new_ct;
-    let mut pending_adds = prev.balance_state.pending_adds.clone();
-    pending_adds[slot as usize][ts] = 0;
-    let next_state = ChannelState {
-        epoch: prev.epoch + 1,
-        balance_state: BalanceState {
-            enc_balances,
-            state_version: prev.balance_state.state_version + 1,
-            pending_adds,
-            ..prev.balance_state.clone()
-        },
-        prev_digest: prev.digest,
-        member_signatures: Vec::new(),
-        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
-        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
-        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
-        // InvalidH2Tag.
-        h2_tag: Bytes32::default(),
-        ..prev.clone()
-    }
-    .with_computed_digest();
+    let next_state = refresh_next_state(prev, slot, token_slot, new_ct)?;
 
     // Refresh is also an unsigned proposal; being the owner is not a substitute for the
     // co-signer's transition, exit-kit and durable anti-equivocation checks.
