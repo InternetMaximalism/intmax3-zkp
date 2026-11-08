@@ -6,9 +6,7 @@ routing‑liquidity problem. This repository contains the proving circuits (Rust
 settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean), and a browser wallet.
 
 > **Specification: start by reading the Overview (chapter 1) of [`doc/design_spec.md`](doc/design_spec.md).**
-> It is the official design specification of the current implementation. The older specifications
-> (abstract, abstract2, abstract2-1, detail2, …) are kept only as history in
-> [`doc/architecture-audit/archive/`](doc/architecture-audit/archive/).
+> It is the official design specification of the current implementation. 
 
 ---
 
