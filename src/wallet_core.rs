@@ -823,11 +823,20 @@ impl From<&SlimSendPayload> for BatchTxApply {
     }
 }
 
-/// Build the full padded Regev pk array from a member list (padding = `RegevPk::padding()`).
-pub fn regev_pks_array(members: &[MemberInfo]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
-    let mut arr: [RegevPk; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| RegevPk::padding());
+/// The Regev pk of every ACTIVE slot, indexed by slot (`len` = one past the highest member slot;
+/// a slot with no member — never the case for a validated member list — holds
+/// `RegevPk::padding()`). Padding slots past the active region are not materialized; the channel
+/// key root folds them in as a constant ([`crate::regev::channel_regev_pk_root`]).
+pub fn regev_pks_array(members: &[MemberInfo]) -> Vec<RegevPk> {
+    let len = members
+        .iter()
+        .map(|m| m.slot as usize + 1)
+        .max()
+        .unwrap_or(0)
+        .min(MAX_CHANNEL_MEMBERS);
+    let mut arr: Vec<RegevPk> = vec![RegevPk::padding(); len];
     for m in members {
-        if (m.slot as usize) < MAX_CHANNEL_MEMBERS {
+        if (m.slot as usize) < len {
             arr[m.slot as usize] = m.regev_pk.clone();
         }
     }
@@ -880,7 +889,7 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 fn require_member_pk_gs_match_record(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<()> {
     for m in members {
         let slot = m.slot as usize;
-        if slot >= MAX_CHANNEL_MEMBERS || m.pk_g != record.member_pk_gs[slot] {
+        if record.member_pk_gs.get(slot) != Some(&m.pk_g) {
             return bail(format!(
                 "members[slot {slot}].pk_g is not the record's registered pk_g for that slot"
             ));
@@ -892,8 +901,15 @@ fn require_member_pk_gs_match_record(record: &ChannelRecord, members: &[MemberIn
 fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<Bytes32> {
     let mut tree = MemberTree::init_wallet_membership();
     let active = record.member_count as usize + record.delegate_count as usize;
-    for slot in 0..active {
-        let m = member_at(members, slot)?;
+    // Index the list by slot once (a per-slot linear search is quadratic in the participants).
+    let mut by_slot: Vec<Option<&MemberInfo>> = vec![None; active];
+    for m in members {
+        if let Some(entry) = by_slot.get_mut(m.slot as usize) {
+            *entry = Some(m);
+        }
+    }
+    for (slot, entry) in by_slot.iter().enumerate() {
+        let m = entry.ok_or_else(|| WalletError(format!("no member at slot {slot}")))?;
         tree.push(MemberLeaf {
             pk_g: record.member_pk_gs[slot].reduce_to_hash_out(),
             pk_b: m.pk_b.reduce_to_hash_out(),
@@ -979,9 +995,15 @@ pub fn build_record(
         ));
     }
     validate_new_participant_exit_keys(members)?;
-    let mut hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| Bytes32::default());
-    for (slot, hash) in hashes.iter_mut().enumerate().take(active) {
-        let m = member_at(members, slot)?;
+    let mut by_slot: Vec<Option<&MemberInfo>> = vec![None; active];
+    for m in members {
+        if let Some(entry) = by_slot.get_mut(m.slot as usize) {
+            *entry = Some(m);
+        }
+    }
+    let mut hashes: Vec<Bytes32> = vec![Bytes32::default(); active];
+    for (slot, hash) in hashes.iter_mut().enumerate() {
+        let m = by_slot[slot].ok_or_else(|| WalletError(format!("no member at slot {slot}")))?;
         // Each active participant's identity = its Goldilocks signing public key `pk_g`.
         *hash = m.pk_g;
     }
@@ -1000,7 +1022,7 @@ pub fn build_record(
         special_close_penalty: U256::from(0u32),
         close_freeze_nonce: 0,
         status: ChannelStatus::Active,
-        regev_pk_root: regev_pk_root(&regev_pks),
+        regev_pk_root: crate::regev::channel_regev_pk_root(&regev_pks),
     };
     record.member_pubkeys_root = member_pubkeys_root(&record, members)?;
     record
@@ -1362,7 +1384,7 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
             snapshot.members.len()
         ));
     }
-    let mut seen = [false; MAX_CHANNEL_MEMBERS];
+    let mut seen = vec![false; active];
     for m in &snapshot.members {
         check_slot(m.slot as usize, active)?;
         if seen[m.slot as usize] {
@@ -1382,7 +1404,7 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
     }
     // regev_pk_root binding (F9-A).
     let regev_pks = regev_pks_array(&snapshot.members);
-    if regev_pk_root(&regev_pks) != snapshot.record.regev_pk_root {
+    if crate::regev::channel_regev_pk_root(&regev_pks) != snapshot.record.regev_pk_root {
         return bail("regev_pk_root mismatch: member Regev keys not anchored to the record");
     }
     // SECURITY (P4-1, A11): authenticate the FULL member set — including each member's `pk_b` — by
@@ -1782,7 +1804,7 @@ pub fn verify_send_transition(
             payload.members.len()
         ));
     }
-    let mut seen = [false; MAX_CHANNEL_MEMBERS];
+    let mut seen = vec![false; active];
     for m in &payload.members {
         check_slot(m.slot as usize, active)?;
         if seen[m.slot as usize] {
@@ -1920,7 +1942,7 @@ pub fn verify_slim_send_tx_as_recipient(
     prev: &ChannelState,
     trusted_record: &ChannelRecord,
     own_members: &[MemberInfo],
-    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    regev_pks: &[RegevPk],
     slim: &SlimSendPayload,
     level: RegevSecurityLevel,
     recipient_sk: &RegevSk,
@@ -1959,7 +1981,7 @@ pub fn verify_slim_send_tx(
     prev: &ChannelState,
     trusted_record: &ChannelRecord,
     own_members: &[MemberInfo],
-    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    regev_pks: &[RegevPk],
     slim: &SlimSendPayload,
     level: RegevSecurityLevel,
     recipient_sk: Option<&RegevSk>,
@@ -2098,11 +2120,12 @@ pub fn build_batch_next_state(prev: &ChannelState, txs: &[BatchTxApply]) -> WRes
         return bail("empty batch");
     }
     let token_count = prev.balance_state.token_count as usize;
-    let mut debited = vec![[false; MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS];
+    let active_slots = prev.balance_state.active_slots();
+    let mut debited = vec![[false; MAX_CHANNEL_TOKENS]; active_slots];
     for t in txs {
         let s = t.sender_index as usize;
-        check_slot(s, MAX_CHANNEL_MEMBERS)?;
-        check_slot(t.recipient_index as usize, MAX_CHANNEL_MEMBERS)?;
+        check_slot(s, active_slots)?;
+        check_slot(t.recipient_index as usize, active_slots)?;
         // TM-8 fail-closed: the fold must never write an inactive (or out-of-layout) token
         // position, even if an upstream verifier was skipped.
         let ts = t.token_slot as usize;
@@ -3893,22 +3916,17 @@ pub mod deprecated_member_set_update {
                 return bail("apply member-set update: channel is full");
             }
             let bs = &mut state.balance_state;
-            // Shift the delegate region [mc..active) up by one, top-down so nothing is overwritten.
-            for i in (mc..active).rev() {
-                bs.enc_balances[i + 1] = bs.enc_balances[i].clone();
-                bs.pending_adds[i + 1] = bs.pending_adds[i].clone();
-                bs.regev_pk_digests[i + 1] = bs.regev_pk_digests[i];
-                bs.recipients[i + 1] = bs.recipients[i];
-            }
-            // The joiner's row: canonical zero (adds no balance), own digest + recipient.
-            bs.enc_balances[mc] = crate::common::balance_state::zero_token_row();
-            bs.pending_adds[mc] = Default::default();
             let digest = Bytes32::from(regev_pk.poseidon_digest());
             if digest == Bytes32::default() {
                 return bail("apply member-set update: joiner Regev digest is the padding value");
             }
-            bs.regev_pk_digests[mc] = digest;
-            bs.recipients[mc] = *recipient;
+            let _ = active;
+            // Insert the joiner's row at the co-signer boundary (the delegate region shifts up by
+            // one): canonical zero (adds no balance), own digest + recipient.
+            bs.enc_balances.insert(mc, crate::common::balance_state::zero_token_row());
+            bs.pending_adds.insert(mc, Default::default());
+            bs.regev_pk_digests.insert(mc, digest);
+            bs.recipients.insert(mc, *recipient);
             bs.member_count = prev_record.member_count + 1;
         }
         Ok(state)
@@ -4369,7 +4387,7 @@ pub fn verify_inter_channel_send_transition_with_lookup(
             debit_payload.members.len()
         ));
     }
-    let mut seen = [false; MAX_CHANNEL_MEMBERS];
+    let mut seen = vec![false; active];
     for m in &debit_payload.members {
         check_slot(m.slot as usize, active)?;
         if seen[m.slot as usize] {
@@ -4379,7 +4397,7 @@ pub fn verify_inter_channel_send_transition_with_lookup(
     }
     require_member_pk_gs_match_record(trusted_record, &debit_payload.members)?;
     let regev_pks = regev_pks_array(&debit_payload.members);
-    if regev_pk_root(&regev_pks) != trusted_record.regev_pk_root {
+    if crate::regev::channel_regev_pk_root(&regev_pks) != trusted_record.regev_pk_root {
         return bail("regev_pk_root mismatch: member Regev keys not anchored to the record");
     }
     if member_pubkeys_root(trusted_record, &debit_payload.members)?
@@ -4921,7 +4939,7 @@ pub fn verify_inter_channel_credit_states(
             b_members.len()
         ));
     }
-    let mut seen = [false; MAX_CHANNEL_MEMBERS];
+    let mut seen = vec![false; active];
     for member in b_members {
         check_slot(member.slot as usize, active)?;
         if seen[member.slot as usize] {
@@ -4930,7 +4948,7 @@ pub fn verify_inter_channel_credit_states(
         seen[member.slot as usize] = true;
     }
     let regev_pks = regev_pks_array(b_members);
-    if regev_pk_root(&regev_pks) != b_trusted_record.regev_pk_root
+    if crate::regev::channel_regev_pk_root(&regev_pks) != b_trusted_record.regev_pk_root
         || member_pubkeys_root(b_trusted_record, b_members)? != b_trusted_record.member_pubkeys_root
     {
         return bail("destination member set is not anchored to the trusted record");
@@ -5423,13 +5441,12 @@ fn source_record_placeholder(
     fallback: &ChannelRecord,
 ) -> WResult<ChannelRecord> {
     let msg = &inter_channel_tx.signed_small_block.message;
-    let mut member_pk_gs: [Bytes32; MAX_CHANNEL_MEMBERS] =
-        std::array::from_fn(|_| Bytes32::default());
     // The validator reads member_pk_gs[bp_member_slot]; structural member-sig validation also reads
     // member_pk_gs[slot] for each signature. Reconstruct from the small block's own signature set.
     let member_count = inter_channel_tx.signed_small_block.signatures.len().max(2) as u8;
+    let mut member_pk_gs: Vec<Bytes32> = vec![Bytes32::default(); member_count as usize];
     for sig in &inter_channel_tx.signed_small_block.signatures {
-        if (sig.member_slot as usize) < MAX_CHANNEL_MEMBERS {
+        if (sig.member_slot as usize) < member_pk_gs.len() {
             member_pk_gs[sig.member_slot as usize] = sig.pk_g;
         }
     }
@@ -11907,7 +11924,7 @@ mod delegate_send_tests {
             special_close_penalty: U256::from(0u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
-            regev_pk_root: regev_pk_root(&regev_pks),
+            regev_pk_root: crate::regev::channel_regev_pk_root(&regev_pks),
         };
         record.member_pubkeys_root = member_pubkeys_root(&record, &members).unwrap();
         record.validate().expect("record shape");

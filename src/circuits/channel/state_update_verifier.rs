@@ -266,7 +266,7 @@ pub struct InChannelTransferUpdateWitness {
     pub channel_record: ChannelRecord,
     /// All member Regev public keys, in member slot order. Checked against the
     /// L1-anchored `channel_record.regev_pk_root` before any use (F9-A).
-    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    pub regev_pks: Vec<RegevPk>,
     pub prev_state: ChannelState,
     pub next_state: ChannelState,
     pub channel_tx: ChannelTx,
@@ -283,7 +283,7 @@ pub struct InChannelTransferUpdateWitness {
 #[derive(Clone, Debug)]
 pub struct InterChannelSendUpdateWitness {
     pub channel_record: ChannelRecord,
-    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    pub regev_pks: Vec<RegevPk>,
     /// The destination channel recipient's Regev public key (receiver_deltas[0] is encrypted to
     /// it). Authenticity is the destination channel's `regev_pk_root` concern; the sender-side
     /// co-signers verify the E-2 statement against the key the sender claims.
@@ -334,7 +334,7 @@ pub struct ReceiverBundleApplyUpdateWitness {
 
     pub receiver_channel_record: ChannelRecord,
     /// The RECEIVER channel's member keys (root-checked against `receiver_channel_record`).
-    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    pub regev_pks: Vec<RegevPk>,
     /// The source channel sender's Regev public key (statement input for re-verifying the E-2
     /// proof signed into the IMIT digest).
     pub source_sender_pk: RegevPk,
@@ -362,7 +362,7 @@ pub struct ReceiverBundleApplyUpdateWitness {
 #[derive(Clone, Debug)]
 pub struct BalanceRefreshUpdateWitness {
     pub channel_record: ChannelRecord,
-    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    pub regev_pks: Vec<RegevPk>,
     pub prev_state: ChannelState,
     pub next_state: ChannelState,
     pub member_index: usize,
@@ -521,7 +521,7 @@ impl InChannelTransferUpdateWitness {
             self.sender_index,
             token_slot,
         )?;
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             if index != self.sender_index && index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             }
@@ -547,7 +547,7 @@ impl InChannelTransferUpdateWitness {
             self.sender_index,
             token_slot,
         )?;
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             if index != self.sender_index && index != self.recipient_index {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
@@ -772,7 +772,7 @@ impl InterChannelSendUpdateWitness {
         // TM-2/TM-6: the sender rebind happens at the REGISTRY-RESOLVED token position; all
         // other positions of the sender row are frozen (the "others unchanged" leg), and every
         // uninvolved row is bit-identical.
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             if index != sender_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -923,7 +923,7 @@ impl InterChannelFundImportUpdateWitness {
             ));
         }
         // Balances are untouched by the import: every slot and counter must be bit-identical.
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
         }
@@ -954,7 +954,7 @@ impl InterChannelFundImportUpdateWitness {
             .receiver_channel_record
             .member_pk_gs
             .iter()
-            .take(active.min(MAX_CHANNEL_MEMBERS))
+            .take(active)
             .position(|pk_g| *pk_g == receiver_user_id)
             .ok_or_else(|| {
                 ChannelStateUpdateError::InvalidReceiverDeltaBundle(
@@ -1043,7 +1043,7 @@ impl L1DepositImportUpdateWitness {
                 "unallocated_confirmed_incoming must increase by deposited amount".to_string(),
             ));
         }
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
         }
@@ -1200,7 +1200,7 @@ impl ReceiverBundleApplyUpdateWitness {
             self.recipient_index,
             token_slot,
         )?;
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             if index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -1317,7 +1317,7 @@ impl BalanceRefreshUpdateWitness {
         )?;
         let member = member_index_pubkey_hash(&self.channel_record, self.member_index)?;
         // Only the refreshed member's slot changes; everyone else's slot and counter are frozen.
-        for index in 0..MAX_CHANNEL_MEMBERS {
+        for index in 0..stored_slots(&self.prev_state, &self.next_state) {
             if index != self.member_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -1721,7 +1721,7 @@ fn verify_balance_state_common(
 
 pub fn verify_regev_pk_root(
     record: &ChannelRecord,
-    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    regev_pks: &[RegevPk],
 ) -> Result<(), ChannelStateUpdateError> {
     for (index, pk) in regev_pks.iter().enumerate() {
         pk.validate().map_err(|err| {
@@ -1730,7 +1730,7 @@ pub fn verify_regev_pk_root(
             ))
         })?;
     }
-    let root = crate::regev::regev_pk_root(regev_pks);
+    let root = crate::regev::channel_regev_pk_root(regev_pks);
     if root != record.regev_pk_root {
         return Err(ChannelStateUpdateError::InvalidRegevPkRoot(format!(
             "computed pk root {root:?} does not match channel record root {:?}",
@@ -1856,12 +1856,23 @@ pub fn require_accumulator_unchanged(
 /// The whole slot ROW (all `MAX_CHANNEL_TOKENS` ciphertext positions) must be bit-identical
 /// prev -> next. Multi-token note: rows are full 10-wide vectors, so this single equality covers
 /// every token position of an uninvolved slot (part of the TM-2 "others unchanged" obligation).
+/// Every slot either state stores (both store exactly their active slots), so a loop over this
+/// range compares every stored row and an unequal slot count fails the comparison.
+fn stored_slots(prev_state: &ChannelState, next_state: &ChannelState) -> usize {
+    prev_state
+        .balance_state
+        .enc_balances
+        .len()
+        .max(next_state.balance_state.enc_balances.len())
+}
+
 fn ensure_slot_unchanged(
     prev_state: &ChannelState,
     next_state: &ChannelState,
     index: usize,
 ) -> Result<(), ChannelStateUpdateError> {
-    if prev_state.balance_state.enc_balances[index] != next_state.balance_state.enc_balances[index]
+    if prev_state.balance_state.enc_balances.get(index)
+        != next_state.balance_state.enc_balances.get(index)
     {
         return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
             format!("balance slot {index} must remain bit-identical"),
@@ -1929,7 +1940,8 @@ fn require_pending_adds_unchanged(
     next_state: &ChannelState,
     index: usize,
 ) -> Result<(), ChannelStateUpdateError> {
-    if prev_state.balance_state.pending_adds[index] != next_state.balance_state.pending_adds[index]
+    if prev_state.balance_state.pending_adds.get(index)
+        != next_state.balance_state.pending_adds.get(index)
     {
         return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
             "pending_adds[{index}] must remain unchanged"
@@ -2288,14 +2300,14 @@ mod tests {
 
     /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array (padding
     /// = `Bytes32::default()`, pad-to-MAX D6).
-    fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
-        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    fn pad_hashes(active: &[Bytes32]) -> Vec<Bytes32> {
+        active.to_vec()
     }
 
     /// Pad an active prefix of Regev pubkeys to the full MAX_CHANNEL_MEMBERS array (padding =
     /// `RegevPk::padding()`).
-    fn pad_pks(active: &[RegevPk]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
-        std::array::from_fn(|i| active.get(i).cloned().unwrap_or_else(RegevPk::padding))
+    fn pad_pks(active: &[RegevPk]) -> Vec<RegevPk> {
+        active.to_vec()
     }
 
     /// Full in-channel fixture: 3 real key pairs, real balance encryptions, a real decrypted E-1
@@ -2340,7 +2352,7 @@ mod tests {
             special_close_penalty: U256::from(7u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
-            regev_pk_root: regev_pk_root(&pks),
+            regev_pk_root: crate::regev::channel_regev_pk_root(&pks),
         };
 
         // Balances: member0 (sender) holds 50, member1 (recipient) holds 10, member2 holds 30.
@@ -2876,7 +2888,7 @@ mod tests {
             special_close_penalty: U256::from(7u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
-            regev_pk_root: regev_pk_root(&pks),
+            regev_pk_root: crate::regev::channel_regev_pk_root(&pks),
         };
 
         // Token 0 balances (bystanders for this transfer).
@@ -3870,7 +3882,7 @@ mod tests {
             special_close_penalty: U256::from(7u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
-            regev_pk_root: regev_pk_root(&pks),
+            regev_pk_root: crate::regev::channel_regev_pk_root(&pks),
         };
 
         // The attacker's position is the canonical ZERO ciphertext (what every joined delegate

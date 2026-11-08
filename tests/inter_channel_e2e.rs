@@ -183,9 +183,8 @@ fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
         regev_pk: k.regev_pk.clone(),
     }
 }
-fn pks_array(keys: &[MemberKeys]) -> [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] {
-    let mut arr: [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] =
-        std::array::from_fn(|_| RegevPk::padding());
+fn pks_array(keys: &[MemberKeys]) -> Vec<RegevPk> {
+    let mut arr: Vec<RegevPk> = vec![RegevPk::padding(); keys.len()];
     for (i, k) in keys.iter().enumerate() {
         arr[i] = k.regev_pk.clone();
     }

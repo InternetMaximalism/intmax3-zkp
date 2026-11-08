@@ -3258,24 +3258,19 @@ fn is_single_delegate_add(
     if boundary >= MAX_CHANNEL_MEMBERS {
         return reject("delegate add: channel is full");
     }
-    // `member_pk_gs` must be an exact prefix-preserving append: every active-or-padding slot equals
-    // the old array, except the boundary slot which goes from empty (zero) to a nonzero identity.
-    for slot in 0..MAX_CHANNEL_MEMBERS {
-        if slot == boundary {
-            if old_record.member_pk_gs[slot] != Bytes32::default() {
-                return reject("delegate add: boundary slot was not empty");
-            }
-            if new_record.member_pk_gs[slot] == Bytes32::default() {
-                return reject("delegate add: new delegate identity is empty");
-            }
-        } else if new_record.member_pk_gs[slot] != old_record.member_pk_gs[slot] {
-            return reject("delegate add: an existing slot's identity changed");
-        }
+    // `member_pk_gs` must be an exact prefix-preserving append of ONE nonzero identity: every
+    // existing slot is unchanged and the new boundary identity is distinct from all of them.
+    if old_record.member_pk_gs.len() != boundary || new_record.member_pk_gs.len() != boundary + 1 {
+        return reject("delegate add: the identity list does not match the participant counts");
     }
-    // The new identity must be distinct from every other slot — a duplicate is a removal in
-    // disguise (mirrors `validate_member_set_delta`'s M-1 guard for co-signers).
+    if new_record.member_pk_gs[..boundary] != old_record.member_pk_gs[..] {
+        return reject("delegate add: an existing slot's identity changed");
+    }
     let added = new_record.member_pk_gs[boundary];
-    if (0..MAX_CHANNEL_MEMBERS).any(|i| i != boundary && new_record.member_pk_gs[i] == added) {
+    if added == Bytes32::default() {
+        return reject("delegate add: new delegate identity is empty");
+    }
+    if old_record.member_pk_gs.contains(&added) {
         return reject("delegate add: the new delegate identity duplicates an existing slot");
     }
     Ok(())
