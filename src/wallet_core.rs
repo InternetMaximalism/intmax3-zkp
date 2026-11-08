@@ -6184,6 +6184,102 @@ impl WithdrawalClaimProver {
         })
     }
 
+    /// [`Self::build_full_witness`] from a delegate's [`crate::slot_view::SlotView`] of the
+    /// finalized close state: the claim opens exactly one slot, so its row and Merkle siblings are
+    /// all the witness needs. Applies the same bindings as the native witness checks (close
+    /// intent/withdrawal digests, H1, the row under the signed slot root, the slot's ciphertext
+    /// and recipient).
+    #[allow(clippy::too_many_arguments)]
+    pub fn full_witness_from_view(
+        view: &crate::slot_view::SlotView,
+        token_slot: u8,
+        member_pk_g: Bytes32,
+        user_pk: &RegevPk,
+        regev_sk: &RegevSk,
+        close_intent: &CloseIntent,
+        close_tx: &CloseWithdrawal,
+        _level: RegevSecurityLevel,
+    ) -> WResult<WithdrawalClaimFullWitness> {
+        let header = &view.state.balance_state;
+        let member_index = view.slot as usize;
+        if member_index >= header.active_slots() {
+            return bail(format!(
+                "withdrawal claim: member_index {member_index} >= active region {}",
+                header.active_slots()
+            ));
+        }
+        if token_slot as usize >= header.token_count as usize {
+            return bail(format!(
+                "withdrawal claim: token_slot {token_slot} >= token_count {}",
+                header.token_count
+            ));
+        }
+        if close_tx.signing_digest() != close_intent.close_withdrawal_digest
+            || close_tx.final_balance_state_h1 != close_intent.final_balance_state_h1
+            || close_tx.channel_id != close_intent.channel_id
+        {
+            return bail("withdrawal claim: close withdrawal does not match the close intent");
+        }
+        if header.h1() != close_intent.final_balance_state_h1
+            || header.channel_id != close_intent.channel_id
+        {
+            return bail("withdrawal claim: the view is not the close intent's final state");
+        }
+        if view.slot_root_for(&view.row) != header.slot_tree_root {
+            return bail("withdrawal claim: the slot's row is not under the final slot root");
+        }
+        let slot_regev_pk_digest = Bytes32::from(user_pk.poseidon_digest());
+        if view.row.regev_pk_digest != slot_regev_pk_digest {
+            return bail("withdrawal claim: the slot's committed key is not the claimant's key");
+        }
+        let ct = view.row.enc_balances[token_slot as usize].clone();
+        let amount = decrypt_amount(regev_sk, &ct).map_err(|e| {
+            WalletError(format!(
+                "withdrawal claim: slot-balance decryption failed: {e:?}"
+            ))
+        })?;
+        let close_intent_digest = close_intent.signing_digest();
+        let recipient = view.row.recipient;
+        let public_inputs = crate::circuits::channel::withdrawal_claim_pis::WithdrawalClaimPublicInputs {
+            close_intent_digest,
+            channel_id: close_intent.channel_id,
+            final_balance_state_h1: close_intent.final_balance_state_h1,
+            member_pk_g,
+            recipient,
+            user_amount_digest: ct.digest(),
+            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                close_intent_digest,
+                slot_regev_pk_digest,
+                token_slot,
+            ),
+            amount,
+            token_slot,
+            token_index: header.token_registry[token_slot as usize],
+        };
+        Ok(WithdrawalClaimFullWitness {
+            public_inputs,
+            slot_tree_root: header.slot_tree_root,
+            slot_inclusion: crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::from_siblings(
+                view.slot_siblings.clone(),
+            ),
+            slot_ct_digests: BalanceState::token_ct_digests(&view.row.enc_balances),
+            slot_pending_adds: view.row.pending_adds,
+            token_count: header.token_count,
+            token_registry: header.token_registry,
+            settled_tx_chain: header.settled_tx_chain,
+            settled_tx_accumulator_root: header.settled_tx_accumulator_root,
+            state_version: header.state_version,
+            member_count: header.member_count,
+            delegate_count: header.delegate_count,
+            member_index,
+            regev_a: user_pk.a.clone(),
+            regev_b: user_pk.b.clone(),
+            ct_c1: ct.c1.clone(),
+            ct_c2: ct.c2.clone(),
+            regev_s: regev_sk.s.clone(),
+        })
+    }
+
     pub fn prove(
         &self,
         witness: &WithdrawalClaimFullWitness,

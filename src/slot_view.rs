@@ -1099,4 +1099,68 @@ mod tests {
         verify_inter_channel_send_transition(&snapshot.state, &snapshot.record, &fat, LEVEL)
             .expect("the burn verifies");
     }
+
+    #[test]
+    fn claim_witness_from_view_matches_the_full_state_claim() {
+        use crate::{
+            circuits::channel::withdrawal_claim_pis::WithdrawalClaimWitness,
+            common::channel::{ChannelMember, CloseIntent, CloseWithdrawal, WithdrawalClaim},
+            wallet_core::WithdrawalClaimProver,
+        };
+        let (snapshot, keys) = channel(&mut StdRng::seed_from_u64(0x51_0D), [5, 6, 7, 8]);
+        let state = &snapshot.state;
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::default(),
+            burn_amount: state.channel_fund.amounts[0],
+            zkp: Vec::new(),
+        };
+        let intent = CloseIntent::new(state, &close_tx).unwrap();
+        let view = SlotView::from_snapshot(&snapshot, 3).unwrap();
+        assert_eq!(CloseIntent::from_header(&view.state, &close_tx).unwrap(), intent);
+        let k = &keys[3];
+        let w = WithdrawalClaimProver::full_witness_from_view(
+            &view, 0, k.pk_g(), &k.regev_pk, &k.regev_sk, &intent, &close_tx, LEVEL,
+        )
+        .unwrap();
+
+        // The native full-state witness over the same slot yields the same public inputs.
+        let ct = state.balance_state.enc_balances[3][0].clone();
+        let pkd = Bytes32::from(k.regev_pk.poseidon_digest());
+        let native = WithdrawalClaimWitness {
+            close_intent: intent.clone(),
+            close_tx: close_tx.clone(),
+            member: ChannelMember {
+                pk_g: k.pk_g(),
+                member_slot: 3,
+                l1_withdrawal_recipient: state.balance_state.recipients[3],
+            },
+            claim: WithdrawalClaim {
+                close_intent_digest: intent.signing_digest(),
+                member_pk_g: k.pk_g(),
+                token_slot: 0,
+                l1_recipient: state.balance_state.recipients[3],
+                user_amount_ct: ct.clone(),
+                withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                    intent.signing_digest(),
+                    pkd,
+                    0,
+                ),
+                claim_proof: Vec::new(),
+            },
+            final_balance_state: state.balance_state.clone(),
+            member_index: 3,
+            user_pk: k.regev_pk.clone(),
+            amount: 8,
+        };
+        let native_pis = native.to_public_inputs_for_in_circuit_decryption(LEVEL).unwrap();
+        assert_eq!(w.public_inputs, native_pis);
+        let tree = state.balance_state.slot_tree();
+        assert_eq!(w.slot_tree_root, tree.get_root());
+        assert_eq!(w.slot_inclusion.0.siblings, tree.prove(3).0.siblings);
+        assert_eq!(w.public_inputs.amount, 8);
+    }
 }

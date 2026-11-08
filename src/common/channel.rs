@@ -1182,6 +1182,15 @@ impl CloseIntent {
         final_channel_state: &ChannelState,
         close_withdrawal: &CloseWithdrawal,
     ) -> Result<Self, ChannelError> {
+        Self::from_header(&final_channel_state.header(), close_withdrawal)
+    }
+
+    /// [`Self::new`] over the signed state header (what a delegate holds). Every value the intent
+    /// binds is a header field, so both constructors yield the identical intent.
+    pub fn from_header(
+        final_channel_state: &ChannelStateHeader,
+        close_withdrawal: &CloseWithdrawal,
+    ) -> Result<Self, ChannelError> {
         if final_channel_state.channel_id != close_withdrawal.channel_id {
             return Err(ChannelError::InvalidCloseBinding(format!(
                 "final state channel_id {:?} != close withdrawal channel_id {:?}",
