@@ -131,10 +131,10 @@ class Wallet {
   // Returns the SLIM send payload.
   send(senderSlot, recipient, amount, nonceHex, tokenSlot) {
     void senderSlot; void nonceHex; // session-internal in the WASM wallet (kept for API compat)
-    if (!recipient || typeof recipient !== 'object') {
-      throw new TypeError('send needs the recipient slot record {slot, pkG, pkB, regevPk} from /api/member');
+    if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) {
+      throw new TypeError('recipientSlot: send needs the recipient slot record {slot, pkG, pkB, regevPk} from /api/member');
     }
-    exactNumber(recipient.slot, 0xffffffff, 'recipient.slot');
+    exactNumber(recipient.slot, 1023, 'recipientSlot');
     const value = exactAmount(amount);
     const token = optionalNumber(tokenSlot, 9, 'tokenSlot');
     return JSON.parse(this._load().wallet_send(JSON.stringify(recipient), value, token));

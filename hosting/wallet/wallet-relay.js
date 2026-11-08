@@ -998,6 +998,30 @@ function buildStateDelta(ch, snap, sinceVersion, sinceDigest) {
   };
 }
 
+app.get('/api/snapshot', (req, res) => {
+  let ch, snap;
+  try {
+    ch = reqChannel(req);
+    snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  } catch (e) {
+    if (e && e.status) return sendRouteError(res, e); // unknown channel is a 400, not "no channel yet"
+    return res.status(404).json({ error: 'no channel yet' });
+  }
+  // No `since`/`sinceDigest` -> byte-identical to the pre-delta response, so OLD CLIENTS (and every
+  // non-send call site) are untouched. The head is still fingerprinted, so this snapshot can serve
+  // as the base of the client's NEXT delta request.
+  const since = req.query && req.query.since;
+  const sinceDigest = req.query && req.query.sinceDigest;
+  if (since === undefined || sinceDigest === undefined) {
+    try { fingerprintCached(ch, snap.state); } catch (e) { /* never fail a snapshot read over the index */ }
+    return res.json(snap);
+  }
+  const out = buildStateDelta(ch, snap, parseInt(String(since), 10), String(sinceDigest));
+  if (out.body) return res.json(out.body);
+  res.setHeader('X-Delta-Fallback', out.fallback);   // observability only; the body is the full snapshot
+  res.json(snap);
+});
+
 // GET /api/view?channel=N&pkG=0x..  (or &slot=S): the signed head's view of one slot. This is the
 // only head a delegate wallet imports.
 app.get('/api/view', (req, res) => {
@@ -1023,30 +1047,6 @@ app.get('/api/member', (req, res) => {
     if (!fs.existsSync(wc(ch, 'channel_snapshot.json'))) return res.status(404).json({ error: 'no channel yet' });
     res.type('json').send(cliProjection(ch, 'member-info', ['--slot', String(Number(slotRaw))], 'm' + Number(slotRaw)));
   } catch (e) { sendRouteError(res, e); }
-});
-
-app.get('/api/snapshot', (req, res) => {
-  let ch, snap;
-  try {
-    ch = reqChannel(req);
-    snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-  } catch (e) {
-    if (e && e.status) return sendRouteError(res, e); // unknown channel is a 400, not "no channel yet"
-    return res.status(404).json({ error: 'no channel yet' });
-  }
-  // No `since`/`sinceDigest` -> byte-identical to the pre-delta response, so OLD CLIENTS (and every
-  // non-send call site) are untouched. The head is still fingerprinted, so this snapshot can serve
-  // as the base of the client's NEXT delta request.
-  const since = req.query && req.query.since;
-  const sinceDigest = req.query && req.query.sinceDigest;
-  if (since === undefined || sinceDigest === undefined) {
-    try { fingerprintCached(ch, snap.state); } catch (e) { /* never fail a snapshot read over the index */ }
-    return res.json(snap);
-  }
-  const out = buildStateDelta(ch, snap, parseInt(String(since), 10), String(sinceDigest));
-  if (out.body) return res.json(out.body);
-  res.setHeader('X-Delta-Fallback', out.fallback);   // observability only; the body is the full snapshot
-  res.json(snap);
 });
 
 // GET /api/poll?channel=N&since=<stateVersion>

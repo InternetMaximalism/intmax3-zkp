@@ -7,6 +7,8 @@ function harness({failed=false,wrong=false,verifyFailed=false}={}){
  const context={fetchDeploymentInfo:async()=>({chainId:31337,rollup:'rollup'}),myChannel:7,activeCh:7,sha256Hex:async()=>wrong?'wrong':'identity',localStorage:{getItem:()=>''},SEED_KEY:'seed',log(){},sendOutboxKey:()=>7,
  fetch:async(_,options)=>{requests++;assert.equal(options.body,saved.body);return {ok:!failed,text:async()=>JSON.stringify(failed?{error:'lost'}:{sourceHead:{digest:'accepted'}})};},
  api:async()=>JSON.stringify({state:{digest:'verified'}}),call:async()=>{if(verifyFailed)throw Error('signature failed');verified++;return JSON.stringify({slot:3});},setChannelFrom(){},walletOutbox:{clear:async()=>{assert.equal(verified,1);cleared++;}}};
+ // The page's own-slot import: fetch our view and verify it in WASM (here: the mocked call).
+ context.importMyView=async()=>JSON.parse(await context.call('importView',{viewJson:'own slot view'}));
  vm.createContext(context);vm.runInContext(html.slice(html.indexOf('async function validateSavedSend('),html.indexOf('async function resumeSoloSend(')) + html.slice(start,end),context);return {run:()=>context.resumeInterSend(saved),counts:()=>({requests,cleared})};
 }
 test('retry replays the exact persisted proof and clears only after verified state import',async()=>{const h=harness();await h.run();assert.deepEqual(h.counts(),{requests:1,cleared:1});});

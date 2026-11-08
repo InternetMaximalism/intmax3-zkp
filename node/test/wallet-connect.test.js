@@ -25,14 +25,16 @@ function harness({ seed = 'test-existing-key', saved = 8, failure, metadataFailu
     guard: (_key, fn) => fn,
     call: async (action, payload) => {
       events.push([action, payload]);
-      if (action === 'keygenSeeded') return '{}';
-      assert.equal(action, 'importChannel');
+      if (action === 'keygenSeeded') return JSON.stringify({ pkG: '0x' + '11'.repeat(32) });
+      // A delegate imports only its own slot view, never the full snapshot.
+      assert.equal(action, 'importView');
       if (failure) throw new Error(failure);
       return JSON.stringify({ slot: 3, balance: '123', stateVersion: 4 });
     },
-    api: async (url, body, method) => {
-      events.push(['api', url, body, method]);
-      assert.equal(url, '/api/snapshot'); assert.equal(method, 'GET');
+    myPkG: null,
+    api: async (url) => { throw new Error('connect must not call ' + url); },
+    fetchMyView: async (channel) => {
+      events.push(['api', '/api/view', channel]);
       return JSON.stringify({ record: { channelId: returnedChannel } });
     },
     setChannelFrom: () => events.push(['adopt']),
@@ -56,7 +58,8 @@ test('Connect opens the selected channel with the saved key, without init or a d
   assert.equal(h.events.find(e => e[0] === 'keygenSeeded')[1].seed, 'test-existing-key');
   assert.ok(h.events.some(e => e[0] === 'showJoined'));
   assert.ok(h.events.some(e => e[0] === 'saveChannel' && e[1] === 10));
-  assert.deepEqual(h.events.filter(e => e[0] === 'api').map(e => e[1]), ['/api/snapshot']);
+  assert.deepEqual(h.events.filter(e => e[0] === 'api').map(e => e[1]), ['/api/view']);
+  assert.equal(h.context.myPkG, '0x' + '11'.repeat(32));
   assert.equal(h.elements.get('btnOpen').disabled, false);
 });
 
@@ -78,7 +81,7 @@ test('wrong-key restoration preserves identity and gives recovery guidance inste
 
 test('snapshot failures stay visible and do not change the saved channel', async () => {
   const h = harness();
-  h.context.api = async () => { throw new Error('relay unavailable'); };
+  h.context.fetchMyView = async () => { throw new Error('relay unavailable'); };
   assert.equal(await h.context.connectExistingChannel(), false);
   assert.match(h.elements.get('connectStatus').textContent, /relay unavailable/);
   assert.equal(h.events.some(e => e[0] === 'saveChannel'), false);
@@ -87,7 +90,7 @@ test('snapshot failures stay visible and do not change the saved channel', async
 test('a snapshot for another channel cannot establish a connection', async () => {
   const h = harness({ returnedChannel: 9 });
   assert.equal(await h.context.connectExistingChannel(), false);
-  assert.equal(h.events.some(e => ['importChannel', 'showJoined', 'saveChannel'].includes(e[0])), false);
+  assert.equal(h.events.some(e => ['importView', 'showJoined', 'saveChannel'].includes(e[0])), false);
 });
 
 test('ancillary metadata failure does not undo verified account connection', async () => {

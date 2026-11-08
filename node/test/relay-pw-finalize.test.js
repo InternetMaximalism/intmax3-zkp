@@ -124,6 +124,7 @@ test('a cosign while a withdrawal is settling is batched and answered, not refus
     fullCliError: e => e.message, kitPendingHint: () => null, console: { error() {} },
   };
   vm.createContext(ctx);
+  vm.runInContext(slice('function headAck(', '// The reply for a route that used to return the full snapshot'), ctx);
   vm.runInContext(slice("app.post('/api/cosign', (req, res) => {", '// Inter-channel transfers still pending'), ctx);
   let status = 200;
   const body = await new Promise(resolve => handler({ query: { channel: '7' }, body: { proposedNextState: {} } },
