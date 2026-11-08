@@ -5,6 +5,11 @@ INTMAX3 is a confidential, quantum safe, fast, and scalable payment system on Et
 routing‑liquidity problem. This repository contains the proving circuits (Rust/Plonky2), the L1
 settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean), and a browser wallet.
 
+> **Specification: start by reading the Overview (chapter 1) of [`doc/design_spec.md`](doc/design_spec.md).**
+> It is the official design specification of the current implementation. The older specifications
+> (abstract, abstract2, abstract2-1, detail2, …) are kept only as history in
+> [`doc/architecture-audit/archive/`](doc/architecture-audit/archive/).
+
 ---
 
 ## Why INTMAX3
@@ -43,7 +48,7 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 
 The protocol is **MECE**: every transfer is exactly one of two kinds, distinguished structurally by an
 `H2` tag in the signed state. Each kind is gated by a ZK range proof so balances stay encrypted while
-remaining provably solvent. (Spec: [`doc/architecture-audit/abstract2.md`](doc/architecture-audit/abstract2.md).)
+remaining provably solvent. (Spec: [`doc/architecture-audit/archive/abstract2.md`](doc/architecture-audit/archive/abstract2.md).)
 
 ```mermaid
 flowchart TB
@@ -151,7 +156,7 @@ trusted or migrated.
 
 | Area | Path | What |
 |---|---|---|
-| **Specification** | [`doc/architecture-audit/detail2.md`](doc/architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](doc/architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
+| **Specification** | [`doc/design_spec.md`](doc/design_spec.md) | the **official design spec** — read its Overview (chapter 1) first; superseded specs are in [`doc/architecture-audit/archive/`](doc/architecture-audit/archive/) |
 | **Audit** | [`doc/audit/zkp/`](doc/audit/zkp/) ([SUMMARY](doc/audit/zkp/SUMMARY.md)) | a historical, partial implementation-level Lean model with 257 theorem declarations and zero `sorry`/`axiom`. Its own staleness banner identifies the target commit, unmodeled cryptographic internals and gate evaluators, and sections not re-synchronized to the current tree. A green `lake build` proves consistency of that model, not line-by-line equivalence with current circuits/contracts. It is accompanied by an adversarial audit and remediation report ([report](doc/audit/audit02-07-2026.md)). |
 | **Machine‑checked safety** | [`doc/architecture-audit/ChannelSafety.lean`](doc/architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](doc/architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
 | **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + Poseidon signature), `withdraw/`, `channel/` (channel state‑update verifiers) |

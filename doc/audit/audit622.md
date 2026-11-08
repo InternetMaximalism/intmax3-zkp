@@ -46,7 +46,7 @@ This report consolidates a multi-pass review of the intmax3-zkp implementation a
 ## Methodology
 
 - Manual code review of primary paths (close, inter-channel send/receive, withdrawal, validity finalization, claims)
-- Cross-reference with in-repo threat models (`doc/tasks/phase-b-claims-threat-model.md`, `doc/tasks/decryption-subphase-design.md`, `doc/tasks/wallet-threat-model.md`, `doc/architecture-audit/detail2.md`)
+- Cross-reference with in-repo threat models (`doc/tasks/phase-b-claims-threat-model.md`, `doc/tasks/decryption-subphase-design.md`, `doc/tasks/wallet-threat-model.md`, `doc/architecture-audit/archive/detail2.md`)
 - Verification of SECURITY / RESIDUAL comments in circuit and contract code
 - Review of adversarial Foundry tests (`ChannelSettlementAdversarial.t.sol`, `ChannelSettlementInvariant.t.sol`, circuit negative tests)
 
@@ -278,7 +278,7 @@ Inter-channel conservation uses full `u64_to_u256`; genesis/close cap path trunc
 | Field | Value |
 |-------|-------|
 | **Severity** | MEDIUM–HIGH |
-| **Files** | `doc/architecture-audit/detail2.md` (M7); `wallet_core.rs:1587-1590`; `channel_member.rs:562-607` |
+| **Files** | `doc/architecture-audit/archive/detail2.md` (M7); `wallet_core.rs:1587-1590`; `channel_member.rs:562-607` |
 
 **Issue:** Members can sign post-debit state (`h2_tag = tx_tree_root`) before L1 absorbs the small block. Wallet layer does not require L1 inclusion witness before co-signing close on `h2_tag ≠ 0` states.
 
@@ -567,8 +567,8 @@ Adversarial circuit tests include `withdrawal_claim_circuit_rejects_over_claim`,
 
 ## References
 
-- `doc/architecture-audit/detail2.md` — protocol specification; M7 open item
-- `doc/architecture-audit/abstract2-1.md` — small-block / bulk transfer model
+- `doc/architecture-audit/archive/detail2.md` — protocol specification; M7 open item
+- `doc/architecture-audit/archive/abstract2-1.md` — small-block / bulk transfer model
 - `doc/tasks/decryption-subphase-design.md` — decryption gadget design and MUST-FIX list
 - `doc/tasks/phase-b-claims-threat-model.md` — claim binding phases
 - `doc/tasks/wallet-threat-model.md` — wallet verification obligations

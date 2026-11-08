@@ -37,4 +37,4 @@ on-chain registration on the close path = it needs an extension binding the with
 - `src/bin/channel_member.rs` (anchor placeholder + fail-closed stubs)
 - `src/circuits/channel/close_circuit.rs`, `close_pis.rs`
 - `contracts/src/ChannelSettlementManager.sol`, `ChannelSettlementVerifier.sol`
-- `doc/architecture-audit/detail2.md` §K-4
+- `doc/architecture-audit/archive/detail2.md` §K-4

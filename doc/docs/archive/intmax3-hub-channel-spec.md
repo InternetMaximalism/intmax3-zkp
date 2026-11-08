@@ -1,6 +1,6 @@
 # [DEPRECATED] Intmax3 Hub-Based Confidential Multi-Party Channel Specification
 
-Status: **DEPRECATED — superseded by `doc/architecture-audit/detail2.md`** (the authoritative spec on the enshrined-paymentchannel line).  
+Status: **DEPRECATED — superseded by `doc/architecture-audit/archive/detail2.md`** (the authoritative spec on the enshrined-paymentchannel line).  
 Scope: Historical design draft. Retained for reference only; **do not implement from this document.**
 
 > **Why deprecated:** This draft conflicts with `detail2.md` on nearly every foundational decision and predates the
@@ -14,7 +14,7 @@ Scope: Historical design draft. Retained for reference only; **do not implement 
 >   `BalanceState{enc_balances, settled_tx_chain, state_version}` + chain-equality reconciliation in detail2.
 > - **Tx / block typing, nullifier model, on-chain wrapper (MLE/WHIR-only):** all diverge from the implemented design.
 >
-> See `doc/architecture-audit/detail2.md` and `doc/architecture-audit/detail2-implementation-notes.md` for the current spec.
+> See `doc/architecture-audit/archive/detail2.md` and `doc/architecture-audit/archive/detail2-implementation-notes.md` for the current spec.
 
 ## 1. Goals
 

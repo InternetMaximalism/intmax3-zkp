@@ -1,4 +1,4 @@
-# detail3 — Intmax3 detailed design specification (current implementation)
+# Intmax3 design specification (official; formerly `detail3.md`)
 
 **Describes:** branch `claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
 `861d44c5` on `claude/abstract-detail-spec-audit-738841`). Written against `7f129334` (2026-10-15:
@@ -9,10 +9,10 @@ fixes (H1, H2, M1), the 2026-10-16 cryptographic review (C01–C10, RNG separati
 minimal fixes, the regenerated wire-v3 fixture cohort, the wallet-core snapshot/import gates, and the
 2026-10-17 follow-up reviews of `src/common`, `src/utils`, `src/ethereum_types`.
 
-**Supersedes:** the "current" sections of [abstract2-1.md](./abstract2-1.md) and
-[detail2.md](./detail2.md). Where those documents and this one disagree, this one describes the code.
+**Supersedes:** the "current" sections of [abstract2-1.md](architecture-audit/archive/abstract2-1.md) and
+[detail2.md](architecture-audit/archive/detail2.md). Where those documents and this one disagree, this one describes the code.
 Their historical sections remain history. This document does not describe the Lean models or the
-audit reports; see [lean-current-safety.md](../audit/lean-current-safety.md) for that scope.
+audit reports; see [lean-current-safety.md](audit/lean-current-safety.md) for that scope.
 
 **How to read:** Chapter 1 (Overview) uses plain words and avoids type and function names. Every
 Overview line has an id (`N..` network, `C..` channels, `G..` deposit/close game). Chapter 2 (Detail)
@@ -886,7 +886,7 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 
 - The CloseAssetBacking VK rotates with the 35-limb statement; the checked-in
   `close_asset_backing_*` fixtures and the pinned adapter must be regenerated per
-  [the regeneration runbook](../tasks/regen-and-redeploy-runbook.md) before any deployment
+  [the regeneration runbook](tasks/regen-and-redeploy-runbook.md) before any deployment
   (`DeployCloseCli` refuses `backingPublicInputCount != 35`).
 - Whether to add a second on-chain layer refusing a close whose unallocated residue is not covered
   by IMUI leaves (the Manager cannot distinguish the heads by statement key; the structural fix

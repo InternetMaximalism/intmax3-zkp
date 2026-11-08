@@ -136,7 +136,7 @@ Two would-be second factors do not fire:
 ### 2.3 Severity
 
 Total loss of channel funds by any single member, with no in-protocol recovery. The design docs
-specify the opposite (`doc/architecture-audit/abstract2-1.md:33`, `:405`: "no unilateral path" /
+specify the opposite (`doc/architecture-audit/archive/abstract2-1.md:33`, `:405`: "no unilateral path" /
 "no unilateral withdrawal"). This is a spec/implementation divergence in the direction of
 unsoundness, not a missing nice-to-have.
 

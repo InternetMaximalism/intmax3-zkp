@@ -5,7 +5,7 @@
 > have been **removed** from the active pipeline: on-chain verification is now
 > **MLE/WHIR only**, and the validity-PI binding the Groth16 PI-hash once carried
 > is replaced by `_mlePublicInputsMatch(mleProof.publicInputs, keccak256(ValidityPublicInputs))`.
-> See `doc/architecture-audit/detail2.md` (D6, Change B) for the current design.
+> See `doc/architecture-audit/archive/detail2.md` (D6, Change B) for the current design.
 > Kept for historical reference only — the WHIR-specific sections below still apply.
 
 ## Overview

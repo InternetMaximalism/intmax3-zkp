@@ -2,7 +2,7 @@
 
 All operations for the INTMAX3 payment channel protocol. Each entry covers what the operation does, its inputs/outputs, current implementation status, and what needs to be built for the public API.
 
-Spec references: `doc/architecture-audit/detail2.md` (detail2), `doc/architecture-audit/abstract2-1.md` (abstract2-1).
+Spec references: `doc/architecture-audit/archive/detail2.md` (detail2), `doc/architecture-audit/archive/abstract2-1.md` (abstract2-1).
 
 ---
 
@@ -848,7 +848,7 @@ first received after finalization use `LiveBalanceService::prepare_late_inter_ch
 `CloseFundingMaterializer.claimLateIncoming`: an exact closing Balance cursor, ordinary receive,
 final-H1 recipient binding, atomic escrow/cap increase, and a persisted next cursor. Their
 59-limb combined proof is distinct from this route's 58-limb residual proof. See
-[the continuation specification](../doc/architecture-audit/detail2.md#post-close-first-receipt-ordinary-receivetransfer-continuation-2026-09-26).
+[the continuation specification](../doc/architecture-audit/archive/detail2.md#post-close-first-receipt-ordinary-receivetransfer-continuation-2026-09-26).
 
 **Inputs:** Manager, retained incoming descriptor, final signed snapshot/tree, recipient proof.
 **Outputs:** Claim-scoped withdrawal credit within the finalized token cap.

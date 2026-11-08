@@ -117,7 +117,7 @@ chain**, not a set:
 The only real nullifier *set* in the repo is the base-layer indexed Merkle tree used by
 `receive_deposit_circuit` (`update_private_state.rs:56-63`), hardened by the
 BAL-CRIT-001 regression test. **`build_l1_deposit_import` never receives such a proof.**
-`doc/architecture-audit/detail2.md:407-410` claims the T2 double-fold mitigation comes from
+`doc/architecture-audit/archive/detail2.md:407-410` claims the T2 double-fold mitigation comes from
 that tree via `verify_channel_backing`; that link is **unimplemented on this path**, and
 structurally cannot be wired as-is (the import pushes the nullifier *twice*, the base layer
 pushes it *once*, so the chains can never agree).

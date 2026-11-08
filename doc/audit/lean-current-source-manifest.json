@@ -94,22 +94,22 @@
       "role": "model"
     },
     {
-      "path": "doc/architecture-audit/abstract2.md",
+      "path": "doc/architecture-audit/archive/abstract2.md",
       "sha256": "5bfcfefc21a315ec7403c193b1c13ae34e65b99d33a4dfafb7fec4d7f456640e",
       "role": "spec"
     },
     {
-      "path": "doc/architecture-audit/abstract2-1.md",
+      "path": "doc/architecture-audit/archive/abstract2-1.md",
       "sha256": "1c63882d66e1ad8ca9c7599af009916233689594f48a9a283771b1ef0fb1c097",
       "role": "spec"
     },
     {
-      "path": "doc/architecture-audit/detail2.md",
+      "path": "doc/architecture-audit/archive/detail2.md",
       "sha256": "e8ae871d27af7ded7b0dd75477fab1009a919aaf340f57d68ad017ebee93a5f8",
       "role": "spec"
     },
     {
-      "path": "doc/architecture-audit/detail2-implementation-notes.md",
+      "path": "doc/architecture-audit/archive/detail2-implementation-notes.md",
       "sha256": "9a79e55c7b667092db3cb2c14411a6f15ebd73b2735e6b2e962c3c1939f29061",
       "role": "spec"
     },
@@ -2505,10 +2505,10 @@
         "contracts/src/IntmaxRollup.sol",
         "src/circuits/channel/close_pis.rs",
         "src/constants.rs",
-        "doc/architecture-audit/abstract2.md",
-        "doc/architecture-audit/abstract2-1.md",
-        "doc/architecture-audit/detail2.md",
-        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/architecture-audit/archive/abstract2.md",
+        "doc/architecture-audit/archive/abstract2-1.md",
+        "doc/architecture-audit/archive/detail2.md",
+        "doc/architecture-audit/archive/detail2-implementation-notes.md",
         "doc/audit/lean-current-safety.md"
       ],
       "theorems": [
@@ -2641,10 +2641,10 @@
         "src/common/channel.rs",
         "src/common/balance_state.rs",
         "src/regev/params.rs",
-        "doc/architecture-audit/abstract2.md",
-        "doc/architecture-audit/abstract2-1.md",
-        "doc/architecture-audit/detail2.md",
-        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/architecture-audit/archive/abstract2.md",
+        "doc/architecture-audit/archive/abstract2-1.md",
+        "doc/architecture-audit/archive/detail2.md",
+        "doc/architecture-audit/archive/detail2-implementation-notes.md",
         "doc/audit/lean-current-safety.md"
       ]
     },
@@ -2696,10 +2696,10 @@
         "src/bin/channel_member.rs",
         "src/bin/channel_member/deposit_recovery.rs",
         "src/bin/channel_member/burn_recovery.rs",
-        "doc/architecture-audit/abstract2.md",
-        "doc/architecture-audit/abstract2-1.md",
-        "doc/architecture-audit/detail2.md",
-        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/architecture-audit/archive/abstract2.md",
+        "doc/architecture-audit/archive/abstract2-1.md",
+        "doc/architecture-audit/archive/detail2.md",
+        "doc/architecture-audit/archive/detail2-implementation-notes.md",
         "doc/audit/lean-current-safety.md"
       ]
     },
@@ -2756,10 +2756,10 @@
         "src/common/channel.rs",
         "src/public_close_prover.rs",
         "src/live_balance_service.rs",
-        "doc/architecture-audit/abstract2.md",
-        "doc/architecture-audit/abstract2-1.md",
-        "doc/architecture-audit/detail2.md",
-        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/architecture-audit/archive/abstract2.md",
+        "doc/architecture-audit/archive/abstract2-1.md",
+        "doc/architecture-audit/archive/detail2.md",
+        "doc/architecture-audit/archive/detail2-implementation-notes.md",
         "doc/audit/lean-current-safety.md"
       ]
     },
@@ -2774,9 +2774,9 @@
         "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
         "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
         "src/utils/mle_prover.rs",
-        "doc/architecture-audit/abstract2.md",
-        "doc/architecture-audit/abstract2-1.md",
-        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/archive/abstract2.md",
+        "doc/architecture-audit/archive/abstract2-1.md",
+        "doc/architecture-audit/archive/detail2.md",
         "doc/audit/lean-current-safety.md",
         "doc/audit/zkp/README.md",
         "doc/audit/zkp/SUMMARY.md"

@@ -232,7 +232,7 @@ one client-side pre-flight re-derives H2 and compares (`channel_member.rs:6317-6
 existing SECURITY comment is accurate in the narrow sense it claims — `aux_data` is merkle-bound and
 the fold is faithful (`send_tx_circuit.rs:285-291`) — and it explicitly defers the semantics
 off-circuit ("enforced off-circuit at co-sign time", `:288-289`; also
-`doc/architecture-audit/detail2-implementation-notes.md:313-319`). The co-sign-time enforcement it
+`doc/architecture-audit/archive/detail2-implementation-notes.md:313-319`). The co-sign-time enforcement it
 defers to does not exist for the *amount*: the co-signer never receives the base `Transfer` (§1.2).
 
 **(b) There is no exploit today**, for reasons unrelated to (a):

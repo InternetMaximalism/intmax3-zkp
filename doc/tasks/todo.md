@@ -297,5 +297,5 @@ commit to a future release or authorize re-enabling the digest-equality verifier
 
 A universal ZK non-inclusion proof is not required if the authenticated obligation and response/
 timeout game establish the fault. The existing close replacement/cancellation challenge alone
-is not that game. See [detail2](../architecture-audit/detail2.md#specialclose--out-of-scope-deferred-todo)
+is not that game. See [detail2](../architecture-audit/archive/detail2.md#specialclose--out-of-scope-deferred-todo)
 for the rationale and historical §H-3 specification.

@@ -62,7 +62,7 @@ Legend: [ ] todo · [~] in progress · [x] modeled+proved
       **2026-10-15 correction:** the 2026-10-09 rule compared the backing's *anchor*
       (`public_state.block_number`) with `lastPostedBlock`; that was unsound, because a receive
       step may re-anchor a pre-burn head at any later finalized state while `block_r` stays below
-      the burn (doc/architecture-audit/detail2.md §T). The statement is now 35 limbs with
+      the burn (doc/architecture-audit/archive/detail2.md §T). The statement is now 35 limbs with
       `processedSendBlockNumber` at limb 26 (`<= anchorBlockNumber`, circuit-range-checked), the
       materializer keeps `signedHeadBackingProcessedSendPlusOne` per statement key (the
       `signedHeadBackingAnchorPlusOne` getter is gone), and `_materialize` checks
