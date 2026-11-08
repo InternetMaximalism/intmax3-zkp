@@ -2137,6 +2137,122 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse {path}: {e}")))
 }
 
+// --- Slim intents from delegates -----------------------------------------------------------------
+//
+// A delegate holds only its own slot view, so it sends SLIM intents without a proposed successor
+// state. These readers accept either form: a slim intent is rebuilt into the full payload against
+// THIS host's trusted head (the successor computed by the same state-application functions the
+// full-state builders use), then every caller runs its unchanged full-state verification on it.
+
+fn read_send_payload(path: &str, snapshot: &ChannelSnapshot) -> SendPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("anchorDigest").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::wallet_core::SlimSendPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    if slim.anchor_digest != snapshot.state.digest {
+        die("stale send: the slim payload's anchor is not the channel head");
+    }
+    let proposed_next_state = intmax3_zkp::wallet_core::solo_next_state(
+        &snapshot.state,
+        slim.sender_index,
+        slim.recipient_index,
+        slim.channel_tx.token_slot,
+        &slim.after_ct,
+        &slim.channel_tx.enc_amount,
+    )
+    .unwrap_or_else(|e| die(format!("slim send: {e}")));
+    SendPayload {
+        sender_index: slim.sender_index,
+        recipient_index: slim.recipient_index,
+        channel_tx: slim.channel_tx,
+        proposed_next_state,
+        members: snapshot.members.clone(),
+        record: snapshot.record.clone(),
+    }
+}
+
+fn read_refresh_payload(path: &str, snapshot: &ChannelSnapshot) -> RefreshPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("newCt").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::slot_view::SlimRefreshPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    intmax3_zkp::slot_view::inflate_refresh(snapshot, &slim)
+        .unwrap_or_else(|e| die(format!("slim refresh: {e}")))
+}
+
+fn read_debit_payload(path: &str, snapshot: &ChannelSnapshot) -> InterChannelDebitPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("proposedDigest").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::slot_view::SlimInterChannelDebitPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    intmax3_zkp::slot_view::inflate_inter_channel_debit(snapshot, &slim)
+        .unwrap_or_else(|e| die(format!("slim inter-channel debit: {e}")))
+        .0
+}
+
+/// `slot-view <out.json> <slot>[,<slot>...]` or `slot-view <out.json> --pk-g <0x..>`: write the
+/// signed head's view for each slot as `{ "<slot>": SlotView }`. This is all a delegate is
+/// served; it never receives the full snapshot.
+fn cmd_slot_view(args: &[String]) {
+    let out_path = args
+        .get(1)
+        .unwrap_or_else(|| die("slot-view <out.json> <slot>[,<slot>...] | --pk-g <0x..>"));
+    let state = load_state();
+    let snapshot = &state.snapshot;
+    let slots: Vec<u16> = if args.get(2).map(String::as_str) == Some("--pk-g") {
+        let pk_g = Bytes32::from_hex(args.get(3).unwrap_or_else(|| die("--pk-g <0x..>")))
+            .unwrap_or_else(|e| die(format!("--pk-g: {e}")));
+        let slot = snapshot
+            .members
+            .iter()
+            .find(|m| m.pk_g == pk_g)
+            .map(|m| m.slot)
+            .unwrap_or_else(|| die("slot-view: no participant has that pk_g"));
+        vec![slot]
+    } else {
+        args.get(2)
+            .unwrap_or_else(|| die("slot-view <out.json> <slot>[,<slot>...]"))
+            .split(',')
+            .map(|t| t.trim().parse::<u16>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
+            .collect()
+    };
+    let mut views = serde_json::Map::new();
+    for slot in slots {
+        let view = intmax3_zkp::slot_view::SlotView::from_snapshot(snapshot, slot)
+            .unwrap_or_else(|e| die(format!("slot-view {slot}: {e}")));
+        views.insert(
+            slot.to_string(),
+            serde_json::to_value(view).unwrap_or_else(|e| die(format!("slot-view: {e}"))),
+        );
+    }
+    write_json(out_path, &serde_json::Value::Object(views));
+}
+
+/// `member-info <out.json> <slot>`: the public participant record of one slot (`{slot, pkG,
+/// pkB, regevPk}`) — what a sender needs to address a recipient without holding the member list.
+fn cmd_member_info(args: &[String]) {
+    let out_path = args.get(1).unwrap_or_else(|| die("member-info <out.json> <slot>"));
+    let slot: u16 = args
+        .get(2)
+        .unwrap_or_else(|| die("member-info <out.json> <slot>"))
+        .parse()
+        .unwrap_or_else(|e| die(format!("slot: {e}")));
+    let state = load_state();
+    let member = state
+        .snapshot
+        .members
+        .iter()
+        .find(|m| m.slot == slot)
+        .unwrap_or_else(|| die(format!("member-info: slot {slot} is not an active participant")));
+    write_json(out_path, member);
+}
+
 /// Refuse symlink substitution and repair legacy overly-broad permissions before reading a file
 /// that contains cosigner seeds or the base private witness.
 fn secure_private_path(path: &Path) {
@@ -10371,6 +10487,8 @@ fn main() {
         "install-exit-kit" => cmd_install_exit_kit(&args),
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
+        "slot-view" => cmd_slot_view(&args),
+        "member-info" => cmd_member_info(&args),
         "cosign-partial" => cmd_cosign_partial(&args),
         "cosign-merge" => cmd_cosign_merge(&args),
         "cosign-batch" => cmd_cosign_batch(&args),
@@ -11396,7 +11514,7 @@ fn cmd_cosign_partial(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("partial_cosign.json");
     let mut state = load_state();
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
     let slots = cluster_sign_slots(&state);
     let record = state.snapshot.record.clone();
@@ -11464,7 +11582,7 @@ fn cmd_cosign_merge(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("cosigned_state.json");
     let mut state = load_state();
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
     // Accept either a bare array of `MemberSignature`s or an object carrying `signatures`.
     #[derive(Deserialize)]
@@ -11518,7 +11636,7 @@ fn cmd_cosign(args: &[String]) {
 
     // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
     // re-verifies the transition before signing — never sign a bare state we did not validate.
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
 
     // CHECK-AND-SIGN (detail2 §3.1): each member signs the next state ONLY IF its settled_tx_chain
@@ -11701,7 +11819,7 @@ fn cmd_cosign_refresh(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("cosigned_state.json");
     let mut state = load_state();
-    let payload: RefreshPayload = read_json(in_path);
+    let payload: RefreshPayload = read_refresh_payload(in_path, &state.snapshot);
     let mut next_state = payload.proposed_next_state.clone();
     if next_state.prev_digest != state.snapshot.state.digest {
         die("payload does not extend the current head");
@@ -12043,11 +12161,10 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("inter_transfer.json");
 
-    let payload: InterChannelDebitPayload = read_json(payload_path);
-    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
-
     // ---- Load A's COMMITTED head (this process's own cli_state). ----
     let mut a_state = load_state();
+    let payload: InterChannelDebitPayload = read_debit_payload(payload_path, &a_state.snapshot);
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
 
     verify_inter_channel_descriptor_matches_debit(&payload, &descriptor)
         .unwrap_or_else(|e| die(format!("inter-channel descriptor/debit mismatch: {e}")));
@@ -12399,10 +12516,9 @@ fn cmd_cosign_burn_send(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("burn_cosigned.json");
 
-    let payload: InterChannelDebitPayload = read_json(payload_path);
-    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
-
     let mut a_state = load_state();
+    let payload: InterChannelDebitPayload = read_debit_payload(payload_path, &a_state.snapshot);
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
 
     // P0-7: bind descriptor economics to the E-2-proved payload BEFORE any member signature or
     // channel debit. In particular, `descriptor.amount = X+1` with an honest proof for X dies here.
