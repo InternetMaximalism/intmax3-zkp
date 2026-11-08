@@ -1550,11 +1550,26 @@ mod tests {
         assert_eq!(
             state.slot_tree_root(),
             state.slot_tree().get_root(),
-            "fold root must equal the IncrementalMerkleTree root"
+            "fold root must equal the sparse slot tree root"
         );
 
+        // VALUE IDENTITY with the full-width layout: an incremental tree over ALL
+        // `MAX_CHANNEL_MEMBERS` slots, the slots past the active ones holding the explicit padding
+        // leaf, has the same root and the same inclusion path for every active slot.
+        let padding = slot_padding_ladder()[0];
+        let mut full = IncrementalMerkleTree::<PoseidonHashOut>::new(BALANCE_SLOT_TREE_HEIGHT);
+        let leaves = state.slot_leaf_hashes();
+        for i in 0..MAX_CHANNEL_MEMBERS {
+            full.push(leaves.get(i).copied().unwrap_or(padding));
+        }
+        assert_eq!(state.slot_tree_root(), full.get_root());
+        let sparse = state.slot_tree();
+        for i in 0..state.active_slots() as u64 {
+            assert_eq!(sparse.prove(i).0.siblings, full.prove(i).0.siblings, "path of slot {i}");
+        }
+
         // Explicit per-slot recompute (no padding memoization) — same leaves, same root.
-        let naive: Vec<PoseidonHashOut> = (0..MAX_CHANNEL_MEMBERS)
+        let naive: Vec<PoseidonHashOut> = (0..state.active_slots())
             .map(|i| {
                 // Per-position recompute WITHOUT the zero-ct digest memoization.
                 let digests: [Bytes32; MAX_CHANNEL_TOKENS] =
@@ -1574,6 +1589,31 @@ mod tests {
         s.regev_pk_digests[1] = Bytes32::from_u32_slice(&[5, 0, 0, 0, 0, 0, 0, 1]).unwrap();
         assert_ne!(state.slot_tree_root(), s.slot_tree_root());
         assert_eq!(s.slot_tree_root(), s.slot_tree().get_root());
+    }
+
+    /// Older encodings carried every padding slot; they decode to the same active-only state.
+    #[test]
+    fn full_width_encoding_decodes_to_the_active_state() {
+        let state = sample_state();
+        let mut value = serde_json::to_value(&state).unwrap();
+        let active = state.active_slots();
+        let pad = |key: &str, padding: serde_json::Value| {
+            let v = value[key].as_array().unwrap().clone();
+            let mut v = v;
+            v.resize(MAX_CHANNEL_MEMBERS, padding);
+            v
+        };
+        let digests = pad("regevPkDigests", serde_json::to_value(Bytes32::default()).unwrap());
+        let recipients = pad("recipients", serde_json::to_value(Address::default()).unwrap());
+        value["regevPkDigests"] = serde_json::Value::Array(digests);
+        value["recipients"] = serde_json::Value::Array(recipients);
+        let decoded: BalanceState = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded, state);
+        assert_eq!(decoded.regev_pk_digests.len(), active);
+        // A nonzero value past the active slots is refused, never silently dropped.
+        value["regevPkDigests"][active] =
+            serde_json::to_value(Bytes32::from_u32_slice(&[1; 8]).unwrap()).unwrap();
+        assert!(serde_json::from_value::<BalanceState>(value).is_err());
     }
 
     /// The new H1 is the CANONICAL `PoseidonHashOut → Bytes32` encoding of the header hash —
