@@ -2196,18 +2196,45 @@ fn read_debit_payload(path: &str, snapshot: &ChannelSnapshot) -> InterChannelDeb
         .0
 }
 
-/// `slot-view <out.json> <slot>[,<slot>...]` or `slot-view <out.json> --pk-g <0x..>`: write the
+/// `inflate-debit <slim_debit.json> <out_full_debit.json>`: rebuild the full inter-channel debit
+/// payload a delegate's slim debit stands for, against this channel's committed head. The relay
+/// runs it once at its boundary so the producer and recovery paths keep handling full payloads;
+/// the full payload never leaves the host.
+fn cmd_inflate_debit(args: &[String]) {
+    let usage = "inflate-debit <slim_debit.json> <out_full_debit.json>";
+    let in_path = args.get(1).unwrap_or_else(|| die(usage));
+    let out_path = args.get(2).unwrap_or_else(|| die(usage));
+    let state = load_state();
+    let full = read_debit_payload(in_path, &state.snapshot);
+    write_json(out_path, &full);
+}
+
+/// Flag value `--name <value>` anywhere in `args`.
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+
+/// The published signed snapshot to project: `--snapshot <file>` (what the relay serves; read
+/// without the state lock), else this process's own committed head.
+fn view_source_snapshot(args: &[String]) -> ChannelSnapshot {
+    match flag_value(args, "--snapshot") {
+        Some(path) => read_json(path),
+        None => load_state().snapshot,
+    }
+}
+
+/// `slot-view <out.json> [--snapshot <file>] (--slots <s>[,<s>...] | --pk-g <0x..>)`: write the
 /// signed head's view for each slot as `{ "<slot>": SlotView }`. This is all a delegate is
 /// served; it never receives the full snapshot.
 fn cmd_slot_view(args: &[String]) {
-    let out_path = args
-        .get(1)
-        .unwrap_or_else(|| die("slot-view <out.json> <slot>[,<slot>...] | --pk-g <0x..>"));
-    let state = load_state();
-    let snapshot = &state.snapshot;
-    let slots: Vec<u16> = if args.get(2).map(String::as_str) == Some("--pk-g") {
-        let pk_g = Bytes32::from_hex(args.get(3).unwrap_or_else(|| die("--pk-g <0x..>")))
-            .unwrap_or_else(|e| die(format!("--pk-g: {e}")));
+    let usage = "slot-view <out.json> [--snapshot <file>] (--slots <s>[,<s>...] | --pk-g <0x..>)";
+    let out_path = args.get(1).unwrap_or_else(|| die(usage));
+    let snapshot = view_source_snapshot(args);
+    let slots: Vec<u16> = if let Some(pk_g) = flag_value(args, "--pk-g") {
+        let pk_g = Bytes32::from_hex(pk_g).unwrap_or_else(|e| die(format!("--pk-g: {e}")));
         let slot = snapshot
             .members
             .iter()
@@ -2216,15 +2243,15 @@ fn cmd_slot_view(args: &[String]) {
             .unwrap_or_else(|| die("slot-view: no participant has that pk_g"));
         vec![slot]
     } else {
-        args.get(2)
-            .unwrap_or_else(|| die("slot-view <out.json> <slot>[,<slot>...]"))
+        flag_value(args, "--slots")
+            .unwrap_or_else(|| die(usage))
             .split(',')
             .map(|t| t.trim().parse::<u16>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
             .collect()
     };
     let mut views = serde_json::Map::new();
     for slot in slots {
-        let view = intmax3_zkp::slot_view::SlotView::from_snapshot(snapshot, slot)
+        let view = intmax3_zkp::slot_view::SlotView::from_snapshot(&snapshot, slot)
             .unwrap_or_else(|e| die(format!("slot-view {slot}: {e}")));
         views.insert(
             slot.to_string(),
@@ -2234,18 +2261,18 @@ fn cmd_slot_view(args: &[String]) {
     write_json(out_path, &serde_json::Value::Object(views));
 }
 
-/// `member-info <out.json> <slot>`: the public participant record of one slot (`{slot, pkG,
-/// pkB, regevPk}`) — what a sender needs to address a recipient without holding the member list.
+/// `member-info <out.json> [--snapshot <file>] --slot <s>`: the public participant record of one
+/// slot (`{slot, pkG, pkB, regevPk}`) — what a sender needs to address a recipient without holding
+/// the member list.
 fn cmd_member_info(args: &[String]) {
-    let out_path = args.get(1).unwrap_or_else(|| die("member-info <out.json> <slot>"));
-    let slot: u16 = args
-        .get(2)
-        .unwrap_or_else(|| die("member-info <out.json> <slot>"))
+    let usage = "member-info <out.json> [--snapshot <file>] --slot <s>";
+    let out_path = args.get(1).unwrap_or_else(|| die(usage));
+    let slot: u16 = flag_value(args, "--slot")
+        .unwrap_or_else(|| die(usage))
         .parse()
-        .unwrap_or_else(|e| die(format!("slot: {e}")));
-    let state = load_state();
-    let member = state
-        .snapshot
+        .unwrap_or_else(|e| die(format!("--slot: {e}")));
+    let snapshot = view_source_snapshot(args);
+    let member = snapshot
         .members
         .iter()
         .find(|m| m.slot == slot)
@@ -10459,12 +10486,15 @@ fn main() {
     // or write `cli_state.json`. They wait minutes on L1 finality while the channel keeps
     // advancing, so they take neither the channel state lock nor run its state recovery.
     let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize");
+    // Read-only projections of a published snapshot file: never queue behind a writer, never
+    // run recoveries.
+    let read_only_view = matches!(cmd, "slot-view" | "member-info");
     // SECURITY: this lock is deliberately process-wide and acquired before recovery.  Per-file
     // atomic writes prevent torn JSON, but only serialization prevents an older init/cosign image
     // from overwriting a settlement PREPARED by another process.  The bypasses are the
     // digest-keyed detached proof-cache worker described at its spawn site above and the two L1
     // drivers, none of which touches the channel state.
-    let state_lock_bypass = detached_precompute_bypass || l1_driver;
+    let state_lock_bypass = detached_precompute_bypass || l1_driver || read_only_view;
     let _state_process_lock = (!state_lock_bypass).then(CliStateProcessLock::acquire);
     // A prepared two-channel transfer is a mutation barrier for either involved channel command,
     // not merely for the next inter-transfer. If the previous process died after replacing A but
@@ -10488,6 +10518,7 @@ fn main() {
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
         "slot-view" => cmd_slot_view(&args),
+        "inflate-debit" => cmd_inflate_debit(&args),
         "member-info" => cmd_member_info(&args),
         "cosign-partial" => cmd_cosign_partial(&args),
         "cosign-merge" => cmd_cosign_merge(&args),

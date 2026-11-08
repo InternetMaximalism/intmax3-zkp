@@ -58,6 +58,18 @@ function createBatchWindow({ windowMs = 1000, maxK = 200, drain }) {
 // sender row's ciphertext at the tx's SIGNED tokenSlot. Key order matters: `anchorDigest` first
 // (§M-1 — transports may read it from the head of the byte stream).
 function projectToSlim(fat) {
+  // A delegate holds only its slot view, so it uploads the slim payload itself (no proposed
+  // state). Pass it through in the canonical field order so its receipt identity is the one the
+  // fat projection of the same send would have.
+  if (fat && fat.anchorDigest && fat.afterCt && !fat.proposedNextState) {
+    return {
+      anchorDigest: fat.anchorDigest,
+      senderIndex: fat.senderIndex,
+      recipientIndex: fat.recipientIndex,
+      channelTx: fat.channelTx,
+      afterCt: fat.afterCt,
+    };
+  }
   const next = fat && fat.proposedNextState;
   if (!next || !next.prevDigest || !next.balanceState) {
     throw new Error('cosign payload missing proposedNextState.{prevDigest,balanceState}');
@@ -81,7 +93,8 @@ function partitionByAnchor(entries, headDigest) {
   const fresh = [];
   const stale = [];
   for (const en of entries) {
-    const anchor = en.payload && en.payload.proposedNextState && en.payload.proposedNextState.prevDigest;
+    const p = en.payload;
+    const anchor = p && (p.anchorDigest || (p.proposedNextState && p.proposedNextState.prevDigest));
     (anchor === headDigest ? fresh : stale).push(en);
   }
   return { fresh, stale };

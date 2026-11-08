@@ -53,9 +53,13 @@ const CALLS = {
   // cosigner-signed leaf-bound exit address (the delegate's only payout binding).
   genesisContribution: (a) => wasm.wallet_genesis_contribution(BigInt(a.balance), a.recipient),
   signState: (a) => wasm.wallet_sign_state(a.slot, a.stateJson),
+  // Co-signer sessions only: the wasm refuses a full snapshot for a delegate slot.
   importChannel: (a) => wasm.wallet_import_channel(a.snapshotJson),
+  // A delegate imports only its own slot view (signed header + own row + Merkle path).
+  importView: (a) => wasm.wallet_import_view(a.viewJson),
   balance: () => wasm.wallet_balance(),
-  send: (a) => wasm.wallet_send(a.recipientSlot, BigInt(a.amount), tokenSlotArg(a.tokenSlot)),
+  // `recipientJson` = the recipient slot's public record from /api/member: {slot, pkG, pkB, regevPk}.
+  send: (a) => wasm.wallet_send(a.recipientJson, BigInt(a.amount), tokenSlotArg(a.tokenSlot)),
   slimWire: (a) => wasm.wallet_slim_send_wire(a.payloadJson),
   sendInterChannel: (a) => wasm.wallet_send_inter_channel(
     a.toChannel, a.toSlot, BigInt(a.amount), a.destRecipientJson, a.tokenIndex, a.baseNonce
@@ -65,7 +69,8 @@ const CALLS = {
   ),
   refresh: (a) => wasm.wallet_refresh(tokenSlotArg(a.tokenSlot)),
   cosign: (a) => wasm.wallet_cosign(a.payloadJson),
-  finalize: (a) => wasm.wallet_finalize(a.stateJson),
+  finalize: (a) => wasm.wallet_finalize(a.viewJson),
+  finalizeState: (a) => wasm.wallet_finalize_state(a.stateJson),
   // The Regev secret never crosses this worker boundary. Only the public claim tuple and its
   // self-verified MLE/WHIR proof are returned to the page for the keyless calldata handoff.
   withdrawalClaim: (a) => wasm.wallet_withdrawal_claim(

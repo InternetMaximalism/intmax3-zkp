@@ -92,9 +92,16 @@ class Wallet {
     const amount = exactAmount(balance);
     return JSON.parse(this._load().wallet_genesis_contribution(amount, recipient));
   }
+  // CO-SIGNER sessions only: the WASM refuses a full snapshot for a delegate slot.
   importChannel(snapshotJson, slot) {
     void slot; // the WASM wallet locates its own slot by key match
     this._load().wallet_import_channel(JSON.stringify(snapshotJson));
+  }
+  // A delegate imports only its own slot view (relay /api/view): the signed header, its own row
+  // and the row's Merkle path. Returns the balance report.
+  importView(viewJson) {
+    const text = typeof viewJson === 'string' ? viewJson : JSON.stringify(viewJson);
+    return JSON.parse(this._load().wallet_import_view(text));
   }
   // Returns { slot, balance (token-0 scalar, wire compat), balances: [{tokenSlot, tokenIndex,
   // balance}], canSend, witnessTokenSlot, stateVersion } (multi-token §N).
@@ -119,13 +126,18 @@ class Wallet {
   // wasm-bindgen signatures (the previous wrappers passed extra positional args — senderSlot /
   // nonce / slot — that the generated JS silently dropped or, worse, shifted into the wrong
   // parameter): the sender slot and nonce are session-internal in wasm_wallet.rs.
-  // wallet_send(recipient_slot: u16, amount: u64, token_slot?: u8)
-  send(senderSlot, recipientSlot, amount, nonceHex, tokenSlot) {
+  // wallet_send(recipient_json, amount: u64, token_slot?: u8). `recipient` is the recipient slot's
+  // public record {slot, pkG, pkB, regevPk} (relay /api/member); a delegate holds no member list.
+  // Returns the SLIM send payload.
+  send(senderSlot, recipient, amount, nonceHex, tokenSlot) {
     void senderSlot; void nonceHex; // session-internal in the WASM wallet (kept for API compat)
-    const recipient = exactNumber(recipientSlot, 1023, 'recipientSlot');
+    if (!recipient || typeof recipient !== 'object') {
+      throw new TypeError('send needs the recipient slot record {slot, pkG, pkB, regevPk} from /api/member');
+    }
+    exactNumber(recipient.slot, 0xffffffff, 'recipient.slot');
     const value = exactAmount(amount);
     const token = optionalNumber(tokenSlot, 9, 'tokenSlot');
-    return JSON.parse(this._load().wallet_send(recipient, value, token));
+    return JSON.parse(this._load().wallet_send(JSON.stringify(recipient), value, token));
   }
   // wallet_refresh(token_slot?: u8) — refreshes THIS session's own slot at the token position.
   refresh(slot, tokenSlot) {
@@ -158,11 +170,11 @@ class Wallet {
     );
   }
 
-  // Verify every real member signature, verify/decrypt this wallet's own slot, and atomically
-  // adopt the new head. wallet_finalize accepts a raw ChannelState (not an API response envelope)
-  // and returns the new multi-token balance report.
-  finalize(stateJson) {
-    return JSON.parse(this._load().wallet_finalize(JSON.stringify(stateJson)));
+  // Adopt this wallet's slot view of a newer head (verifies the co-signatures and its own row).
+  // Returns the new multi-token balance report.
+  finalize(viewJson) {
+    const text = typeof viewJson === 'string' ? viewJson : JSON.stringify(viewJson);
+    return JSON.parse(this._load().wallet_finalize(text));
   }
 
   available() {
