@@ -700,6 +700,23 @@ fn enforce_exit_kit_before_signature_release(
     successor: &ChannelState,
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
+    // C25/G16 (2026-11-09): whatever the successor does — an in-channel send, a debit, a burn, a
+    // deposit import, a token registration or an inter-channel credit — it is stacked on the
+    // durable head, and if that head's own block never reaches L1 the successor rolls back with
+    // it at close (a deposit import stacked on an unposted debit strands the deposit exactly like
+    // review item A). So the durable head's installed kit must already be backable on L1 before
+    // ANY asset-bearing successor is signed on top of it. Genesis has no predecessor; a delegate
+    // join only adds an empty row. A head without a receipt (kit-pending) is handled by the
+    // purpose-specific gates below, which either refuse or carry a prepared kit.
+    if !matches!(
+        purpose,
+        StateSigningPurpose::Genesis | StateSigningPurpose::DelegateJoin
+    ) && cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
+        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
+    }) {
+        require_durable_head_backing_finalized(cli, purpose)?;
+    }
+
     if purpose.requires_prepared_exit_kit() {
         if purpose.is_terminal() {
             return Err(
@@ -772,9 +789,6 @@ fn enforce_exit_kit_before_signature_release(
         // compromise. Fresh exit kits for asset/composition-moving successors (deposit / inter-
         // channel / close) still take the full prepare+verify path above.
         validate_exit_kit_receipt_for_head(receipt, predecessor)?;
-        // C25/G16 (2026-11-09): the reused kit must be BACKABLE on L1 before this signer adds a
-        // value-moving successor on top of it.
-        require_durable_head_backing_finalized(cli, purpose)?;
     }
 
     Ok(())
@@ -20887,6 +20901,15 @@ mod signing_ledger_tests {
         .expect_err("unfinalized backing root must refuse");
         assert!(refused.contains(HEAD_BACKING_NOT_FINALIZED), "{refused}");
         assert!(!cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
+        // The gate is purpose-independent: a deposit import stacked on the same unfinalized head
+        // is refused before its own prepared-kit check runs (item A by stacking).
+        let stacked = require_durable_head_backing_finalized_with(
+            &mut cli,
+            StateSigningPurpose::L1DepositImport,
+            |_, _| false,
+        )
+        .expect_err("asset-moving successor on an unfinalized head must refuse");
+        assert!(stacked.contains("L1DepositImport"), "{stacked}");
         let asked = std::cell::RefCell::new(Vec::new());
         require_durable_head_backing_finalized_with(
             &mut cli,

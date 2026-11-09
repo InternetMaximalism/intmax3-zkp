@@ -167,6 +167,9 @@
     </div>
     <button id="btnBurnSend" disabled>Step 1 -- Burn Send</button>
     <button id="btnPwSettle" disabled>Step 2 -- Settle on L1</button>
+    <p id="pwPayoutReceipt" class="hint hidden">Once the relay has proved your payout you can
+      <a id="pwPayoutReceiptLink" href="#" target="_blank" rel="noopener">download the payout receipt</a>
+      and finish the L1 payout yourself (channel_member pw-finalize) if this relay ever stops.</p>
   </section>
 
   <section class="panel hidden" id="panelFullWithdraw" style="margin-top:16px">
@@ -2512,6 +2515,11 @@ function settleButtonLabel(ticket) {
 function restorePartialWithdrawalControls() {
   const status = $('pwRecoveryStatus');
   const ticket = ticketOfType('partial_withdrawal');
+  // Item B (2026-11-09): from the burn on, point at the relay's payout receipt so the burner is
+  // never dependent on this relay once the proof exists (the route answers 404 until then).
+  const receiptReady = !!ticket && ['burn_done', 'settle_pending', 'settle_blocked', 'claim_pending', 'settle_done'].includes(ticket.status);
+  $('pwPayoutReceipt').classList.toggle('hidden', !receiptReady);
+  if (receiptReady) $('pwPayoutReceiptLink').href = '/api/pw-payout-receipt?channel=' + activeCh;
   if (!_inflight.has('settle')) $('btnPwSettle').textContent = settleButtonLabel(ticket);
   // A burn already being settled in the background is shown below even while new burns are not
   // offered (the operator's funds only gate new ones).

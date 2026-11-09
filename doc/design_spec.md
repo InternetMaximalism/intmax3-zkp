@@ -912,7 +912,27 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   ReceiveDeposit relation (`ReceiveDepositTarget`), consuming the deposit nullifier and crediting
   the deposit's `depositor` through `creditLateIncoming`; new pinned adapter, Materializer
   constructor parameter, host module and CLI command. Like G14 it needs the holder of the private
-  Balance checkpoint.
+  Balance checkpoint. Decisions the owner must take before it is built:
+  1. *Payee.* Refund the L1 `depositor` (no row binding needed; the deposit leaf carries it), or
+     pay the intended row's exit address (needs the deposit's channel-private recipient tag bound
+     to a row, i.e. a second H1-opening proof as in late-incoming).
+  2. *Prover.* Accept that only the private Balance checkpoint holder (relay/daemon) can run it,
+     as G14 already does — or instead change deposits themselves: an import deadline enforced in
+     `ReceiveDeposit` (deposit block + T) plus an L1 refund of an expired, never-imported deposit,
+     which removes the relay from the recovery path but changes the deposit flow and circuit.
+  3. *Deployment.* A new pinned adapter and a Materializer constructor argument mean a new
+     Materializer, and N34 forbids attaching one to a rollup that already holds escrow — so this is
+     a rollup redeploy (testnet) or must wait for the next one.
+  4. *Amount width.* L1 deposits are U256, channel credits and `creditLateIncoming` are u64; the
+     lane must refuse or split larger deposits (today's import already requires u64, G01).
+  5. *Cohort.* A new circuit joins the fixture cohort (N35): VK export, `DeployLateDepositVerifier`,
+     and the regeneration runbook grow by one lane.
+- **Browser signers hold no exit kit (item E).** Options: (a) require at least one daemon signer
+  in every sig-cluster and state it as a rule (the relay-served channels already have one, since
+  `channel_member` controls a slot; not enforced anywhere today); (b) ship the exit-kit envelope to
+  browser signers and verify the Balance/backing proofs in WASM before signing (verification only,
+  no proving; size and time not measured); (c) accept the dependency and document G17 as "with a
+  daemon".
 - **Burn payout liveness (item B).** The withdrawal proof of a burn needs the channel's Balance
   proof, so only its holder can produce it; after the proof exists the burner can finish alone
   (`GET .../partial-withdrawal/payout-receipt`, `ROLLUP=… channel_member pw-finalize`). Whether the
@@ -1033,7 +1053,7 @@ was performed for these changes.
   (`CloseHeadLink.backing_root: Option<Bytes32>`); `save_state` archives every N-of-N head in
   `.signed-heads/<digest>.json`; the walk resolves each head's kit by statement key and re-verifies
   the chosen head's N-of-N and envelope (`resolve_close_head`, §2.5) → G16, C25.
-- **C — payments on an unposted debit (fixed).** No signing path consulted L1, and the relay
+- **C — payments on an unposted debit (fixed for daemon signers).** No signing path consulted L1, and the relay
   published validity candidates only from the burn settle route, so a channel kept signing
   in-channel sends on top of a debit/import head whose block was not on Ethereum; had that block
   never posted, `close` would fall back and every such payment would roll back. The H2=0 reuse path
@@ -1041,18 +1061,32 @@ was performed for these changes.
   (`require_durable_head_backing_finalized`, cached in `SignerExitKitReceipt.backing_root_finalized`
   once true), refusing with `HEAD BACKING NOT FINALIZED`; the relay publishes the pending candidate
   after every deposit import, inter-channel debit and burn (`wallet-l1.publishLater`) and maps the
-  refusal to a 409 (`backingPendingHint`) → C14, C25. Consequence, for the owner: in-channel sends
-  pause after each asset-moving head until its block is proved and finalized on L1.
+  refusal to a 409 (`backingPendingHint`) → C14, C25. Second pass (same day): the gate runs for
+  EVERY purpose except genesis and delegate join whenever the durable head has an installed
+  receipt, so a deposit import, debit, burn, token registration or inter-channel credit cannot be
+  stacked on an unfinalized head either (a deposit stacked on an unposted debit would otherwise be
+  stranded at close like item A). Consequence, for the owner: in-channel sends pause after each
+  asset-moving head until its block is proved and finalized on L1 (not measured). Not covered: the
+  browser signer (`wallet_cosign`, `src/wasm_wallet.rs`) consults no L1 and holds no kit, so a
+  sig-cluster made only of browser signers has no gate — this is item E (below). A relay without
+  `producer/wallet-l1.json` cannot publish and its channels stay refused after the first
+  asset-moving head.
 - **B — burn payout depends on the relay (mitigated).** The withdrawal proof needs the channel's
   Balance proof (`SingleWithdawalWitness`), so only its holder can produce it. Once produced, the
-  burner can finish alone: `GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt` returns
-  `pw_artifacts.json`, `pw_producer.json` and `burn_cosigned.json`, and `pw-finalize` accepts
-  `ROLLUP` in place of `channel_backing.json`. The remaining window (relay stops before proving) and
-  the deeper redesign are owner decisions (§2.8).
+  burner can finish alone: `GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt`
+  (`api/server.js` routes) and `GET /api/pw-payout-receipt?channel=N` (`wallet-relay.js`) return
+  `pw_artifacts.json`, `pw_producer.json` and `burn_cosigned.json`; the wallet's withdrawal panel
+  links to it from the burn on; `pw-finalize` accepts `ROLLUP` in place of `channel_backing.json`.
+  Finishing still needs forge, `contracts/script/RunPartialWithdrawalPayout.s.sol` and an L1 key.
+  Not covered: `wallet-relay-ec2.js` (a co-sign-only demo host without forge) and the window in
+  which the relay stops before proving; the redesign is an owner decision (§2.8).
 - **A — stranded L1 deposit (not fixed).** Confirmed: `CloseFundingMaterializer` has no deposit
   lane, so a deposit that one co-signer never imports is paid by nothing after close. The proposed
-  `claimLateDeposit` lane is specified in §2.8; it needs a new pinned adapter and the Materializer
-  constructor to change, so it is not a minimal fix.
+  `claimLateDeposit` lane and the decisions it needs are in §2.8; it needs a new pinned adapter and
+  the Materializer constructor to change, so it is not a minimal fix.
+- **E — exit kits live only with the daemon (not fixed).** Browser co-signers receive no kit and
+  verify none; a unilateral exit (G17) therefore depends on the operator's or a delegate's daemon.
+  Options are listed in §2.8.
 - The spec text that said an L1 deposit import re-pins `intmax_state_root` was wrong (nothing
   re-pins it) and is corrected in §2.9.
 

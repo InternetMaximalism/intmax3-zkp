@@ -1584,6 +1584,29 @@ app.get('/api/settlement', (req, res) => {
   } catch (e) { res.status(404).json({ error: 'no settlement deployed yet' }); }
 });
 
+// GET /api/pw-payout-receipt?channel=N
+// The current burn's payout proof plus the two files `pw-finalize` reads beside it. Once the
+// proof's anchor is finalized on L1 the receipt is self-sufficient: the burner can run
+// `ROLLUP=<rollup> channel_member pw-finalize <rpc>` (forge + contracts/script and an L1 key
+// needed) in a directory holding these three files, without this relay (2026-11-09, item B).
+// 404 until the relay has proved the payout; the proof needs the relay's private balance state.
+app.get('/api/pw-payout-receipt', (req, res) => {
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  try {
+    const artifacts = require('../../api/lib/partial-withdrawal-live').savedPayoutArtifacts(ch);
+    if (!artifacts) return res.status(404).json({ error: 'no proved payout for the current burn yet' });
+    const read = (name) => JSON.parse(fs.readFileSync(wc(ch, name), 'utf8'));
+    res.json({
+      schemaVersion: 1,
+      chainId: relayChainId(),
+      rollup: rollupOf(ch),
+      howTo: 'put the three files in an empty directory and run: ROLLUP=<rollup> channel_member pw-finalize <rpc_url> (needs forge, contracts/script/RunPartialWithdrawalPayout.s.sol and your L1 key)',
+      files: { 'pw_artifacts.json': artifacts, 'pw_producer.json': read('pw_producer.json'), 'burn_cosigned.json': read('burn_cosigned.json') },
+    });
+  } catch (e) { sendRouteError(res, e); }
+});
+
 // POST /api/pw-finalize?channel=N
 // Step 2 of a partial withdrawal: prove its payout, publish the validity batch it is anchored at,
 // and credit it on the rollup (hosting/wallet/pw-settlement.js). On a public chain the relay runs
