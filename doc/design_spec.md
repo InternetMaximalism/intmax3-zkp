@@ -1,6 +1,7 @@
 # Intmax3 design specification (official; formerly `detail3.md`)
 
-**Describes:** branch `claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
+**Describes:** `main` after the 2026-11-09 close-safety fixes (§2.10), on top of branch
+`claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
 `861d44c5` on `claude/abstract-detail-spec-audit-738841`). Written against `7f129334` (2026-10-15:
 `8acbe309` close ordered against a burn by the processed-send block, `9ef32e3c` an L1 deposit import is
 one signed head, `7f129334` close falls back to the newest backable head) and brought up to date with
@@ -153,7 +154,11 @@ citations are `path:line` in the tree named above; line numbers drift with later
   its last fully signed state. A proposal that a host's own check refuses is dropped at once.
 - **C14** Before any signature that moves assets is released, the signer must hold a prepared *exit
   kit* for exactly that successor (see G-lines): a head without an exit kit is "kit-pending" and
-  blocks further in-channel signatures until the kit is installed.
+  blocks further in-channel signatures until the kit is installed. A head whose kit is anchored at a
+  rollup state that is not yet finalized on Ethereum (a debit, burn or deposit import whose block has
+  not been posted, proved and finalized) is "post-pending" and likewise blocks in-channel
+  signatures: a payment signed on top of it would roll back with the head if the block never posts
+  (C25). The relay publishes the pending validity candidate right after each such head.
 - **C15** *Inter-channel payment:* the sending channel debits the sender's ciphertext and its fund
   vector, builds one base-layer transfer to the destination channel, and signs a state whose H2 is
   the root of the one-transaction tree. Authorizing the payment and agreeing to the debit are one
@@ -254,9 +259,12 @@ citations are `path:line` in the tree named above; line numbers drift with later
   continuation of the balance proof, which also extends the cap by the new amount.
 - **G15** Funds are pulled from the rollup into the Manager by exact amount (cap minus received), and
   a payout never exceeds what was pulled.
-- **G16** *Which head to close on:* the close tooling uses the latest signed head whose fund root is
-  finalized; if the latest head's block never reached Ethereum, it walks back to the newest
-  predecessor with a finalized backing and a retained exit kit, and never fabricates a kit.
+- **G16** *Which head to close on:* the close tooling uses the latest signed head whose exit kit's
+  backing root (the Balance proof's anchor, `finalized_extended_state_commitment`) is finalized; if
+  the latest head's block never reached Ethereum, it walks back through the archived signed heads to
+  the newest predecessor with a finalized backing and a retained exit kit, and never fabricates a
+  head or a kit. The signed fund root (`channel_fund.intmax_state_root`) is pinned at genesis and
+  never changes, so it is not the finality signal.
 - **G17** *Non-cooperative exit* needs no new signature from anyone: the last signed head and its
   retained exit kit are enough; only gas and an Ethereum transaction signer are needed to publish.
 - **G18** The old cooperative close-funding path, the special-close penalty game and the late
@@ -754,12 +762,25 @@ decodes 35 limbs (`:577`), requires `pi[25] < 2^63` and `pi[26] ≤ pi[25]` (`:5
 greatest processed-send block seen per statement key (`signedHeadBackingProcessedSendPlusOne`);
 re-attesting the same statement with a later value raises it → G07.
 
-**Head selection** (commit `7f129334`): `channel_member close` uses the latest head when
-`isFinalizedStateRoot(channel_fund.intmax_state_root)` holds, otherwise walks `prev_digest` through
-the content-addressed signer exit-kit archive to the newest predecessor whose backing root is
-finalized and whose kit is retained, re-verifies it and announces the fallback on stderr;
-`CLOSE_HEAD_FALLBACK=off` opts out; no kit is ever fabricated. The delegate does the same before
+**Head selection** (commit `7f129334`, backing-root source fixed 2026-11-09): `channel_member close`
+uses the latest head when its exit kit's `finalized_extended_state_commitment` satisfies
+`isFinalizedStateRoot`, otherwise walks `prev_digest` through the signed-head archive
+(`.signed-heads/<digest>.json`, written by `save_state` at every N-of-N boundary) and resolves each
+head's kit by its statement key from the content-addressed exit-kit archive, closing the newest
+predecessor whose kit root is finalized; the chosen head's N-of-N and its envelope are re-verified
+and the fallback is announced on stderr; `CLOSE_HEAD_FALLBACK=off` opts out; no head or kit is ever
+fabricated (`resolve_close_head`, `choose_close_head`). Before the fix the selector tested
+`channel_fund.intmax_state_root`, which every transition carries unchanged from genesis, so the
+fallback never triggered. The delegate does the same from its vaults before
 `requestCloseAsParticipant` and pins the chosen head (`node/delegate/branches/exit.js`) → G16, C25.
+
+**Backing finality before in-channel signatures** (2026-11-09): the H2=0 reuse path of
+`enforce_exit_kit_before_signature_release` additionally requires the durable head's kit root to be
+`isFinalizedStateRoot` on the rollup (`require_durable_head_backing_finalized`; the receipt caches
+the answer once true, finality being permanent); the refusal carries the marker
+`HEAD BACKING NOT FINALIZED`, which the relay maps to a 409 and answers by publishing the pending
+validity candidate (`wallet-l1.publishLater`, called after every deposit import, inter-channel
+debit and burn) → C14, C25.
 
 ### 2.6 Settlement contracts: Manager and Materializer
 
@@ -884,6 +905,20 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 
 ### 2.8 Open items carried from the fixes (owner decisions)
 
+- **Stranded L1 deposit (2026-11-09 review, item A).** A deposit whose import one co-signer refuses
+  sits in rollup escrow with no payout lane: `CloseFundingMaterializer` has no deposit path, so a
+  close pays the fund vector without it. Proposed fix (not implemented): a post-close
+  `claimLateDeposit` lane mirroring `claimLateIncoming` — a Balance continuation over the ordinary
+  ReceiveDeposit relation (`ReceiveDepositTarget`), consuming the deposit nullifier and crediting
+  the deposit's `depositor` through `creditLateIncoming`; new pinned adapter, Materializer
+  constructor parameter, host module and CLI command. Like G14 it needs the holder of the private
+  Balance checkpoint.
+- **Burn payout liveness (item B).** The withdrawal proof of a burn needs the channel's Balance
+  proof, so only its holder can produce it; after the proof exists the burner can finish alone
+  (`GET .../partial-withdrawal/payout-receipt`, `ROLLUP=… channel_member pw-finalize`). Whether the
+  relay must prove payouts eagerly after finalization, and whether the base withdrawal relation
+  should drop the Balance-proof dependency, are owner decisions.
+
 - The CloseAssetBacking VK rotates with the 35-limb statement; the checked-in
   `close_asset_backing_*` fixtures and the pinned adapter must be regenerated per
   [the regeneration runbook](tasks/regen-and-redeploy-runbook.md) before any deployment
@@ -915,7 +950,8 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   schedule binding (every production MMCS is binary).
 - Pass-2 "B-series" items closed with minimal changes on 2026-10-16: the U63 comparison gadgets are
   bit-wise (no modular wrap of `block_r`); an inter-channel debit or import must carry the fund's
-  `channel_id` and `intmax_state_root` unchanged (only an L1 deposit import re-pins the root); the
+  `channel_id` and `intmax_state_root` unchanged (nothing re-pins the root after genesis — see §2.5,
+  it is not a finality signal); the
   deposit-import head builder refuses a credit into a cell already holding
   `MAX_HOMO_ADDS_BEFORE_REFRESH` credits; the rollup records a channel post only for a sub-block
   that names a signer (an all-zero `keyIds` block can neither be refused by a frozen channel nor
@@ -981,6 +1017,44 @@ Grouped by the Overview lines they realise; commit ids are on `claude/abstract-d
 - **Follow-up reviews:** `861d44c5` canonical decoders, atomic block application, native Merkle index
   domain, indexed-tree sentinel, canonical Poseidon limbs, fallible hash-chain APIs, removed the
   unsound `U256 → Fq` conversion, non-truncating witness extraction (→ C34).
+
+### 2.10 Changes of 2026-11-09 (review items A–E: fund loss at close)
+
+A code review of `main` (`6820a636`) reported five findings; A–D were confirmed by reading the code
+and D, C and B were fixed minimally (E, the browser co-signers' lack of exit kits, is unverified and
+untouched). Unit tests: `cargo test --bin channel_member` 94 passed; no devnet, relay or browser run
+was performed for these changes.
+
+- **D — G16 fallback never triggered (fixed).** `choose_close_head` tested
+  `channel_fund.intmax_state_root`, which `setup-backing` pins once at genesis and every transition
+  builder carries unchanged (`..prev.channel_fund.clone()` in the debit, fund-import, bundle-apply
+  and deposit-import builders), so the root was always finalized and `close` always chose the
+  latest head. The selector now tests the exit kit's `finalized_extended_state_commitment`
+  (`CloseHeadLink.backing_root: Option<Bytes32>`); `save_state` archives every N-of-N head in
+  `.signed-heads/<digest>.json`; the walk resolves each head's kit by statement key and re-verifies
+  the chosen head's N-of-N and envelope (`resolve_close_head`, §2.5) → G16, C25.
+- **C — payments on an unposted debit (fixed).** No signing path consulted L1, and the relay
+  published validity candidates only from the burn settle route, so a channel kept signing
+  in-channel sends on top of a debit/import head whose block was not on Ethereum; had that block
+  never posted, `close` would fall back and every such payment would roll back. The H2=0 reuse path
+  now requires the durable head's kit root to be `isFinalizedStateRoot`
+  (`require_durable_head_backing_finalized`, cached in `SignerExitKitReceipt.backing_root_finalized`
+  once true), refusing with `HEAD BACKING NOT FINALIZED`; the relay publishes the pending candidate
+  after every deposit import, inter-channel debit and burn (`wallet-l1.publishLater`) and maps the
+  refusal to a 409 (`backingPendingHint`) → C14, C25. Consequence, for the owner: in-channel sends
+  pause after each asset-moving head until its block is proved and finalized on L1.
+- **B — burn payout depends on the relay (mitigated).** The withdrawal proof needs the channel's
+  Balance proof (`SingleWithdawalWitness`), so only its holder can produce it. Once produced, the
+  burner can finish alone: `GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt` returns
+  `pw_artifacts.json`, `pw_producer.json` and `burn_cosigned.json`, and `pw-finalize` accepts
+  `ROLLUP` in place of `channel_backing.json`. The remaining window (relay stops before proving) and
+  the deeper redesign are owner decisions (§2.8).
+- **A — stranded L1 deposit (not fixed).** Confirmed: `CloseFundingMaterializer` has no deposit
+  lane, so a deposit that one co-signer never imports is paid by nothing after close. The proposed
+  `claimLateDeposit` lane is specified in §2.8; it needs a new pinned adapter and the Materializer
+  constructor to change, so it is not a minimal fix.
+- The spec text that said an L1 deposit import re-pins `intmax_state_root` was wrong (nothing
+  re-pins it) and is corrected in §2.9.
 
 ### Appendix A — Code comments known to be stale at `039e9e63`
 

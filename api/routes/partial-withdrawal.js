@@ -59,6 +59,32 @@ for (const route of ['/settle', '/finalize']) {
   });
 }
 
+// GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt
+// The burn's payout proof and the two files `pw-finalize` reads beside it. Once the proof's anchor
+// is finalized on L1 this receipt is self-sufficient: the burner can run
+// `ROLLUP=<rollup> channel_member pw-finalize <rpc>` in a directory holding these three files with
+// their own L1 key, so a relay that stops after proving can no longer strand the burn (2026-11-09).
+// 404 until the relay has proved the payout (the proof needs the relay's private balance state).
+router.get('/payout-receipt', (req, res) => {
+  const ch = Number(req.params.ch);
+  try {
+    const live = require('../lib/partial-withdrawal-live');
+    const { readJson, wc, chainId, rollupOf } = require('../lib/cli');
+    const artifacts = live.savedPayoutArtifacts(ch);
+    if (!artifacts) return res.status(404).json({ error: 'no proved payout for the current burn yet' });
+    res.json({
+      schemaVersion: 1,
+      chainId: chainId(),
+      rollup: rollupOf(ch),
+      files: {
+        'pw_artifacts.json': artifacts,
+        'pw_producer.json': readJson(wc(ch, 'pw_producer.json')),
+        'burn_cosigned.json': readJson(wc(ch, 'burn_cosigned.json')),
+      },
+    });
+  } catch (e) { failRoute(res, e); }
+});
+
 // The settlement-manager submission and its cancellation no longer exist.
 for (const route of ['/submit', '/cancel']) {
   router.post(route, (req, res) => res.status(410).json({

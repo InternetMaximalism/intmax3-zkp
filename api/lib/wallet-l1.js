@@ -168,4 +168,28 @@ async function publishCandidate(ch, prove) {
     await acknowledge(receipt.candidateId, receipt.transactionHash);
 }
 
-module.exports = { deploymentConfig, configure, publish, frozenChannelsInCandidate };
+// C25/G16 (2026-11-09): a deposit import, inter-channel debit or burn advances a channel's head to
+// a state whose exit kit is anchored AFTER a block that is not on L1 yet. The CLI refuses every
+// in-channel signature on top of such a head until that root is finalized ("HEAD BACKING NOT
+// FINALIZED"), so the relay publishes (posts, proves, finalizes) the pending validity candidate
+// right after each such head instead of waiting for the next burn. Serialized by `publish`'s own
+// queue; one in flight per channel; failures are logged and the next hook or cosign retries.
+const configured = () => fs.existsSync(path.join(cli.WORK, 'producer', 'wallet-l1.json'));
+const publishing = new Map();
+function publishLater(ch, why) {
+  const key = Number(ch);
+  if (!configured()) {
+    console.error(`[wallet-l1] channel ${ch}: no validity publication configured; the head signed by ${why} stays unbackable until the operator publishes`);
+    return Promise.resolve(null);
+  }
+  if (publishing.has(key)) return publishing.get(key);
+  console.log(`[wallet-l1] channel ${ch}: publishing the validity candidate after ${why}`);
+  const run = publish(ch)
+    .catch(e => console.error(`[wallet-l1] channel ${ch}: publish after ${why} failed (in-channel sends stay refused until it succeeds): ${String(e.stderr || e.message || e).slice(0, 400)}`))
+    .finally(() => publishing.delete(key));
+  publishing.set(key, run);
+  return run;
+}
+function publishPending(ch) { return publishing.get(Number(ch)) || null; }
+
+module.exports = { deploymentConfig, configure, publish, publishLater, publishPending, frozenChannelsInCandidate };

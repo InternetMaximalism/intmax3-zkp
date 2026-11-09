@@ -1132,11 +1132,26 @@ app.post('/api/cosign', (req, res) => {
       console.error(error);
       // A KIT-PENDING head is a channel condition, not a relay failure: say which transition is
       // holding the channel (an inter-channel credit still pending on its source channel).
-      const kitPending = /KIT-PENDING/.test(error) ? kitPendingHint(ch) : null;
+      const kitPending = /KIT-PENDING/.test(error) ? kitPendingHint(ch)
+        : /HEAD BACKING NOT FINALIZED/.test(error) ? backingPendingHint(ch) : null;
       res.status(e.staleAnchor || kitPending ? 409 : 500).json(kitPending ? { error, ...kitPending } : { error });
     }
   );
 });
+
+// The channel's head is backed by an exit kit anchored after a block that is not finalized on L1
+// (a deposit import, debit or burn whose validity candidate has not been published yet). The CLI
+// refuses in-channel signatures until it is (C25/G16); publish now and tell the wallet to retry.
+function backingPendingHint(ch) {
+  const walletL1 = require('../../api/lib/wallet-l1');
+  const inFlight = !!walletL1.publishPending(ch);
+  walletL1.publishLater(ch, 'a refused in-channel signature');
+  return {
+    kitPending: true,
+    backingPending: true,
+    hint: `channel ${ch}'s head is not finalized on L1 yet (its deposit/debit/burn block is being published${inFlight ? '' : ' now'}); in-channel sends resume once the rollup finalizes it — retry shortly`,
+  };
+}
 
 // Inter-channel transfers still pending on any source channel whose destination is `ch`: these
 // are the transitions that advanced `ch`'s signed head without an exit kit yet.
@@ -1165,7 +1180,12 @@ app.post('/api/refresh-cosign', (req, res) => {
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
     await flushPublishedHead(ch); // the live balance refuses a later bind that skips this version
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  }).catch((e) => {
+    const error = fullCliError(e);
+    console.error(error);
+    const pending = /HEAD BACKING NOT FINALIZED/.test(error) ? backingPendingHint(ch) : null;
+    res.status(pending ? 409 : 500).json(pending ? { error, ...pending } : { error });
+  });
 });
 
 // Inter-channel send (SINGLE atomic endpoint). `?channel=A` = the SOURCE channel; the relay OWNS both
