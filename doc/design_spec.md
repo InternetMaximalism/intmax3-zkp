@@ -1,6 +1,7 @@
 # Intmax3 design specification (official; formerly `detail3.md`)
 
-**Describes:** `main` after the 2026-11-09 close-safety fixes (§2.10), on top of branch
+**Describes:** `main` after the 2026-11-10 stranded-deposit / cluster-state changes (§2.11) and the
+2026-11-09 close-safety fixes (§2.10), on top of branch
 `claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
 `861d44c5` on `claude/abstract-detail-spec-audit-738841`). Written against `7f129334` (2026-10-15:
 `8acbe309` close ordered against a burn by the processed-send block, `9ef32e3c` an L1 deposit import is
@@ -200,6 +201,17 @@ citations are `path:line` in the tree named above; line numbers drift with later
   byte; every recovery path compares the exact before and after digests, never "the newest file".
 - **C30** The channel's own hash chain of settled transactions and the balance proof's chain must be
   identical for a head to be exit-capable; this is what ties a signed state to the rollup's view.
+- **C32** Every sig-cluster holds at least one *daemon signer*: a cosigner slot whose key the
+  native `channel_member` derives itself. Browser sessions sit at delegate slots and sign nothing
+  but their own join; they hold no exit kit and consult no L1, so a cluster of browsers alone would
+  have no backing-finality gate and no signer-independent exit. The CLI refuses to sign a genesis or
+  a join, and to freeze the L1 member set, unless it controls such a slot (`require_daemon_signer`).
+- **C33** The whole sig-cluster holds the channel's private Balance state. The host whose daemon
+  advances it (deposit import, inter-channel send, burn) ships the sealed live snapshot, the producer
+  journal and the burn/close sidecars to every cluster peer, authenticated under the cluster secret;
+  a peer keeps them as a passive replica it never opens while the driver lives, and an operator
+  promotes one on failover. A deposit recipient is handed out only once a peer holds its salt, and a
+  burn is reported live only once a peer holds the state its payout proof needs.
 - **C31** A channel snapshot presented to a wallet or a service is trusted only after four structural
   checks, before any signature is counted: the unsigned registration record agrees with the signed
   state on the number of signers and delegates; every listed participant's identity is the one
@@ -279,6 +291,13 @@ citations are `path:line` in the tree named above; line numbers drift with later
   be claimable from escrow.
 - **G22** The exit moves exactly the amounts the backing proof attests: the materializer recomputes
   the fund digest from the proof's own vector and refuses any other vector.
+- **G23** *Late deposit* (2026-11-10): an L1 deposit to the channel's recipient that no signed state
+  imported before the close is refunded, after the close, to its L1 `depositor`: the holder of the
+  channel's private Balance state proves one ordinary ReceiveDeposit step from the materializer's
+  confirmed late cursor (the same cursor and nullifier set as G14's post-close receive), and the
+  materializer credits the depositor's pending withdrawal on the rollup directly. Amounts that do
+  not fit u64 are refused on chain. A deposit that was received into the private state but never
+  signed (one co-signer refused the import) is provable from the retained pre-receive generation.
 
 ### 1.4 Diagrams
 
@@ -905,40 +924,20 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 
 ### 2.8 Open items carried from the fixes (owner decisions)
 
-- **Stranded L1 deposit (2026-11-09 review, item A).** A deposit whose import one co-signer refuses
-  sits in rollup escrow with no payout lane: `CloseFundingMaterializer` has no deposit path, so a
-  close pays the fund vector without it. Proposed fix (not implemented): a post-close
-  `claimLateDeposit` lane mirroring `claimLateIncoming` — a Balance continuation over the ordinary
-  ReceiveDeposit relation (`ReceiveDepositTarget`), consuming the deposit nullifier and crediting
-  the deposit's `depositor` through `creditLateIncoming`; new pinned adapter, Materializer
-  constructor parameter, host module and CLI command. Like G14 it needs the holder of the private
-  Balance checkpoint. Decisions the owner must take before it is built:
-  1. *Payee.* Refund the L1 `depositor` (no row binding needed; the deposit leaf carries it), or
-     pay the intended row's exit address (needs the deposit's channel-private recipient tag bound
-     to a row, i.e. a second H1-opening proof as in late-incoming).
-  2. *Prover.* Accept that only the private Balance checkpoint holder (relay/daemon) can run it,
-     as G14 already does — or instead change deposits themselves: an import deadline enforced in
-     `ReceiveDeposit` (deposit block + T) plus an L1 refund of an expired, never-imported deposit,
-     which removes the relay from the recovery path but changes the deposit flow and circuit.
-  3. *Deployment.* A new pinned adapter and a Materializer constructor argument mean a new
-     Materializer, and N34 forbids attaching one to a rollup that already holds escrow — so this is
-     a rollup redeploy (testnet) or must wait for the next one.
-  4. *Amount width.* L1 deposits are U256, channel credits and `creditLateIncoming` are u64; the
-     lane must refuse or split larger deposits (today's import already requires u64, G01).
-  5. *Cohort.* A new circuit joins the fixture cohort (N35): VK export, `DeployLateDepositVerifier`,
-     and the regeneration runbook grow by one lane.
-- **Browser signers hold no exit kit (item E).** Options: (a) require at least one daemon signer
-  in every sig-cluster and state it as a rule (the relay-served channels already have one, since
-  `channel_member` controls a slot; not enforced anywhere today); (b) ship the exit-kit envelope to
-  browser signers and verify the Balance/backing proofs in WASM before signing (verification only,
-  no proving; size and time not measured); (c) accept the dependency and document G17 as "with a
-  daemon".
-- **Burn payout liveness (item B).** The withdrawal proof of a burn needs the channel's Balance
-  proof, so only its holder can produce it; after the proof exists the burner can finish alone
-  (`GET .../partial-withdrawal/payout-receipt`, `ROLLUP=… channel_member pw-finalize`). Whether the
-  relay must prove payouts eagerly after finalization, and whether the base withdrawal relation
-  should drop the Balance-proof dependency, are owner decisions.
-
+- **Stranded L1 deposit (item A) — implemented 2026-11-10 (§2.11, G23).** Decisions taken by the
+  owner: payee = the L1 `depositor`; amounts above u64 are refused on chain; the prover is any holder
+  of the private Balance state, which C33 makes the whole sig-cluster; the materializer gains a 4th
+  constructor argument, so N34 makes this a rollup redeploy (accepted); the late-deposit config joins
+  the deploy-time exports next to late-incoming (no checked-in proof fixture).
+- **Browser signers hold no exit kit (item E) — rule (a) adopted 2026-11-10 (C32).** Every
+  sig-cluster has a daemon signer; a browser is a delegate and never co-signs state in the shipped
+  flow (`create_channel` seats the CLI cosigners at `0..cli_cosigner_count()`, `wallet_cosign`
+  refuses delegate slots). The rule is now explicit and enforced in the CLI; browser signers still
+  hold no kit themselves, so a G17 exit by a browser user goes through a daemon signer's kit.
+- **Burn payout liveness (item B) — closed by C33 (2026-11-10).** The payout proof needs the private
+  Balance state; every cluster host now holds it, and the burn is not reported live before a peer
+  acknowledged the post-burn state. Whether the base withdrawal relation should drop the
+  Balance-proof dependency altogether remains a possible simplification, not an open hole.
 - The CloseAssetBacking VK rotates with the 35-limb statement; the checked-in
   `close_asset_backing_*` fixtures and the pinned adapter must be regenerated per
   [the regeneration runbook](tasks/regen-and-redeploy-runbook.md) before any deployment
@@ -1089,6 +1088,62 @@ was performed for these changes.
   Options are listed in §2.8.
 - The spec text that said an L1 deposit import re-pins `intmax_state_root` was wrong (nothing
   re-pins it) and is corrected in §2.9.
+
+### 2.11 Changes of 2026-11-10 (items A, B, E closed: late deposit, cluster-held state, daemon signer)
+
+Owner decisions of 2026-11-10: refund the depositor; refuse deposits above u64; the whole
+sig-cluster holds the private Balance state (no single "relay" role); rule (a) for item E; a rollup
+redeploy is acceptable.
+
+- **G23 late-deposit lane.** Circuit `src/circuits/channel/late_deposit_circuit.rs`
+  (`LateDepositCircuit::new(balance_vd)`, 49 public inputs: channel | prev Balance commitment | next
+  Balance commitment | ExtendedPublicState commitment | anchor block | deposit nullifier | depositor
+  (5 limbs) | token | amount (8 U256 limbs) | version 1; embeds `ReceiveDepositTarget`, pins the
+  Balance VD, no spend/binding VDs). Host `src/late_deposit.rs` (`prepare_deposit`,
+  `PreparedLateDeposit { statement, compact_proof, mle_json, mle_config_json }`,
+  `export_late_deposit_mle_config`) and `src/bin/export_late_deposit_config.rs`. Live service:
+  `late_deposit_checkpoint` picks the Balance generation whose commitment equals the materializer's
+  late cursor — the current disk, or a *retained pre-receive generation* that
+  `receive_deposit_unbound` now keeps (snapshot v5, `retained_pre_receive`, at most 64, with the
+  deposit request and salt) — and `prepare_late_deposit` reconciles the deposit leaf against the
+  producer, checks the recipient derives from the salt, anchors at the producer head and proves.
+  Daemon command `livePrepareLateDeposit`; relay routes `POST /api/late-deposit/prepare` (reads the
+  close id, finalized H1 and late cursor from the settlement contracts, writes
+  `ch<N>/late_deposit_<nullifier>.json` 0600) and `POST /api/late-deposit/claim` (sends
+  `claimLateDeposit(manager, compactProof)` with the relay's L1 key). Contract:
+  `CloseFundingMaterializer.claimLateDeposit` with the 4th constructor adapter
+  `lateDepositMleVerifier` (env `LATE_DEPOSIT_VERIFIER`, `LATE_DEPOSIT_MLE_CONFIG_PATH`; scripts
+  `DeployLateDepositVerifier.s.sol`, `PrepareLateDeposit.s.sol`); same `lateBalanceStateCommitment` /
+  `lateBalanceAnchorBlock` / `lateReceiveNullifierUsed` cursor as late-incoming; amount limbs 0..6
+  must be zero; credits `rollup.creditChannelExit(depositor, token, amount)`; claim-key domain
+  `IMLD`. CLI deploy plumbing (`SettlementDeploymentIntent.late_deposit_verifier`, plan digest over
+  the config, 4-address constructor encoding and read-back) and the hosting scripts
+  (`rebuild-public-rollup.sh`, `public-chain-rehearsal.sh`, `bootstrap-real-chain.js`) carry the
+  new adapter. Not covered: a deposit still pending in `_pendingDepositHashChain` (no posted,
+  finalized block after it) cannot be claimed until the producer posts one; a UI for the lane.
+- **C33 cluster-held private state.** `api/lib/live-replica.js`: after every deposit import,
+  inter-channel debit/credit and burn the driving host ships `producer/journal.json`,
+  `producer/live/channel-<N>/balance.snapshot` and the channel sidecars to each
+  `INTMAX_CLUSTER_PEERS` host (`POST /api/cluster/live-replica`, HMAC-SHA256 under
+  `INTMAX_CLUSTER_SECRET`, generation-monotone, stored 0600 under `INTMAX_REPLICA_ROOT/<host>`);
+  the burn waits for one acknowledgement before it is reported live, `GET /api/deposit-info` is
+  withheld (503) until a peer holds the recipient's salt, `GET /api/cluster/replica-status` lists
+  what a host holds, `verify_live_replica` (new binary) opens a replica with the daemon's own
+  checks, and `node api/lib/live-replica.js promote <channel> <host-key>` is the operator failover.
+  Without the secret nothing is shipped and the relay says so at start and per channel. Known
+  limits: the replica is not re-shipped by the in-channel cluster round (the private state does not
+  change there); a peer's public CLI head is not advanced by the driver's deposit/burn/inter-channel
+  operations (pre-existing cluster behaviour, 未確認 by run); the validity snapshot is not shipped
+  (a public-chain payout after failover needs the validity prover's own state as well).
+- **C32 daemon-signer rule.** `require_daemon_signer(record, controlled)` in `channel_member.rs`,
+  called before genesis/join signing in `cmd_init` and before `build_live_settlement_reg_record`
+  freezes the member set; unit tests `daemon_signer_rule_tests` (4).
+- **Tests run in this session** (exact lines in the commit message): `daemon_signer_rule_tests` 4
+  passed; `hosting/wallet/test/live-replica.test.js` 3 passed; late-deposit circuit parse +
+  composition tests, `retained_pre_receive_tests`, `late_incoming::tests` 6 passed (implementer
+  runs); forge suite — see §2.11 addendum once measured. Not run: any devnet, relay, browser or
+  public-chain flow of the new lane or of replication; `prepare_late_deposit` against a real
+  producer; the export binary.
 
 ### Appendix A — Code comments known to be stale at `039e9e63`
 

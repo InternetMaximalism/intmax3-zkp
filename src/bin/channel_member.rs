@@ -952,6 +952,11 @@ struct SettlementRuntimeCodeHashes {
 #[serde(deny_unknown_fields)]
 struct SettlementDeploymentIntent {
     late_incoming_verifier: String,
+    /// The late-deposit adapter (post-close refund of a deposit no signed state imported), the
+    /// materializer's 4th constructor argument since 2026-11-10. Defaulted so an intent persisted
+    /// before the field still parses; `settlement_deploy_mode_for_intent` then refuses to resume it.
+    #[serde(default)]
+    late_deposit_verifier: String,
     /// A sibling channel's registered manager whose close-funding materializer this deployment
     /// reuses (the rollup installs exactly one). Empty for the rollup's first settlement stack.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -10601,6 +10606,32 @@ fn build_reg_record() -> serde_json::Value {
     )
 }
 
+/// Design rule (item E, 2026-11-10): every sig-cluster holds at least one DAEMON signer — a
+/// cosigner slot (`< member_count`) whose key this `channel_member` derives itself. Browser
+/// sessions sign nothing but their own join contribution (they sit at delegate slots and
+/// `wallet_cosign` refuses delegate slots), hold no exit kit and consult no L1, so a cluster of
+/// browsers alone would have no backing-finality gate (`require_durable_head_backing_finalized`)
+/// and no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always seats
+/// the CLI's cosigners at `0..cli_cosigner_count()`; this makes the rule explicit and refuses a
+/// hand-built state (empty `controlled`, foreign `member_pk_gs`) before any signature or the
+/// immutable L1 member set is produced. Ownership evidence is the same the signing primitive
+/// uses: the derived `pk_g` must equal the record's entry for that slot.
+fn require_daemon_signer(record: &ChannelRecord, controlled: &[ControlledMember]) -> Result<(), String> {
+    let member_count = usize::from(record.member_count);
+    let held = controlled
+        .iter()
+        .filter(|c| usize::from(c.slot) < member_count)
+        .any(|c| keys_for(c.keygen_seed).pk_g() == record.member_pk_gs[usize::from(c.slot)]);
+    if held {
+        return Ok(());
+    }
+    Err(format!(
+        "sig-cluster rule: no cosigner slot (0..{member_count}) is controlled by this channel_member \
+         (controlled slots {:?}); every sig-cluster needs at least one daemon signer",
+        controlled.iter().map(|c| c.slot).collect::<Vec<_>>()
+    ))
+}
+
 /// Build the production settlement input from the one authenticated, fully signed live snapshot.
 /// No deterministic-key fallback and no derived recipient formula is permitted here: the exact
 /// slot recipient committed inside `BalanceState::h1()` is what the manager root freezes.
@@ -10617,6 +10648,7 @@ fn build_live_settlement_reg_record(state: &CliState) -> serde_json::Value {
             "settlement N-of-N signature verification failed: {e}"
         ))
     });
+    require_daemon_signer(&state.snapshot.record, &state.controlled).unwrap_or_else(|e| die(e));
 
     let channel_id = channel_id_env();
     let record = &state.snapshot.record;
@@ -10972,6 +11004,7 @@ fn cmd_init(args: &[String]) {
     // validated, value-preserving successor gate described at `join_delegate`.
     let record = cli.snapshot.record.clone();
     let controlled = cli.controlled.clone();
+    require_daemon_signer(&record, &controlled).unwrap_or_else(|e| die(e));
     let mut signed_state = cli.snapshot.state.clone();
     if previous.is_none() {
         let (balance_vd, attestation, _) = load_backing();
@@ -14253,6 +14286,12 @@ fn settlement_deployment_plan_digest(
         .map_err(|_| "LATE_MLE_CONFIG_PATH is required".to_string())?;
     let late_config = fs::read(contracts_dir.join(late_config_path)).map_err(|e| format!("late verifier config: {e}"))?;
     append_deployment_digest_field(&mut preimage, &late_config);
+    let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .map_err(|_| "LATE_DEPOSIT_MLE_CONFIG_PATH is required".to_string())?;
+    let late_deposit_config = fs::read(contracts_dir.join(late_deposit_config_path))
+        .map_err(|e| format!("late deposit verifier config: {e}"))?;
+    append_deployment_digest_field(&mut preimage, b"late_deposit_config");
+    append_deployment_digest_field(&mut preimage, &late_deposit_config);
     append_deployment_digest_field(&mut preimage, &chain_id.to_be_bytes());
     append_deployment_digest_field(&mut preimage, strip0x(broadcaster).as_bytes());
     append_deployment_digest_field(&mut preimage, &start_nonce.to_be_bytes());
@@ -14316,9 +14355,12 @@ fn expected_settlement_deployment_intent(
 ) -> Result<SettlementDeploymentIntent, String> {
     let late_incoming_verifier = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
         .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?, 20, "late incoming verifier")?;
+    let late_deposit_verifier = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
+        .map_err(|_| "LATE_DEPOSIT_VERIFIER is required".to_string())?, 20, "late deposit verifier")?;
     let existing_settlement_manager = existing_settlement_manager_env()?;
     Ok(SettlementDeploymentIntent {
         late_incoming_verifier,
+        late_deposit_verifier,
         existing_settlement_manager: existing_settlement_manager.clone(),
         chain_id,
         broadcaster: broadcaster.to_string(),
@@ -14369,6 +14411,7 @@ fn reused_close_funding(
     rollup: &str,
     existing_manager: &str,
     late_adapter: &str,
+    late_deposit_adapter: &str,
     backing_pin: &SettlementMleV2ConfigPin,
 ) -> Option<ReusedCloseFunding> {
     if existing_manager.is_empty() {
@@ -14395,13 +14438,15 @@ fn reused_close_funding(
     );
     let materializer_rollup = cast_call(rpc, &materializer, "rollup()(address)", &[]);
     let materializer_late = cast_call(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[]);
+    let materializer_late_deposit = cast_call(rpc, &materializer, "lateDepositMleVerifier()(address)", &[]);
     if !strip0x(&materializer_rollup).eq_ignore_ascii_case(&strip0x(rollup))
         || !strip0x(&materializer_late).eq_ignore_ascii_case(&strip0x(late_adapter))
+        || !strip0x(&materializer_late_deposit).eq_ignore_ascii_case(&strip0x(late_deposit_adapter))
     {
         die(format!(
             "materializer {materializer} of {existing_manager} is bound to rollup \
-             {materializer_rollup} and late-incoming adapter {materializer_late}, not \
-             {rollup} / {late_adapter}"
+             {materializer_rollup}, late-incoming adapter {materializer_late} and late-deposit \
+             adapter {materializer_late_deposit}, not {rollup} / {late_adapter} / {late_deposit_adapter}"
         ));
     }
     let backing_mle_adapter = cast_call(rpc, &materializer, "backingMleVerifier()(address)", &[]);
@@ -14529,10 +14574,13 @@ fn prepare_real_settlement_binding(
             || !expected
                 .late_incoming_verifier
                 .eq_ignore_ascii_case(&persisted.late_incoming_verifier)
+            || !expected
+                .late_deposit_verifier
+                .eq_ignore_ascii_case(&persisted.late_deposit_verifier)
         {
             die(format!(
                 "cannot restart settlement deployment: persisted identity {persisted:?} names a \
-                 different chain, broadcaster or late-incoming adapter than this run {expected:?}"
+                 different chain, broadcaster, late-incoming or late-deposit adapter than this run {expected:?}"
             ));
         }
         if expected != persisted {
@@ -14685,14 +14733,16 @@ fn cast_encode_materializer_constructor(
     rollup: &str,
     backing_adapter: &str,
     late_adapter: &str,
+    late_deposit_adapter: &str,
 ) -> Result<String, String> {
-    const SIGNATURE: &str = "constructor(address,address,address)";
+    const SIGNATURE: &str = "constructor(address,address,address,address)";
     let output = Command::new("cast")
         .arg("abi-encode")
         .arg(SIGNATURE)
         .arg(rollup)
         .arg(backing_adapter)
         .arg(late_adapter)
+        .arg(late_deposit_adapter)
         .output()
         .map_err(|e| format!("start `cast abi-encode` for close-funding materializer: {e}"))?;
     if !output.status.success() {
@@ -15232,12 +15282,14 @@ fn validate_settlement_mle_v2_pair(
 ///   14 IntmaxRollup.registerSettlementManager
 /// There are no mutable VK initializers: every verifier binding is a constructor argument.
 /// The first stack's materializer CREATE: its constructor must bind the backing rollup, the
-/// CloseAssetBacking adapter created immediately before it, and the pinned late-incoming adapter.
+/// CloseAssetBacking adapter created immediately before it, and the pinned late-incoming and
+/// late-deposit adapters.
 fn validate_created_materializer(
     tx: &serde_json::Value,
     rollup: &str,
     backing_mle_adapter: &str,
     late_incoming_verifier: &str,
+    late_deposit_verifier: &str,
 ) -> Result<String, String> {
     validate_settlement_tx_shape(
         tx,
@@ -15254,7 +15306,7 @@ fn validate_created_materializer(
     // real Sepolia deployment whose on-chain bindings were correct. For static-argument
     // constructors the initcode suffix is the complete, exact ABI encoding.
     let encoded_materializer_constructor =
-        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier)?;
+        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier, late_deposit_verifier)?;
     let materializer_input = tx
         .get("transaction")
         .and_then(|value| value.get("input"))
@@ -15263,8 +15315,8 @@ fn validate_created_materializer(
     if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
         return Err(
             "close-funding materializer is not bound to the backing rollup, the CloseAssetBacking \
-             adapter created by this run and the pinned late-incoming adapter: its creation input \
-             does not end in that constructor ABI"
+             adapter created by this run and the pinned late-incoming and late-deposit adapters: \
+             its creation input does not end in that constructor ABI"
                 .to_string(),
         );
     }
@@ -15409,6 +15461,7 @@ fn validate_settlement_broadcast_value(
                 rollup,
                 &backing_mle_adapter,
                 &intent.late_incoming_verifier,
+                &intent.late_deposit_verifier,
             )?;
             (backing_mle_core, backing_mle_adapter, materializer)
         }
@@ -15775,6 +15828,7 @@ mod settlement_broadcast_recovery_tests {
     const BACKING_MLE_CORE: &str = "0x0000000000000000000000000000000000000015";
     const BACKING_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000025";
     const LATE_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000026";
+    const LATE_DEPOSIT_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000027";
     const VERIFIER: &str = "0x0000000000000000000000000000000000000031";
     const MANAGER: &str = "0x0000000000000000000000000000000000000032";
     const MATERIALIZER: &str = "0x0000000000000000000000000000000000000088";
@@ -15782,6 +15836,7 @@ mod settlement_broadcast_recovery_tests {
     fn intent() -> SettlementDeploymentIntent {
         SettlementDeploymentIntent {
             late_incoming_verifier: LATE_MLE_ADAPTER.to_string(),
+            late_deposit_verifier: LATE_DEPOSIT_MLE_ADAPTER.to_string(),
             existing_settlement_manager: String::new(),
             chain_id: CHAIN_ID,
             broadcaster: BROADCASTER.to_string(),
@@ -15936,7 +15991,7 @@ mod settlement_broadcast_recovery_tests {
         let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
         let manager_input = format!("0x60006000{}", strip0x(&constructor));
         let materializer_constructor =
-            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER).unwrap();
+            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER).unwrap();
         let materializer_input = format!("0x6002{}", strip0x(&materializer_constructor));
 
         // One MleVerifierV2 core CREATE followed by its PinnedMleVerifierV2 adapter CREATE.
@@ -16000,7 +16055,7 @@ mod settlement_broadcast_recovery_tests {
             START_NONCE + 2,
             "CloseFundingMaterializer",
             MATERIALIZER,
-            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string()]),
+            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string(), LATE_DEPOSIT_MLE_ADAPTER.to_string()]),
             &materializer_input,
         ));
         for (index, pin) in pins.iter().enumerate() {
@@ -16366,6 +16421,13 @@ mod settlement_broadcast_recovery_tests {
         let mut wrong_late = expected.clone();
         wrong_late.late_incoming_verifier = BACKING_MLE_ADAPTER.to_string();
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late), &expected).is_err());
+        let mut wrong_late_deposit = expected.clone();
+        wrong_late_deposit.late_deposit_verifier = BACKING_MLE_ADAPTER.to_string();
+        assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late_deposit), &expected).is_err());
+        // An intent persisted before the late-deposit adapter existed cannot be resumed.
+        let mut pre_late_deposit = expected.clone();
+        pre_late_deposit.late_deposit_verifier = String::new();
+        assert!(settlement_deploy_mode_for_intent(true, Some(&pre_late_deposit), &expected).is_err());
         let mut wrong_chain = expected.clone();
         wrong_chain.chain_id = 10;
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_chain), &expected).is_err());
@@ -16433,17 +16495,21 @@ mod settlement_broadcast_recovery_tests {
             "the backing adapter must bind the backing core created immediately before it"
         );
         // The materializer's bindings are read from the creation input that was sent.
-        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str| {
-            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late).unwrap();
+        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str, late_deposit: &str| {
+            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late, late_deposit).unwrap();
             serde_json::json!(format!("0x6002{}", strip0x(&encoded)))
         };
+        let mut wrong_late_deposit_adapter = artifact.clone();
+        wrong_late_deposit_adapter["transactions"][2]["transaction"]["input"] =
+            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, BACKING_MLE_ADAPTER);
+        assert!(validate_settlement_broadcast_value(&wrong_late_deposit_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut wrong_late_adapter = artifact.clone();
         wrong_late_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER);
+            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut materializer_on_other_rollup = artifact.clone();
         materializer_on_other_rollup["transactions"][2]["transaction"]["input"] =
-            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER);
+            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         // Foundry's `arguments` is a best-effort decode that has sliced a correct constructor two
         // words early on Sepolia; it is not the authority and must neither accept nor refuse.
@@ -16504,7 +16570,7 @@ mod settlement_broadcast_recovery_tests {
         );
         let mut materializer_bound_to_other_adapter = artifact.clone();
         materializer_bound_to_other_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER);
+            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(
             validate_settlement_broadcast_value(
                 &materializer_bound_to_other_adapter,
@@ -17403,6 +17469,19 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let late_pin = parse_settlement_mle_v2_config_pin(&late_config_value, "late incoming", "LATE_MLE_CONFIG_PATH")
         .unwrap_or_else(|e| die(e));
     require_mle_v2_pair_pin(rpc, chain_id, &late_adapter, None, &late_pin, None);
+    let late_deposit_adapter = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
+        .unwrap_or_else(|_| die("LATE_DEPOSIT_VERIFIER is required")), 20, "late deposit verifier")
+        .unwrap_or_else(|e| die(e));
+    let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .unwrap_or_else(|_| die("LATE_DEPOSIT_MLE_CONFIG_PATH is required (use an absolute path)"));
+    let late_deposit_config_path = fs::canonicalize(contracts_dir.join(late_deposit_config_path))
+        .unwrap_or_else(|e| die(format!("late deposit config: {e}")));
+    let late_deposit_config_text = fs::read_to_string(&late_deposit_config_path).unwrap_or_else(|e| die(e));
+    MleVerifierV2ConfigFixture::from_canonical_json(&late_deposit_config_text).unwrap_or_else(|e| die(e));
+    let late_deposit_config_value = serde_json::from_str(&late_deposit_config_text).unwrap_or_else(|e| die(e));
+    let late_deposit_pin = parse_settlement_mle_v2_config_pin(&late_deposit_config_value, "late deposit", "LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .unwrap_or_else(|e| die(e));
+    require_mle_v2_pair_pin(rpc, chain_id, &late_deposit_adapter, None, &late_deposit_pin, None);
     let existing_settlement_manager = existing_settlement_manager_env().unwrap_or_else(|e| die(e));
     let reused = reused_close_funding(
         rpc,
@@ -17410,6 +17489,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_rollup_hex,
         &existing_settlement_manager,
         &late_adapter,
+        &late_deposit_adapter,
         &backing_mle_v2_pin,
     );
     if let Some(reused) = &reused {
@@ -17694,6 +17774,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         die("materializer late incoming verifier differs from prepared deployment intent");
     }
     require_mle_v2_pair_pin(rpc, chain_id, &deployed_late, None, &late_pin, Some(activation_checkpoint.block_number));
+    let deployed_late_deposit = cast_call_at(rpc, &materializer, "lateDepositMleVerifier()(address)", &[], activation_checkpoint.block_number);
+    if !strip0x(&deployed_late_deposit).eq_ignore_ascii_case(&strip0x(&deployment_intent.late_deposit_verifier)) {
+        die("materializer late deposit verifier differs from prepared deployment intent");
+    }
+    require_mle_v2_pair_pin(rpc, chain_id, &deployed_late_deposit, None, &late_deposit_pin, Some(activation_checkpoint.block_number));
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -20494,6 +20579,47 @@ mod partial_withdrawal_reconcile_tests {
             validate_tx_receipt_identity(&tx_hash, &tx_hash, &tx_hash, from, to, to, from,)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod daemon_signer_rule_tests {
+    use super::*;
+
+    #[test]
+    fn a_controlled_cosigner_slot_with_the_recorded_key_satisfies_the_rule() {
+        let cli = signing_ledger_tests::fixture();
+        require_daemon_signer(&cli.snapshot.record, &cli.controlled).expect("daemon signer present");
+    }
+
+    #[test]
+    fn no_controlled_slot_is_refused() {
+        let cli = signing_ledger_tests::fixture();
+        let err = require_daemon_signer(&cli.snapshot.record, &[]).unwrap_err();
+        assert!(err.contains("sig-cluster rule"), "{err}");
+    }
+
+    #[test]
+    fn a_controlled_slot_whose_key_is_not_in_the_record_does_not_count() {
+        let cli = signing_ledger_tests::fixture();
+        let foreign: Vec<ControlledMember> = cli
+            .controlled
+            .iter()
+            .map(|c| ControlledMember { keygen_seed: c.keygen_seed + 1000, ..c.clone() })
+            .collect();
+        assert!(require_daemon_signer(&cli.snapshot.record, &foreign).is_err());
+    }
+
+    #[test]
+    fn a_delegate_slot_does_not_count() {
+        let cli = signing_ledger_tests::fixture();
+        let member_count = cli.snapshot.record.member_count;
+        let delegate_only: Vec<ControlledMember> = cli
+            .controlled
+            .iter()
+            .map(|c| ControlledMember { slot: c.slot + u16::from(member_count), ..c.clone() })
+            .collect();
+        assert!(require_daemon_signer(&cli.snapshot.record, &delegate_only).is_err());
     }
 }
 

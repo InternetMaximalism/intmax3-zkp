@@ -117,6 +117,7 @@ contract MaterializerTrustBoundaryTest is Test {
         materializer = new CloseFundingMaterializer(
             rollup,
             IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid))),
+            IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid))),
             IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid)))
         );
         vm.deal(user, 100 ether);

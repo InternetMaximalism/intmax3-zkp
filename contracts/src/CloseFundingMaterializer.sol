@@ -197,12 +197,20 @@ contract CloseFundingMaterializer {
     ///         complete immutable VK/configuration; there is no post-deploy initialization.
     IPinnedMleVerifierV2 public immutable backingMleVerifier;
     IPinnedMleVerifierV2 public immutable lateIncomingMleVerifier;
+    /// @notice The constructor-pinned adapter of the post-close late-deposit lane: one
+    ///         ReceiveDeposit step over an L1 deposit that was never imported into a signed
+    ///         channel state before the close. Shares the late cursor below with late-incoming
+    ///         (a deposit nullifier and a transfer nullifier live in one Balance nullifier tree).
+    IPinnedMleVerifierV2 public immutable lateDepositMleVerifier;
     mapping(uint32 => bytes32) public lateBalanceStateCommitment;
     mapping(uint32 => uint64) public lateBalanceAnchorBlock;
     mapping(uint32 => mapping(bytes32 => bool)) public lateReceiveNullifierUsed;
     error InvalidLateIncoming();
+    error InvalidLateDeposit();
     event LateIncomingClaimed(uint32 indexed channelId, bytes32 indexed receiveNullifier,
         address indexed recipient, uint32 tokenIndex, uint64 amount, bytes32 nextBalanceCommitment);
+    event LateDepositClaimed(uint32 indexed channelId, bytes32 indexed nullifier, address depositor,
+        uint32 tokenIndex, uint64 amount, bytes32 nextCommitment, uint64 anchorBlock);
 
     mapping(uint32 => address) public managerOfChannel;
     mapping(uint32 => uint64) public frozenGeneration;
@@ -235,13 +243,20 @@ contract CloseFundingMaterializer {
         uint32 indexed channelId, address indexed manager, bytes32 indexed closeIntentDigest, uint8 tokenCount
     );
 
-    constructor(IntmaxRollup rollup_, IPinnedMleVerifierV2 backingMleVerifier_, IPinnedMleVerifierV2 lateIncomingMleVerifier_) {
+    constructor(
+        IntmaxRollup rollup_,
+        IPinnedMleVerifierV2 backingMleVerifier_,
+        IPinnedMleVerifierV2 lateIncomingMleVerifier_,
+        IPinnedMleVerifierV2 lateDepositMleVerifier_
+    ) {
         if (address(rollup_).code.length == 0) revert InvalidRollup();
         rollup = rollup_;
         _requirePinnedVerifier(backingMleVerifier_);
         backingMleVerifier = backingMleVerifier_;
         _requirePinnedVerifier(lateIncomingMleVerifier_);
         lateIncomingMleVerifier = lateIncomingMleVerifier_;
+        _requirePinnedVerifier(lateDepositMleVerifier_);
+        lateDepositMleVerifier = lateDepositMleVerifier_;
     }
 
     /// @dev Mirrors the Rollup/Manager constructor invariant: the adapter and its linked core must
@@ -507,6 +522,54 @@ contract CloseFundingMaterializer {
         bytes32 claimKey = keccak256(abi.encodePacked(bytes4(0x494d4c43), channelId, closeId, nullifier));
         manager.creditLateIncoming(tokenIndex, amount, recipient, claimKey);
         emit LateIncomingClaimed(channelId, nullifier, recipient, tokenIndex, amount, next);
+    }
+
+    /// @notice Refund one L1 deposit that reached this channel's rollup but was never imported
+    /// into a signed channel state before the close. The proof is one ReceiveDeposit step over the
+    /// finalized close state; it consumes the deposit nullifier in the same Balance nullifier tree
+    /// the late-incoming lane uses, so both lanes advance one shared cursor. The refund is credited
+    /// directly on the Rollup to the depositor: the deposit only ever raised the Rollup escrow, so
+    /// no Manager cap or channel token registry is involved. Amounts above uint64 are refused.
+    /// Public inputs (49 limbs): [0] channel | [1..9] prev | [9..17] next | [17..25] ext state |
+    /// [25] anchor | [26..34] nullifier | [34..39] depositor | [39] token | [40..48] amount | [48] v=1.
+    function claimLateDeposit(ChannelSettlementManager manager, bytes calldata proof) external {
+        uint32 channelId = uint32(manager.channelId());
+        if (managerOfChannel[channelId] != address(manager)) revert NotBoundManager();
+        if (materializedChannelExit[channelId] == bytes32(0)
+            || manager.channelStatus() != ChannelSettlementManager.ChannelLifecycleStatus.Closed) {
+            revert ChannelExitManagerNotClosed();
+        }
+        uint256[] memory pi = lateDepositMleVerifier.verifyCompactPublicInputs(proof);
+        if (pi.length != 49 || pi[48] != 1) revert InvalidLateDeposit();
+        for (uint256 i; i < pi.length; ++i) {
+            if (i != 25 && pi[i] > type(uint32).max) revert InvalidLateDeposit();
+        }
+        if (pi[25] >= uint256(1) << 63) revert InvalidLateDeposit();
+        bytes32 previous = lateBalanceStateCommitment[channelId];
+        if (pi[0] != channelId || _limbsToBytes32(pi, 1) != previous
+            || !rollup.isFinalizedStateRoot(_limbsToBytes32(pi, 17))
+            || pi[25] < lateBalanceAnchorBlock[channelId]
+            || pi[25] > rollup.latestFinalizedBlockNumber()) revert InvalidLateDeposit();
+        bytes32 nullifier = _limbsToBytes32(pi, 26);
+        if (lateReceiveNullifierUsed[channelId][nullifier]) revert InvalidLateDeposit();
+        uint160 depositorWord;
+        for (uint256 i = 34; i < 39; ++i) depositorWord = (depositorWord << 32) | uint160(pi[i]);
+        address depositor = address(depositorWord);
+        uint32 tokenIndex = uint32(pi[39]);
+        for (uint256 i = 40; i < 46; ++i) {
+            if (pi[i] != 0) revert InvalidLateDeposit();
+        }
+        uint64 amount = uint64((pi[46] << 32) | pi[47]);
+        if (depositor == address(0) || amount == 0) revert InvalidLateDeposit();
+        bytes32 next = _limbsToBytes32(pi, 9);
+        if (next == previous) revert InvalidLateDeposit();
+        lateReceiveNullifierUsed[channelId][nullifier] = true;
+        lateBalanceStateCommitment[channelId] = next;
+        lateBalanceAnchorBlock[channelId] = uint64(pi[25]);
+        // The deposit raised only the Rollup escrow; this debits exactly that and credits the
+        // depositor's own pull-payment balance. A failure here rolls back the cursor and nullifier.
+        rollup.creditChannelExit(depositor, tokenIndex, amount);
+        emit LateDepositClaimed(channelId, nullifier, depositor, tokenIndex, amount, next, uint64(pi[25]));
     }
 
     /// @dev The pinned adapter verifies the compact proof against its immutable configuration and

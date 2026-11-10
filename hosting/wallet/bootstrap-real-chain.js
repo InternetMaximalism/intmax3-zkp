@@ -30,12 +30,14 @@
 //
 // Every step is skipped when its result already exists, so the script can be re-run after a
 // failure. Prerequisites: the rollup is deployed and each channel dir holds its `setup-backing`
-// artifacts; the late-incoming verifier is deployed (contracts/script/DeployLateIncomingVerifier.s.sol).
+// artifacts; the late-incoming and late-deposit verifiers are deployed
+// (contracts/script/DeployLateIncomingVerifier.s.sol, DeployLateDepositVerifier.s.sol).
 //
 // Usage: node hosting/wallet/bootstrap-real-chain.js <channel> [<channel> ...]
 // Environment (in addition to the relay's CLI/L1 environment):
 //   BOOTSTRAP_DELEGATE_RECIPIENT_<ch>  operator-controlled L1 exit address of the operator delegate
 //   LATE_INCOMING_VERIFIER, LATE_MLE_CONFIG_PATH   the deployed late-incoming adapter and its config
+//   LATE_DEPOSIT_VERIFIER, LATE_DEPOSIT_MLE_CONFIG_PATH   the deployed late-deposit adapter and its config
 //   PUBLIC_CLOSE_PROVER_BIN   default target/release/public_close_prover
 //   BOOTSTRAP_STOP_AFTER=envelope   stop after step 3 (to run the prover on another machine and
 //                             place the bundle at <channel dir>/public_close_bundle)
@@ -124,7 +126,7 @@ function siblingManager(ch) {
 
 async function settlement(ch, bundleDir) {
   if (fs.existsSync(wc(ch, 'settlement.json'))) return step(ch, 'settlement', 'exists');
-  for (const name of ['LATE_INCOMING_VERIFIER', 'LATE_MLE_CONFIG_PATH']) {
+  for (const name of ['LATE_INCOMING_VERIFIER', 'LATE_MLE_CONFIG_PATH', 'LATE_DEPOSIT_VERIFIER', 'LATE_DEPOSIT_MLE_CONFIG_PATH']) {
     if (!process.env[name]) throw new Error(`${name} is required to deploy the settlement stack`);
   }
   // Broadcasts ~15 transactions and waits for the finalized read-back: far beyond the CLI default.

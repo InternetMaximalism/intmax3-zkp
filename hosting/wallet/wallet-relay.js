@@ -337,6 +337,12 @@ const cluster = (clusterSelfUrl && clusterPeers) ? createCluster({
   }),
 }) : null;
 if (cluster) console.log(`[cluster] enabled: self ${clusterSelfUrl} slots ${JSON.stringify(clusterSignSlots)}, peers ${JSON.stringify(clusterPeers)}`);
+// Standby replica of every channel's private base state on each peer (api/lib/live-replica.js).
+const liveReplica = require('../../api/lib/live-replica');
+if (cluster) {
+  liveReplica.configure({ selfUrl: clusterSelfUrl, peers: clusterPeers, log: console });
+  if (!liveReplica.enabled()) console.error('[live-replica] INTMAX_CLUSTER_SECRET is unset: the private base state is NOT replicated to the peers');
+}
 
 // ---- Ticket persistence (one JSON array per channel) ----------------------------------------
 // tickets.json     = ACTIVE tickets (+ terminal ones for a short TTL, so an in-flight UI can react).
@@ -575,6 +581,16 @@ function activeSlotCount(ch) {
 }
 
 const app = express();
+// Replica bundles carry the sealed live snapshot (up to hundreds of MB): parsed with their own
+// limit, registered BEFORE the general JSON parser so its 64 MB cap does not reject them.
+app.post('/api/cluster/live-replica', express.json({ limit: '1gb' }), (req, res) => {
+  if (!cluster) return res.status(404).json({ error: 'cluster co-signing is not enabled on this relay' });
+  try { res.json(liveReplica.receive(req.body, req.get('x-intmax-replica-signature'))); }
+  catch (e) { res.status(e.status || 500).json({ error: String(e.message || e) }); }
+});
+app.get('/api/cluster/replica-status', (req, res) => {
+  res.json({ enabled: liveReplica.enabled(), configured: liveReplica.configured(), root: liveReplica.REPLICA_ROOT, held: liveReplica.held() });
+});
 app.use(express.json({ limit: '64mb' }));
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'invalid JSON: ' + err.message });
@@ -1366,11 +1382,16 @@ app.get('/api/deployment', (req, res) => {
 // Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via
 // MetaMask (native ETH or any L1-registered ERC-20 — `rollup` is both the deposit target and the
 // ERC-20 approve spender). Only where deposits can be withdrawn again (capability `deposit`).
-app.get('/api/deposit-info', (req, res) => {
+app.get('/api/deposit-info', async (req, res) => {
   if (!requireCapability(res, 'deposit', 'Depositing')) return;
   try {
-    const { backing, info } = deploymentOf(reqChannel(req));
+    const ch = reqChannel(req);
+    const { backing, info } = deploymentOf(ch);
     if (!backing.deposit_recipient) throw new Error('no deposit_recipient in channel_backing.json');
+    // The recipient's salt must exist on a peer before anyone deposits to it (see live-replica.js).
+    if (!(await liveReplica.ensureReplicated(ch, 'deposit-info'))) {
+      return res.status(503).json({ error: `channel ${ch}: no cluster peer holds the private base state yet; deposits are withheld until one acknowledges` });
+    }
     res.json({ ...info, depositRecipient: backing.deposit_recipient });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -1574,6 +1595,74 @@ app.post('/api/deploy-settlement', (req, res) => {
     upsertTicket(ch, ticket);
     res.json(s);
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+});
+
+// ─── Late deposit: post-close refund of an L1 deposit no signed state imported ───────────────
+// POST /api/late-deposit/prepare?channel=N  body: { request?, depositSalt? }
+//   `request` = the rollup `Deposited` event's fields as the producer journals them
+//   ({ depositIndex, depositor, recipient, tokenIndex, amount, auxData, expectedDepositHashChain });
+//   `depositSalt` = the channel's deposit salt (channel_backing.json `deposit_salt` for the
+//   setup-backing recipient). Both may be omitted when this host's daemon received the deposit
+//   before the close (it retained that pre-receive generation with them). The close cursor
+//   (close id, finalized H1, late Balance commitment) is read from the settlement contracts.
+//   Writes ch<N>/late_deposit_<nullifier>.json (0600: it carries the next private checkpoint) and
+//   returns the statement; then:
+// POST /api/late-deposit/claim?channel=N  body: { nullifier }
+//   sends CloseFundingMaterializer.claimLateDeposit(manager, compactProof) with the relay's L1 key.
+//   Any holder of the private base state can run both (every cluster host, see live-replica.js).
+function lateDepositSettlement(ch) {
+  const s = JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8'));
+  const materializer = s.close_funding_materializer || s.closeFundingMaterializer;
+  if (!s.manager || !materializer) throw new Error('settlement.json lacks manager / close_funding_materializer');
+  return { manager: s.manager, materializer };
+}
+app.post('/api/late-deposit/prepare', (req, res) => {
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, async () => {
+    const { manager, materializer } = lateDepositSettlement(ch);
+    const call = (to, sig, ...args) => require('../../api/lib/cli').sh('cast', ['call', to, sig, ...args, '--rpc-url', RPC], { stdio: 'pipe' }).trim();
+    const closeIntentDigest = call(materializer, 'materializedChannelExit(uint32)(bytes32)', String(ch));
+    const finalBalanceStateH1 = call(manager, 'finalizedBalanceStateH1()(bytes32)');
+    const confirmedCommitment = call(materializer, 'lateBalanceStateCommitment(uint32)(bytes32)', String(ch));
+    if (/^0x0+$/.test(closeIntentDigest) || /^0x0+$/.test(confirmedCommitment)) {
+      throw new Error(`channel ${ch} has no materialized close on ${materializer}: nothing to refund against yet`);
+    }
+    const body = req.body || {};
+    const out = await producer.livePrepareLateDeposit(ch, {
+      closeIntentDigest, finalBalanceStateH1, confirmedCommitment,
+      ...(body.request ? { request: body.request } : {}),
+      ...(body.depositSalt ? { depositSalt: body.depositSalt } : {}),
+    });
+    const statement = out.prepared.statement;
+    const file = wc(ch, `late_deposit_${statement.depositNullifier}.json`);
+    fs.writeFileSync(file, JSON.stringify({ channel: ch, manager, materializer, closeIntentDigest, finalBalanceStateH1,
+      confirmedCommitment, preparedAt: Date.now(), ...out }), { mode: 0o600 });
+    return { statement, fromRetainedPreReceiveGeneration: out.fromRetainedPreReceiveGeneration, file,
+      next: `POST /api/late-deposit/claim?channel=${ch} { "nullifier": "${statement.depositNullifier}" }` };
+  }).then((out) => res.json(out)).catch((e) => sendRouteError(res, e));
+});
+app.post('/api/late-deposit/claim', (req, res) => {
+  let ch;
+  try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
+  withLock(ch, () => {
+    const nullifier = String((req.body && req.body.nullifier) || '');
+    if (!/^0x[0-9a-fA-F]{64}$/.test(nullifier)) throw new Error('late-deposit claim needs { nullifier } (0x + 64 hex)');
+    const file = wc(ch, `late_deposit_${nullifier}.json`);
+    if (!fs.existsSync(file)) throw new Error(`no prepared late deposit ${nullifier} for channel ${ch}: run /api/late-deposit/prepare first`);
+    const prepared = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const { manager, materializer } = lateDepositSettlement(ch);
+    if (prepared.manager !== manager || prepared.materializer !== materializer) throw new Error('prepared late deposit names another settlement');
+    const proof = '0x' + Buffer.from(prepared.prepared.compactProof).toString('hex');
+    const helper = require('../../api/lib/cli');
+    const out = helper.sh('cast', ['send', materializer, 'claimLateDeposit(address,bytes)', manager, proof,
+      ...helper.l1SignerArgs(), '--rpc-url', RPC, '--json'], { stdio: 'pipe' });
+    const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
+    const status = (out.match(/"status"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
+    fs.writeFileSync(file, JSON.stringify({ ...prepared, claim: { txHash, status, sentAt: Date.now() } }), { mode: 0o600 });
+    return { txHash, status, statement: prepared.prepared.statement, depositor: prepared.prepared.statement.depositor,
+      howTo: 'the depositor withdraws the credited amount from the rollup (pendingWithdrawals / pendingTokenWithdrawals) with its own wallet' };
+  }).then((out) => res.json(out)).catch((e) => sendRouteError(res, e));
 });
 
 // GET /api/settlement?channel=N

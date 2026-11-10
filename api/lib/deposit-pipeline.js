@@ -240,6 +240,8 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
   // The import head's kit is anchored after the deposit block: publish it so the CLI's backing
   // finality gate lets the channel sign in-channel sends again (C25/G16).
   require('./wallet-l1').publishLater(ch, 'L1 deposit import');
+  // The import advanced the private base state: every cluster host keeps a standby copy.
+  require('./live-replica').replicate(ch, 'L1 deposit import');
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 

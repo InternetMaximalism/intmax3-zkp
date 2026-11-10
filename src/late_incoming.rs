@@ -64,6 +64,35 @@ impl LateIncomingCheckpoint {
             "rebuild all verifier keys with authenticated-tail-receive"
         );
         let commitment = circuit.balance_commitment(proof)?;
+        Self::from_commitment(commitment, proof, private_state, close_intent_digest, final_balance_state_h1, expected)
+    }
+
+    /// Same checkpoint as `new`, bound by the Balance verifier data alone. The late-deposit lane
+    /// shares this cursor: both lanes advance the materializer's `lateBalanceStateCommitment`.
+    pub fn with_balance_vd(
+        balance_vd: &plonky2::plonk::circuit_data::VerifierCircuitData<F, C, D>,
+        proof: &ProofWithPublicInputs<F, C, D>,
+        private_state: FullPrivateState,
+        close_intent_digest: Bytes32,
+        final_balance_state_h1: Bytes32,
+        expected: Bytes32,
+    ) -> Result<Self> {
+        ensure!(
+            cfg!(feature = "authenticated-tail-receive"),
+            "rebuild all verifier keys with authenticated-tail-receive"
+        );
+        let commitment = balance_commitment_with_vd(balance_vd, proof)?;
+        Self::from_commitment(commitment, proof, private_state, close_intent_digest, final_balance_state_h1, expected)
+    }
+
+    fn from_commitment(
+        commitment: Bytes32,
+        proof: &ProofWithPublicInputs<F, C, D>,
+        private_state: FullPrivateState,
+        close_intent_digest: Bytes32,
+        final_balance_state_h1: Bytes32,
+        expected: Bytes32,
+    ) -> Result<Self> {
         ensure!(
             commitment == expected,
             "checkpoint differs from confirmed L1 state"
@@ -88,6 +117,27 @@ impl LateIncomingCheckpoint {
 
     pub fn commitment(&self) -> Bytes32 {
         self.commitment
+    }
+
+    pub fn channel_id(&self) -> ChannelId {
+        self.channel_id
+    }
+
+    pub fn close_intent_digest(&self) -> Bytes32 {
+        self.close_intent_digest
+    }
+
+    pub fn final_balance_state_h1(&self) -> Bytes32 {
+        self.final_balance_state_h1
+    }
+
+    /// Serialized ordinary Balance proof at this cursor (decode with the Balance common data).
+    pub fn balance_proof_bytes(&self) -> &[u8] {
+        &self.balance_proof
+    }
+
+    pub fn private_state(&self) -> &FullPrivateState {
+        &self.private_state
     }
 
     /// Reuse the ordinary receive witness and Balance prover. `extended` must be the canonical
@@ -187,6 +237,22 @@ impl PreparedLateIncoming {
         );
         Ok(self.next_checkpoint.clone())
     }
+}
+
+/// The L1 cursor of an ordinary Balance proof: the full-PI Poseidon commitment, after verifying
+/// the proof under `balance_vd` and that it embeds that same key. Identical to
+/// `LateIncomingCircuit::balance_commitment`.
+pub fn balance_commitment_with_vd(
+    balance_vd: &plonky2::plonk::circuit_data::VerifierCircuitData<F, C, D>,
+    proof: &ProofWithPublicInputs<F, C, D>,
+) -> Result<Bytes32> {
+    balance_vd.verify(proof.clone())?;
+    let full = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
+        &proof.public_inputs.to_u64_vec(),
+        &balance_vd.common.config,
+    )?;
+    ensure!(full.vd == balance_vd.verifier_only, "wrong Balance VK");
+    Ok(Bytes32::from(full.commitment(&balance_vd.common.config)))
 }
 
 /// Available before the first receipt: deploy this config's pinned adapter before the materializer.

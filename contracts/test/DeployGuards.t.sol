@@ -229,6 +229,7 @@ contract DeployGuardsTest is Test {
     function setUp() public {
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("LATE_INCOMING_VERIFIER", vm.toString(address(new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID))));
+        vm.setEnv("LATE_DEPOSIT_VERIFIER", vm.toString(address(new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID))));
         verifier = new ChannelSettlementVerifier(
             new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
             new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),

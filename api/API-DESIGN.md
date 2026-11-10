@@ -847,7 +847,11 @@ proves the delta amount. This HTTP residual route covers already-imported transf
 first received after finalization use `LiveBalanceService::prepare_late_inter_channel` and
 `CloseFundingMaterializer.claimLateIncoming`: an exact closing Balance cursor, ordinary receive,
 final-H1 recipient binding, atomic escrow/cap increase, and a persisted next cursor. Their
-59-limb combined proof is distinct from this route's 58-limb residual proof. See
+59-limb combined proof is distinct from this route's 58-limb residual proof. A deposit that no
+signed state imported before the close is refunded to its L1 `depositor` by the sibling lane
+`LiveBalanceService::prepare_late_deposit` + `CloseFundingMaterializer.claimLateDeposit` (49-limb
+proof over the ordinary ReceiveDeposit relation, same late cursor and nullifier set, amount must
+fit u64, credited on the rollup directly). See
 [the continuation specification](../doc/architecture-audit/archive/detail2.md#post-close-first-receipt-ordinary-receivetransfer-continuation-2026-09-26).
 
 **Inputs:** Manager, retained incoming descriptor, final signed snapshot/tree, recipient proof.

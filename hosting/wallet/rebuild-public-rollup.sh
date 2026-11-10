@@ -13,7 +13,7 @@
 #              deploy script reads
 #   rollup     Deploy.s.sol with the validity verifier pinned to the producer's exported config
 #   backing    setup-backing (empty genesis) per channel
-#   late       the late-incoming config exported from the channel Balance VD + its verifier
+#   late       the late-incoming AND late-deposit configs exported from the channel Balance VD + their verifiers
 #   bootstrap  bootstrap-real-chain.js (validity record, genesis, settlement, registration, exit kit)
 #
 # then starts the relay. Every step skips work already done, so a failed run is re-run as is.
@@ -90,7 +90,8 @@ fi
 # The deploy scripts below must run on the binaries the relay will run: the deploy installed them.
 cargo build --release --locked --features authenticated-tail-receive \
   --bin channel_member --bin block_producer_service --bin public_close_prover \
-  --bin export_late_incoming_config > "$STATE/build.log" 2>&1 || { tail -30 "$STATE/build.log"; exit 1; }
+  --bin export_late_incoming_config --bin export_late_deposit_config --bin verify_live_replica \
+  > "$STATE/build.log" 2>&1 || { tail -30 "$STATE/build.log"; exit 1; }
 
 log "exporting the producer's validity configuration"
 CFG=$(node -e 'process.stdout.write(require("./api/lib/validity-deployment").exportedConfig())')
@@ -176,12 +177,32 @@ if [ ! -f "$STATE/late_incoming_verifier" ]; then
 fi
 export LATE_INCOMING_VERIFIER; LATE_INCOMING_VERIFIER=$(cat "$STATE/late_incoming_verifier")
 log "late-incoming verifier $LATE_INCOMING_VERIFIER"
-# Later operator runs of the bootstrap source the same file: keep it on this rollup's verifier.
-if ! grep -q "^export LATE_INCOMING_VERIFIER=$LATE_INCOMING_VERIFIER\$" "$BOOTSTRAP_ENV"; then
-  cp "$BOOTSTRAP_ENV" "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE"
-  sed "s/^export LATE_INCOMING_VERIFIER=.*/export LATE_INCOMING_VERIFIER=$LATE_INCOMING_VERIFIER/" \
-    "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE" > "$BOOTSTRAP_ENV"
+# The late-deposit verifier (post-close refund of a deposit no signed state imported) pins the same
+# Balance VD; the materializer takes it as its 4th constructor argument.
+export LATE_DEPOSIT_MLE_CONFIG_PATH=$DATA/late_deposit_mle_config.json
+if [ ! -f "$STATE/late_deposit_verifier" ]; then
+  log "exporting the late-deposit config from ch$FIRST's Balance VD"
+  rm -f "$LATE_DEPOSIT_MLE_CONFIG_PATH"
+  "$REPO/target/release/export_late_deposit_config" "$WORK/ch$FIRST/balance_vd.bin" "$LATE_DEPOSIT_MLE_CONFIG_PATH" \
+    > "$STATE/late-deposit-export.log" 2>&1 || { tail -20 "$STATE/late-deposit-export.log"; exit 1; }
+  log "deploying the late-deposit verifier"
+  forge_broadcast "$STATE/late-deposit.log" script/DeployLateDepositVerifier.s.sol || exit 1
+  grep -oE "LATE_DEPOSIT_VERIFIER 0x[0-9a-fA-F]{40}" "$STATE/late-deposit.log" | tail -1 | cut -d' ' -f2 > "$STATE/late_deposit_verifier"
 fi
+export LATE_DEPOSIT_VERIFIER; LATE_DEPOSIT_VERIFIER=$(cat "$STATE/late_deposit_verifier")
+log "late-deposit verifier $LATE_DEPOSIT_VERIFIER"
+# Later operator runs of the bootstrap source the same file: keep it on this rollup's verifiers.
+for pair in "LATE_INCOMING_VERIFIER=$LATE_INCOMING_VERIFIER" "LATE_DEPOSIT_VERIFIER=$LATE_DEPOSIT_VERIFIER" "LATE_DEPOSIT_MLE_CONFIG_PATH=$LATE_DEPOSIT_MLE_CONFIG_PATH"; do
+  name=${pair%%=*}
+  if ! grep -q "^export $pair\$" "$BOOTSTRAP_ENV"; then
+    cp "$BOOTSTRAP_ENV" "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE-$name"
+    if grep -q "^export $name=" "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE-$name"; then
+      sed "s|^export $name=.*|export $pair|" "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE-$name" > "$BOOTSTRAP_ENV"
+    else
+      { cat "$BOOTSTRAP_ENV.before-$REBUILD_ARCHIVE-$name"; echo "export $pair"; } > "$BOOTSTRAP_ENV"
+    fi
+  fi
+done
 
 log "bootstrapping channels (validity check, genesis, live, envelope, close bundle, settlement, registration, exit kit)"
 node hosting/wallet/bootstrap-real-chain.js $CHANNELS

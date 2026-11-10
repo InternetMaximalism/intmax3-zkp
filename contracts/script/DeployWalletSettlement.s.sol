@@ -79,7 +79,8 @@ contract DeployWalletSettlement is Script {
         if (existing == address(0)) {
             (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingJson);
             materializer = new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
-                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")));
+                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")),
+                IPinnedMleVerifierV2(vm.envAddress("LATE_DEPOSIT_VERIFIER")));
         } else {
             require(rollup.isRegisteredSettlementManager(existing), "existing manager is not registered");
             ChannelSettlementManager incumbent = ChannelSettlementManager(payable(existing));

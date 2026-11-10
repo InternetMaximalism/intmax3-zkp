@@ -104,6 +104,7 @@ async function flushLastProducerBlock(ch, lockedDestination) {
   // THIRD channel D is not replayed here (the caller holds A and B, not D): D finishes its own
   // credit from its recovery sidecar the next time D itself is flushed (`recoverIncomingHead`).
   if (lockedDestination !== destination) {
+    require('./live-replica').replicate(ch, 'inter-channel debit');
     return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt: null };
   }
   const sourceArtifact = await producer.liveSendArtifact(ch, producerRequestId);
@@ -118,6 +119,9 @@ async function flushLastProducerBlock(ch, lockedDestination) {
   // The credited head was signed kit-pending; archive its exit kit into B's CLI state.
   await installHeadExitKit(destination);
   archiveVerifiedDestinationRecovery(ch, destination, result, debitPayload, descriptor, producerRequestId);
+  // Both private base states moved: every cluster host keeps a standby copy of each.
+  require('./live-replica').replicate(ch, 'inter-channel debit');
+  require('./live-replica').replicate(destination, 'inter-channel credit');
   return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt };
 }
 
@@ -281,6 +285,9 @@ async function interChannelSend(ch, { debitPayload, transferDescriptor, tokenInd
   writeJson(wc(ch, 'inter_operation.json'), {
     ...operation, status: 'completed', completedAt: Date.now(), response,
   });
+  // Both private base states moved: every cluster host keeps a standby copy of each.
+  require('./live-replica').replicate(ch, 'inter-channel debit');
+  require('./live-replica').replicate(destination, 'inter-channel credit');
   return { status: 200, body: response };
 }
 

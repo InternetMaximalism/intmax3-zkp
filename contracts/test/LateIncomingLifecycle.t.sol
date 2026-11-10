@@ -51,7 +51,7 @@ contract LateIncomingLifecycleTest is CloseSettlementBase {
         registry.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, members);
         backingVerifier = new MockPinnedMleVerifierV2(block.chainid);
         lateVerifier = new MockPinnedMleVerifierV2(block.chainid);
-        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), backingVerifier, lateVerifier);
+        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), backingVerifier, lateVerifier, lateVerifier);
         manager = _deployManagerWithMaterializer(registry, alice, bob, carol, address(materializer));
         rollup.bind(materializer, address(manager));
         token = new SimpleERC20("Late receipt token");

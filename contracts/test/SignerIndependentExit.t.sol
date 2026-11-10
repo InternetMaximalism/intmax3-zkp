@@ -152,7 +152,7 @@ contract SignerIndependentExitTest is Test {
         LATER_TFD = _tfdOf(11, 15);
         rollup = new ExitRollupHarness();
         verifier = new MockPinnedMleVerifierV2(block.chainid);
-        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier, verifier);
+        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier, verifier, verifier);
         manager = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
         rollup.setRegisteredChannel(CHANNEL);
         rollup.setFinalizedRoot(SIGNED_ROOT);
@@ -166,7 +166,7 @@ contract SignerIndependentExitTest is Test {
         laterRollup.setHead(9, 9);
         laterRollup.setRegisteredChannel(CHANNEL);
         CloseFundingMaterializer later =
-            new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))), verifier, verifier);
+            new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))), verifier, verifier, verifier);
         ExitManagerHarness laterManager = new ExitManagerHarness(bytes4(CHANNEL), address(laterRollup), address(later));
         laterRollup.bind(later, address(laterManager));
         assertEq(later.lastPostedBlock(CHANNEL), 9);

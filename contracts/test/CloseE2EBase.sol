@@ -181,11 +181,12 @@ abstract contract CloseE2EBase is Test {
     {
         return abi.encodePacked(
             type(CloseFundingMaterializer).creationCode,
-            // The late-incoming slot (0b6a8d87) is pinned to the backing adapter: this E2E never
-            // submits a late receive, and the late-incoming config is a deploy-time export
-            // (`export_late_incoming_config`, `DeployLateIncomingVerifier`), not a checked-in
-            // fixture. Same stand-in as SignerIndependentExit / FrozenChannelBatchPost.
-            abi.encode(IntmaxRollup(payable(rollupAddr)), backing, backing)
+            // The late-incoming slot (0b6a8d87) and the late-deposit slot are pinned to the
+            // backing adapter: this E2E never submits a late receive or late deposit, and both
+            // configs are deploy-time exports (`export_late_incoming_config`,
+            // `DeployLateIncomingVerifier` / `DeployLateDepositVerifier`), not checked-in
+            // fixtures. Same stand-in as SignerIndependentExit / FrozenChannelBatchPost.
+            abi.encode(IntmaxRollup(payable(rollupAddr)), backing, backing, backing)
         );
     }
 
