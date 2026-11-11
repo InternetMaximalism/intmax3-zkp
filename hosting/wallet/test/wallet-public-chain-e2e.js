@@ -40,6 +40,21 @@ const file = name => path.join(directory, name + '.json');
 const read = name => JSON.parse(fs.readFileSync(file(name)));
 function save(name, value) { const dest = file(name), temp = dest + '.tmp'; fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(temp, dest); return value; }
 async function once(name, fn) { return fs.existsSync(file(name)) ? read(name) : save(name, await fn()); }
+// C25/G16 (2026-11-09): after an asset-moving head (deposit import, debit, burn) the co-signers
+// refuse the channel's next signature until that head's block is finalized on L1; the relay answers
+// 409 with `backingPending` and publishes meanwhile. On a public chain that is minutes: wait, retry.
+const BACKING_PENDING = /HEAD BACKING NOT FINALIZED|backingPending|kitPending/;
+async function untilBacked(fn, what, limitMs = 40 * 60 * 1000) {
+  const t0 = Date.now();
+  for (;;) {
+    try { return await fn(); }
+    catch (e) {
+      if (!BACKING_PENDING.test(String(e.message || e)) || Date.now() - t0 > limitMs) throw e;
+      log(`${what}: waiting for the channel head's block to finalize on L1 (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
+      await sleep(10000);
+    }
+  }
+}
 function cast(...args) { return cp.execFileSync('cast', [...args, '--rpc-url', rpc], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim(); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function log(...args) { console.log(new Date().toISOString().slice(11, 19), ...args); }
@@ -93,8 +108,10 @@ async function deposit(user, amount, tag) {
     for (;;) {
       try { return await api(u.ch, '/api/import-deposit', { recipientSlot: report.slot, txHash: tx.transactionHash }); }
       catch (e) {
-        if (!/confirmation/i.test(e.message)) throw e;
-        if (Date.now() - t0 > 20 * 60 * 1000) throw e;
+        // Waits, not failures: the chain's confirmation depth, and the previous import's block
+        // not yet finalized on L1 (the relay answers 409 and publishes it meanwhile).
+        if (!/confirmation|HEAD BACKING NOT FINALIZED|queued behind/i.test(e.message)) throw e;
+        if (Date.now() - t0 > 40 * 60 * 1000) throw e;
         await sleep(3000);
       }
     }
@@ -138,7 +155,7 @@ async function withdraw(user, amount, tag) {
     await load(user);
     const head = await api(u.ch, '/api/base-head');
     const payload = wallet.burnSend(amount, u.address, 0, head.nonce);
-    wallet.finalize(await api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }));
+    wallet.finalize(await untilBacked(() => api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }), `withdraw ${tag}`));
     log(`withdraw ${tag}: ${user} burned ${amount} to ${u.address}`);
     return { at: Date.now() };
   });
@@ -188,7 +205,7 @@ async function sendIntra(from, to, amount, tag) {
   const toSlot = (await load(to)).slot;
   const payload = await once(tag + '-payload', async () => { await load(from); return wallet.send(null, toSlot, amount); });
   const t0 = Date.now();
-  await once(tag + '-result', () => api(f.ch, '/api/cosign', payload));
+  await once(tag + '-result', () => untilBacked(() => api(f.ch, '/api/cosign', payload), `send ${tag}`));
   log(`send ${tag}: ${from} -> ${to} ${amount} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 }
 
@@ -204,12 +221,12 @@ async function sendInter(from, to, amount, tag) {
     return { debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor };
   });
   const t0 = Date.now();
-  await once(tag + '-result', () => api(f.ch, '/api/inter/send', payload));
+  await once(tag + '-result', () => untilBacked(() => api(f.ch, '/api/inter/send', payload), `send ${tag}`));
   // A repeated delivery of the same transfer must not credit twice (checked once, right after it
   // landed: a resumed run may meet the channel paused by a later withdrawal).
   await once(tag + '-replayed', async () => {
     const before = (await api(t.ch, '/api/snapshot')).state.digest;
-    await api(f.ch, '/api/inter/send', payload);
+    await untilBacked(() => api(f.ch, '/api/inter/send', payload), `send ${tag} replay`);
     if ((await api(t.ch, '/api/snapshot')).state.digest !== before) throw Error('duplicate delivery advanced the destination');
     return { at: Date.now() };
   });

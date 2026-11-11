@@ -41,6 +41,15 @@ async function flushLastDepositImport(ch) {
     throw new Error('deposit recovery is missing producer_deposit.json or channel_snapshot.json');
   }
   const deposit = readJson(depositPath);
+  // producer_deposit.json is rewritten by every `inspect-l1-deposit`: when it already names a LATER
+  // deposit than the signed artifact, that artifact's import finished (its head was adopted) and
+  // there is nothing to flush — replaying would receive the later deposit and then bind the current
+  // head against a live balance that holds it unsigned (measured 2026-11-11: "signed snapshot
+  // settle chain differs from the pending live balance proof", on every import of the channel).
+  if (deposit.depositIndex !== undefined && artifact.depositIndex !== undefined
+      && String(deposit.depositIndex) !== String(artifact.depositIndex)) {
+    return null;
+  }
   const producerReceipt = await producer.postDeposit(deposit);
   const liveReceipt = await receiveDepositIntoLiveBalance(ch, producerReceipt, deposit);
   const snapshot = readJson(snapshotPath);

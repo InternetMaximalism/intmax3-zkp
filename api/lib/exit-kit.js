@@ -71,10 +71,24 @@ async function cliWithPreparedExitKit(ch, args, extraEnv, options = {}) {
       && operation.binding === producer.stableRequestId('presign', {
         ch, args: legacyArgs, inputs, requestId: options.requestId,
       });
-    if (operation.schemaVersion !== 1 || (operation.binding !== binding && !exactLegacyInterRetry)) {
+    // A deposit import retried for the SAME L1 deposit at the SAME producer block is the same
+    // pre-sign operation whatever else changed in the argument list (the RPC endpoint, say): its
+    // proposal and prepared kit are exactly the ones this run would produce. Measured 2026-11-11:
+    // a refused signing run left `status: signing`, and the retry after an RPC port change was
+    // refused as "a different pre-sign operation" forever.
+    const exactDepositRetry = args[0] === 'cosign-l1-deposit-import'
+      && Array.isArray(operation.args) && operation.args[0] === 'cosign-l1-deposit-import'
+      && String(operation.args[2]).toLowerCase() === String(args[2]).toLowerCase()
+      && operation.args.find(a => a.startsWith('--intmax-block-number=')) === args.find(a => a.startsWith('--intmax-block-number='))
+      && operation.proposal && operation.proposal.kind === 'l1DepositImport';
+    if (operation.schemaVersion !== 1 || (operation.binding !== binding && !exactLegacyInterRetry && !exactDepositRetry)) {
       throw new Error('a different pre-sign operation requires exact recovery before another signature');
     }
     if (exactLegacyInterRetry) signingArgs = operation.args;
+    if (exactDepositRetry && operation.binding !== binding) {
+      operation = { ...operation, binding, args, extraEnv: extraEnv || {} };
+      writeJson(wc(ch, OPERATION_FILE), operation);
+    }
   } else {
     fs.rmSync(wc(ch, PROPOSAL_FILE), { force: true });
     cliModule.cli(ch, [...args, PROPOSE_FLAG], extraEnv);

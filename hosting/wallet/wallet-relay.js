@@ -1490,7 +1490,14 @@ function importViaSequencer(ch, req, res) {
       console.error(`import-deposit: ${b.txHash} credited slot ${outcome.slot} (its depositor's), not the requested ${b.recipientSlot}`);
     }
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
-  })().catch((e) => { const full = fullCliError(e); console.error(full); res.status(/confirmation\(s\), need|queued behind/.test(full) ? 409 : 500).json({ error: full }); });
+  })().catch((e) => {
+    const full = fullCliError(e); console.error(full);
+    // Not failures but waits: the chain's confirmation depth, the deposit queue, and the durable
+    // head's backing finality (C25/G16: the previous import's block must be finalized on L1 before
+    // the next asset-bearing head is signed; the publisher is kicked and the client retries).
+    if (/HEAD BACKING NOT FINALIZED/.test(full)) return res.status(409).json({ error: full, ...backingPendingHint(ch) });
+    res.status(/confirmation\(s\), need|queued behind/.test(full) ? 409 : 500).json({ error: full });
+  });
 }
 
 // ─── Testnet $ITX faucet ───────────────────────────────────────────────────────────────────

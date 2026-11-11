@@ -1145,6 +1145,54 @@ redeploy is acceptable.
   public-chain flow of the new lane or of replication; `prepare_late_deposit` against a real
   producer; the export binary.
 
+**Addendum 2026-11-11 (public-chain rehearsal of `bdf2ef4d`, anvil 31338).** Measured:
+- Gas, `467f474d` → `bdf2ef4d` (forge gas report + rehearsal broadcasts): `IntmaxRollup` and
+  `ChannelSettlementManager` bytecode and per-function gas unchanged; `CloseFundingMaterializer`
+  runtime 11,405 → 13,149 B, deployment 2,540,330 → 2,919,408 gas (rehearsal CREATE 2,929,498),
+  `materializeSignedHead` max 262,081 → 266,875, `claimLateIncoming` max 300,902 → 303,339, views
+  +22..+44 gas; `claimLateDeposit` 43,720 min / 159,050 max with the mock adapter (the real
+  adapter's verification cost is the late-incoming adapter's, same WHIR profile); one more
+  verifier pair per rollup deploy (5,231,171 + 5,406,863 gas). On the rehearsal rollup
+  `finalize` of a 3-block candidate estimates 5,075,700 gas and `attestProofData` 14,751,171.
+- Proving: no `*_config.json` changed, so every pre-existing circuit is byte-identical; validity
+  prover for the 3-block candidate 25.1 s (block chain 22.2 s, validity 2.9 s, peak RSS 17.5 GB);
+  `export_late_deposit_config` 25 s (late-incoming's 102 s); close-family regeneration 400 s,
+  20.7 GB RSS; deposit import on the rehearsal 58.8–71.4 s including the 12-confirmation wait.
+- Found and fixed: the 2026-11-09 pass-2 gate was reached only in the SIGNING run of a deposit
+  import, after phase 1 had consumed the deposit into the live balance, so a refused import left
+  the live balance one deposit ahead of every signed head and every later bind failed ("signed
+  snapshot settle chain differs from the pending live balance proof"). Now the proposal-only run
+  refuses first (`refuse_proposal_on_unfinalized_head_backing`), `flushPublishedHead` does not bind
+  the public head while the live balance awaits the pending import, the public-chain import route
+  answers 409 (+hint) on `HEAD BACKING NOT FINALIZED`, the E2E retries it, and `publishLater` logs
+  the publisher's diagnosis instead of its banner.
+- Found and fixed (2): `IntmaxRollup.isFinalizedStateRoot` is set only for the root a validity
+  candidate ENDS at (and genesis). With several channels interleaving blocks, the publisher's
+  candidate (finalized head → producer head) ends at the latest block, so a head whose block sits
+  inside the candidate never has its root marked, and the 2026-11-09 gate refused it forever
+  (rehearsal: candidates 0→3 and 3→8 left channel 8's block-4 head refused for good). The gate now
+  also accepts `anchor block ≤ latestFinalizedBlockNumber` (the question it asks is whether the
+  head's block reached L1). Consequence that remains OPEN: `materializeSignedHead` and the Manager's
+  close path still require `isFinalizedStateRoot(kit root)`, so an exit kit anchored inside a
+  candidate cannot close as is — G16 falls back to the newest head whose root ends a candidate, and
+  payments after it roll back. Closing this needs the live service to re-anchor the durable head's
+  kit at a candidate-end state after finalization (a new CloseAssetBacking proof over the same
+  Balance proof), or the publisher to end a candidate at every asset-moving head. Owner decision.
+- Found and fixed (3): the deposit sequencer dropped a deposit the producer had consumed but no
+  signed head carried (`pending` entries below the producer's next index were deleted, and a
+  refusal after the producer consumed the leaf was recorded as a permanent error); it now retries
+  consumed-but-uncredited deposits in order and treats `HEAD BACKING NOT FINALIZED` as a wait that
+  kicks the publisher. A deposit import retried for the same deposit and block reuses its pre-sign
+  operation whatever else changed in the arguments (the RPC endpoint).
+- Measured on the rehearsal after the fixes: deposits #2 (channel 8), #4 (channel 7, operator
+  custody) and #5 (channel 7) credited in order once the backing finalized; an inter-channel send
+  refused for backing finality completed 74.1 s later; balances A 0.01 / B 0.011 / C 0.005 ETH as
+  the E2E expects.
+- Not on `main`: the EIP-7825 finalize gas-limit fix and the cap-enforcing rehearsal proxy live
+  on `claude/bold-hertz-0f2708` (worktree funny-cannon); `main`'s publisher still sends
+  `finalize`/`attestProofData` at twice the simulated gas (32.7M / 35.8M here), which a 2^24 cap
+  refuses. Sepolia does not enforce the cap today; mainnet does.
+
 ### Appendix A — Code comments known to be stale at `039e9e63`
 
 These were found while reconciling this document with the code; the code behaves as this document

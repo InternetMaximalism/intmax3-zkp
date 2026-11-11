@@ -814,12 +814,37 @@ fn finality_rpc() -> String {
 /// be `isFinalizedStateRoot` on the rollup. The answer is cached in the receipt once true (finality
 /// is permanent), so a channel whose head is backed pays one `cast call` per asset-moving head,
 /// not per send.
+/// The proposal-only run (`--propose-exit-kit`) must refuse exactly where the signing run would:
+/// the API performs phase-1 work between the two (a deposit import consumes the L1 leaf into the
+/// live balance before the co-signers sign), so a refusal first raised in the signing run leaves
+/// the live balance ahead of every signed head ("signed snapshot settle chain differs from the
+/// pending live balance proof", measured 2026-11-11 on the rehearsal). Same gate as
+/// `enforce_exit_kit_before_signature_release`, evaluated before the proposal is emitted.
+fn refuse_proposal_on_unfinalized_head_backing(
+    cli: &mut CliState,
+    purpose: StateSigningPurpose,
+) {
+    if cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
+        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
+    }) {
+        require_durable_head_backing_finalized(cli, purpose).unwrap_or_else(|e| die(e));
+    }
+}
+
 fn require_durable_head_backing_finalized(
     cli: &mut CliState,
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
-    require_durable_head_backing_finalized_with(cli, purpose, |rollup, root| {
-        read_finalized_state_root(&finality_rpc(), &rollup.to_string(), root)
+    require_durable_head_backing_finalized_with(cli, purpose, |rollup, root, anchor| {
+        let rpc = finality_rpc();
+        let rollup = rollup.to_string();
+        // `isFinalizedStateRoot` is set only for the root a validity candidate ENDS at (and
+        // genesis); a head whose block sits inside a candidate never gets its root marked, although
+        // its block is just as final. The gate's question is whether the head's BLOCK reached L1,
+        // so the finalized block number answers it too (measured 2026-11-11 on the rehearsal:
+        // candidates 0->3 and 3->8 left channel 8's block-4 head refused forever).
+        read_finalized_state_root(&rpc, &rollup, root)
+            || read_latest_finalized_block_number(&rpc, &rollup).is_some_and(|final_block| anchor <= final_block)
     })
 }
 
@@ -829,7 +854,7 @@ fn require_durable_head_backing_finalized(
 fn require_durable_head_backing_finalized_with(
     cli: &mut CliState,
     purpose: StateSigningPurpose,
-    finalized: impl Fn(&Address, &Bytes32) -> bool,
+    finalized: impl Fn(&Address, &Bytes32, u64) -> bool,
 ) -> Result<(), String> {
     let already = cli
         .signer_exit_kit_receipt
@@ -861,12 +886,12 @@ fn require_durable_head_backing_finalized_with(
     } else {
         recorded
     };
-    if !finalized(&rollup, &root) {
+    if !finalized(&rollup, &root, anchor) {
         let head = &cli.snapshot.state;
         return Err(format!(
             "{HEAD_BACKING_NOT_FINALIZED}: refusing {purpose:?} because channel {}'s durable head {} \
              (epoch {}, state version {}) is backed by an exit kit anchored at rollup block {anchor} \
-             (root {root}) that is NOT a finalized state root of rollup {rollup} yet. The head's own \
+             (root {root}) that rollup {rollup} has not finalized yet (neither the root nor block {anchor}). The head's own \
              block (a debit, burn or deposit import) must be posted, proved and finalized on L1 before \
              any in-channel payment is signed on top of it; otherwise, if that block never posts, \
              every such payment rolls back at close (C25/G16). Publish the pending validity \
@@ -5307,6 +5332,12 @@ fn choose_close_head(
         missing_archive_for: None,
         examined: depth,
     }
+}
+
+/// `IntmaxRollup.latestFinalizedBlockNumber()`, or None when the call fails.
+fn read_latest_finalized_block_number(rpc: &str, rollup: &str) -> Option<u64> {
+    let out = cast(&["call", rollup, "latestFinalizedBlockNumber()(uint64)", "--rpc-url", rpc]);
+    out.trim().split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
 }
 
 fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
@@ -18763,6 +18794,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|error| die(error));
 
     if propose_exit_kit_requested(args) {
+        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::L1DepositImport);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "l1DepositImport",
             "record": state.snapshot.record,
@@ -21022,7 +21054,7 @@ mod signing_ledger_tests {
         let refused = require_durable_head_backing_finalized_with(
             &mut cli,
             StateSigningPurpose::InChannelSend,
-            |_, _| false,
+            |_, _, _| false,
         )
         .expect_err("unfinalized backing root must refuse");
         assert!(refused.contains(HEAD_BACKING_NOT_FINALIZED), "{refused}");
@@ -21032,7 +21064,7 @@ mod signing_ledger_tests {
         let stacked = require_durable_head_backing_finalized_with(
             &mut cli,
             StateSigningPurpose::L1DepositImport,
-            |_, _| false,
+            |_, _, _| false,
         )
         .expect_err("asset-moving successor on an unfinalized head must refuse");
         assert!(stacked.contains("L1DepositImport"), "{stacked}");
@@ -21040,7 +21072,7 @@ mod signing_ledger_tests {
         require_durable_head_backing_finalized_with(
             &mut cli,
             StateSigningPurpose::InChannelSend,
-            |rollup, asked_root| {
+            |rollup, asked_root, _anchor| {
                 asked.borrow_mut().push((*rollup, *asked_root));
                 true
             },
@@ -21055,7 +21087,7 @@ mod signing_ledger_tests {
         require_durable_head_backing_finalized_with(
             &mut cli,
             StateSigningPurpose::InChannelSend,
-            |_, _| panic!("finality is permanent; L1 must not be asked twice"),
+            |_, _, _| panic!("finality is permanent; L1 must not be asked twice"),
         )
         .unwrap();
     }

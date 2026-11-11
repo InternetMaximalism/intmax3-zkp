@@ -185,7 +185,11 @@ function publishLater(ch, why) {
   if (publishing.has(key)) return publishing.get(key);
   console.log(`[wallet-l1] channel ${ch}: publishing the validity candidate after ${why}`);
   const run = publish(ch)
-    .catch(e => console.error(`[wallet-l1] channel ${ch}: publish after ${why} failed (in-channel sends stay refused until it succeeds): ${String(e.stderr || e.message || e).slice(0, 400)}`))
+    .catch(e => {
+      // The CLI prints its diagnosis LAST, on stdout; stderr starts with its banners. Show the tail.
+      const text = [e && e.message, e && e.stdout, e && e.stderr].filter(Boolean).map(String).join('\n').trim();
+      console.error(`[wallet-l1] channel ${ch}: publish after ${why} failed (in-channel sends stay refused until it succeeds): …${text.slice(-700)}`);
+    })
     .finally(() => publishing.delete(key));
   publishing.set(key, run);
   return run;
