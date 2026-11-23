@@ -12703,6 +12703,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::InterChannelDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13030,6 +13035,11 @@ fn cmd_cosign_burn_send(args: &[String]) {
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::BurnDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13238,6 +13248,11 @@ fn cmd_register_token(args: &[String]) {
         build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
             .unwrap_or_else(|e| die(format!("build token register: {e}")));
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::TokenRegister);
         verify_token_register_state_transition(
             &state.snapshot.state,
             &state.snapshot.record,

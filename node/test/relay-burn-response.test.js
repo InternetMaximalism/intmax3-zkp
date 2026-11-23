@@ -65,7 +65,7 @@ test('relay burn on an unfinalized head answers 409 and publishes the pending ca
     fullDebitPayload: (_ch, payload) => payload,
     console: { error() {}, log() {} },
   };
-  vm.createContext(context); vm.runInContext(helper('headAck') + source.slice(start, end), context);
+  vm.createContext(context); vm.runInContext(helper('headAck') + helper('sendSigningError') + source.slice(start, end), context);
   const reply = await new Promise(resolve => handler({ body: { debitPayload: {}, transferDescriptor: {} } },
     { status(code) { return { json: body => resolve({ code, body }) }; }, json: body => resolve({ code: 200, body }) }));
   assert.equal(reply.code, 409);
@@ -95,4 +95,31 @@ test('a slim debit on a superseded head is a stale anchor, not a relay failure',
     assert.deepEqual(fs.readdirSync(path.join(dir, 'slim_debits')).filter(n => !n.endsWith('.slim.json')), [],
       'no inflated payload is cached for a stale debit');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The inter-channel send route answers a backing refusal the same way (rh1123 UI run, 2026-11-23:
+// a send right after a deposit import answered 500 and the wallet gave up instead of waiting).
+test('relay inter-channel send on an unfinalized head answers 409 and publishes the pending candidate', async () => {
+  const s = source.indexOf("app.post('/api/inter/send'"), e = source.indexOf('// ─── A-3 close lifecycle', s);
+  let handler; const published = [];
+  const refusal = Object.assign(new Error('Command failed: channel_member cosign-inter-transfer'), {
+    stderr: "error: HEAD BACKING NOT FINALIZED: refusing InterChannelDebit because channel 7's durable head ... has not finalized yet" });
+  const context = {
+    app: { post(_url, fn) { handler = fn; } }, CHANNELS: [7, 8], reqChannel: () => 7,
+    fullDebitPayload: (_ch, payload) => payload,
+    interChannelSend: async () => { throw refusal; },
+    resumePendingInterTransferLocked: async () => null,
+    withInterLocks: (_a, _b, fn) => Promise.resolve().then(fn),
+    delegateInterBody: body => body,
+    sendRouteError: () => { throw new Error('a backing refusal is not a route error'); },
+    fullCliError: e => [e.message, e.stderr].filter(Boolean).join('\n'),
+    backingPendingHint: ch => { published.push(ch); return { kitPending: true, backingPending: true, hint: 'retry shortly' }; },
+    console: { error() {}, log() {} },
+  };
+  vm.createContext(context); vm.runInContext(helper('sendSigningError') + source.slice(s, e), context);
+  const reply = await new Promise(resolve => handler({ body: { debitPayload: {}, transferDescriptor: { destinationChannelId: 8 } } },
+    { status(code) { return { json: body => resolve({ code, body }) }; } }));
+  assert.equal(reply.code, 409);
+  assert.equal(reply.body.backingPending, true);
+  assert.deepEqual(published, [7]);
 });

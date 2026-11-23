@@ -1283,6 +1283,16 @@ app.post('/api/cosign', (req, res) => {
   );
 });
 
+// A signing route's failure: a head whose block is not finalized on L1 yet is a wait, not a
+// failure (C25/G16). Answer 409 with backingPendingHint, which publishes the pending candidate
+// (nothing else would retry a failed publication), so the wallet re-sends the same request.
+function sendSigningError(res, ch, e) {
+  const error = fullCliError(e);
+  if (!/HEAD BACKING NOT FINALIZED/.test(error)) return sendRouteError(res, e);
+  console.error(error);
+  res.status(409).json({ error, ...backingPendingHint(ch) });
+}
+
 // The channel's head is backed by an exit kit anchored after a block that is not finalized on L1
 // (a deposit import, debit or burn whose validity candidate has not been published yet). The CLI
 // refuses in-channel signatures until it is (C25/G16); publish now and tell the wallet to retry.
@@ -1406,7 +1416,7 @@ app.post('/api/inter/send', (req, res) => {
   resumePendingInterTransferLocked(ch)
     .catch((e) => console.error(`[inter] channel ${ch}: pending transfer resume failed before a new send: ${String(e.stderr || e.message || e).slice(0, 300)}`))
     .then(() => withInterLocks(ch, destination, runLocked))
-    .catch((e) => sendRouteError(res, e));
+    .catch((e) => sendSigningError(res, ch, e));
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -1703,14 +1713,7 @@ app.post('/api/cosign-burn', (req, res) => {
     res.json(headAck(cosignedHead));
     // Public chain: settle it on L1 in the background, starting now; the channel stays open.
     pwSettlement.start(ch);
-  }).catch((e) => {
-    // Like /api/cosign: a head whose block is not finalized yet is a wait, not a failure; publish
-    // the pending candidate now (nothing else would) and tell the wallet to retry (C25/G16).
-    const error = fullCliError(e);
-    if (!/HEAD BACKING NOT FINALIZED/.test(error)) return sendRouteError(res, e);
-    console.error(error);
-    res.status(409).json({ error, ...backingPendingHint(ch) });
-  });
+  }).catch((e) => sendSigningError(res, ch, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
