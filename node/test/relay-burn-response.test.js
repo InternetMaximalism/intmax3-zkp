@@ -73,3 +73,26 @@ test('relay burn on an unfinalized head answers 409 and publishes the pending ca
   assert.match(reply.body.error, /HEAD BACKING NOT FINALIZED/);
   assert.deepEqual(published, [7], 'the refusal itself starts the publication nothing else would retry');
 });
+
+// A slim debit built on a head the channel has since left (a second burn sent after the first
+// one moved the head, rh1123 2026-11-23) is a stale anchor the wallet must rebuild from: 409 via
+// staleAnchor, as for /api/cosign, and nothing is cached for it.
+test('a slim debit on a superseded head is a stale anchor, not a relay failure', () => {
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-slim-'));
+  try {
+    const context = {
+      fs, path, require, JSON,
+      wc: (_ch, name) => path.join(dir, name),
+      cli: () => { throw Object.assign(new Error('Command failed: channel_member inflate-debit'), {
+        stderr: 'error: slim inter-channel debit: stale inter-channel debit: the anchor is not the channel head' }); },
+      fullCliError: e => [e.message, e.stderr].filter(Boolean).join('\n'),
+    };
+    vm.createContext(context); vm.runInContext(helper('fullDebitPayload'), context);
+    let thrown;
+    try { context.fullDebitPayload(7, { anchorDigest: '0xold', proposedDigest: '0xnext' }); } catch (e) { thrown = e; }
+    assert.ok(thrown && thrown.staleAnchor, 'the route answers 409 (sendRouteError maps staleAnchor)');
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'slim_debits')).filter(n => !n.endsWith('.slim.json')), [],
+      'no inflated payload is cached for a stale debit');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

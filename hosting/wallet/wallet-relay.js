@@ -281,7 +281,14 @@ function fullDebitPayload(ch, debitPayload) {
   const slimFile = path.join('slim_debits', key + '.slim.json');
   const outFile = path.join('slim_debits', key + '.tmp.json');
   fs.writeFileSync(wc(ch, slimFile), JSON.stringify(debitPayload));
-  cli(ch, ['inflate-debit', slimFile, outFile]);
+  try {
+    cli(ch, ['inflate-debit', slimFile, outFile]);
+  } catch (e) {
+    // Built on a head the channel has since left: the wallet must rebuild from its new view (409,
+    // like a stale /api/cosign anchor), not a relay failure.
+    if (/anchor is not the channel head/.test(fullCliError(e))) e.staleAnchor = true;
+    throw e;
+  }
   fs.renameSync(wc(ch, outFile), file);
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }

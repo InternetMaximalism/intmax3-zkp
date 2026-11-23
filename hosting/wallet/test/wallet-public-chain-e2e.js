@@ -160,13 +160,34 @@ async function waitWithdrawal(ch, done, what) {
   throw Error('withdrawal did not reach ' + what);
 }
 
+// After a (re)start the relay offers withdrawals only once it has checked the operator's L1 funds;
+// a resumed run reaches the burn within seconds, so wait for that check like for deposits above.
+async function untilWithdrawalsOffered(ch) {
+  for (let i = 0; ; i++) {
+    const health = await api(ch, '/api/health');
+    if (health.capabilities.partialWithdrawal === true) return;
+    const why = (health.unavailable || {}).partialWithdrawal || '';
+    if (!/still checking/.test(why) || i >= 300) throw Error('the relay offers no withdrawals: ' + why);
+    await sleep(1000);
+  }
+}
+
 async function withdraw(user, amount, tag) {
   const u = USERS[user];
+  await untilWithdrawalsOffered(u.ch);
   const t0 = Date.now();
   await once(tag + '-burn', async () => {
-    const before = await load(user);
-    const head = await api(u.ch, '/api/base-head');
-    const payload = wallet.burnSend(amount, u.address, 0, head.nonce);
+    // Persisted like a send's payload: a run resumed after a crash must re-send the SAME burn (the
+    // relay answers its replay from the durable record), never build a second one on the old head.
+    const before = await once(tag + '-burn-before', async () => ({ balance: String((await load(user)).balance) }));
+    const payload = await once(tag + '-burn-payload', async () => {
+      await load(user);
+      const head = await api(u.ch, '/api/base-head');
+      const built = wallet.burnSend(amount, u.address, 0, head.nonce);
+      return { debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor };
+    });
+    if (payload.debitPayload.proposedNextState) throw Error('a delegate burn must be slim');
+    await load(user);
     const ack = await untilBacked(() => api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }), `withdraw ${tag}`);
     const after = wallet.finalize(await viewAtLeast(user, ack));
     if (BigInt(after.balance) !== BigInt(before.balance) - BigInt(amount)) throw Error('burn debit not installed in the view');
