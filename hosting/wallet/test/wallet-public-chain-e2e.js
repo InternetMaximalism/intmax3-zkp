@@ -180,16 +180,20 @@ async function withdraw(user, amount, tag) {
     // Persisted like a send's payload: a run resumed after a crash must re-send the SAME burn (the
     // relay answers its replay from the durable record), never build a second one on the old head.
     const before = await once(tag + '-burn-before', async () => ({ balance: String((await load(user)).balance) }));
+    let builtHere = false;
     const payload = await once(tag + '-burn-payload', async () => {
+      builtHere = true;
       await load(user);
       const head = await api(u.ch, '/api/base-head');
       const built = wallet.burnSend(amount, u.address, 0, head.nonce);
       return { debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor };
     });
     if (payload.debitPayload.proposedNextState) throw Error('a delegate burn must be slim');
-    await load(user);
     const ack = await untilBacked(() => api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }), `withdraw ${tag}`);
-    const after = wallet.finalize(await viewAtLeast(user, ack));
+    const view = await viewAtLeast(user, ack);
+    // The wallet that built the burn commits its pending debit; a resumed run (a new process with no
+    // pending debit) adopts the burned head's view of its slot instead.
+    const after = builtHere ? wallet.finalize(view) : wallet.importView(view);
     if (BigInt(after.balance) !== BigInt(before.balance) - BigInt(amount)) throw Error('burn debit not installed in the view');
     log(`withdraw ${tag}: ${user} burned ${amount} to ${u.address}`);
     return { at: Date.now() };
