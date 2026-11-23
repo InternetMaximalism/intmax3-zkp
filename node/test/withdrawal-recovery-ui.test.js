@@ -14,7 +14,7 @@ function render(ticket, failed = false, capabilities = { partialWithdrawal: true
     }
     return elements.get(id);
   };
-  const ctx = { $, mySlot: 3, ticketLoadFailed: failed, _inflight: new Set(),
+  const ctx = { $, mySlot: 3, activeCh: 7, ticketLoadFailed: failed, _inflight: new Set(),
     ticketOfType: () => ticket, ticketAmountLabel: () => '0.005 ETH', setInterval: () => 0 };
   vm.createContext(ctx);vm.runInContext(source, ctx);
   ctx.__capabilities = capabilities; vm.runInContext('relayCapabilities = __capabilities;', ctx);
@@ -220,4 +220,14 @@ test('Step 2 on the devnet settles through pw-finalize alone; a payout to the op
 
 test('the wallet never calls the removed pw-submit route', () => {
   assert.doesNotMatch(html, /pw-submit/);
+});
+
+// Item B (467f474d): from the burn on, the burner is pointed at the relay's payout receipt for its
+// channel; before a burn there is nothing to point at.
+test('a burned withdrawal links its payout receipt for the active channel; none before the burn', () => {
+  const burned = render({ status: 'burn_done', steps: { burn: {} }, params: {} });
+  assert.equal(burned('pwPayoutReceipt').hidden, false);
+  assert.equal(burned('pwPayoutReceiptLink').href, '/api/pw-payout-receipt?channel=7');
+  const none = render(null);
+  assert.equal(none('pwPayoutReceipt').hidden, true);
 });
