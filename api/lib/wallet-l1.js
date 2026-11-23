@@ -65,9 +65,29 @@ async function acknowledge(candidateId, transactionHash) {
 // `prove: false` only publishes a candidate already proven (a burn payout proves its own, anchored
 // at the head the candidate ends at), and never proves a new one past it.
 function publish(ch, { prove = true } = {}) {
-  const run = queue.then(() => publishCandidate(ch, prove));
+  const run = queue.then(() => publishCandidateRetrying(ch, prove));
   queue = run.catch(() => {});
   return run;
+}
+
+// Every validity command first re-binds the producer to one finalized L1 block; a read that
+// straddles an advance of the RPC's finalized head is refused as transient (STABLE_HEAD_RETRY in
+// src/validity_prover_service.rs). Nothing else retries a failed publish of a head that is
+// already signed, so retry it here: each step below is idempotent (the candidate, its pinned
+// publication manifest and the acknowledgement request id are all reused).
+const STABLE_HEAD = /retry against one stable finalized block/;
+const STABLE_HEAD_RETRIES = Number(process.env.WALLET_L1_STABLE_HEAD_RETRIES || 12);
+const STABLE_HEAD_RETRY_MS = Number(process.env.WALLET_L1_STABLE_HEAD_RETRY_MS || 5000);
+async function publishCandidateRetrying(ch, prove) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await publishCandidate(ch, prove); }
+    catch (e) {
+      const text = [e && e.message, e && e.stdout, e && e.stderr].filter(Boolean).map(String).join('\n');
+      if (!STABLE_HEAD.test(text) || attempt >= STABLE_HEAD_RETRIES) throw e;
+      console.error(`[wallet-l1] channel ${ch}: the L1 finalized head moved during a read-back; publishing again (${attempt}/${STABLE_HEAD_RETRIES})`);
+      await sleep(STABLE_HEAD_RETRY_MS);
+    }
+  }
 }
 
 // The rollup's one close materializer, read from any sibling channel's settlement record on the

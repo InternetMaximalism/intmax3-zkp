@@ -1696,7 +1696,14 @@ app.post('/api/cosign-burn', (req, res) => {
     res.json(headAck(cosignedHead));
     // Public chain: settle it on L1 in the background, starting now; the channel stays open.
     pwSettlement.start(ch);
-  }).catch((e) => sendRouteError(res, e));
+  }).catch((e) => {
+    // Like /api/cosign: a head whose block is not finalized yet is a wait, not a failure; publish
+    // the pending candidate now (nothing else would) and tell the wallet to retry (C25/G16).
+    const error = fullCliError(e);
+    if (!/HEAD BACKING NOT FINALIZED/.test(error)) return sendRouteError(res, e);
+    console.error(error);
+    res.status(409).json({ error, ...backingPendingHint(ch) });
+  });
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)

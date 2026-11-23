@@ -2,7 +2,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../../api/lib/wallet-l1.js'), 'utf8');
-function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, proved = [] } = {}) {
+function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, proved = [], statusErrors = [] } = {}) {
   const id = '0x' + '12'.repeat(32), rollup = '0x' + '34'.repeat(20);
   const posting = { receipt: { candidateId: id }, subBlocks: [{ channelId: 7 }] };
   const pinned = { rollup, posting: mismatch ? { ...posting, subBlocks: [] } : posting,
@@ -21,7 +21,8 @@ function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, pr
     cli() { published = true; assert.deepEqual(written.get('/work/ch7/wallet_validity_finalize.json'), pinned.finalize); },
     async cliAsync(...args) { return this.cli(...args); }, DEVNET_CHAIN_ID: 31337,
   };
-  const producer = { enableLocalValidity: async () => {}, validityStatus: async () => ({ candidate, finalizedBlockNumber }),
+  const producer = { enableLocalValidity: async () => {},
+    validityStatus: async () => { if (statusErrors.length) throw statusErrors.shift(); return { candidate, finalizedBlockNumber }; },
     status: async () => ({ blockNumber: 4, generation: 5, extendedStateCommitment: '0xhead' }), validityPostingArtifact: async () => posting,
     stableRequestId: (kind, body) => kind + ':' + JSON.stringify(body), proveValidity: async id => { proved.push(id); },
     validityFinalizeArtifact: async () => { throw new Error('must not regenerate a published proof'); },
@@ -69,4 +70,19 @@ test('a default publish proves the history up to the producer head first', async
   const synced = [];
   await runner(false, { candidate: null, finalizedBlockNumber: 4, proved: synced }).run();
   assert.deepEqual(synced, [], 'nothing to prove once the producer head is finalized');
+});
+
+// Every validity command re-binds the producer to one finalized L1 block, and a read that straddles
+// an advance of the finalized head is refused as transient (measured rh1123, 2026-11-23: the only
+// publish of channel 8's debit block failed this way and nothing retried it, so channel 7's next
+// burn waited 40 minutes on HEAD BACKING NOT FINALIZED). publish retries exactly that refusal.
+test('a finalized-head race during the read-back is retried; any other refusal is not', async () => {
+  process.env.WALLET_L1_STABLE_HEAD_RETRY_MS = '1';
+  const transient = () => new Error('block producer rejected request [validity_reconciliation_failed]: producer reconciliation failed: L1 finalization read-back rejected: durable L1 head changed during state binding; retry against one stable finalized block');
+  const raced = runner(false, { statusErrors: [transient(), transient()] });
+  await raced.run();
+  assert.deepEqual(raced.state(), { published: true, acknowledged: true });
+  const refused = runner(false, { statusErrors: [new Error('L1 finalization read-back rejected: L1 authority block was replaced during state binding (reorg detected)')] });
+  await assert.rejects(refused.run(), /reorg detected/);
+  assert.deepEqual(refused.state(), { published: false, acknowledged: false });
 });
