@@ -205,7 +205,15 @@ async function credit(ch, entry, withLock) {
       await importL1Deposit(ch, slot, entry.txHash, { allowUnboundDepositor: custody });
       return { index: entry.index, channel: ch, slot, custody };
     } catch (error) {
-      const text = String((error && (error.stderr || error.message)) || error);
+      const text = String((error && (error.stderr || error.message || error.stdout)) || error);
+      // The co-signers wait for the durable head's backing to finalize on L1 (C25/G16). Nobody else
+      // publishes while a channel's imports are all refused this way (the import that would have
+      // kicked the publisher never completes), so kick it here; the deposit stays pending and the
+      // next pass retries it.
+      if (/HEAD BACKING NOT FINALIZED/.test(text)) {
+        require('./wallet-l1').publishLater(ch, `the import of deposit #${entry.index}`);
+        throw error; // a wait, never a recorded refusal: the deposit stays pending and is retried
+      }
       if (!(await consumed(entry.index))) {
         if (!DETERMINISTIC_REFUSAL.test(text)) throw error;
       } else {
@@ -234,18 +242,24 @@ function run(withLock) {
     const recipients = channelsByRecipient();
     for (;;) {
       const next = Number((await producer.status()).nextDepositIndex);
-      for (const index of Object.keys(state.pending)) if (Number(index) < next) delete state.pending[index];
-      const entry = state.pending[next];
-      if (!entry) break;
+      // The oldest pending deposit: the producer's next one, or an earlier one the producer already
+      // consumed (import phase 1 journals the leaf before the co-signers sign) whose credit did not
+      // finish — it is retried, never dropped. Dropping consumed-but-uncredited entries here left a
+      // received deposit with no owner on 2026-11-11 (rehearsal: deposit #2 vanished from both
+      // `pending` and `outcomes` after its import was refused for the head's unfinalized backing).
+      const index = Object.keys(state.pending).map(Number).sort((a, b) => a - b).find(i => i <= next);
+      if (index === undefined) break;
+      const entry = state.pending[index];
+      if (index < next) console.error(`[deposit-sequencer] deposit #${index} ${entry.txHash} was consumed by the producer but not credited yet; retrying its import`);
       const ch = recipients.get(entry.recipient);
-      const outcome = ch === undefined ? { index: next, journaled: true } : await credit(ch, entry, withLock);
+      const outcome = ch === undefined ? { index, journaled: true } : await credit(ch, entry, withLock);
       if (outcome.error) {
-        console.error(`[deposit-sequencer] deposit #${next} ${entry.txHash} is not credited: ${outcome.error}`);
+        console.error(`[deposit-sequencer] deposit #${index} ${entry.txHash} is not credited: ${outcome.error}`);
       }
-      if (!(await consumed(next))) await journal(entry, withLock);
-      if (!(await consumed(next))) throw new Error(`deposit #${next} was processed but the producer did not consume it`);
+      if (!(await consumed(index))) await journal(entry, withLock);
+      if (!(await consumed(index))) throw new Error(`deposit #${index} was processed but the producer did not consume it`);
       state.outcomes[entry.txHash.toLowerCase()] = { ...outcome, at: Date.now() };
-      delete state.pending[next];
+      delete state.pending[index];
       writeState(state);
     }
     return state;

@@ -404,6 +404,12 @@ function liveReceiveInterChannel(channelId, body) {
   return execute({ command: 'liveReceiveInterChannel', channelId, ...body });
 }
 
+// Post-close refund lane of a deposit no signed state imported (claimLateDeposit). `body`:
+// { closeIntentDigest, finalBalanceStateH1, confirmedCommitment, request?, depositSalt? }.
+function livePrepareLateDeposit(channelId, body) {
+  return execute({ command: 'livePrepareLateDeposit', channelId, ...body });
+}
+
 /// Terminate the resident daemon (server shutdown / test teardown). In-flight waiters are
 /// rejected by the child's exit handler; a later command restarts the daemon, which recovers
 /// from its durable journal + live snapshots.
@@ -415,6 +421,7 @@ function stop() {
 }
 
 module.exports = {
+  JOURNAL, LIVE_ROOT,
   configureLocalValidity, enableLocalValidity,
   execute,
   postDeposit,
@@ -451,6 +458,7 @@ module.exports = {
   liveCloseFundingPayoutArtifacts,
   authoritativeBaseNonceEnv,
   liveReceiveInterChannel,
+  livePrepareLateDeposit,
   liveBurnPayoutArtifacts,
   liveSnapshotExists,
   liveSnapshotPath,

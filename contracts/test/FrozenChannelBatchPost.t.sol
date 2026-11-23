@@ -50,7 +50,7 @@ contract FrozenChannelBatchPostTest is Test {
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(producer, true);
         MockPinnedMleVerifierV2 verifier = new MockPinnedMleVerifierV2(block.chainid);
-        materializer = new CloseFundingMaterializer(rollup, verifier, verifier);
+        materializer = new CloseFundingMaterializer(rollup, verifier, verifier, verifier);
         rollup.seedRegisteredChannel(CHANNEL_A);
         rollup.seedRegisteredChannel(CHANNEL_B);
         managerA = new ExitManagerHarness(bytes4(CHANNEL_A), address(rollup), address(materializer));

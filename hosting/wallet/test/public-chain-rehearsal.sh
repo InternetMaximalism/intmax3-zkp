@@ -18,7 +18,7 @@
 #   rollup     feature-config contracts copy + Deploy.s.sol, its validity verifier pinned to the
 #              producer's own exported configuration (never the arity-[2] test fixture)
 #   backing    setup-backing (empty genesis) for every channel
-#   late       export the late-incoming config from the channel Balance VD + deploy its verifier
+#   late       export the late-incoming + late-deposit configs from the channel Balance VD + deploy their verifiers
 #   bootstrap  bootstrap-real-chain.js up to the envelope, public_close_prover, then settlement,
 #              L1 registration and exit kits
 #   relay      start wallet-relay.js (HTTPS :$RELAY_PORT, HTTP :$RELAY_PORT+1)
@@ -29,7 +29,7 @@
 #
 # Requires: Foundry v1.5.1, and for `rollup` TAIL_CONFIGS=<dir with the feature-built *_config.json
 # fixtures> (generate_*_fixture --mle-config-only under the same feature; `rebuild` generates its own). `build` produces
-# target/release/{channel_member,block_producer_service,public_close_prover,export_late_incoming_config}.
+# target/release/{channel_member,block_producer_service,public_close_prover,export_late_incoming_config,export_late_deposit_config}.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -81,10 +81,12 @@ export ETH_PASSWORD=$R/eth_password
 export FOUNDRY_SOLC=0.8.28
 export MLE_VERIFIER_CHAIN_ID=$CHAIN_ID
 export LATE_MLE_CONFIG_PATH=$CONTRACTS/test/data/late_incoming_mle_config.json
+export LATE_DEPOSIT_MLE_CONFIG_PATH=$CONTRACTS/test/data/late_deposit_mle_config.json
 export BOOTSTRAP_DELEGATE_RECIPIENT_7=$DELEGATE_RECIPIENT_7
 export BOOTSTRAP_DELEGATE_RECIPIENT_8=$DELEGATE_RECIPIENT_8
 EOF
   if [ -f "$R/late_verifier" ]; then echo "export LATE_INCOMING_VERIFIER=$(cat "$R/late_verifier")"; fi
+  if [ -f "$R/late_deposit_verifier" ]; then echo "export LATE_DEPOSIT_VERIFIER=$(cat "$R/late_deposit_verifier")"; fi
 }
 
 load_env() { eval "$(environment)"; }
@@ -92,7 +94,8 @@ load_env() { eval "$(environment)"; }
 step_build() {
   (cd "$REPO" && cargo build --release --locked --features authenticated-tail-receive \
     --bin channel_member --bin block_producer_service --bin public_close_prover \
-    --bin export_late_incoming_config > "$R/build.log" 2>&1) || { tail -30 "$R/build.log"; exit 1; }
+    --bin export_late_incoming_config --bin export_late_deposit_config --bin verify_live_replica \
+    > "$R/build.log" 2>&1) || { tail -30 "$R/build.log"; exit 1; }
   grep -q "Finished" "$R/build.log" || { tail -30 "$R/build.log"; exit 1; }
   echo "build: $(tail -1 "$R/build.log")"
   # The wallets are WASM: the relay serves pkg/ to the browser (as deploy-relay-host.sh ships it)
@@ -186,6 +189,16 @@ step_late() {
     grep -oE "LATE_INCOMING_VERIFIER 0x[0-9a-fA-F]{40}" "$R/late.log" | tail -1 | cut -d' ' -f2 > "$R/late_verifier"
   fi
   echo "late-incoming verifier: $(cat "$R/late_verifier")"
+  if [ ! -f "$LATE_DEPOSIT_MLE_CONFIG_PATH" ]; then
+    "$BIN/export_late_deposit_config" "$WORK/ch$first/balance_vd.bin" "$LATE_DEPOSIT_MLE_CONFIG_PATH" > "$R/late-deposit-export.log" 2>&1 \
+      || { tail -20 "$R/late-deposit-export.log"; exit 1; }
+  fi
+  if [ ! -f "$R/late_deposit_verifier" ]; then
+    (cd "$CONTRACTS" && forge script script/DeployLateDepositVerifier.s.sol --rpc-url "$RPC" \
+      --account "$ACCOUNT" --broadcast --slow > "$R/late-deposit.log" 2>&1) || { tail -30 "$R/late-deposit.log"; exit 1; }
+    grep -oE "LATE_DEPOSIT_VERIFIER 0x[0-9a-fA-F]{40}" "$R/late-deposit.log" | tail -1 | cut -d' ' -f2 > "$R/late_deposit_verifier"
+  fi
+  echo "late-deposit verifier: $(cat "$R/late_deposit_verifier")"
 }
 
 step_bootstrap() {
@@ -236,6 +249,8 @@ step_rebuild() {
   [ -f "$R/relayhome/bootstrap.env" ] || environment > "$R/relayhome/bootstrap.env"
   grep -q '^export LATE_INCOMING_VERIFIER=' "$R/relayhome/bootstrap.env" \
     || echo "export LATE_INCOMING_VERIFIER=0x0000000000000000000000000000000000000000" >> "$R/relayhome/bootstrap.env"
+  grep -q '^export LATE_DEPOSIT_VERIFIER=' "$R/relayhome/bootstrap.env" \
+    || echo "export LATE_DEPOSIT_VERIFIER=0x0000000000000000000000000000000000000000" >> "$R/relayhome/bootstrap.env"
   cat > "$R/shim/sudo" <<SHIM
 #!/usr/bin/env bash
 [ "\$1" = systemctl ] || { echo "unexpected: sudo \$*" >&2; exit 1; }

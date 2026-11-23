@@ -170,11 +170,11 @@ HEAD. Reported here because the README was never reconciled with it.)*
 
 ### The claims
 
-`doc/architecture-audit/detail2.md:619` — the constants table the implementation tracks:
+`doc/architecture-audit/archive/detail2.md:619` — the constants table the implementation tracks:
 
 > `| `CHALLENGE_PERIOD_SECS` | **86,400** | abstract2.md §2.5 (1 day). Set to the immutable `challengePeriod` of `ChannelSettlementManager` |`
 
-`doc/architecture-audit/abstract2.md:154`: "`CHALLENGE_PERIOD = 1 day` : the challenge period."
+`doc/architecture-audit/archive/abstract2.md:154`: "`CHALLENGE_PERIOD = 1 day` : the challenge period."
 `doc/tasks/a3-close-lifecycle-spec.md:24`, in the "Current state (already REAL)" table:
 
 > `| state machine: Active → ClosePending → Closed、GRACE=600s / CHALLENGE=86400s | **REAL** |`

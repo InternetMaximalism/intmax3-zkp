@@ -28,7 +28,8 @@ contract MockRollupRegistry is IChannelRegistry {
         verifier = verifier_;
     }
 
-    function isFinalizedStateRoot(bytes32) external pure returns (bool) {
+    /// Every root is finalized unless a derived double overrides this (LateDepositLifecycle).
+    function isFinalizedStateRoot(bytes32) external view virtual returns (bool) {
         return true;
     }
 

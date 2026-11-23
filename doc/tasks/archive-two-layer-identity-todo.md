@@ -192,7 +192,7 @@ transition = the registration sequence → the root is bound on-chain. ← the p
 
 ---
 
-# Task: Lean safety proof of doc/architecture-audit/abstract.md (2026-06-10)
+# Task: Lean safety proof of doc/architecture-audit/archive/abstract.md (2026-06-10)
 
 Status: DONE (2026-06-10)
 
@@ -230,7 +230,7 @@ Status: DONE (2026-06-10)
 
 Status: DONE
 
-- [x] doc/architecture-audit/abstract2.md — reflect the LATTICE spec diff over v1 in a MECE manner
+- [x] doc/architecture-audit/archive/abstract2.md — reflect the LATTICE spec diff over v1 in a MECE manner
   (Regev confidentiality / H1/H2 two-part state / channelUpdateZKP / signature target hash(H1,H2) / close withdrawal ZKP,
   safety extended to 5 properties: + confidentiality)
 - [x] doc/architecture-audit/ChannelSafety2.lean — v2 proof reusing v1 via import

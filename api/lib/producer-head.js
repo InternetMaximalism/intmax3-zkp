@@ -183,7 +183,17 @@ async function flushPublishedHead(ch) {
   // resident balance proof.  Deposit/destination recovery states are deliberately deferred until
   // after this bind, closing the crash window where the public producer could outrun backing.
   if (isZeroH2Tag(snapshot.state && snapshot.state.h2Tag)) {
-    await producer.liveBindSnapshot(ch, snapshot);
+    // A live balance that already consumed an L1 deposit (import phase 1) whose signing run was
+    // then refused — the co-signers wait for the durable head's backing to finalize (C25/G16) —
+    // is one step AHEAD of every signed head: binding the current head to it is refused by the
+    // daemon ("signed snapshot settle chain differs from the pending live balance proof", measured
+    // 2026-11-11). Only that import's own signed state binds it; leave the bind to the import.
+    const live = await producer.liveStatus(ch);
+    if (live.awaitingChannelBinding) {
+      console.error(`[producer-head] channel ${ch}: the live balance holds a received deposit no signed head carries yet; its import completes the binding`);
+    } else {
+      await producer.liveBindSnapshot(ch, snapshot);
+    }
   }
   if (deferredHeadStates.length > 0) {
     await producer.syncOffchainHeads(deferredHeadStates);

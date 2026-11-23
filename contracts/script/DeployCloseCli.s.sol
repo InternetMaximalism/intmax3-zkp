@@ -155,7 +155,7 @@ contract DeployCloseCli is Script {
     /// @dev The materializer a sibling channel's registered manager already installed on `rollup`,
     ///      checked to be the one this channel's settlement would have deployed: same rollup, a
     ///      chain-pinned CloseAssetBacking adapter carrying the staged configuration's digests, and
-    ///      the pinned late-incoming adapter.
+    ///      the pinned late-incoming and late-deposit adapters.
     function _existingMaterializer(IntmaxRollup rollup, address existingManager, string memory backingConfigJson)
         internal
         view
@@ -187,6 +187,10 @@ contract DeployCloseCli is Script {
         require(
             address(materializer.lateIncomingMleVerifier()) == vm.envAddress("LATE_INCOMING_VERIFIER"),
             "existing materializer uses another late-incoming adapter"
+        );
+        require(
+            address(materializer.lateDepositMleVerifier()) == vm.envAddress("LATE_DEPOSIT_VERIFIER"),
+            "existing materializer uses another late-deposit adapter"
         );
     }
 
@@ -312,13 +316,14 @@ contract DeployCloseCli is Script {
         // any other (`InvalidChannelExitManager`). Every later channel on the same rollup therefore
         // reuses it: EXISTING_SETTLEMENT_MANAGER names a sibling channel's registered manager, and
         // its materializer must be bound to this rollup, the staged backing circuit configuration
-        // and the pinned late-incoming adapter before it is adopted.
+        // and the pinned late-incoming/late-deposit adapters before it is adopted.
         CloseFundingMaterializer materializer;
         address existingManager = _envOrAddress("EXISTING_SETTLEMENT_MANAGER", address(0));
         if (existingManager == address(0)) {
             (, PinnedMleVerifierV2 backingVerifier) = FixtureLib.deployPinnedMleV2(backingConfigJson);
             materializer = new CloseFundingMaterializer(rollup, IPinnedMleVerifierV2(address(backingVerifier)),
-                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")));
+                IPinnedMleVerifierV2(vm.envAddress("LATE_INCOMING_VERIFIER")),
+                IPinnedMleVerifierV2(vm.envAddress("LATE_DEPOSIT_VERIFIER")));
         } else {
             require(existingRollup != address(0), "EXISTING_SETTLEMENT_MANAGER requires EXISTING_ROLLUP");
             materializer = _existingMaterializer(rollup, existingManager, backingConfigJson);

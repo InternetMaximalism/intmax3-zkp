@@ -110,6 +110,12 @@ function createBurnOperations({cli=cliModule, bp=producer, kit=exitKit, checkpoi
     const liveReceipt=await bp.liveSettleInterChannel(ch,receipt,op.head,op.input.debitPayload,op.input.transferDescriptor);
     cli.writeJson(cli.wc(ch,'pw_producer.json'),{producerRequestId:id,blockReceipt:receipt,liveReceipt});
     kit.acknowledgePreparedExitKit(ch,op.head);
+    // The burn head's kit is anchored after the burn block; publish it so in-channel sends can
+    // resume (C25/G16). The payout settlement publishes again later only if a newer candidate exists.
+    require('./wallet-l1').publishLater(ch,'burn');
+    // The burn's payout proof needs the private base state this settle just advanced; wait for
+    // at least one cluster peer to hold it before the burn is reported live (B liveness).
+    op.replica=await require('./live-replica').replicate(ch,'burn',{sync:true});
     op.blockReceipt=receipt;op.liveReceipt=liveReceipt;op.phase='live';save(ch,op);
     await checkpoint('live',op);
     ticket.status='burn_done';ticket.steps.burn={completedAt:Date.now()};

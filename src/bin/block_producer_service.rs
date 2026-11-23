@@ -275,6 +275,23 @@ enum LiveCommand {
         fund_import_state: serde_json::Value,
         destination_snapshot: serde_json::Value,
     },
+    /// Post-close refund lane of an L1 deposit no signed state imported (`claimLateDeposit`).
+    /// Read-only on live state. Starts from the Balance generation whose commitment equals the
+    /// materializer's confirmed late cursor (`confirmed_commitment`): the current disk when the
+    /// deposit was never received here, else the pre-receive generation retained by
+    /// `receive_deposit_unbound`. `request`/`deposit_salt` may be omitted when that retained
+    /// generation carries them. Returns the `PreparedLateDeposit` (statement, compact proof,
+    /// MLE JSON) plus which source was used.
+    LivePrepareLateDeposit {
+        channel_id: ChannelId,
+        close_intent_digest: Bytes32,
+        final_balance_state_h1: Bytes32,
+        confirmed_commitment: Bytes32,
+        #[serde(default)]
+        request: Option<ProductionDepositRequest>,
+        #[serde(default)]
+        deposit_salt: Option<intmax3_zkp::common::salt::Salt>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -822,6 +839,42 @@ fn execute_live_command(
                 level,
             )?;
             to_value(serde_json::to_value(receipt))
+        }
+        LiveCommand::LivePrepareLateDeposit {
+            channel_id,
+            close_intent_digest,
+            final_balance_state_h1,
+            confirmed_commitment,
+            request,
+            deposit_salt,
+        } => {
+            let invalid = |e: anyhow::Error| LiveBalanceServiceError::InvalidRequest(format!("late deposit: {e:#}"));
+            let service = live.service(channel_id, producer)?;
+            let circuit = service.late_deposit_circuit();
+            let checkpoint = service
+                .late_deposit_checkpoint(circuit, close_intent_digest, final_balance_state_h1, confirmed_commitment)
+                .map_err(invalid)?;
+            let retained = checkpoint.retained_deposit.is_some();
+            let (request, deposit_salt) = match (request, deposit_salt, checkpoint.retained_deposit) {
+                (Some(request), Some(salt), _) => (request, salt),
+                (None, None, Some(kept)) => (kept.request, kept.deposit_salt),
+                (Some(request), None, Some(kept)) if kept.request == request => (request, kept.deposit_salt),
+                _ => {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "late deposit: pass both `request` and `depositSalt` (the deposit was never received \
+                         here), or neither (its pre-receive generation is retained with them)"
+                            .into(),
+                    ))
+                }
+            };
+            let prepared = service
+                .prepare_late_deposit(&checkpoint.checkpoint, circuit, producer, &request, deposit_salt)
+                .map_err(invalid)?;
+            to_value(serde_json::to_value(serde_json::json!({
+                "fromRetainedPreReceiveGeneration": retained,
+                "request": request,
+                "prepared": prepared,
+            })))
         }
     }
 }

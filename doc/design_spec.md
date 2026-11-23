@@ -1,6 +1,8 @@
-# detail3 — Intmax3 detailed design specification (current implementation)
+# Intmax3 design specification (official; formerly `detail3.md`)
 
-**Describes:** branch `claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
+**Describes:** `main` after the 2026-11-10 stranded-deposit / cluster-state changes (§2.11) and the
+2026-11-09 close-safety fixes (§2.10), on top of branch
+`claude/bold-hertz-0f2708` at commit `039e9e63` (2026-10-20; the same tree is
 `861d44c5` on `claude/abstract-detail-spec-audit-738841`). Written against `7f129334` (2026-10-15:
 `8acbe309` close ordered against a burn by the processed-send block, `9ef32e3c` an L1 deposit import is
 one signed head, `7f129334` close falls back to the newest backable head) and brought up to date with
@@ -9,10 +11,10 @@ fixes (H1, H2, M1), the 2026-10-16 cryptographic review (C01–C10, RNG separati
 minimal fixes, the regenerated wire-v3 fixture cohort, the wallet-core snapshot/import gates, and the
 2026-10-17 follow-up reviews of `src/common`, `src/utils`, `src/ethereum_types`.
 
-**Supersedes:** the "current" sections of [abstract2-1.md](./abstract2-1.md) and
-[detail2.md](./detail2.md). Where those documents and this one disagree, this one describes the code.
+**Supersedes:** the "current" sections of [abstract2-1.md](architecture-audit/archive/abstract2-1.md) and
+[detail2.md](architecture-audit/archive/detail2.md). Where those documents and this one disagree, this one describes the code.
 Their historical sections remain history. This document does not describe the Lean models or the
-audit reports; see [lean-current-safety.md](../audit/lean-current-safety.md) for that scope.
+audit reports; see [lean-current-safety.md](audit/lean-current-safety.md) for that scope.
 
 **How to read:** Chapter 1 (Overview) uses plain words and avoids type and function names. Every
 Overview line has an id (`N..` network, `C..` channels, `G..` deposit/close game). Chapter 2 (Detail)
@@ -153,7 +155,11 @@ citations are `path:line` in the tree named above; line numbers drift with later
   its last fully signed state. A proposal that a host's own check refuses is dropped at once.
 - **C14** Before any signature that moves assets is released, the signer must hold a prepared *exit
   kit* for exactly that successor (see G-lines): a head without an exit kit is "kit-pending" and
-  blocks further in-channel signatures until the kit is installed.
+  blocks further in-channel signatures until the kit is installed. A head whose kit is anchored at a
+  rollup state that is not yet finalized on Ethereum (a debit, burn or deposit import whose block has
+  not been posted, proved and finalized) is "post-pending" and likewise blocks in-channel
+  signatures: a payment signed on top of it would roll back with the head if the block never posts
+  (C25). The relay publishes the pending validity candidate right after each such head.
 - **C15** *Inter-channel payment:* the sending channel debits the sender's ciphertext and its fund
   vector, builds one base-layer transfer to the destination channel, and signs a state whose H2 is
   the root of the one-transaction tree. Authorizing the payment and agreeing to the debit are one
@@ -195,6 +201,17 @@ citations are `path:line` in the tree named above; line numbers drift with later
   byte; every recovery path compares the exact before and after digests, never "the newest file".
 - **C30** The channel's own hash chain of settled transactions and the balance proof's chain must be
   identical for a head to be exit-capable; this is what ties a signed state to the rollup's view.
+- **C32** Every sig-cluster holds at least one *daemon signer*: a cosigner slot whose key the
+  native `channel_member` derives itself. Browser sessions sit at delegate slots and sign nothing
+  but their own join; they hold no exit kit and consult no L1, so a cluster of browsers alone would
+  have no backing-finality gate and no signer-independent exit. The CLI refuses to sign a genesis or
+  a join, and to freeze the L1 member set, unless it controls such a slot (`require_daemon_signer`).
+- **C33** The whole sig-cluster holds the channel's private Balance state. The host whose daemon
+  advances it (deposit import, inter-channel send, burn) ships the sealed live snapshot, the producer
+  journal and the burn/close sidecars to every cluster peer, authenticated under the cluster secret;
+  a peer keeps them as a passive replica it never opens while the driver lives, and an operator
+  promotes one on failover. A deposit recipient is handed out only once a peer holds its salt, and a
+  burn is reported live only once a peer holds the state its payout proof needs.
 - **C31** A channel snapshot presented to a wallet or a service is trusted only after four structural
   checks, before any signature is counted: the unsigned registration record agrees with the signed
   state on the number of signers and delegates; every listed participant's identity is the one
@@ -254,9 +271,12 @@ citations are `path:line` in the tree named above; line numbers drift with later
   continuation of the balance proof, which also extends the cap by the new amount.
 - **G15** Funds are pulled from the rollup into the Manager by exact amount (cap minus received), and
   a payout never exceeds what was pulled.
-- **G16** *Which head to close on:* the close tooling uses the latest signed head whose fund root is
-  finalized; if the latest head's block never reached Ethereum, it walks back to the newest
-  predecessor with a finalized backing and a retained exit kit, and never fabricates a kit.
+- **G16** *Which head to close on:* the close tooling uses the latest signed head whose exit kit's
+  backing root (the Balance proof's anchor, `finalized_extended_state_commitment`) is finalized; if
+  the latest head's block never reached Ethereum, it walks back through the archived signed heads to
+  the newest predecessor with a finalized backing and a retained exit kit, and never fabricates a
+  head or a kit. The signed fund root (`channel_fund.intmax_state_root`) is pinned at genesis and
+  never changes, so it is not the finality signal.
 - **G17** *Non-cooperative exit* needs no new signature from anyone: the last signed head and its
   retained exit kit are enough; only gas and an Ethereum transaction signer are needed to publish.
 - **G18** The old cooperative close-funding path, the special-close penalty game and the late
@@ -271,6 +291,13 @@ citations are `path:line` in the tree named above; line numbers drift with later
   be claimable from escrow.
 - **G22** The exit moves exactly the amounts the backing proof attests: the materializer recomputes
   the fund digest from the proof's own vector and refuses any other vector.
+- **G23** *Late deposit* (2026-11-10): an L1 deposit to the channel's recipient that no signed state
+  imported before the close is refunded, after the close, to its L1 `depositor`: the holder of the
+  channel's private Balance state proves one ordinary ReceiveDeposit step from the materializer's
+  confirmed late cursor (the same cursor and nullifier set as G14's post-close receive), and the
+  materializer credits the depositor's pending withdrawal on the rollup directly. Amounts that do
+  not fit u64 are refused on chain. A deposit that was received into the private state but never
+  signed (one co-signer refused the import) is provable from the retained pre-receive generation.
 
 ### 1.4 Diagrams
 
@@ -754,12 +781,25 @@ decodes 35 limbs (`:577`), requires `pi[25] < 2^63` and `pi[26] ≤ pi[25]` (`:5
 greatest processed-send block seen per statement key (`signedHeadBackingProcessedSendPlusOne`);
 re-attesting the same statement with a later value raises it → G07.
 
-**Head selection** (commit `7f129334`): `channel_member close` uses the latest head when
-`isFinalizedStateRoot(channel_fund.intmax_state_root)` holds, otherwise walks `prev_digest` through
-the content-addressed signer exit-kit archive to the newest predecessor whose backing root is
-finalized and whose kit is retained, re-verifies it and announces the fallback on stderr;
-`CLOSE_HEAD_FALLBACK=off` opts out; no kit is ever fabricated. The delegate does the same before
+**Head selection** (commit `7f129334`, backing-root source fixed 2026-11-09): `channel_member close`
+uses the latest head when its exit kit's `finalized_extended_state_commitment` satisfies
+`isFinalizedStateRoot`, otherwise walks `prev_digest` through the signed-head archive
+(`.signed-heads/<digest>.json`, written by `save_state` at every N-of-N boundary) and resolves each
+head's kit by its statement key from the content-addressed exit-kit archive, closing the newest
+predecessor whose kit root is finalized; the chosen head's N-of-N and its envelope are re-verified
+and the fallback is announced on stderr; `CLOSE_HEAD_FALLBACK=off` opts out; no head or kit is ever
+fabricated (`resolve_close_head`, `choose_close_head`). Before the fix the selector tested
+`channel_fund.intmax_state_root`, which every transition carries unchanged from genesis, so the
+fallback never triggered. The delegate does the same from its vaults before
 `requestCloseAsParticipant` and pins the chosen head (`node/delegate/branches/exit.js`) → G16, C25.
+
+**Backing finality before in-channel signatures** (2026-11-09): the H2=0 reuse path of
+`enforce_exit_kit_before_signature_release` additionally requires the durable head's kit root to be
+`isFinalizedStateRoot` on the rollup (`require_durable_head_backing_finalized`; the receipt caches
+the answer once true, finality being permanent); the refusal carries the marker
+`HEAD BACKING NOT FINALIZED`, which the relay maps to a 409 and answers by publishing the pending
+validity candidate (`wallet-l1.publishLater`, called after every deposit import, inter-channel
+debit and burn) → C14, C25.
 
 ### 2.6 Settlement contracts: Manager and Materializer
 
@@ -884,9 +924,23 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 
 ### 2.8 Open items carried from the fixes (owner decisions)
 
+- **Stranded L1 deposit (item A) — implemented 2026-11-10 (§2.11, G23).** Decisions taken by the
+  owner: payee = the L1 `depositor`; amounts above u64 are refused on chain; the prover is any holder
+  of the private Balance state, which C33 makes the whole sig-cluster; the materializer gains a 4th
+  constructor argument, so N34 makes this a rollup redeploy (accepted); the late-deposit config joins
+  the deploy-time exports next to late-incoming (no checked-in proof fixture).
+- **Browser signers hold no exit kit (item E) — rule (a) adopted 2026-11-10 (C32).** Every
+  sig-cluster has a daemon signer; a browser is a delegate and never co-signs state in the shipped
+  flow (`create_channel` seats the CLI cosigners at `0..cli_cosigner_count()`, `wallet_cosign`
+  refuses delegate slots). The rule is now explicit and enforced in the CLI; browser signers still
+  hold no kit themselves, so a G17 exit by a browser user goes through a daemon signer's kit.
+- **Burn payout liveness (item B) — closed by C33 (2026-11-10).** The payout proof needs the private
+  Balance state; every cluster host now holds it, and the burn is not reported live before a peer
+  acknowledged the post-burn state. Whether the base withdrawal relation should drop the
+  Balance-proof dependency altogether remains a possible simplification, not an open hole.
 - The CloseAssetBacking VK rotates with the 35-limb statement; the checked-in
   `close_asset_backing_*` fixtures and the pinned adapter must be regenerated per
-  [the regeneration runbook](../tasks/regen-and-redeploy-runbook.md) before any deployment
+  [the regeneration runbook](tasks/regen-and-redeploy-runbook.md) before any deployment
   (`DeployCloseCli` refuses `backingPublicInputCount != 35`).
 - Whether to add a second on-chain layer refusing a close whose unallocated residue is not covered
   by IMUI leaves (the Manager cannot distinguish the heads by statement key; the structural fix
@@ -915,7 +969,8 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
   schedule binding (every production MMCS is binary).
 - Pass-2 "B-series" items closed with minimal changes on 2026-10-16: the U63 comparison gadgets are
   bit-wise (no modular wrap of `block_r`); an inter-channel debit or import must carry the fund's
-  `channel_id` and `intmax_state_root` unchanged (only an L1 deposit import re-pins the root); the
+  `channel_id` and `intmax_state_root` unchanged (nothing re-pins the root after genesis — see §2.5,
+  it is not a finality signal); the
   deposit-import head builder refuses a credit into a cell already holding
   `MAX_HOMO_ADDS_BEFORE_REFRESH` credits; the rollup records a channel post only for a sub-block
   that names a signer (an all-zero `keyIds` block can neither be refused by a frozen channel nor
@@ -981,6 +1036,162 @@ Grouped by the Overview lines they realise; commit ids are on `claude/abstract-d
 - **Follow-up reviews:** `861d44c5` canonical decoders, atomic block application, native Merkle index
   domain, indexed-tree sentinel, canonical Poseidon limbs, fallible hash-chain APIs, removed the
   unsound `U256 → Fq` conversion, non-truncating witness extraction (→ C34).
+
+### 2.10 Changes of 2026-11-09 (review items A–E: fund loss at close)
+
+A code review of `main` (`6820a636`) reported five findings; A–D were confirmed by reading the code
+and D, C and B were fixed minimally (E, the browser co-signers' lack of exit kits, is unverified and
+untouched). Unit tests: `cargo test --bin channel_member` 94 passed; no devnet, relay or browser run
+was performed for these changes.
+
+- **D — G16 fallback never triggered (fixed).** `choose_close_head` tested
+  `channel_fund.intmax_state_root`, which `setup-backing` pins once at genesis and every transition
+  builder carries unchanged (`..prev.channel_fund.clone()` in the debit, fund-import, bundle-apply
+  and deposit-import builders), so the root was always finalized and `close` always chose the
+  latest head. The selector now tests the exit kit's `finalized_extended_state_commitment`
+  (`CloseHeadLink.backing_root: Option<Bytes32>`); `save_state` archives every N-of-N head in
+  `.signed-heads/<digest>.json`; the walk resolves each head's kit by statement key and re-verifies
+  the chosen head's N-of-N and envelope (`resolve_close_head`, §2.5) → G16, C25.
+- **C — payments on an unposted debit (fixed for daemon signers).** No signing path consulted L1, and the relay
+  published validity candidates only from the burn settle route, so a channel kept signing
+  in-channel sends on top of a debit/import head whose block was not on Ethereum; had that block
+  never posted, `close` would fall back and every such payment would roll back. The H2=0 reuse path
+  now requires the durable head's kit root to be `isFinalizedStateRoot`
+  (`require_durable_head_backing_finalized`, cached in `SignerExitKitReceipt.backing_root_finalized`
+  once true), refusing with `HEAD BACKING NOT FINALIZED`; the relay publishes the pending candidate
+  after every deposit import, inter-channel debit and burn (`wallet-l1.publishLater`) and maps the
+  refusal to a 409 (`backingPendingHint`) → C14, C25. Second pass (same day): the gate runs for
+  EVERY purpose except genesis and delegate join whenever the durable head has an installed
+  receipt, so a deposit import, debit, burn, token registration or inter-channel credit cannot be
+  stacked on an unfinalized head either (a deposit stacked on an unposted debit would otherwise be
+  stranded at close like item A). Consequence, for the owner: in-channel sends pause after each
+  asset-moving head until its block is proved and finalized on L1 (not measured). Not covered: the
+  browser signer (`wallet_cosign`, `src/wasm_wallet.rs`) consults no L1 and holds no kit, so a
+  sig-cluster made only of browser signers has no gate — this is item E (below). A relay without
+  `producer/wallet-l1.json` cannot publish and its channels stay refused after the first
+  asset-moving head.
+- **B — burn payout depends on the relay (mitigated).** The withdrawal proof needs the channel's
+  Balance proof (`SingleWithdawalWitness`), so only its holder can produce it. Once produced, the
+  burner can finish alone: `GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt`
+  (`api/server.js` routes) and `GET /api/pw-payout-receipt?channel=N` (`wallet-relay.js`) return
+  `pw_artifacts.json`, `pw_producer.json` and `burn_cosigned.json`; the wallet's withdrawal panel
+  links to it from the burn on; `pw-finalize` accepts `ROLLUP` in place of `channel_backing.json`.
+  Finishing still needs forge, `contracts/script/RunPartialWithdrawalPayout.s.sol` and an L1 key.
+  Not covered: `wallet-relay-ec2.js` (a co-sign-only demo host without forge) and the window in
+  which the relay stops before proving; the redesign is an owner decision (§2.8).
+- **A — stranded L1 deposit (not fixed).** Confirmed: `CloseFundingMaterializer` has no deposit
+  lane, so a deposit that one co-signer never imports is paid by nothing after close. The proposed
+  `claimLateDeposit` lane and the decisions it needs are in §2.8; it needs a new pinned adapter and
+  the Materializer constructor to change, so it is not a minimal fix.
+- **E — exit kits live only with the daemon (not fixed).** Browser co-signers receive no kit and
+  verify none; a unilateral exit (G17) therefore depends on the operator's or a delegate's daemon.
+  Options are listed in §2.8.
+- The spec text that said an L1 deposit import re-pins `intmax_state_root` was wrong (nothing
+  re-pins it) and is corrected in §2.9.
+
+### 2.11 Changes of 2026-11-10 (items A, B, E closed: late deposit, cluster-held state, daemon signer)
+
+Owner decisions of 2026-11-10: refund the depositor; refuse deposits above u64; the whole
+sig-cluster holds the private Balance state (no single "relay" role); rule (a) for item E; a rollup
+redeploy is acceptable.
+
+- **G23 late-deposit lane.** Circuit `src/circuits/channel/late_deposit_circuit.rs`
+  (`LateDepositCircuit::new(balance_vd)`, 49 public inputs: channel | prev Balance commitment | next
+  Balance commitment | ExtendedPublicState commitment | anchor block | deposit nullifier | depositor
+  (5 limbs) | token | amount (8 U256 limbs) | version 1; embeds `ReceiveDepositTarget`, pins the
+  Balance VD, no spend/binding VDs). Host `src/late_deposit.rs` (`prepare_deposit`,
+  `PreparedLateDeposit { statement, compact_proof, mle_json, mle_config_json }`,
+  `export_late_deposit_mle_config`) and `src/bin/export_late_deposit_config.rs`. Live service:
+  `late_deposit_checkpoint` picks the Balance generation whose commitment equals the materializer's
+  late cursor — the current disk, or a *retained pre-receive generation* that
+  `receive_deposit_unbound` now keeps (snapshot v5, `retained_pre_receive`, at most 64, with the
+  deposit request and salt) — and `prepare_late_deposit` reconciles the deposit leaf against the
+  producer, checks the recipient derives from the salt, anchors at the producer head and proves.
+  Daemon command `livePrepareLateDeposit`; relay routes `POST /api/late-deposit/prepare` (reads the
+  close id, finalized H1 and late cursor from the settlement contracts, writes
+  `ch<N>/late_deposit_<nullifier>.json` 0600) and `POST /api/late-deposit/claim` (sends
+  `claimLateDeposit(manager, compactProof)` with the relay's L1 key). Contract:
+  `CloseFundingMaterializer.claimLateDeposit` with the 4th constructor adapter
+  `lateDepositMleVerifier` (env `LATE_DEPOSIT_VERIFIER`, `LATE_DEPOSIT_MLE_CONFIG_PATH`; scripts
+  `DeployLateDepositVerifier.s.sol`, `PrepareLateDeposit.s.sol`); same `lateBalanceStateCommitment` /
+  `lateBalanceAnchorBlock` / `lateReceiveNullifierUsed` cursor as late-incoming; amount limbs 0..6
+  must be zero; credits `rollup.creditChannelExit(depositor, token, amount)`; claim-key domain
+  `IMLD`. CLI deploy plumbing (`SettlementDeploymentIntent.late_deposit_verifier`, plan digest over
+  the config, 4-address constructor encoding and read-back) and the hosting scripts
+  (`rebuild-public-rollup.sh`, `public-chain-rehearsal.sh`, `bootstrap-real-chain.js`) carry the
+  new adapter. Not covered: a deposit still pending in `_pendingDepositHashChain` (no posted,
+  finalized block after it) cannot be claimed until the producer posts one; a UI for the lane.
+- **C33 cluster-held private state.** `api/lib/live-replica.js`: after every deposit import,
+  inter-channel debit/credit and burn the driving host ships `producer/journal.json`,
+  `producer/live/channel-<N>/balance.snapshot` and the channel sidecars to each
+  `INTMAX_CLUSTER_PEERS` host (`POST /api/cluster/live-replica`, HMAC-SHA256 under
+  `INTMAX_CLUSTER_SECRET`, generation-monotone, stored 0600 under `INTMAX_REPLICA_ROOT/<host>`);
+  the burn waits for one acknowledgement before it is reported live, `GET /api/deposit-info` is
+  withheld (503) until a peer holds the recipient's salt, `GET /api/cluster/replica-status` lists
+  what a host holds, `verify_live_replica` (new binary) opens a replica with the daemon's own
+  checks, and `node api/lib/live-replica.js promote <channel> <host-key>` is the operator failover.
+  Without the secret nothing is shipped and the relay says so at start and per channel. Known
+  limits: the replica is not re-shipped by the in-channel cluster round (the private state does not
+  change there); a peer's public CLI head is not advanced by the driver's deposit/burn/inter-channel
+  operations (pre-existing cluster behaviour, 未確認 by run); the validity snapshot is not shipped
+  (a public-chain payout after failover needs the validity prover's own state as well).
+- **C32 daemon-signer rule.** `require_daemon_signer(record, controlled)` in `channel_member.rs`,
+  called before genesis/join signing in `cmd_init` and before `build_live_settlement_reg_record`
+  freezes the member set; unit tests `daemon_signer_rule_tests` (4).
+- **Tests run in this session** (exact lines in the commit message): `daemon_signer_rule_tests` 4
+  passed; `hosting/wallet/test/live-replica.test.js` 3 passed; late-deposit circuit parse +
+  composition tests, `retained_pre_receive_tests`, `late_incoming::tests` 6 passed (implementer
+  runs); forge suite — see §2.11 addendum once measured. Not run: any devnet, relay, browser or
+  public-chain flow of the new lane or of replication; `prepare_late_deposit` against a real
+  producer; the export binary.
+
+**Addendum 2026-11-11 (public-chain rehearsal of `bdf2ef4d`, anvil 31338).** Measured:
+- Gas, `467f474d` → `bdf2ef4d` (forge gas report + rehearsal broadcasts): `IntmaxRollup` and
+  `ChannelSettlementManager` bytecode and per-function gas unchanged; `CloseFundingMaterializer`
+  runtime 11,405 → 13,149 B, deployment 2,540,330 → 2,919,408 gas (rehearsal CREATE 2,929,498),
+  `materializeSignedHead` max 262,081 → 266,875, `claimLateIncoming` max 300,902 → 303,339, views
+  +22..+44 gas; `claimLateDeposit` 43,720 min / 159,050 max with the mock adapter (the real
+  adapter's verification cost is the late-incoming adapter's, same WHIR profile); one more
+  verifier pair per rollup deploy (5,231,171 + 5,406,863 gas). On the rehearsal rollup
+  `finalize` of a 3-block candidate estimates 5,075,700 gas and `attestProofData` 14,751,171.
+- Proving: no `*_config.json` changed, so every pre-existing circuit is byte-identical; validity
+  prover for the 3-block candidate 25.1 s (block chain 22.2 s, validity 2.9 s, peak RSS 17.5 GB);
+  `export_late_deposit_config` 25 s (late-incoming's 102 s); close-family regeneration 400 s,
+  20.7 GB RSS; deposit import on the rehearsal 58.8–71.4 s including the 12-confirmation wait.
+- Found and fixed: the 2026-11-09 pass-2 gate was reached only in the SIGNING run of a deposit
+  import, after phase 1 had consumed the deposit into the live balance, so a refused import left
+  the live balance one deposit ahead of every signed head and every later bind failed ("signed
+  snapshot settle chain differs from the pending live balance proof"). Now the proposal-only run
+  refuses first (`refuse_proposal_on_unfinalized_head_backing`), `flushPublishedHead` does not bind
+  the public head while the live balance awaits the pending import, the public-chain import route
+  answers 409 (+hint) on `HEAD BACKING NOT FINALIZED`, the E2E retries it, and `publishLater` logs
+  the publisher's diagnosis instead of its banner.
+- Found and fixed (2): `IntmaxRollup.isFinalizedStateRoot` is set only for the root a validity
+  candidate ENDS at (and genesis). With several channels interleaving blocks, the publisher's
+  candidate (finalized head → producer head) ends at the latest block, so a head whose block sits
+  inside the candidate never has its root marked, and the 2026-11-09 gate refused it forever
+  (rehearsal: candidates 0→3 and 3→8 left channel 8's block-4 head refused for good). The gate now
+  also accepts `anchor block ≤ latestFinalizedBlockNumber` (the question it asks is whether the
+  head's block reached L1). Consequence that remains OPEN: `materializeSignedHead` and the Manager's
+  close path still require `isFinalizedStateRoot(kit root)`, so an exit kit anchored inside a
+  candidate cannot close as is — G16 falls back to the newest head whose root ends a candidate, and
+  payments after it roll back. Closing this needs the live service to re-anchor the durable head's
+  kit at a candidate-end state after finalization (a new CloseAssetBacking proof over the same
+  Balance proof), or the publisher to end a candidate at every asset-moving head. Owner decision.
+- Found and fixed (3): the deposit sequencer dropped a deposit the producer had consumed but no
+  signed head carried (`pending` entries below the producer's next index were deleted, and a
+  refusal after the producer consumed the leaf was recorded as a permanent error); it now retries
+  consumed-but-uncredited deposits in order and treats `HEAD BACKING NOT FINALIZED` as a wait that
+  kicks the publisher. A deposit import retried for the same deposit and block reuses its pre-sign
+  operation whatever else changed in the arguments (the RPC endpoint).
+- Measured on the rehearsal after the fixes: deposits #2 (channel 8), #4 (channel 7, operator
+  custody) and #5 (channel 7) credited in order once the backing finalized; an inter-channel send
+  refused for backing finality completed 74.1 s later; balances A 0.01 / B 0.011 / C 0.005 ETH as
+  the E2E expects.
+- Not on `main`: the EIP-7825 finalize gas-limit fix and the cap-enforcing rehearsal proxy live
+  on `claude/bold-hertz-0f2708` (worktree funny-cannon); `main`'s publisher still sends
+  `finalize`/`attestProofData` at twice the simulated gas (32.7M / 35.8M here), which a 2^24 cap
+  refuses. Sepolia does not enforce the cap today; mainnet does.
 
 ### Appendix A — Code comments known to be stale at `039e9e63`
 

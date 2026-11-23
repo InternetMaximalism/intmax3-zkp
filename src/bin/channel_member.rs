@@ -434,6 +434,18 @@ struct SignerExitKitReceipt {
     channel_id: ChannelId,
     settled_tx_chain: Bytes32,
     token_funds_digest: Bytes32,
+    /// The kit's `finalized_extended_state_commitment`: the rollup state the Balance proof is
+    /// anchored at, which the Materializer requires finalized. Zero in receipts written before
+    /// 2026-11-09; resolved from the archived envelope on first use.
+    #[serde(default)]
+    backing_root: Bytes32,
+    #[serde(default)]
+    backing_anchor_block_number: u64,
+    /// Sticky L1 observation: `isFinalizedStateRoot(backing_root)` answered true once. Finality
+    /// is permanent (N13), so the check is never repeated for this receipt. Never set by the
+    /// envelope verifier; only by the L1 read in `require_durable_head_backing_finalized`.
+    #[serde(default)]
+    backing_root_finalized: bool,
 }
 
 /// A verified, fsynced exit kit for a PROPOSED successor the signer has not released a
@@ -688,6 +700,23 @@ fn enforce_exit_kit_before_signature_release(
     successor: &ChannelState,
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
+    // C25/G16 (2026-11-09): whatever the successor does — an in-channel send, a debit, a burn, a
+    // deposit import, a token registration or an inter-channel credit — it is stacked on the
+    // durable head, and if that head's own block never reaches L1 the successor rolls back with
+    // it at close (a deposit import stacked on an unposted debit strands the deposit exactly like
+    // review item A). So the durable head's installed kit must already be backable on L1 before
+    // ANY asset-bearing successor is signed on top of it. Genesis has no predecessor; a delegate
+    // join only adds an empty row. A head without a receipt (kit-pending) is handled by the
+    // purpose-specific gates below, which either refuse or carry a prepared kit.
+    if !matches!(
+        purpose,
+        StateSigningPurpose::Genesis | StateSigningPurpose::DelegateJoin
+    ) && cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
+        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
+    }) {
+        require_durable_head_backing_finalized(cli, purpose)?;
+    }
+
     if purpose.requires_prepared_exit_kit() {
         if purpose.is_terminal() {
             return Err(
@@ -765,6 +794,122 @@ fn enforce_exit_kit_before_signature_release(
     Ok(())
 }
 
+/// Stable stderr marker for the one refusal the relay resolves by publishing the pending validity
+/// candidate and retrying (see `hosting/wallet/wallet-relay.js`).
+const HEAD_BACKING_NOT_FINALIZED: &str = "HEAD BACKING NOT FINALIZED";
+
+/// The RPC the signing paths read L1 finality from (same default as every other CLI route).
+fn finality_rpc() -> String {
+    std::env::var("RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string())
+}
+
+/// In-channel successors are only as exitable as the kit they reuse (C25, G16). A debit or
+/// deposit-import head is N-of-N signed BEFORE its small block is posted: its kit's backing root
+/// is the rollup state AFTER that block, which is finalized on L1 only once the block is posted,
+/// proved and finalized. Until then every H2=0 successor signed on top of it shares the same
+/// unbackable statement, and if the block never posts (producer stall, or the sender freezing the
+/// channel right after its debit), `close` falls back to the pre-debit head and EVERY in-channel
+/// payment made since rolls back — the payees delivered against signatures that were never
+/// closable. So: before releasing an in-channel signature, require the durable head's kit root to
+/// be `isFinalizedStateRoot` on the rollup. The answer is cached in the receipt once true (finality
+/// is permanent), so a channel whose head is backed pays one `cast call` per asset-moving head,
+/// not per send.
+/// The proposal-only run (`--propose-exit-kit`) must refuse exactly where the signing run would:
+/// the API performs phase-1 work between the two (a deposit import consumes the L1 leaf into the
+/// live balance before the co-signers sign), so a refusal first raised in the signing run leaves
+/// the live balance ahead of every signed head ("signed snapshot settle chain differs from the
+/// pending live balance proof", measured 2026-11-11 on the rehearsal). Same gate as
+/// `enforce_exit_kit_before_signature_release`, evaluated before the proposal is emitted.
+fn refuse_proposal_on_unfinalized_head_backing(
+    cli: &mut CliState,
+    purpose: StateSigningPurpose,
+) {
+    if cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
+        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
+    }) {
+        require_durable_head_backing_finalized(cli, purpose).unwrap_or_else(|e| die(e));
+    }
+}
+
+fn require_durable_head_backing_finalized(
+    cli: &mut CliState,
+    purpose: StateSigningPurpose,
+) -> Result<(), String> {
+    require_durable_head_backing_finalized_with(cli, purpose, |rollup, root, anchor| {
+        let rpc = finality_rpc();
+        let rollup = rollup.to_string();
+        // `isFinalizedStateRoot` is set only for the root a validity candidate ENDS at (and
+        // genesis); a head whose block sits inside a candidate never gets its root marked, although
+        // its block is just as final. The gate's question is whether the head's BLOCK reached L1,
+        // so the finalized block number answers it too (measured 2026-11-11 on the rehearsal:
+        // candidates 0->3 and 3->8 left channel 8's block-4 head refused forever).
+        read_finalized_state_root(&rpc, &rollup, root)
+            || read_latest_finalized_block_number(&rpc, &rollup).is_some_and(|final_block| anchor <= final_block)
+    })
+}
+
+/// `finalized(rollup, root)` answers `IntmaxRollup.isFinalizedStateRoot(root)`. The sticky flag
+/// is written into the receipt here and persisted by the caller's `save_state` (every signing
+/// path saves after a released signature); a refusal changes nothing.
+fn require_durable_head_backing_finalized_with(
+    cli: &mut CliState,
+    purpose: StateSigningPurpose,
+    finalized: impl Fn(&Address, &Bytes32, u64) -> bool,
+) -> Result<(), String> {
+    let already = cli
+        .signer_exit_kit_receipt
+        .as_ref()
+        .map(|receipt| receipt.backing_root_finalized)
+        .ok_or_else(|| "SIGNER-INDEPENDENT EXIT REQUIRED: no signer exit-kit receipt".to_string())?;
+    if already {
+        return Ok(());
+    }
+    // The receipt's rollup was pinned against the settlement binding when the kit was installed
+    // (`signer_exit_kit_context`); it is this signer's own durable record, not a caller input.
+    let (rollup, recorded) = cli
+        .signer_exit_kit_receipt
+        .as_ref()
+        .map(|receipt| {
+            (
+                receipt.rollup,
+                (receipt.backing_root, receipt.backing_anchor_block_number),
+            )
+        })
+        .expect("checked above");
+    let (root, anchor) = if recorded.0 == Bytes32::default() {
+        // A receipt written before the backing root was recorded: read it from the envelope.
+        durable_head_kit_backing_root(cli, Path::new(".")).ok_or_else(|| {
+            "SIGNER-INDEPENDENT EXIT REQUIRED: the durable head's exit-kit envelope is not \
+             retained, so its backing root cannot be checked on L1 (run install-exit-kit)"
+                .to_string()
+        })?
+    } else {
+        recorded
+    };
+    if !finalized(&rollup, &root, anchor) {
+        let head = &cli.snapshot.state;
+        return Err(format!(
+            "{HEAD_BACKING_NOT_FINALIZED}: refusing {purpose:?} because channel {}'s durable head {} \
+             (epoch {}, state version {}) is backed by an exit kit anchored at rollup block {anchor} \
+             (root {root}) that rollup {rollup} has not finalized yet (neither the root nor block {anchor}). The head's own \
+             block (a debit, burn or deposit import) must be posted, proved and finalized on L1 before \
+             any in-channel payment is signed on top of it; otherwise, if that block never posts, \
+             every such payment rolls back at close (C25/G16). Publish the pending validity \
+             candidate and retry.",
+            head.channel_id.as_u64(),
+            head.digest,
+            head.epoch,
+            head.balance_state.state_version,
+        ));
+    }
+    if let Some(receipt) = cli.signer_exit_kit_receipt.as_mut() {
+        receipt.backing_root = root;
+        receipt.backing_anchor_block_number = anchor;
+        receipt.backing_root_finalized = true;
+    }
+    Ok(())
+}
+
 /// One crash-safe anti-equivocation decision. The map key repeats the first three fields in a
 /// canonical printable form so malformed/renamed state cannot alias two signing decisions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -832,6 +977,11 @@ struct SettlementRuntimeCodeHashes {
 #[serde(deny_unknown_fields)]
 struct SettlementDeploymentIntent {
     late_incoming_verifier: String,
+    /// The late-deposit adapter (post-close refund of a deposit no signed state imported), the
+    /// materializer's 4th constructor argument since 2026-11-10. Defaulted so an intent persisted
+    /// before the field still parses; `settlement_deploy_mode_for_intent` then refuses to resume it.
+    #[serde(default)]
+    late_deposit_verifier: String,
     /// A sibling channel's registered manager whose close-funding materializer this deployment
     /// reuses (the rollup installs exactly one). Empty for the rollup's first settlement stack.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2946,6 +3096,11 @@ fn save_state(state: &CliState) {
     // LAZY: no plonky2 proving happens outside the settlement paths.
     let is_finalized =
         state.snapshot.state.member_signatures.len() == state.snapshot.record.member_count as usize;
+    // G16: every N-of-N head is archived by digest so `close` can fall back to it when a later
+    // head's block never reaches L1 (`resolve_close_head`). Idempotent, content-addressed.
+    if is_finalized {
+        archive_signed_head_at(state, Path::new("."));
+    }
     let prewarm_opted_in = std::env::var("INTMAX_FALCON_AGG_PRECOMPUTE").as_deref() == Ok("1");
     if is_finalized && prewarm_opted_in {
         spawn_detached_falcon_precompute(state.snapshot.state.digest);
@@ -3956,6 +4111,9 @@ fn verified_signer_exit_kit_receipt_at(
         channel_id: kit.backing_public_inputs.channel_id,
         settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
         token_funds_digest: kit.backing_public_inputs.token_funds_digest,
+        backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+        backing_anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
+        backing_root_finalized: false,
     };
     validate_exit_kit_receipt_for_head(&receipt, source_head)?;
     if require_current_source_head {
@@ -4004,6 +4162,9 @@ fn verified_prepared_exit_kit_receipt(
         channel_id: kit.backing_public_inputs.channel_id,
         settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
         token_funds_digest: kit.backing_public_inputs.token_funds_digest,
+        backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+        backing_anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
+        backing_root_finalized: false,
     };
     validate_exit_kit_receipt_for_head(&receipt, successor)?;
     Ok(receipt)
@@ -4065,13 +4226,27 @@ fn verify_persisted_signer_exit_kit_at(cli: &CliState, directory: &Path) -> Resu
         ));
     }
     let recomputed = verified_signer_exit_kit_receipt_at(cli, &bytes, false, directory)?;
-    if &recomputed != receipt {
+    if !receipt_matches_reverified(receipt, &recomputed) {
         return Err(
             "cryptographically reverified signer exit-kit archive differs from its durable receipt"
                 .into(),
         );
     }
     Ok(())
+}
+
+/// A durable receipt agrees with its re-verified envelope when every statement field is equal.
+/// The L1 finality flag is this signer's own observation (never in the envelope), and a receipt
+/// written before the backing root was recorded carries a zero root; both are tolerated here and
+/// filled in by `require_durable_head_backing_finalized`.
+fn receipt_matches_reverified(stored: &SignerExitKitReceipt, recomputed: &SignerExitKitReceipt) -> bool {
+    let mut normalized = stored.clone();
+    normalized.backing_root_finalized = false;
+    if normalized.backing_root == Bytes32::default() && normalized.backing_anchor_block_number == 0 {
+        normalized.backing_root = recomputed.backing_root;
+        normalized.backing_anchor_block_number = recomputed.backing_anchor_block_number;
+    }
+    &normalized == recomputed
 }
 
 /// `--propose-exit-kit`: write the live balance service's proposal for the exact successor(s)
@@ -5181,35 +5356,48 @@ fn durable_pending_close_guard(rpc: &str, manager: &str) -> (String, u64) {
 ///   channel_member close <manager_addr> [rpc_url]
 /// env: CLOSE_SV (settlement verifier). Close nonce/snapshot/burn metadata is canonical and has no
 /// caller input: nonce = signed close_freeze_nonce + 1, snapshot = 0, burn hash = 0.
-// ── M7 close-head selection (2026-10-15) ─────────────────────────────────────────────────────
+// ── M7 close-head selection (2026-10-15; backing-root source fixed 2026-11-09) ──────────────
 //
 // An inter-channel debit head H is N-of-N signed before its small block is posted on L1. If that
 // block never posts (the producer stalls, or channel A freezes with the block unposted) H can
-// never be closed: the Manager requires the close's `channel_fund_intmax_state_root` to be a
-// finalized rollup root. Every close tool used to prove and submit the LATEST local head only, so
-// such a channel retried forever. The selector below keeps the latest head whenever its backing
-// root is finalized, and otherwise walks `prev_digest` back through the content-addressed signer
-// exit-kit archive to the newest predecessor whose backing root IS finalized and whose kit is
-// retained. It never fabricates a kit: a predecessor without an archived envelope ends the walk.
-// The anti-equivocation ledger is untouched — closing at H-1 signs nothing new.
+// never be closed: `submitCloseIntent` requires an ATTESTED backing for H's statement key
+// (`requireSignedHeadBacking`), and the backing proof's `finalized_extended_state_commitment` —
+// the rollup state the Balance proof is anchored at — must be a finalized rollup root. Every close
+// tool used to prove and submit the LATEST local head only, so such a channel retried forever.
+//
+// G16 selector: keep the latest head whenever ITS EXIT KIT's backing root is finalized, and
+// otherwise walk `prev_digest` back through the signed-head archive to the newest predecessor
+// whose retained kit has a finalized backing root. It never fabricates a kit or a head: a
+// predecessor without an archived signed head ends the walk, a predecessor without a retained kit
+// is skipped. The anti-equivocation ledger is untouched — closing at H-1 signs nothing new.
+//
+// WHY THE KIT ROOT AND NOT `channel_fund.intmax_state_root` (bug fixed 2026-11-09): the signed
+// fund root is pinned once at genesis (`setup-backing`) and carried unchanged by every transition
+// builder (`..prev.channel_fund.clone()` in debit, fund-import, bundle-apply and deposit import),
+// so `isFinalizedStateRoot(channel_fund.intmax_state_root)` is true for EVERY head once the
+// genesis root finalized and the fallback never triggered. The Manager's own check of that field
+// (`ChannelFundStateRootNotFinalized`) is likewise vacuous; the load-bearing finality check is the
+// attested backing's root, which is exactly what the kit carries.
 
 /// One link of the signed-head chain as the selector sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CloseHeadLink {
     digest: Bytes32,
     prev_digest: Bytes32,
-    /// `channel_fund.intmax_state_root`: the root the Manager requires to be finalized.
-    backing_root: Bytes32,
+    /// The retained exit kit's `finalized_extended_state_commitment` (the Balance proof's anchor
+    /// root, which the Materializer requires finalized), or `None` when no kit for this head's
+    /// statement key is retained locally (a kit-pending head).
+    backing_root: Option<Bytes32>,
     /// Nonzero for an inter-channel debit (the own small block's tx tree root).
     h2_tag: Bytes32,
 }
 
 impl CloseHeadLink {
-    fn of(state: &ChannelState) -> Self {
+    fn of(state: &ChannelState, backing_root: Option<Bytes32>) -> Self {
         Self {
             digest: state.digest,
             prev_digest: state.prev_digest,
-            backing_root: state.channel_fund.intmax_state_root,
+            backing_root,
             h2_tag: state.h2_tag,
         }
     }
@@ -5238,21 +5426,24 @@ const CLOSE_HEAD_FALLBACK_MAX_DEPTH: usize = 64;
 const CLOSE_HEAD_FALLBACK_ENV: &str = "CLOSE_HEAD_FALLBACK";
 
 fn close_head_kind(link: &CloseHeadLink) -> &'static str {
-    if link.h2_tag != Bytes32::default() {
+    if link.backing_root.is_none() {
+        "a kit-pending head (no exit kit for its statement key is retained here)"
+    } else if link.h2_tag != Bytes32::default() {
         "an inter-channel debit (H2 != 0) whose small block is not posted/finalized"
     } else {
         "an in-channel or credit-only head (H2 = 0) whose backing block is not posted/finalized"
     }
 }
 
-/// Pure selection: `archived` resolves a digest to its archived link (None = kit not retained),
-/// `finalized` answers `isFinalizedStateRoot` for a backing root.
+/// Pure selection: `archived` resolves a digest to its archived link (None = signed head not
+/// retained), `finalized` answers `isFinalizedStateRoot` for a kit's backing root. A link whose
+/// `backing_root` is `None` (head retained, kit not) is skipped, never closed.
 fn choose_close_head(
     latest: &CloseHeadLink,
     archived: impl Fn(&Bytes32) -> Option<CloseHeadLink>,
     finalized: impl Fn(&Bytes32) -> bool,
 ) -> CloseHeadChoice {
-    if finalized(&latest.backing_root) {
+    if latest.backing_root.is_some_and(|root| finalized(&root)) {
         return CloseHeadChoice::Latest;
     }
     let latest_kind = close_head_kind(latest);
@@ -5270,7 +5461,7 @@ fn choose_close_head(
             };
         };
         depth += 1;
-        if finalized(&link.backing_root) {
+        if link.backing_root.is_some_and(|root| finalized(&root)) {
             return CloseHeadChoice::Fallback {
                 head: cursor,
                 depth,
@@ -5284,6 +5475,12 @@ fn choose_close_head(
         missing_archive_for: None,
         examined: depth,
     }
+}
+
+/// `IntmaxRollup.latestFinalizedBlockNumber()`, or None when the call fails.
+fn read_latest_finalized_block_number(rpc: &str, rollup: &str) -> Option<u64> {
+    let out = cast(&["call", rollup, "latestFinalizedBlockNumber()(uint64)", "--rpc-url", rpc]);
+    out.trim().split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
 }
 
 fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
@@ -5300,18 +5497,35 @@ fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
         == TRUE_WORD
 }
 
-/// Every N-of-N-headed envelope in the content-addressed signer exit-kit archive for this
-/// channel, keyed by its signed head digest. Pre-sign (proposed) envelopes are included here and
-/// rejected later by the cryptographic verification of the chosen one, which demands the N-of-N.
+/// One retained public exit-kit envelope: the head it was proved for, and the kit's backing
+/// statement. The backing proof binds `(channel_id, settled_tx_chain, token_funds_digest)` and
+/// NOT the head digest, so every H2=0 successor with the same statement key is backed by it.
+struct ArchivedExitKitEnvelope {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    head: ChannelState,
+    record: ChannelRecord,
+    /// `finalized_extended_state_commitment`: the Balance anchor root the Materializer requires
+    /// finalized (`_validateBackingPublicInputs`).
+    backing_root: Bytes32,
+    anchor_block_number: u64,
+}
+
+impl ArchivedExitKitEnvelope {
+    fn statement_key(&self) -> (ChannelId, Bytes32, Bytes32) {
+        exit_kit_statement_key(&self.head)
+    }
+}
+
+/// Every envelope in the content-addressed signer exit-kit archive for this channel that carries
+/// a kit. Pre-sign (proposed) envelopes are included here and rejected later by the cryptographic
+/// verification of the chosen one, which demands the N-of-N on the chosen head itself.
 fn archived_signer_exit_kit_envelopes_at(
     cli: &CliState,
     directory: &Path,
-) -> Result<
-    std::collections::HashMap<Bytes32, (PathBuf, Vec<u8>, ChannelState, ChannelRecord)>,
-    String,
-> {
+) -> Result<Vec<ArchivedExitKitEnvelope>, String> {
     let archive = directory.join(SIGNER_EXIT_KIT_ARCHIVE_DIR);
-    let mut envelopes = std::collections::HashMap::new();
+    let mut envelopes = Vec::new();
     let entries = match fs::read_dir(&archive) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(envelopes),
@@ -5339,20 +5553,127 @@ fn archived_signer_exit_kit_envelopes_at(
         let Ok(envelope) = parse_public_close_backing_envelope(&bytes) else {
             continue;
         };
-        if envelope.backing.signed_head.channel_id != cli.snapshot.record.channel_id
-            || envelope.backing.signed_head_exit_kit.is_none()
-        {
+        if envelope.backing.signed_head.channel_id != cli.snapshot.record.channel_id {
             continue;
         }
-        let head = envelope.backing.signed_head;
-        envelopes.entry(head.digest).or_insert((
+        let Some(kit) = envelope.backing.signed_head_exit_kit.as_ref() else {
+            continue;
+        };
+        envelopes.push(ArchivedExitKitEnvelope {
             path,
             bytes,
-            head,
-            envelope.backing.channel_record,
-        ));
+            backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+            anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
+            head: envelope.backing.signed_head,
+            record: envelope.backing.channel_record,
+        });
     }
     Ok(envelopes)
+}
+
+/// Content-addressed archive of every N-of-N signed head this signer adopted (`save_state`
+/// writes it at the N-of-N boundary). The G16 walk needs the FULL predecessor state — its
+/// signatures included — to close on it, and an H2=0 head has no envelope of its own (it reuses
+/// its predecessor's kit), so without this archive the fallback could only reach heads that
+/// happened to be asset-moving. Nothing here is a kit: a head is closable only when a retained
+/// envelope with its exact statement key exists and verifies.
+const SIGNED_HEAD_ARCHIVE_DIR: &str = ".signed-heads";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArchivedSignedHead {
+    record: ChannelRecord,
+    state: ChannelState,
+}
+
+fn signed_head_archive_path_at(directory: &Path, digest: &Bytes32) -> PathBuf {
+    directory
+        .join(SIGNED_HEAD_ARCHIVE_DIR)
+        .join(format!("{}.json", digest.to_hex().trim_start_matches("0x")))
+}
+
+/// Archive the current head when (and only when) it carries the complete N-of-N signature set.
+/// Idempotent: a digest already archived is never rewritten (content-addressed by digest; the
+/// close path re-verifies every signature before closing on an archived head).
+fn archive_signed_head_at(cli: &CliState, directory: &Path) {
+    let state = &cli.snapshot.state;
+    if state.member_signatures.len() != cli.snapshot.record.member_count as usize {
+        return;
+    }
+    let path = signed_head_archive_path_at(directory, &state.digest);
+    if path.exists() {
+        return;
+    }
+    write_private_json_at(
+        &path,
+        &ArchivedSignedHead {
+            record: cli.snapshot.record.clone(),
+            state: state.clone(),
+        },
+    );
+}
+
+fn archived_signed_head_at(
+    cli: &CliState,
+    directory: &Path,
+    digest: &Bytes32,
+) -> Option<ArchivedSignedHead> {
+    let path = signed_head_archive_path_at(directory, digest);
+    let bytes = read_bounded_regular_file(&path, 64 * 1024 * 1024, "archived signed head").ok()?;
+    let archived: ArchivedSignedHead = serde_json::from_slice(&bytes).ok()?;
+    if archived.state.digest != *digest
+        || archived.state.channel_id != cli.snapshot.record.channel_id
+        || archived.state.digest != archived.state.signing_digest()
+    {
+        return None;
+    }
+    Some(archived)
+}
+
+/// The exit kit that backs `state`: the envelope proved for exactly this head when one exists,
+/// otherwise any retained envelope with the same `(channel_id, settled_tx_chain,
+/// token_funds_digest)` — the statement the backing proof actually binds (an H2=0 successor
+/// reuses its predecessor's kit by construction, `reuses_predecessor_exit_kit`).
+fn exit_kit_envelope_for<'a>(
+    envelopes: &'a [ArchivedExitKitEnvelope],
+    state: &ChannelState,
+) -> Option<&'a ArchivedExitKitEnvelope> {
+    let key = exit_kit_statement_key(state);
+    envelopes
+        .iter()
+        .find(|envelope| envelope.head.digest == state.digest)
+        .or_else(|| envelopes.iter().find(|envelope| envelope.statement_key() == key))
+}
+
+/// The backing root of the durable head's installed kit, read from the receipt's archived
+/// envelope. `None` when the head is kit-pending or its envelope is not retained here.
+fn durable_head_kit_backing_root(cli: &CliState, directory: &Path) -> Option<(Bytes32, u64)> {
+    let receipt = cli.signer_exit_kit_receipt.as_ref()?;
+    validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).ok()?;
+    let path = exit_kit_receipt_archive_path_at(receipt, directory);
+    let bytes = read_bounded_regular_file(
+        &path,
+        MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+        "durable head exit-kit envelope",
+    )
+    .ok()?;
+    if sha256_bytes(&bytes) != receipt.archive_sha256 {
+        return None;
+    }
+    let envelope = parse_public_close_backing_envelope(&bytes).ok()?;
+    let kit = envelope.backing.signed_head_exit_kit.as_ref()?;
+    if (
+        kit.backing_public_inputs.channel_id,
+        kit.backing_public_inputs.settled_tx_chain,
+        kit.backing_public_inputs.token_funds_digest,
+    ) != exit_kit_statement_key(&cli.snapshot.state)
+    {
+        return None;
+    }
+    Some((
+        kit.backing_public_inputs.finalized_extended_state_commitment,
+        kit.backing_public_inputs.anchor_block_number.as_u64(),
+    ))
 }
 
 /// The `(record, state, balance proof bytes)` a close must prove. `latest_balance_proof` is the
@@ -5369,23 +5690,44 @@ fn resolve_close_head(
     if std::env::var(CLOSE_HEAD_FALLBACK_ENV).is_ok_and(|value| value.trim() == "off") {
         eprintln!(
             "[close] {CLOSE_HEAD_FALLBACK_ENV}=off: closing the latest local head {} without \
-             checking that its backing root is finalized on L1",
+             checking that its exit kit's backing root is finalized on L1",
             latest_state.digest
         );
         return (latest_record, latest_state, latest_balance_proof);
     }
-    let archive = archived_signer_exit_kit_envelopes_at(cli, Path::new("."))
+    let here = Path::new(".");
+    let envelopes = archived_signer_exit_kit_envelopes_at(cli, here)
         .unwrap_or_else(|error| die(format!("[close] {error}")));
-    let latest = CloseHeadLink::of(&latest_state);
+    // The durable head's kit: the installed receipt first (verified when it was installed),
+    // else any retained envelope for the head's statement key.
+    let latest_kit = durable_head_kit_backing_root(cli, here).or_else(|| {
+        exit_kit_envelope_for(&envelopes, &latest_state)
+            .map(|envelope| (envelope.backing_root, envelope.anchor_block_number))
+    });
+    let latest = CloseHeadLink::of(&latest_state, latest_kit.map(|(root, _)| root));
+    let archived_state = |digest: &Bytes32| -> Option<(ChannelRecord, ChannelState)> {
+        archived_signed_head_at(cli, here, digest)
+            .map(|archived| (archived.record, archived.state))
+            .or_else(|| {
+                envelopes
+                    .iter()
+                    .find(|envelope| envelope.head.digest == *digest)
+                    .map(|envelope| (envelope.record.clone(), envelope.head.clone()))
+            })
+    };
     let choice = choose_close_head(
         &latest,
         |digest| {
-            archive
-                .get(digest)
-                .map(|(_, _, state, _)| CloseHeadLink::of(state))
+            let (_, state) = archived_state(digest)?;
+            let root = exit_kit_envelope_for(&envelopes, &state).map(|e| e.backing_root);
+            Some(CloseHeadLink::of(&state, root))
         },
         |root| read_finalized_state_root(rpc, rollup, root),
     );
+    let latest_root_text = match latest_kit {
+        Some((root, anchor)) => format!("{root} (Balance anchor block {anchor})"),
+        None => "absent (no exit kit is retained for this head's statement key)".to_string(),
+    };
     match choice {
         CloseHeadChoice::Latest => (latest_record, latest_state, latest_balance_proof),
         CloseHeadChoice::Fallback {
@@ -5393,17 +5735,19 @@ fn resolve_close_head(
             depth,
             latest_kind,
         } => {
-            let (path, bytes, state, record) = archive
-                .get(&head)
-                .cloned()
+            let (record, state) = archived_state(&head)
                 .unwrap_or_else(|| die("[close] selected fallback head vanished from the archive"));
-            // Cryptographically re-verify the archived envelope (N-of-N, pinned Balance VD,
-            // Balance and backing proofs) before a single byte of it enters the close witness.
-            verified_signer_exit_kit_receipt_at(cli, &bytes, false, Path::new("."))
+            let envelope = exit_kit_envelope_for(&envelopes, &state)
+                .unwrap_or_else(|| die("[close] selected fallback head's kit vanished from the archive"));
+            // Cryptographically re-verify the archived envelope (pinned Balance VD, Balance and
+            // backing proofs) before a single byte of it enters the close witness, and the
+            // fallback head's own N-of-N (the envelope may have been proved for an earlier head
+            // with the same statement key).
+            verified_signer_exit_kit_receipt_at(cli, &envelope.bytes, false, here)
                 .unwrap_or_else(|error| {
                     die(format!(
                         "[close] archived exit kit {} for fallback head {head} failed verification: {error}",
-                        path.display()
+                        envelope.path.display()
                     ))
                 });
             if record != latest_record {
@@ -5412,6 +5756,14 @@ fn resolve_close_head(
                      than the current one (participants changed since); refusing to close it \
                      automatically"
                 ));
+            }
+            verify_all_signatures(&record, &cli.snapshot.members, &state).unwrap_or_else(|error| {
+                die(format!(
+                    "[close] archived fallback head {head} is not N-of-N signed: {error}"
+                ))
+            });
+            if exit_kit_statement_key(&envelope.head) != exit_kit_statement_key(&state) {
+                die("[close] fallback head and its envelope disagree on the backing statement");
             }
             if state.balance_state.settled_tx_chain == latest_state.balance_state.settled_tx_chain
                 && state.channel_fund == latest_state.channel_fund
@@ -5422,24 +5774,26 @@ fn resolve_close_head(
             }
             eprintln!(
                 "[close] CLOSE HEAD FALLBACK: the latest signed head {} (epoch {}, state_version {}) is {latest_kind}; \
-                 its backing root {} is not finalized on rollup {rollup}, so the Manager would refuse it. \
-                 Closing the newest backable predecessor {head} (epoch {}, state_version {}, {depth} head(s) back) \
-                 from its retained exit kit {} instead. Funds moved by the unbackable head(s) stay with \
-                 the channel; the counterparty's credit cannot be backed either.",
+                 its exit kit's backing root is {latest_root_text}, not a finalized root on rollup {rollup}, so the \
+                 Materializer would refuse it. Closing the newest backable predecessor {head} (epoch {}, \
+                 state_version {}, {depth} head(s) back) from its retained exit kit {} (backing root {}, anchor \
+                 block {}) instead. Funds moved by the unbackable head(s) stay with the channel; the \
+                 counterparty's credit cannot be backed either.",
                 latest_state.digest,
                 latest_state.epoch,
                 latest_state.balance_state.state_version,
-                latest_state.channel_fund.intmax_state_root,
                 state.epoch,
                 state.balance_state.state_version,
-                path.display()
+                envelope.path.display(),
+                envelope.backing_root,
+                envelope.anchor_block_number,
             );
-            let envelope = parse_public_close_backing_envelope(&bytes)
+            let parsed = parse_public_close_backing_envelope(&envelope.bytes)
                 .unwrap_or_else(|error| die(format!("[close] reparse archived envelope: {error}")));
             (
                 record,
                 state,
-                envelope.backing.balance_attestation.balance_proof,
+                parsed.backing.balance_attestation.balance_proof,
             )
         }
         CloseHeadChoice::Unbackable {
@@ -5449,19 +5803,20 @@ fn resolve_close_head(
         } => {
             let why = match missing_archive_for {
                 Some(digest) => format!(
-                    "predecessor {digest} has no retained exit kit in {SIGNER_EXIT_KIT_ARCHIVE_DIR}/ \
-                     (a kit is never fabricated)"
+                    "predecessor {digest} has no archived signed head in {SIGNED_HEAD_ARCHIVE_DIR}/ \
+                     (and no retained envelope in {SIGNER_EXIT_KIT_ARCHIVE_DIR}/); a head or kit is never fabricated"
                 ),
                 None => format!(
-                    "{examined} archived predecessor(s) examined, none has a finalized backing root"
+                    "{examined} archived predecessor(s) examined, none has a retained kit with a finalized backing root"
                 ),
             };
             die(format!(
-                "[close] the latest signed head {} is {latest_kind}; its backing root {} is not finalized \
-                 on rollup {rollup}, and no predecessor can be closed instead: {why}. Wait for the \
-                 block to post and finalize, or set {CLOSE_HEAD_FALLBACK_ENV}=off to submit the latest \
-                 head anyway (the Manager will refuse it until the root finalizes).",
-                latest_state.digest, latest_state.channel_fund.intmax_state_root
+                "[close] the latest signed head {} is {latest_kind}; its exit kit's backing root is \
+                 {latest_root_text}, not a finalized root on rollup {rollup}, and no predecessor can be \
+                 closed instead: {why}. Wait for the block to post and finalize, or set \
+                 {CLOSE_HEAD_FALLBACK_ENV}=off to submit the latest head anyway (the Materializer will \
+                 refuse it until the root finalizes).",
+                latest_state.digest
             ))
         }
     }
@@ -5483,12 +5838,20 @@ mod close_head_fallback_tests {
             } else {
                 digest(prev_byte)
             },
-            backing_root: digest(root_byte),
+            backing_root: Some(digest(root_byte)),
             h2_tag: if debit {
                 digest(0xd0 + digest_byte)
             } else {
                 Bytes32::default()
             },
+        }
+    }
+
+    /// A head whose signed state is archived but whose kit is not retained (kit-pending).
+    fn kitless(digest_byte: u8, prev_byte: u8) -> CloseHeadLink {
+        CloseHeadLink {
+            backing_root: None,
+            ..link(digest_byte, prev_byte, 0, false)
         }
     }
 
@@ -5498,6 +5861,40 @@ mod close_head_fallback_tests {
 
     fn finalized(roots: &[u8]) -> impl Fn(&Bytes32) -> bool + '_ {
         move |root| roots.iter().any(|byte| digest(*byte) == *root)
+    }
+
+    #[test]
+    fn a_kit_pending_latest_head_falls_back_to_its_backed_predecessor() {
+        // The latest head has no kit at all (e.g. an inter-channel credit the daemon never
+        // accepted): it can never be closed, whatever L1 says. Its predecessor is.
+        let latest = kitless(3, 2);
+        let archived = [link(2, 1, 0xa2, false)];
+        let choice = choose_close_head(&latest, archive(&archived), finalized(&[0xa2]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Fallback {
+                head: digest(2),
+                depth: 1,
+                latest_kind: "a kit-pending head (no exit kit for its statement key is retained here)",
+            }
+        );
+    }
+
+    #[test]
+    fn a_kitless_archived_predecessor_is_skipped_not_fatal() {
+        // H (debit, root a3 unfinalized) -> H-1 (archived head, kit missing) -> H-2 (finalized).
+        // Skipping H-1 fabricates nothing: H-2 is closed from H-2's own retained kit.
+        let latest = link(3, 2, 0xa3, true);
+        let archived = [kitless(2, 1), link(1, 0, 0xa1, false)];
+        let choice = choose_close_head(&latest, archive(&archived), finalized(&[0xa1]));
+        assert_eq!(
+            choice,
+            CloseHeadChoice::Fallback {
+                head: digest(1),
+                depth: 2,
+                latest_kind: "an inter-channel debit (H2 != 0) whose small block is not posted/finalized",
+            }
+        );
     }
 
     #[test]
@@ -10383,6 +10780,32 @@ fn build_reg_record() -> serde_json::Value {
     )
 }
 
+/// Design rule (item E, 2026-11-10): every sig-cluster holds at least one DAEMON signer — a
+/// cosigner slot (`< member_count`) whose key this `channel_member` derives itself. Browser
+/// sessions sign nothing but their own join contribution (they sit at delegate slots and
+/// `wallet_cosign` refuses delegate slots), hold no exit kit and consult no L1, so a cluster of
+/// browsers alone would have no backing-finality gate (`require_durable_head_backing_finalized`)
+/// and no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always seats
+/// the CLI's cosigners at `0..cli_cosigner_count()`; this makes the rule explicit and refuses a
+/// hand-built state (empty `controlled`, foreign `member_pk_gs`) before any signature or the
+/// immutable L1 member set is produced. Ownership evidence is the same the signing primitive
+/// uses: the derived `pk_g` must equal the record's entry for that slot.
+fn require_daemon_signer(record: &ChannelRecord, controlled: &[ControlledMember]) -> Result<(), String> {
+    let member_count = usize::from(record.member_count);
+    let held = controlled
+        .iter()
+        .filter(|c| usize::from(c.slot) < member_count)
+        .any(|c| keys_for(c.keygen_seed).pk_g() == record.member_pk_gs[usize::from(c.slot)]);
+    if held {
+        return Ok(());
+    }
+    Err(format!(
+        "sig-cluster rule: no cosigner slot (0..{member_count}) is controlled by this channel_member \
+         (controlled slots {:?}); every sig-cluster needs at least one daemon signer",
+        controlled.iter().map(|c| c.slot).collect::<Vec<_>>()
+    ))
+}
+
 /// Build the production settlement input from the one authenticated, fully signed live snapshot.
 /// No deterministic-key fallback and no derived recipient formula is permitted here: the exact
 /// slot recipient committed inside `BalanceState::h1()` is what the manager root freezes.
@@ -10399,6 +10822,7 @@ fn build_live_settlement_reg_record(state: &CliState) -> serde_json::Value {
             "settlement N-of-N signature verification failed: {e}"
         ))
     });
+    require_daemon_signer(&state.snapshot.record, &state.controlled).unwrap_or_else(|e| die(e));
 
     let channel_id = channel_id_env();
     let record = &state.snapshot.record;
@@ -10760,6 +11184,7 @@ fn cmd_init(args: &[String]) {
     // validated, value-preserving successor gate described at `join_delegate`.
     let record = cli.snapshot.record.clone();
     let controlled = cli.controlled.clone();
+    require_daemon_signer(&record, &controlled).unwrap_or_else(|e| die(e));
     let mut signed_state = cli.snapshot.state.clone();
     if previous.is_none() {
         let (balance_vd, attestation, _) = load_backing();
@@ -14039,6 +14464,12 @@ fn settlement_deployment_plan_digest(
         .map_err(|_| "LATE_MLE_CONFIG_PATH is required".to_string())?;
     let late_config = fs::read(contracts_dir.join(late_config_path)).map_err(|e| format!("late verifier config: {e}"))?;
     append_deployment_digest_field(&mut preimage, &late_config);
+    let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .map_err(|_| "LATE_DEPOSIT_MLE_CONFIG_PATH is required".to_string())?;
+    let late_deposit_config = fs::read(contracts_dir.join(late_deposit_config_path))
+        .map_err(|e| format!("late deposit verifier config: {e}"))?;
+    append_deployment_digest_field(&mut preimage, b"late_deposit_config");
+    append_deployment_digest_field(&mut preimage, &late_deposit_config);
     append_deployment_digest_field(&mut preimage, &chain_id.to_be_bytes());
     append_deployment_digest_field(&mut preimage, strip0x(broadcaster).as_bytes());
     append_deployment_digest_field(&mut preimage, &start_nonce.to_be_bytes());
@@ -14102,9 +14533,12 @@ fn expected_settlement_deployment_intent(
 ) -> Result<SettlementDeploymentIntent, String> {
     let late_incoming_verifier = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
         .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?, 20, "late incoming verifier")?;
+    let late_deposit_verifier = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
+        .map_err(|_| "LATE_DEPOSIT_VERIFIER is required".to_string())?, 20, "late deposit verifier")?;
     let existing_settlement_manager = existing_settlement_manager_env()?;
     Ok(SettlementDeploymentIntent {
         late_incoming_verifier,
+        late_deposit_verifier,
         existing_settlement_manager: existing_settlement_manager.clone(),
         chain_id,
         broadcaster: broadcaster.to_string(),
@@ -14155,6 +14589,7 @@ fn reused_close_funding(
     rollup: &str,
     existing_manager: &str,
     late_adapter: &str,
+    late_deposit_adapter: &str,
     backing_pin: &SettlementMleV2ConfigPin,
 ) -> Option<ReusedCloseFunding> {
     if existing_manager.is_empty() {
@@ -14181,13 +14616,15 @@ fn reused_close_funding(
     );
     let materializer_rollup = cast_call(rpc, &materializer, "rollup()(address)", &[]);
     let materializer_late = cast_call(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[]);
+    let materializer_late_deposit = cast_call(rpc, &materializer, "lateDepositMleVerifier()(address)", &[]);
     if !strip0x(&materializer_rollup).eq_ignore_ascii_case(&strip0x(rollup))
         || !strip0x(&materializer_late).eq_ignore_ascii_case(&strip0x(late_adapter))
+        || !strip0x(&materializer_late_deposit).eq_ignore_ascii_case(&strip0x(late_deposit_adapter))
     {
         die(format!(
             "materializer {materializer} of {existing_manager} is bound to rollup \
-             {materializer_rollup} and late-incoming adapter {materializer_late}, not \
-             {rollup} / {late_adapter}"
+             {materializer_rollup}, late-incoming adapter {materializer_late} and late-deposit \
+             adapter {materializer_late_deposit}, not {rollup} / {late_adapter} / {late_deposit_adapter}"
         ));
     }
     let backing_mle_adapter = cast_call(rpc, &materializer, "backingMleVerifier()(address)", &[]);
@@ -14315,10 +14752,13 @@ fn prepare_real_settlement_binding(
             || !expected
                 .late_incoming_verifier
                 .eq_ignore_ascii_case(&persisted.late_incoming_verifier)
+            || !expected
+                .late_deposit_verifier
+                .eq_ignore_ascii_case(&persisted.late_deposit_verifier)
         {
             die(format!(
                 "cannot restart settlement deployment: persisted identity {persisted:?} names a \
-                 different chain, broadcaster or late-incoming adapter than this run {expected:?}"
+                 different chain, broadcaster, late-incoming or late-deposit adapter than this run {expected:?}"
             ));
         }
         if expected != persisted {
@@ -14471,14 +14911,16 @@ fn cast_encode_materializer_constructor(
     rollup: &str,
     backing_adapter: &str,
     late_adapter: &str,
+    late_deposit_adapter: &str,
 ) -> Result<String, String> {
-    const SIGNATURE: &str = "constructor(address,address,address)";
+    const SIGNATURE: &str = "constructor(address,address,address,address)";
     let output = Command::new("cast")
         .arg("abi-encode")
         .arg(SIGNATURE)
         .arg(rollup)
         .arg(backing_adapter)
         .arg(late_adapter)
+        .arg(late_deposit_adapter)
         .output()
         .map_err(|e| format!("start `cast abi-encode` for close-funding materializer: {e}"))?;
     if !output.status.success() {
@@ -15018,12 +15460,14 @@ fn validate_settlement_mle_v2_pair(
 ///   14 IntmaxRollup.registerSettlementManager
 /// There are no mutable VK initializers: every verifier binding is a constructor argument.
 /// The first stack's materializer CREATE: its constructor must bind the backing rollup, the
-/// CloseAssetBacking adapter created immediately before it, and the pinned late-incoming adapter.
+/// CloseAssetBacking adapter created immediately before it, and the pinned late-incoming and
+/// late-deposit adapters.
 fn validate_created_materializer(
     tx: &serde_json::Value,
     rollup: &str,
     backing_mle_adapter: &str,
     late_incoming_verifier: &str,
+    late_deposit_verifier: &str,
 ) -> Result<String, String> {
     validate_settlement_tx_shape(
         tx,
@@ -15040,7 +15484,7 @@ fn validate_created_materializer(
     // real Sepolia deployment whose on-chain bindings were correct. For static-argument
     // constructors the initcode suffix is the complete, exact ABI encoding.
     let encoded_materializer_constructor =
-        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier)?;
+        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier, late_deposit_verifier)?;
     let materializer_input = tx
         .get("transaction")
         .and_then(|value| value.get("input"))
@@ -15049,8 +15493,8 @@ fn validate_created_materializer(
     if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
         return Err(
             "close-funding materializer is not bound to the backing rollup, the CloseAssetBacking \
-             adapter created by this run and the pinned late-incoming adapter: its creation input \
-             does not end in that constructor ABI"
+             adapter created by this run and the pinned late-incoming and late-deposit adapters: \
+             its creation input does not end in that constructor ABI"
                 .to_string(),
         );
     }
@@ -15195,6 +15639,7 @@ fn validate_settlement_broadcast_value(
                 rollup,
                 &backing_mle_adapter,
                 &intent.late_incoming_verifier,
+                &intent.late_deposit_verifier,
             )?;
             (backing_mle_core, backing_mle_adapter, materializer)
         }
@@ -15561,6 +16006,7 @@ mod settlement_broadcast_recovery_tests {
     const BACKING_MLE_CORE: &str = "0x0000000000000000000000000000000000000015";
     const BACKING_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000025";
     const LATE_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000026";
+    const LATE_DEPOSIT_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000027";
     const VERIFIER: &str = "0x0000000000000000000000000000000000000031";
     const MANAGER: &str = "0x0000000000000000000000000000000000000032";
     const MATERIALIZER: &str = "0x0000000000000000000000000000000000000088";
@@ -15568,6 +16014,7 @@ mod settlement_broadcast_recovery_tests {
     fn intent() -> SettlementDeploymentIntent {
         SettlementDeploymentIntent {
             late_incoming_verifier: LATE_MLE_ADAPTER.to_string(),
+            late_deposit_verifier: LATE_DEPOSIT_MLE_ADAPTER.to_string(),
             existing_settlement_manager: String::new(),
             chain_id: CHAIN_ID,
             broadcaster: BROADCASTER.to_string(),
@@ -15722,7 +16169,7 @@ mod settlement_broadcast_recovery_tests {
         let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
         let manager_input = format!("0x60006000{}", strip0x(&constructor));
         let materializer_constructor =
-            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER).unwrap();
+            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER).unwrap();
         let materializer_input = format!("0x6002{}", strip0x(&materializer_constructor));
 
         // One MleVerifierV2 core CREATE followed by its PinnedMleVerifierV2 adapter CREATE.
@@ -15786,7 +16233,7 @@ mod settlement_broadcast_recovery_tests {
             START_NONCE + 2,
             "CloseFundingMaterializer",
             MATERIALIZER,
-            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string()]),
+            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string(), LATE_DEPOSIT_MLE_ADAPTER.to_string()]),
             &materializer_input,
         ));
         for (index, pin) in pins.iter().enumerate() {
@@ -16152,6 +16599,13 @@ mod settlement_broadcast_recovery_tests {
         let mut wrong_late = expected.clone();
         wrong_late.late_incoming_verifier = BACKING_MLE_ADAPTER.to_string();
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late), &expected).is_err());
+        let mut wrong_late_deposit = expected.clone();
+        wrong_late_deposit.late_deposit_verifier = BACKING_MLE_ADAPTER.to_string();
+        assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late_deposit), &expected).is_err());
+        // An intent persisted before the late-deposit adapter existed cannot be resumed.
+        let mut pre_late_deposit = expected.clone();
+        pre_late_deposit.late_deposit_verifier = String::new();
+        assert!(settlement_deploy_mode_for_intent(true, Some(&pre_late_deposit), &expected).is_err());
         let mut wrong_chain = expected.clone();
         wrong_chain.chain_id = 10;
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_chain), &expected).is_err());
@@ -16219,17 +16673,21 @@ mod settlement_broadcast_recovery_tests {
             "the backing adapter must bind the backing core created immediately before it"
         );
         // The materializer's bindings are read from the creation input that was sent.
-        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str| {
-            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late).unwrap();
+        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str, late_deposit: &str| {
+            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late, late_deposit).unwrap();
             serde_json::json!(format!("0x6002{}", strip0x(&encoded)))
         };
+        let mut wrong_late_deposit_adapter = artifact.clone();
+        wrong_late_deposit_adapter["transactions"][2]["transaction"]["input"] =
+            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, BACKING_MLE_ADAPTER);
+        assert!(validate_settlement_broadcast_value(&wrong_late_deposit_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut wrong_late_adapter = artifact.clone();
         wrong_late_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER);
+            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         let mut materializer_on_other_rollup = artifact.clone();
         materializer_on_other_rollup["transactions"][2]["transaction"]["input"] =
-            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER);
+            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
         // Foundry's `arguments` is a best-effort decode that has sliced a correct constructor two
         // words early on Sepolia; it is not the authority and must neither accept nor refuse.
@@ -16290,7 +16748,7 @@ mod settlement_broadcast_recovery_tests {
         );
         let mut materializer_bound_to_other_adapter = artifact.clone();
         materializer_bound_to_other_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER);
+            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
         assert!(
             validate_settlement_broadcast_value(
                 &materializer_bound_to_other_adapter,
@@ -17189,6 +17647,19 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let late_pin = parse_settlement_mle_v2_config_pin(&late_config_value, "late incoming", "LATE_MLE_CONFIG_PATH")
         .unwrap_or_else(|e| die(e));
     require_mle_v2_pair_pin(rpc, chain_id, &late_adapter, None, &late_pin, None);
+    let late_deposit_adapter = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
+        .unwrap_or_else(|_| die("LATE_DEPOSIT_VERIFIER is required")), 20, "late deposit verifier")
+        .unwrap_or_else(|e| die(e));
+    let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .unwrap_or_else(|_| die("LATE_DEPOSIT_MLE_CONFIG_PATH is required (use an absolute path)"));
+    let late_deposit_config_path = fs::canonicalize(contracts_dir.join(late_deposit_config_path))
+        .unwrap_or_else(|e| die(format!("late deposit config: {e}")));
+    let late_deposit_config_text = fs::read_to_string(&late_deposit_config_path).unwrap_or_else(|e| die(e));
+    MleVerifierV2ConfigFixture::from_canonical_json(&late_deposit_config_text).unwrap_or_else(|e| die(e));
+    let late_deposit_config_value = serde_json::from_str(&late_deposit_config_text).unwrap_or_else(|e| die(e));
+    let late_deposit_pin = parse_settlement_mle_v2_config_pin(&late_deposit_config_value, "late deposit", "LATE_DEPOSIT_MLE_CONFIG_PATH")
+        .unwrap_or_else(|e| die(e));
+    require_mle_v2_pair_pin(rpc, chain_id, &late_deposit_adapter, None, &late_deposit_pin, None);
     let existing_settlement_manager = existing_settlement_manager_env().unwrap_or_else(|e| die(e));
     let reused = reused_close_funding(
         rpc,
@@ -17196,6 +17667,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_rollup_hex,
         &existing_settlement_manager,
         &late_adapter,
+        &late_deposit_adapter,
         &backing_mle_v2_pin,
     );
     if let Some(reused) = &reused {
@@ -17480,6 +17952,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         die("materializer late incoming verifier differs from prepared deployment intent");
     }
     require_mle_v2_pair_pin(rpc, chain_id, &deployed_late, None, &late_pin, Some(activation_checkpoint.block_number));
+    let deployed_late_deposit = cast_call_at(rpc, &materializer, "lateDepositMleVerifier()(address)", &[], activation_checkpoint.block_number);
+    if !strip0x(&deployed_late_deposit).eq_ignore_ascii_case(&strip0x(&deployment_intent.late_deposit_verifier)) {
+        die("materializer late deposit verifier differs from prepared deployment intent");
+    }
+    require_mle_v2_pair_pin(rpc, chain_id, &deployed_late_deposit, None, &late_deposit_pin, Some(activation_checkpoint.block_number));
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -18464,6 +18941,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|error| die(error));
 
     if propose_exit_kit_requested(args) {
+        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::L1DepositImport);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "l1DepositImport",
             "record": state.snapshot.record,
@@ -18875,12 +19353,31 @@ fn cmd_pw_finalize(args: &[String]) {
         .get(1)
         .cloned()
         .unwrap_or_else(|| die("pw-finalize needs <rpc_url>"));
-    let backing: ChannelBacking = read_private_json(BACKING_FILE);
-    if backing.rollup.trim().is_empty() {
-        die(format!("{BACKING_FILE} names no rollup; the burn cannot be paid without it"));
-    }
+    // The burner's own recovery path (2026-11-09): a payout receipt downloaded from the relay
+    // (`GET .../partial-withdrawal/payout-receipt`: pw_artifacts.json, pw_producer.json,
+    // burn_cosigned.json) is complete once the proof's anchor is finalized, so anyone holding
+    // those three files, an RPC and an L1 key can pay the burn without the relay. Such a
+    // directory has no channel_backing.json; the rollup then comes from `ROLLUP`.
+    let rollup = if Path::new(BACKING_FILE).exists() {
+        let backing: ChannelBacking = read_private_json(BACKING_FILE);
+        if backing.rollup.trim().is_empty() {
+            die(format!("{BACKING_FILE} names no rollup; the burn cannot be paid without it"));
+        }
+        backing.rollup.trim().to_string()
+    } else {
+        std::env::var("ROLLUP")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                die(format!(
+                    "pw-finalize: no {BACKING_FILE} here; set ROLLUP=<rollup address> when paying a \
+                     burn from a downloaded payout receipt"
+                ))
+            })
+    };
     let l1_signer = LazyL1Signer::new(&rpc);
-    run_partial_withdrawal_payout(&rpc, &l1_signer, backing.rollup.trim());
+    run_partial_withdrawal_payout(&rpc, &l1_signer, &rollup);
 }
 
 /// Stable stderr marker of the one refusal the relay is expected to resolve and retry: the proof's
@@ -20378,6 +20875,47 @@ mod partial_withdrawal_reconcile_tests {
 }
 
 #[cfg(test)]
+mod daemon_signer_rule_tests {
+    use super::*;
+
+    #[test]
+    fn a_controlled_cosigner_slot_with_the_recorded_key_satisfies_the_rule() {
+        let cli = signing_ledger_tests::fixture();
+        require_daemon_signer(&cli.snapshot.record, &cli.controlled).expect("daemon signer present");
+    }
+
+    #[test]
+    fn no_controlled_slot_is_refused() {
+        let cli = signing_ledger_tests::fixture();
+        let err = require_daemon_signer(&cli.snapshot.record, &[]).unwrap_err();
+        assert!(err.contains("sig-cluster rule"), "{err}");
+    }
+
+    #[test]
+    fn a_controlled_slot_whose_key_is_not_in_the_record_does_not_count() {
+        let cli = signing_ledger_tests::fixture();
+        let foreign: Vec<ControlledMember> = cli
+            .controlled
+            .iter()
+            .map(|c| ControlledMember { keygen_seed: c.keygen_seed + 1000, ..c.clone() })
+            .collect();
+        assert!(require_daemon_signer(&cli.snapshot.record, &foreign).is_err());
+    }
+
+    #[test]
+    fn a_delegate_slot_does_not_count() {
+        let cli = signing_ledger_tests::fixture();
+        let member_count = cli.snapshot.record.member_count;
+        let delegate_only: Vec<ControlledMember> = cli
+            .controlled
+            .iter()
+            .map(|c| ControlledMember { slot: c.slot + u16::from(member_count), ..c.clone() })
+            .collect();
+        assert!(require_daemon_signer(&cli.snapshot.record, &delegate_only).is_err());
+    }
+}
+
+#[cfg(test)]
 mod signing_ledger_tests {
     use super::*;
 
@@ -20436,6 +20974,11 @@ mod signing_ledger_tests {
             channel_id,
             settled_tx_chain,
             token_funds_digest,
+            backing_root: Bytes32::from_bytes_be(&[0x44u8; 32]).unwrap(),
+            backing_anchor_block_number: 1,
+            // The fixture models an installed kit whose backing root L1 already finalized; the
+            // L1 read itself is exercised by `backing_finality_gate_tests`.
+            backing_root_finalized: true,
         };
 
         CliState {
@@ -20752,8 +21295,61 @@ mod signing_ledger_tests {
                 channel_id,
                 settled_tx_chain,
                 token_funds_digest,
+                backing_root: Bytes32::from_bytes_be(&[0x55u8; 32]).unwrap(),
+                backing_anchor_block_number: 2,
+                backing_root_finalized: true,
             },
         }
+    }
+
+    #[test]
+    fn in_channel_signing_waits_for_the_reused_kit_root_to_finalize_on_l1() {
+        // C25/G16: the durable head's kit root is not finalized → no in-channel signature, with the
+        // relay-visible marker; once L1 reports it finalized the receipt remembers that for good.
+        let mut cli = fixture();
+        let receipt = cli.signer_exit_kit_receipt.as_mut().unwrap();
+        receipt.backing_root_finalized = false;
+        let root = receipt.backing_root;
+
+        let refused = require_durable_head_backing_finalized_with(
+            &mut cli,
+            StateSigningPurpose::InChannelSend,
+            |_, _, _| false,
+        )
+        .expect_err("unfinalized backing root must refuse");
+        assert!(refused.contains(HEAD_BACKING_NOT_FINALIZED), "{refused}");
+        assert!(!cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
+        // The gate is purpose-independent: a deposit import stacked on the same unfinalized head
+        // is refused before its own prepared-kit check runs (item A by stacking).
+        let stacked = require_durable_head_backing_finalized_with(
+            &mut cli,
+            StateSigningPurpose::L1DepositImport,
+            |_, _, _| false,
+        )
+        .expect_err("asset-moving successor on an unfinalized head must refuse");
+        assert!(stacked.contains("L1DepositImport"), "{stacked}");
+        let asked = std::cell::RefCell::new(Vec::new());
+        require_durable_head_backing_finalized_with(
+            &mut cli,
+            StateSigningPurpose::InChannelSend,
+            |rollup, asked_root, _anchor| {
+                asked.borrow_mut().push((*rollup, *asked_root));
+                true
+            },
+        )
+        .expect("finalized backing root releases the gate");
+        assert_eq!(
+            asked.into_inner(),
+            vec![(cli.signer_exit_kit_receipt.as_ref().unwrap().rollup, root)]
+        );
+        assert!(cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
+        // Sticky: a second check never consults L1 again.
+        require_durable_head_backing_finalized_with(
+            &mut cli,
+            StateSigningPurpose::InChannelSend,
+            |_, _, _| panic!("finality is permanent; L1 must not be asked twice"),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -14,3 +14,4 @@ pub mod withdrawal_claim_circuit;
 pub mod withdrawal_claim_pis;
 
 pub mod late_incoming_circuit;
+pub mod late_deposit_circuit;

@@ -263,8 +263,9 @@ operator bootstraps each channel once, before the relay serves it.
 - `MLE_VERIFIER_CHAIN_ID=<chain id>`: the explicit operator opt-in for pinning MLE verifiers to a
   public chain (`FixtureLib.mleVerifierChainId`).
 - Build `channel_member` and `block_producer_service` with `--features authenticated-tail-receive`.
-  The late-incoming verifier, which a real-chain settlement requires, only exists for that balance
-  circuit, so the rollup, `setup-backing` and all config fixtures must come from the same build.
+  The late-incoming and late-deposit verifiers, which a real-chain settlement requires, only exist
+  for that balance circuit, so the rollup, `setup-backing` and all config fixtures must come from
+  the same build.
 
 **The rollup must finalize the producer's blocks.** Every exit (partial-withdrawal payout, close
 funding, late incoming claim) needs a validity proof the rollup has FINALIZED, the rollup verifies
@@ -282,10 +283,13 @@ copy it under `proof-da-output/` next to the contracts directory, which Foundry 
 **Order** (one writer per channel directory: the relay is stopped while this runs):
 1. Feature-build config fixtures → the producer's validity configuration → `Deploy.s.sol` (rollup,
    with `WALLET_VALIDITY_CONFIG` + `WALLET_VALIDITY_CONFIG_SHA256`) → `setup-backing` per channel →
-   `export_late_incoming_config` + `DeployLateIncomingVerifier.s.sol`.
+   `export_late_incoming_config` + `DeployLateIncomingVerifier.s.sol` →
+   `export_late_deposit_config` + `DeployLateDepositVerifier.s.sol` (the materializer's 4th
+   constructor argument: the post-close refund lane of a deposit no signed state imported).
 2. `BOOTSTRAP_STOP_AFTER=envelope node hosting/wallet/bootstrap-real-chain.js <ch>...` with the
    relay's CLI/L1 environment plus `BOOTSTRAP_DELEGATE_RECIPIENT_<ch>` (the operator delegate's exit
-   address), `LATE_INCOMING_VERIFIER`, `LATE_MLE_CONFIG_PATH`, `CONTRACTS_DIR`. It first verifies
+   address), `LATE_INCOMING_VERIFIER`, `LATE_MLE_CONFIG_PATH`, `LATE_DEPOSIT_VERIFIER`,
+   `LATE_DEPOSIT_MLE_CONFIG_PATH`, `CONTRACTS_DIR`. It first verifies
    that the rollup's validity verifier pins the producer's configuration and stops if it does not
    (`hosting/wallet/verify-validity-deployment.js`, which writes
    `wallet-live-work/producer/validity-deployment.json`). Then it writes the
@@ -337,7 +341,7 @@ installs the browser wasm package (built locally from the same clean tree by
 `DEPLOYED_REVISION`. Never scp single files onto the host.
 
 **A release whose circuits changed needs a new rollup.** The rollup's validity and withdrawal
-verifiers, and the late-incoming and close verifiers, pin circuit configurations and have no
+verifiers, and the late-incoming, late-deposit and close verifiers, pin circuit configurations and have no
 setter, so a plonky2 update or a circuit change cannot finalize anything on the deployed rollup
 (the deploy's re-verification refuses it). Deploy such a release with `DEPLOY_NEW_ROLLUP=1`
 (tree, binaries and wasm package installed, no re-verification, relay left stopped), then on the
@@ -345,7 +349,7 @@ host run `REBUILD_ARCHIVE=<name> nohup hosting/wallet/rebuild-public-rollup.sh`.
 old rollup's relay state (including the old `contracts-tail/test/data`), refreshes that directory
 from this release and generates the feature-built `*_config.json` set with this build into it, deploys the rollup (validity verifier pinned to the producer's export;
 `BASE_STAKE_WEI` / `POST_STAKE_WEI` override the 0.1 + 0.001 ETH bond), runs `setup-backing`,
-exports the late-incoming config and deploys its verifier (recorded in `~/relay/bootstrap.env`),
+exports the late-incoming and late-deposit configs and deploys their verifiers (recorded in `~/relay/bootstrap.env`),
 bootstraps the channels and starts the relay: the same order the rehearsal runs. Rehearse the
 script itself first: `public-chain-rehearsal.sh build`, `chain`, then `rebuild` runs it against the
 rehearsal chain, followed by the E2E. Balances on the replaced rollup stay there; users Clear and
