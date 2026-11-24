@@ -378,7 +378,9 @@ const INTENTIONAL_WASM_BINARY_OUTPUTS: &[&str] = &[
 /// Exact tracked Solidity-fixture surface in the pinned MLE submodule. The seven packed-v1 files
 /// remain historical cross-language conformance inputs, not aliases for the current wire-v3
 /// deployment protocol. `xlarge_mul.json` was retired and its reappearance must fail the release
-/// gate rather than silently expanding the legacy surface.
+/// gate rather than silently expanding the legacy surface. `v2_production_shape.json` and
+/// `v2_cheating_prover.json` arrived with the gas-halving pin 9575e2ef (submodule b8575001): the
+/// production-shape measurement fixture and the cheating-prover negative vectors of its own tests.
 const SUBMODULE_SOLIDITY_FIXTURES: &[&str] = &[
     "coset_recursive_verify.json",
     "historical_pcs_triples.json",
@@ -389,8 +391,10 @@ const SUBMODULE_SOLIDITY_FIXTURES: &[&str] = &[
     "recursive_verify.json",
     "small_mul.json",
     "transcript_v1_trace.json",
+    "v2_cheating_prover.json",
     "v2_cross_language.json",
     "v2_max_resource.json",
+    "v2_production_shape.json",
 ];
 
 const SUBMODULE_PACKED_V1_FIXTURES: &[&str] = &[
