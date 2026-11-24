@@ -232,6 +232,26 @@ pub fn regev_pk_root(pks: &[RegevPk]) -> Bytes32 {
     hash_words(&words)
 }
 
+/// The channel's Regev key root: [`regev_pk_root`] over all `MAX_CHANNEL_MEMBERS` balance slots,
+/// the slots past `active` holding [`RegevPk::padding`]. Computed from the active keys alone (the
+/// padding key's digest is a constant), so it never materializes the padded key array.
+pub fn channel_regev_pk_root(active: &[RegevPk]) -> Bytes32 {
+    use crate::constants::MAX_CHANNEL_MEMBERS;
+    assert!(active.len() <= MAX_CHANNEL_MEMBERS, "more keys than balance slots");
+    static PADDING_DIGEST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    let padding = PADDING_DIGEST.get_or_init(|| RegevPk::padding().digest().to_u32_vec());
+    let mut words = Vec::with_capacity(2 + 8 * MAX_CHANNEL_MEMBERS);
+    words.push(REGEV_PK_ROOT_DOMAIN);
+    words.push(MAX_CHANNEL_MEMBERS as u32);
+    for pk in active {
+        words.extend(pk.digest().to_u32_vec());
+    }
+    for _ in active.len()..MAX_CHANNEL_MEMBERS {
+        words.extend_from_slice(padding);
+    }
+    hash_words(&words)
+}
+
 #[cfg(test)]
 mod tests {
     use rand010::{SeedableRng, rngs::SmallRng};

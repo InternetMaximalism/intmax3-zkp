@@ -207,7 +207,7 @@ impl ChannelProofEnvelope {
 // below is unchanged.
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "ChannelRecordWire")]
 pub struct ChannelRecord {
     pub channel_id: ChannelId,
     /// Number of ACTIVE members (2..=MAX_CHANNEL_MEMBERS). Active members occupy slots
@@ -231,12 +231,10 @@ pub struct ChannelRecord {
     /// member_count`), which does not fit in u8 (the 2026-07-18 storm capped joins at 256). The
     /// IMCR digest encodes this as a u32 limb, so the widening is digest-transparent.
     pub delegate_count: u16,
-    /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order
-    /// 0..MAX_CHANNEL_MEMBERS. Active slots (`< member_count+delegate_count`) are nonzero and
-    /// pairwise-distinct; padding slots are `Bytes32::default()`.
-    // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
-    #[serde(with = "serde_big_array::BigArray")]
-    pub member_pk_gs: [Bytes32; MAX_CHANNEL_MEMBERS],
+    /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order. Holds exactly
+    /// the ACTIVE slots (`member_count + delegate_count`), each nonzero and pairwise-distinct;
+    /// padding slots are never stored (their value is `Bytes32::default()` in every digest).
+    pub member_pk_gs: Vec<Bytes32>,
     /// Bytes32 form of the wallet's LIVE-membership tree root
     /// (`wallet_core::member_pubkeys_root`, height `WALLET_MEMBER_TREE_HEIGHT`, cosigners +
     /// delegates — evolves with delegate joins).
@@ -267,6 +265,57 @@ pub struct ChannelRecord {
     /// `publishRegevPk` (adversarial review F9-A / detail2 §H-1): a balance ciphertext only
     /// counts if its key digest hangs under this root at the member's slot.
     pub regev_pk_root: Bytes32,
+}
+
+/// Serialized shape of [`ChannelRecord`]; older encodings carried every padding slot of
+/// `member_pk_gs`. Decoding keeps the active slots and refuses a nonzero value past them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelRecordWire {
+    channel_id: ChannelId,
+    member_count: u8,
+    delegate_count: u16,
+    member_pk_gs: Vec<Bytes32>,
+    member_pubkeys_root: Bytes32,
+    #[serde(default)]
+    set_version: u64,
+    bp_member_slot: u8,
+    special_close_penalty: U256,
+    close_freeze_nonce: u64,
+    status: ChannelStatus,
+    regev_pk_root: Bytes32,
+}
+
+impl TryFrom<ChannelRecordWire> for ChannelRecord {
+    type Error = String;
+
+    fn try_from(w: ChannelRecordWire) -> Result<Self, String> {
+        let active = w.member_count as usize + w.delegate_count as usize;
+        if active > MAX_CHANNEL_MEMBERS || w.member_pk_gs.len() > MAX_CHANNEL_MEMBERS {
+            return Err("channel record exceeds MAX_CHANNEL_MEMBERS".to_string());
+        }
+        let mut member_pk_gs = w.member_pk_gs;
+        if member_pk_gs.iter().skip(active).any(|h| *h != Bytes32::default()) {
+            return Err(format!("memberPkGs carries a nonzero identity past the {active} active slots"));
+        }
+        if member_pk_gs.len() < active {
+            return Err(format!("memberPkGs has {} slots, fewer than the active {active}", member_pk_gs.len()));
+        }
+        member_pk_gs.truncate(active);
+        Ok(Self {
+            channel_id: w.channel_id,
+            member_count: w.member_count,
+            delegate_count: w.delegate_count,
+            member_pk_gs,
+            member_pubkeys_root: w.member_pubkeys_root,
+            set_version: w.set_version,
+            bp_member_slot: w.bp_member_slot,
+            special_close_penalty: w.special_close_penalty,
+            close_freeze_nonce: w.close_freeze_nonce,
+            status: w.status,
+            regev_pk_root: w.regev_pk_root,
+        })
+    }
 }
 
 impl ChannelRecord {
@@ -319,25 +368,23 @@ impl ChannelRecord {
         // slots `0..member_count+delegate_count`) must be nonzero and pairwise distinct (no
         // shared-key / duplicate-participant forgery, across members AND delegates); PADDING slots
         // (`>= member_count+delegate_count`) must be Bytes32::default().
+        if self.member_pk_gs.len() != active {
+            return Err(ChannelError::InvalidChannelRecord(format!(
+                "member_pk_gs must hold exactly the {active} active slots (got {})",
+                self.member_pk_gs.len()
+            )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(active);
         for (i, hash) in self.member_pk_gs.iter().enumerate() {
-            if i < active {
-                if *hash == Bytes32::default() {
-                    return Err(ChannelError::InvalidChannelRecord(format!(
-                        "member_pk_gs[{i}] (active) must be nonzero"
-                    )));
-                }
-                for (j, other) in self.member_pk_gs.iter().enumerate().skip(i + 1) {
-                    if j < active && hash == other {
-                        return Err(ChannelError::InvalidChannelRecord(
-                            "active member_pk_gs must be pairwise distinct".to_string(),
-                        ));
-                    }
-                }
-            } else if *hash != Bytes32::default() {
+            if *hash == Bytes32::default() {
                 return Err(ChannelError::InvalidChannelRecord(format!(
-                    "member_pk_gs[{i}] is a padding slot (>= member_count+delegate_count {active}) \
-                     and must be Bytes32::default()"
+                    "member_pk_gs[{i}] (active) must be nonzero"
                 )));
+            }
+            if !seen.insert(*hash) {
+                return Err(ChannelError::InvalidChannelRecord(
+                    "active member_pk_gs must be pairwise distinct".to_string(),
+                ));
             }
         }
         Ok(())
@@ -373,10 +420,17 @@ impl ChannelRecord {
                     self.member_count as u32,
                     self.delegate_count as u32,
                 ],
-                self.member_pk_gs
-                    .iter()
-                    .flat_map(Bytes32::to_u32_vec)
-                    .collect::<Vec<_>>(),
+                {
+                    // Value-identical to the full-width digest: every padding slot hashes as the
+                    // zero identity.
+                    let mut words: Vec<u32> = self
+                        .member_pk_gs
+                        .iter()
+                        .flat_map(Bytes32::to_u32_vec)
+                        .collect();
+                    words.resize(MAX_CHANNEL_MEMBERS * 8, 0);
+                    words
+                },
                 self.member_pubkeys_root.to_u32_vec(),
                 self.special_close_penalty.to_u32_vec(),
                 self.regev_pk_root.to_u32_vec(),
@@ -2036,8 +2090,8 @@ mod tests {
 
     /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array
     /// (the balance-slot capacity, used for `ChannelRecord.member_pk_gs`).
-    fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
-        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    fn pad_hashes(active: &[Bytes32]) -> Vec<Bytes32> {
+        active.to_vec()
     }
 
     /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_SIG_CLUSTER array (the cosigner

@@ -11538,10 +11538,18 @@ fn join_delegate(
     // ciphertext, which decrypts to 0 under any key, so the join adds no balance to the channel and
     // `Σ balances` is provably unchanged by it. Do NOT reintroduce a caller-supplied ciphertext
     // here without an accompanying backing proof — that is the R3 hole.
-    state.balance_state.enc_balances[new_slot as usize] =
-        intmax3_zkp::common::balance_state::zero_token_row();
-    state.balance_state.pending_adds[new_slot as usize] =
-        [0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS];
+    // The state stores only active slots: the joiner's row is APPENDED at the old boundary.
+    if state.balance_state.enc_balances.len() != new_slot as usize {
+        die("join: the balance state does not end at the delegate boundary");
+    }
+    state
+        .balance_state
+        .enc_balances
+        .push(intmax3_zkp::common::balance_state::zero_token_row());
+    state
+        .balance_state
+        .pending_adds
+        .push([0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS]);
     // SECURITY (A-1 finding 1): bind the JOINER'S OWN Regev pk digest into its slot leaf, so the
     // slot is claimable at close. The value is not free: it is `poseidon(a, b)` over the very key
     // `nd.regev_pk` that `build_record` above already folded into the record's `regev_pk_root`, so
@@ -11555,9 +11563,9 @@ fn join_delegate(
     // `b = a·s + e`), so it can only harm itself, and the balance it would be "stealing" is
     // provably 0. The recipient-uniqueness guard at the top of this function is what prevents a
     // duplicate-identity join from capturing another slot's L1 deposits.
-    state.balance_state.regev_pk_digests[new_slot as usize] = new_pk_digest;
+    state.balance_state.regev_pk_digests.push(new_pk_digest);
     // B-1b: bind the new delegate's L1 exit address into its slot leaf (cosigner-signed H1).
-    state.balance_state.recipients[new_slot as usize] = new_recipient;
+    state.balance_state.recipients.push(new_recipient);
     state.balance_state.state_version += 1;
     state.member_signatures = Vec::new();
     let state = state.with_computed_digest();

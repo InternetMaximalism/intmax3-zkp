@@ -34,7 +34,7 @@ use crate::{
     utils::{
         leafable_hasher::{LeafableHasher as _, PoseidonLeafableHasher},
         poseidon_hash_out::PoseidonHashOut,
-        trees::incremental_merkle_tree::IncrementalMerkleTree,
+        trees::incremental_merkle_tree::{IncrementalMerkleProof, IncrementalMerkleTree},
     },
 };
 
@@ -193,7 +193,7 @@ mod token_matrix_serde {
                     sparse.len()
                 )));
             }
-            let mut rows: Vec<TokenCiphertexts> = Vec::with_capacity(MAX_CHANNEL_MEMBERS);
+            let mut rows: Vec<TokenCiphertexts> = Vec::with_capacity(sparse.len());
             for (slot, mut row) in sparse.into_iter().enumerate() {
                 if row.keys().any(|&t| t as usize >= MAX_CHANNEL_TOKENS) {
                     return Err(D::Error::custom(format!(
@@ -206,7 +206,6 @@ mod token_matrix_serde {
                         .unwrap_or_else(|| zero_ciphertext().clone())
                 }));
             }
-            rows.resize_with(MAX_CHANNEL_MEMBERS, zero_token_row);
             Ok(rows)
         }
     }
@@ -244,7 +243,7 @@ mod token_matrix_serde {
                     sparse.len()
                 )));
             }
-            let mut rows: Vec<TokenPendingAdds> = Vec::with_capacity(MAX_CHANNEL_MEMBERS);
+            let mut rows: Vec<TokenPendingAdds> = Vec::with_capacity(sparse.len());
             for (slot, row) in sparse.into_iter().enumerate() {
                 if row.keys().any(|&t| t as usize >= MAX_CHANNEL_TOKENS) {
                     return Err(D::Error::custom(format!(
@@ -256,7 +255,6 @@ mod token_matrix_serde {
                     row.get(&(t as u8)).copied().unwrap_or(0)
                 }));
             }
-            rows.resize(MAX_CHANNEL_MEMBERS, [0u32; MAX_CHANNEL_TOKENS]);
             Ok(rows)
         }
     }
@@ -267,7 +265,7 @@ mod token_matrix_serde {
 /// multi-token dimension (detail2 §N: per-(slot, token) ciphertexts + the channel-local token
 /// registry).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "BalanceStateWire")]
 pub struct BalanceState {
     pub channel_id: ChannelId,
     /// Number of ACTIVE members (2..=MAX_CHANNEL_MEMBERS). Active members occupy slots
@@ -299,9 +297,10 @@ pub struct BalanceState {
     /// delegate_count`) are all-zero rows; within active slots, positions `t >= token_count` are
     /// the canonical zero ciphertext (TM-8).
     ///
-    /// INVARIANT: `len() == MAX_CHANNEL_MEMBERS` always (constructed via the `pad_*` helpers /
-    /// the deserializer, re-checked fail-closed by [`Self::validate`]). Heap-backed `Vec` — a
-    /// `[[RegevCiphertext; 10]; 1024]` by-value array would blow the stack.
+    /// INVARIANT: `len() == member_count + delegate_count` (the ACTIVE slots only). Padding slots
+    /// are never stored: their committed value is the canonical padding leaf, folded into the
+    /// slot root by the padding ladder (see [`Self::slot_tree_root`]). Re-checked fail-closed by
+    /// [`Self::validate`]; the deserializer normalizes older full-width encodings.
     #[serde(with = "token_matrix_serde::ciphertexts")]
     pub enc_balances: Vec<TokenCiphertexts>,
     /// Decryption Stage 1: per-slot Regev public-key Poseidon digests, in member slot order.
@@ -314,8 +313,8 @@ pub struct BalanceState {
     /// (`balance_slot_leaf_hash`), so each member's registered Regev pk is bound by the same
     /// all-member signatures that bind the balances. This is the H1-commitment prerequisite that
     /// makes the decryption-core pk binding (MUST-FIX #1) satisfiable without deployer trust.
-    #[serde(with = "serde_big_array::BigArray")]
-    pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
+    /// INVARIANT: `len() == member_count + delegate_count` (see `enc_balances`).
+    pub regev_pk_digests: Vec<Bytes32>,
     /// B-1b (Option B1, tasks/reg-chain-1024-threat-model.md): the per-slot L1 EXIT ADDRESS, in
     /// member slot order. Active slots carry the slot owner's L1 withdrawal recipient; padding
     /// slots (`>= member_count + delegate_count`) carry `Address::default()` (zero).
@@ -328,8 +327,8 @@ pub struct BalanceState {
     /// open this field by slot-tree inclusion and connect it to the claim's `recipient` PI.
     /// Recipient changes are NOT a supported state transition — every transition verifier
     /// enforces `recipients` unchanged (see `state_update_verifier::verify_balance_state_common`).
-    #[serde(with = "serde_big_array::BigArray")]
-    pub recipients: [Address; MAX_CHANNEL_MEMBERS],
+    /// INVARIANT: `len() == member_count + delegate_count` (see `enc_balances`).
+    pub recipients: Vec<Address>,
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
     /// Stage 3 (post-close source-tx anchoring): the root of the per-channel settled-tx Merkle
@@ -357,7 +356,7 @@ pub struct BalanceState {
     /// Co-signers must refuse adds at `MAX_HOMO_ADDS_BEFORE_REFRESH`. Padding member slots and
     /// inactive token positions (`t >= token_count`) are 0.
     ///
-    /// INVARIANT: `len() == MAX_CHANNEL_MEMBERS` always (see `enc_balances`).
+    /// INVARIANT: `len() == member_count + delegate_count` (see `enc_balances`).
     #[serde(with = "token_matrix_serde::pending_adds")]
     pub pending_adds: Vec<TokenPendingAdds>,
     /// Channel-local token registry (detail2 §N-1): local token slot `t` -> BASE-layer
@@ -378,17 +377,163 @@ pub struct BalanceState {
     pub token_count: u8,
 }
 
+/// The serialized shape of [`BalanceState`]. Older encodings carried every padding slot
+/// (full `MAX_CHANNEL_MEMBERS` arrays); [`TryFrom`] keeps the active slots and refuses a nonzero
+/// value in any slot past them, so both encodings decode to the same active-only state.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BalanceStateWire {
+    channel_id: ChannelId,
+    member_count: u8,
+    delegate_count: u16,
+    #[serde(with = "token_matrix_serde::ciphertexts")]
+    enc_balances: Vec<TokenCiphertexts>,
+    regev_pk_digests: Vec<Bytes32>,
+    recipients: Vec<Address>,
+    settled_tx_chain: Bytes32,
+    settled_tx_accumulator_root: Bytes32,
+    state_version: u64,
+    #[serde(with = "token_matrix_serde::pending_adds")]
+    pending_adds: Vec<TokenPendingAdds>,
+    token_registry: [u32; MAX_CHANNEL_TOKENS],
+    token_count: u8,
+}
+
+fn trim_to_active<T: PartialEq + Clone>(
+    mut rows: Vec<T>,
+    active: usize,
+    padding: T,
+    pad_short: bool,
+    what: &str,
+) -> Result<Vec<T>, String> {
+    if rows.len() > MAX_CHANNEL_MEMBERS {
+        return Err(format!("{what} has {} slots (> MAX_CHANNEL_MEMBERS)", rows.len()));
+    }
+    if rows.iter().skip(active).any(|row| *row != padding) {
+        return Err(format!("{what} carries a nonzero value past the active slots ({active})"));
+    }
+    rows.truncate(active);
+    if rows.len() < active {
+        if !pad_short {
+            return Err(format!("{what} has {} slots, fewer than the active {active}", rows.len()));
+        }
+        rows.resize(active, padding);
+    }
+    Ok(rows)
+}
+
+impl TryFrom<BalanceStateWire> for BalanceState {
+    type Error = String;
+
+    fn try_from(w: BalanceStateWire) -> Result<Self, String> {
+        let active = w.member_count as usize + w.delegate_count as usize;
+        if active > MAX_CHANNEL_MEMBERS {
+            return Err(format!("{active} active slots exceed MAX_CHANNEL_MEMBERS"));
+        }
+        Ok(Self {
+            channel_id: w.channel_id,
+            member_count: w.member_count,
+            delegate_count: w.delegate_count,
+            // Ciphertext and add-counter rows drop trailing all-zero rows on the wire.
+            enc_balances: trim_to_active(w.enc_balances, active, zero_token_row(), true, "encBalances")?,
+            regev_pk_digests: trim_to_active(
+                w.regev_pk_digests,
+                active,
+                Bytes32::default(),
+                false,
+                "regevPkDigests",
+            )?,
+            recipients: trim_to_active(w.recipients, active, Address::default(), false, "recipients")?,
+            settled_tx_chain: w.settled_tx_chain,
+            settled_tx_accumulator_root: w.settled_tx_accumulator_root,
+            state_version: w.state_version,
+            pending_adds: trim_to_active(
+                w.pending_adds,
+                active,
+                [0u32; MAX_CHANNEL_TOKENS],
+                true,
+                "pendingAdds",
+            )?,
+            token_registry: w.token_registry,
+            token_count: w.token_count,
+        })
+    }
+}
+
+/// `z[k]` = the root of an all-padding subtree of height `k` (`z[0]` = the canonical padding
+/// leaf). With these, the balance-slot root over `2^BALANCE_SLOT_TREE_HEIGHT` slots is computed
+/// from the active slots alone.
+pub fn slot_padding_ladder() -> &'static [PoseidonHashOut] {
+    static LADDER: std::sync::OnceLock<Vec<PoseidonHashOut>> = std::sync::OnceLock::new();
+    LADDER.get_or_init(|| {
+        let zero_row_digests: [Bytes32; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| zero_ciphertext_digest());
+        let mut ladder = vec![balance_slot_leaf_hash(
+            Bytes32::default(),
+            &zero_row_digests,
+            &[0u32; MAX_CHANNEL_TOKENS],
+            Address::default(),
+        )];
+        for k in 0..BALANCE_SLOT_TREE_HEIGHT {
+            let z = ladder[k];
+            ladder.push(PoseidonLeafableHasher::two_to_one(z, z));
+        }
+        ladder
+    })
+}
+
+/// The balance-slot Merkle tree over the ACTIVE slots, every slot past them being the padding
+/// leaf. Same root and same inclusion paths as the full-width tree; memory O(active).
+pub struct SlotTree {
+    /// `levels[k]` = the nodes at height `k` that cover at least one active slot.
+    levels: Vec<Vec<PoseidonHashOut>>,
+}
+
+impl SlotTree {
+    pub fn from_leaves(leaves: Vec<PoseidonHashOut>) -> Self {
+        assert!(leaves.len() <= MAX_CHANNEL_MEMBERS, "more leaves than balance slots");
+        let ladder = slot_padding_ladder();
+        let mut levels = vec![leaves];
+        for k in 0..BALANCE_SLOT_TREE_HEIGHT {
+            let below = &levels[k];
+            let next: Vec<PoseidonHashOut> = below
+                .chunks(2)
+                .map(|pair| PoseidonLeafableHasher::two_to_one(pair[0], *pair.get(1).unwrap_or(&ladder[k])))
+                .collect();
+            levels.push(next);
+        }
+        Self { levels }
+    }
+
+    pub fn get_root(&self) -> PoseidonHashOut {
+        self.levels[BALANCE_SLOT_TREE_HEIGHT]
+            .first()
+            .copied()
+            .unwrap_or(slot_padding_ladder()[BALANCE_SLOT_TREE_HEIGHT])
+    }
+
+    /// Siblings of `index` from the leaf level up, as an incremental-tree proof.
+    pub fn prove(&self, index: u64) -> IncrementalMerkleProof<PoseidonHashOut> {
+        let ladder = slot_padding_ladder();
+        let mut siblings = Vec::with_capacity(BALANCE_SLOT_TREE_HEIGHT);
+        let mut i = index as usize;
+        for k in 0..BALANCE_SLOT_TREE_HEIGHT {
+            siblings.push(self.levels[k].get(i ^ 1).copied().unwrap_or(ladder[k]));
+            i >>= 1;
+        }
+        IncrementalMerkleProof::from_siblings(siblings)
+    }
+}
+
 impl BalanceState {
     /// Pad `active` full-width token rows (len = the active slot prefix) to the full
     /// `MAX_CHANNEL_MEMBERS`-length row vector, filling padding slots with all-zero rows.
     pub fn pad_enc_balances(active: &[TokenCiphertexts]) -> Vec<TokenCiphertexts> {
-        let mut rows: Vec<TokenCiphertexts> = active.to_vec();
         assert!(
-            rows.len() <= MAX_CHANNEL_MEMBERS,
+            active.len() <= MAX_CHANNEL_MEMBERS,
             "active slot prefix exceeds MAX_CHANNEL_MEMBERS"
         );
-        rows.resize_with(MAX_CHANNEL_MEMBERS, zero_token_row);
-        rows
+        active.to_vec()
     }
 
     /// Single-token convenience: place each active ciphertext at TOKEN SLOT 0 of its member
@@ -410,13 +555,11 @@ impl BalanceState {
     /// Pad `active` full-width per-token add-counter rows to the full `MAX_CHANNEL_MEMBERS`
     /// length, filling padding slots with all-zero rows.
     pub fn pad_pending_adds(active: &[TokenPendingAdds]) -> Vec<TokenPendingAdds> {
-        let mut rows: Vec<TokenPendingAdds> = active.to_vec();
         assert!(
-            rows.len() <= MAX_CHANNEL_MEMBERS,
+            active.len() <= MAX_CHANNEL_MEMBERS,
             "active slot prefix exceeds MAX_CHANNEL_MEMBERS"
         );
-        rows.resize(MAX_CHANNEL_MEMBERS, [0u32; MAX_CHANNEL_TOKENS]);
-        rows
+        active.to_vec()
     }
 
     /// Single-token convenience: each active counter goes to token position 0 (see
@@ -444,16 +587,18 @@ impl BalanceState {
     /// Decryption Stage 1: pad `active` Regev pk digests (len = `member_count + delegate_count`,
     /// each `Bytes32::from(RegevPk::poseidon_digest())`) to a full `MAX_CHANNEL_MEMBERS`-sized
     /// array, filling padding slots with `Bytes32::default()`.
-    pub fn pad_regev_pk_digests(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
-        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    pub fn pad_regev_pk_digests(active: &[Bytes32]) -> Vec<Bytes32> {
+        assert!(active.len() <= MAX_CHANNEL_MEMBERS, "active slot prefix exceeds MAX_CHANNEL_MEMBERS");
+        active.to_vec()
     }
 
     /// B-1b: pad `active` per-slot L1 exit addresses (len = `member_count + delegate_count`, each
     /// NONZERO) to a full `MAX_CHANNEL_MEMBERS`-sized array, filling padding slots with
     /// `Address::default()` (zero). Mirrors the other `pad_*` helpers; [`Self::validate`] enforces
     /// the nonzero-active / zero-padding split fail-closed.
-    pub fn pad_recipients(active: &[Address]) -> [Address; MAX_CHANNEL_MEMBERS] {
-        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    pub fn pad_recipients(active: &[Address]) -> Vec<Address> {
+        assert!(active.len() <= MAX_CHANNEL_MEMBERS, "active slot prefix exceeds MAX_CHANNEL_MEMBERS");
+        active.to_vec()
     }
 
     /// The keccak digests of one slot's `MAX_CHANNEL_TOKENS` ciphertexts, reusing the canonical
@@ -476,72 +621,58 @@ impl BalanceState {
     /// adds, zero recipient)` leaf, and within active slots every zero token position reuses the
     /// cached zero-ct digest. Pure memoizations: the reused values equal the per-slot recompute.
     pub fn slot_leaf_hashes(&self) -> Vec<PoseidonHashOut> {
-        assert_eq!(
-            self.enc_balances.len(),
-            MAX_CHANNEL_MEMBERS,
-            "enc_balances must be full slot width"
+        let active = self.active_slots();
+        assert!(
+            self.enc_balances.len() == active
+                && self.pending_adds.len() == active
+                && self.regev_pk_digests.len() == active
+                && self.recipients.len() == active,
+            "balance-state slot vectors must hold exactly the active slots"
         );
-        assert_eq!(
-            self.pending_adds.len(),
-            MAX_CHANNEL_MEMBERS,
-            "pending_adds must be full slot width"
-        );
-        let zero_row_digests: [Bytes32; MAX_CHANNEL_TOKENS] =
-            std::array::from_fn(|_| zero_ciphertext_digest());
-        let padding_leaf = balance_slot_leaf_hash(
-            Bytes32::default(),
-            &zero_row_digests,
-            &[0u32; MAX_CHANNEL_TOKENS],
-            Address::default(),
-        );
-        (0..MAX_CHANNEL_MEMBERS)
+        (0..active)
             .map(|i| {
-                let is_padding_slot = self.regev_pk_digests[i] == Bytes32::default()
-                    && self.pending_adds[i] == [0u32; MAX_CHANNEL_TOKENS]
-                    && self.recipients[i] == Address::default()
-                    && self.enc_balances[i]
-                        .iter()
-                        .all(|ct| ct == zero_ciphertext());
-                if is_padding_slot {
-                    padding_leaf
-                } else {
-                    balance_slot_leaf_hash(
-                        self.regev_pk_digests[i],
-                        &Self::token_ct_digests(&self.enc_balances[i]),
-                        &self.pending_adds[i],
-                        self.recipients[i],
-                    )
-                }
+                balance_slot_leaf_hash(
+                    self.regev_pk_digests[i],
+                    &Self::token_ct_digests(&self.enc_balances[i]),
+                    &self.pending_adds[i],
+                    self.recipients[i],
+                )
             })
             .collect()
+    }
+
+    /// Number of ACTIVE slots (`member_count + delegate_count`): the length of every slot vector.
+    pub fn active_slots(&self) -> usize {
+        self.member_count as usize + self.delegate_count as usize
     }
 
     /// The FULL balance-slot tree (height [`BALANCE_SLOT_TREE_HEIGHT`], all
     /// `MAX_CHANNEL_MEMBERS` leaves populated). Used by the claim witness builders to produce
     /// per-slot inclusion proofs; [`Self::slot_tree_root`] computes the same root without the
     /// tree bookkeeping.
-    pub fn slot_tree(&self) -> IncrementalMerkleTree<PoseidonHashOut> {
-        let mut tree = IncrementalMerkleTree::<PoseidonHashOut>::new(BALANCE_SLOT_TREE_HEIGHT);
-        for leaf in self.slot_leaf_hashes() {
-            tree.push(leaf);
-        }
-        tree
+    pub fn slot_tree(&self) -> SlotTree {
+        SlotTree::from_leaves(self.slot_leaf_hashes())
     }
 
-    /// The balance-slot tree ROOT — the value committed inside [`Self::h1`]. Bottom-up fold
-    /// (`PoseidonLeafableHasher::two_to_one`, the same node hash `slot_tree()` /
-    /// `IncrementalMerkleProofTarget` use; equality is pinned by
-    /// `slot_tree_root_matches_incremental_tree` below).
+    /// The balance-slot tree ROOT — the value committed inside [`Self::h1`]: the Merkle root over
+    /// all `2^BALANCE_SLOT_TREE_HEIGHT` slots, the slots past the active ones being the padding
+    /// leaf (folded in through [`slot_padding_ladder`], never materialized).
     pub fn slot_tree_root(&self) -> PoseidonHashOut {
+        let ladder = slot_padding_ladder();
         let mut level = self.slot_leaf_hashes();
-        debug_assert_eq!(level.len(), 1 << BALANCE_SLOT_TREE_HEIGHT);
-        while level.len() > 1 {
+        for z in ladder.iter().take(BALANCE_SLOT_TREE_HEIGHT) {
+            if level.is_empty() {
+                break;
+            }
             level = level
                 .chunks(2)
-                .map(|pair| PoseidonLeafableHasher::two_to_one(pair[0], pair[1]))
+                .map(|pair| PoseidonLeafableHasher::two_to_one(pair[0], *pair.get(1).unwrap_or(z)))
                 .collect();
         }
-        level[0]
+        level
+            .first()
+            .copied()
+            .unwrap_or(ladder[BALANCE_SLOT_TREE_HEIGHT])
     }
 
     /// The FIXED-width v2 H1 header preimage (detail2 §N-1; 37 u64-encoded elements). Exposed so
@@ -619,16 +750,6 @@ impl BalanceState {
     pub fn validate(&self) -> Result<(), ChannelError> {
         // Fail-closed shape check: the in-memory token matrices must be full slot width (a
         // malformed snapshot must never reach the hashing paths, which assert the same).
-        if self.enc_balances.len() != MAX_CHANNEL_MEMBERS
-            || self.pending_adds.len() != MAX_CHANNEL_MEMBERS
-        {
-            return Err(ChannelError::InvalidBalanceState(format!(
-                "enc_balances/pending_adds must have exactly MAX_CHANNEL_MEMBERS = \
-                 {MAX_CHANNEL_MEMBERS} slot rows (got {} / {})",
-                self.enc_balances.len(),
-                self.pending_adds.len()
-            )));
-        }
         // TM-8: token_count bounds. token_count == 0 is invalid (a channel always has at least
         // its genesis token); token_count > MAX_CHANNEL_TOKENS would put "active" positions
         // outside the fixed-width leaf layout.
@@ -685,6 +806,22 @@ impl BalanceState {
                      MAX_CHANNEL_MEMBERS = {MAX_CHANNEL_MEMBERS}"
                 ))
             })?;
+        // Fail-closed shape check: every slot vector holds exactly the active slots (padding
+        // slots are never stored; a malformed state must never reach the hashing paths).
+        if self.enc_balances.len() != active
+            || self.pending_adds.len() != active
+            || self.regev_pk_digests.len() != active
+            || self.recipients.len() != active
+        {
+            return Err(ChannelError::InvalidBalanceState(format!(
+                "slot vectors must hold exactly the {active} active slots (got enc {} / adds {} / \
+                 pk digests {} / recipients {})",
+                self.enc_balances.len(),
+                self.pending_adds.len(),
+                self.regev_pk_digests.len(),
+                self.recipients.len()
+            )));
+        }
         for (index, row) in self.enc_balances.iter().enumerate() {
             for (t, ct) in row.iter().enumerate() {
                 ct.validate().map_err(|err| {
@@ -696,13 +833,6 @@ impl BalanceState {
                 // delegate account): a non-default padding slot would smuggle hidden value past
                 // the active accounting. Active slots = members (`< member_count`) + delegates
                 // (`member_count..member_count+delegate_count`). Padding = `>= active`.
-                if index >= active && ct != zero_ciphertext() {
-                    return Err(ChannelError::InvalidBalanceState(format!(
-                        "enc_balances[{index}][{t}] is a padding slot (>= \
-                         member_count+delegate_count {active}) and must be the canonical zero \
-                         ciphertext"
-                    )));
-                }
                 // TM-8 fail-closed per (slot, token): INACTIVE token positions (`t >=
                 // token_count`) must be the canonical zero ciphertext on EVERY slot — the
                 // zero-ct digest is the only value the active/unused token boundary admits, so
@@ -721,14 +851,6 @@ impl BalanceState {
         // non-default padding digest would be folded into H1 and could smuggle an
         // unregistered key past the active accounting. Active-slot digests are arbitrary
         // (the registered member pk digests).
-        for (index, d) in self.regev_pk_digests.iter().enumerate() {
-            if index >= active && *d != Bytes32::default() {
-                return Err(ChannelError::InvalidBalanceState(format!(
-                    "regev_pk_digests[{index}] is a padding slot (>= member_count+delegate_count \
-                     {active}) and must be Bytes32::default()"
-                )));
-            }
-        }
         // B-1b recipient split (fail-closed on BOTH sides):
         // - ACTIVE slots (`< member_count + delegate_count`) MUST carry a NONZERO recipient. Under
         //   Option B a delegate has NO L1 registration, so a zero recipient would make the slot
@@ -744,12 +866,6 @@ impl BalanceState {
                      {active}) and must be a NONZERO L1 exit address (B-1b)"
                 )));
             }
-            if index >= active && *r != Address::default() {
-                return Err(ChannelError::InvalidBalanceState(format!(
-                    "recipients[{index}] is a padding slot (>= member_count+delegate_count \
-                     {active}) and must be Address::default()"
-                )));
-            }
         }
         for (index, row) in self.pending_adds.iter().enumerate() {
             for (t, &adds) in row.iter().enumerate() {
@@ -760,12 +876,6 @@ impl BalanceState {
                     return Err(ChannelError::InvalidBalanceState(format!(
                         "pending_adds[{index}][{t}] = {adds} exceeds \
                          MAX_HOMO_ADDS_BEFORE_REFRESH = {MAX_HOMO_ADDS_BEFORE_REFRESH}"
-                    )));
-                }
-                if index >= active && adds != 0 {
-                    return Err(ChannelError::InvalidBalanceState(format!(
-                        "pending_adds[{index}][{t}] is a padding slot (>= \
-                         member_count+delegate_count {active}) and must be 0"
                     )));
                 }
                 // TM-8/TM-13 fail-closed per (slot, token): an inactive token position must
@@ -1440,11 +1550,26 @@ mod tests {
         assert_eq!(
             state.slot_tree_root(),
             state.slot_tree().get_root(),
-            "fold root must equal the IncrementalMerkleTree root"
+            "fold root must equal the sparse slot tree root"
         );
 
+        // VALUE IDENTITY with the full-width layout: an incremental tree over ALL
+        // `MAX_CHANNEL_MEMBERS` slots, the slots past the active ones holding the explicit padding
+        // leaf, has the same root and the same inclusion path for every active slot.
+        let padding = slot_padding_ladder()[0];
+        let mut full = IncrementalMerkleTree::<PoseidonHashOut>::new(BALANCE_SLOT_TREE_HEIGHT);
+        let leaves = state.slot_leaf_hashes();
+        for i in 0..MAX_CHANNEL_MEMBERS {
+            full.push(leaves.get(i).copied().unwrap_or(padding));
+        }
+        assert_eq!(state.slot_tree_root(), full.get_root());
+        let sparse = state.slot_tree();
+        for i in 0..state.active_slots() as u64 {
+            assert_eq!(sparse.prove(i).0.siblings, full.prove(i).0.siblings, "path of slot {i}");
+        }
+
         // Explicit per-slot recompute (no padding memoization) — same leaves, same root.
-        let naive: Vec<PoseidonHashOut> = (0..MAX_CHANNEL_MEMBERS)
+        let naive: Vec<PoseidonHashOut> = (0..state.active_slots())
             .map(|i| {
                 // Per-position recompute WITHOUT the zero-ct digest memoization.
                 let digests: [Bytes32; MAX_CHANNEL_TOKENS] =
@@ -1464,6 +1589,31 @@ mod tests {
         s.regev_pk_digests[1] = Bytes32::from_u32_slice(&[5, 0, 0, 0, 0, 0, 0, 1]).unwrap();
         assert_ne!(state.slot_tree_root(), s.slot_tree_root());
         assert_eq!(s.slot_tree_root(), s.slot_tree().get_root());
+    }
+
+    /// Older encodings carried every padding slot; they decode to the same active-only state.
+    #[test]
+    fn full_width_encoding_decodes_to_the_active_state() {
+        let state = sample_state();
+        let mut value = serde_json::to_value(&state).unwrap();
+        let active = state.active_slots();
+        let pad = |key: &str, padding: serde_json::Value| {
+            let v = value[key].as_array().unwrap().clone();
+            let mut v = v;
+            v.resize(MAX_CHANNEL_MEMBERS, padding);
+            v
+        };
+        let digests = pad("regevPkDigests", serde_json::to_value(Bytes32::default()).unwrap());
+        let recipients = pad("recipients", serde_json::to_value(Address::default()).unwrap());
+        value["regevPkDigests"] = serde_json::Value::Array(digests);
+        value["recipients"] = serde_json::Value::Array(recipients);
+        let decoded: BalanceState = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded, state);
+        assert_eq!(decoded.regev_pk_digests.len(), active);
+        // A nonzero value past the active slots is refused, never silently dropped.
+        value["regevPkDigests"][active] =
+            serde_json::to_value(Bytes32::from_u32_slice(&[1; 8]).unwrap()).unwrap();
+        assert!(serde_json::from_value::<BalanceState>(value).is_err());
     }
 
     /// The new H1 is the CANONICAL `PoseidonHashOut → Bytes32` encoding of the header hash —
