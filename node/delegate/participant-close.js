@@ -16,7 +16,7 @@ const {
 } = require('ethers');
 const { SignedTransactionOutbox } = require('./signed-transaction-outbox');
 
-const PARTICIPANT_TREE_DEPTH = 10;
+const PARTICIPANT_TREE_DEPTH = 20;
 const MAX_PARTICIPANTS = 1 << PARTICIPANT_TREE_DEPTH;
 const PARTICIPANT_LEAF_DOMAIN = '0x494d5052'; // "IMPR"
 const PARTICIPANT_NODE_DOMAIN = '0x494d504e'; // "IMPN"
@@ -26,14 +26,14 @@ const MANAGER_PARTICIPANT_ABI = [
   'event CloseCancelled(bytes32 indexed closeIntentDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion)',
   'event CloseFinalized(bytes32 indexed closeIntentDigest, bytes32 indexed burnTxHash, uint64 indexed finalEpoch, uint256 channelFundAmount, uint64 finalStateVersion, bytes32 finalSettledTxChain)',
   'function participantRoot() view returns (bytes32)',
-  'function activeParticipantCount() view returns (uint16)',
+  'function activeParticipantCount() view returns (uint32)',
   'function channelStatus() view returns (uint8)',
   'function currentCloseFreezeNonce() view returns (uint64)',
   'function closeRequestGeneration() view returns (uint64)',
   'function highestCancelledRevivedStateVersion() view returns (uint64)',
   'function finalizedCloseIntentDigest() view returns (bytes32)',
   'function getPendingClose() view returns (tuple(bool active,uint64 closeNonce,uint64 finalEpoch,uint64 finalSmallBlockNumber,uint64 closeFreezeNonce,uint64 challengeDeadline,bytes32 closeIntentDigest,bytes32 finalChannelStateDigest,bytes32 finalBalanceStateH1,uint256[10] channelFundAmounts,uint32[10] tokenRegistry,uint8 tokenCount,bytes32 channelFundIntmaxStateRoot,bytes32 burnTxHash,bytes32 closeWithdrawalDigest,uint64 snapshotMediumBlockNumber,uint64 finalStateVersion,bytes32 finalSettledTxChain,bytes32 finalSettledTxAccumulatorRoot))',
-  'function requestCloseAsParticipant(uint16 slot, bytes32 pkG, bytes32[10] siblings, uint64 expectedCurrentCloseFreezeNonce, uint64 expectedHighestCancelledRevivedStateVersion)',
+  'function requestCloseAsParticipant(uint32 slot, bytes32 pkG, bytes32[20] siblings, uint64 expectedCurrentCloseFreezeNonce, uint64 expectedHighestCancelledRevivedStateVersion)',
   // Permissionless by contract.  The delegate reuses its recipient signer only as the gas-paying
   // account; no participant authority is implied by this call.
   'function finalizeCloseGuarded(bytes32 expectedCloseIntentDigest, uint64 expectedCloseRequestGeneration)',
@@ -61,7 +61,7 @@ function boundedCount(value, label) {
 
 function participantLeaf(slot, pkG, recipient) {
   return solidityPackedKeccak256(
-    ['bytes4', 'uint16', 'bytes32', 'address'],
+    ['bytes4', 'uint32', 'bytes32', 'address'],
     [PARTICIPANT_LEAF_DOMAIN, slot, pkG, recipient],
   );
 }
@@ -161,7 +161,9 @@ function buildParticipantCloseProof(snapshot, configuredSlot, configuredRecipien
   }
 
   const expectedRecipient = getAddress(configuredRecipient);
-  const nodes = Array(MAX_PARTICIPANTS).fill(ZeroHash);
+  // Only the occupied prefix is materialized: an unoccupied leaf is the zero word, so a missing
+  // node at height k is the root of an all-zero subtree of height k (`zero`).
+  let nodes = Array(activeParticipantCount).fill(ZeroHash);
   for (let i = 0; i < activeParticipantCount; i += 1) {
     const pkG = String(pkGs[i]);
     if (!isHexString(pkG, 32) || pkG.toLowerCase() === ZeroHash) {
@@ -181,12 +183,17 @@ function buildParticipantCloseProof(snapshot, configuredSlot, configuredRecipien
   const pkG = String(pkGs[slot]).toLowerCase();
   const siblings = [];
   let index = slot;
-  let width = MAX_PARTICIPANTS;
-  while (width > 1) {
-    siblings.push(nodes[index ^ 1]);
-    for (let i = 0; i < width; i += 2) nodes[i >> 1] = participantNode(nodes[i], nodes[i + 1]);
+  let zero = ZeroHash;
+  for (let level = 0; level < PARTICIPANT_TREE_DEPTH; level += 1) {
+    const sibling = index ^ 1;
+    siblings.push(sibling < nodes.length ? nodes[sibling] : zero);
+    const parents = [];
+    for (let i = 0; i < nodes.length; i += 2) {
+      parents.push(participantNode(nodes[i], i + 1 < nodes.length ? nodes[i + 1] : zero));
+    }
+    nodes = parents;
     index >>= 1;
-    width >>= 1;
+    zero = participantNode(zero, zero);
   }
   if (siblings.length !== PARTICIPANT_TREE_DEPTH) throw new Error('participant proof depth mismatch');
   return {

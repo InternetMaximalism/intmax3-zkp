@@ -400,7 +400,7 @@ test('an unchanged index the base cannot supply is refused (rowCount may exceed 
 });
 
 test('a bad rowCount is refused', () => {
-  for (const rc of [undefined, null, -1, 1.5, 1025, '5']) {
+  for (const rc of [undefined, null, -1, 1.5, (1 << 20) + 1, '5']) {
     assert.strictEqual(rejects(makeDelta({ rowCount: rc })), 'rowCount', 'rowCount: ' + rc);
   }
 });

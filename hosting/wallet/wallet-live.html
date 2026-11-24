@@ -741,7 +741,7 @@ function parseConfirmationProgress(message) {
 // unrecognized shape returns `{ok:false, reason}` and the caller re-fetches in full.
 const DELTA_FORMAT = 1;
 const DELTA_CARRY_FIELDS = ['regevPkDigests', 'recipients'];
-const MAX_CHANNEL_MEMBERS_JS = 1024; // src/constants.rs — slot-matrix width
+const MAX_CHANNEL_MEMBERS_JS = 1 << 20; // src/constants.rs — slot-matrix width
 const MAX_CHANNEL_TOKENS_JS = 10;    // src/constants.rs — token positions per slot
 
 function isPlainObject(v) {

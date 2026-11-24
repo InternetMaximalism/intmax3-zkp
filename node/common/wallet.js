@@ -1,4 +1,6 @@
 'use strict';
+// src/constants.rs MAX_CHANNEL_MEMBERS = 2^20 balance slots: the highest slot index.
+const MAX_SLOT_INDEX = (1 << 20) - 1;
 // Delegate proving backend (DESIGN.md §2.2/§4). Wraps the WASM wallet built with
 // `hosting/build-wallet-node-wasm.sh` (output dir `pkg-node/`). Secrets live
 // only in the in-process WASM session and are never serialized (matches wasm_wallet.rs).
@@ -134,7 +136,7 @@ class Wallet {
     if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) {
       throw new TypeError('recipientSlot: send needs the recipient slot record {slot, pkG, pkB, regevPk} from /api/member');
     }
-    exactNumber(recipient.slot, 1023, 'recipientSlot');
+    exactNumber(recipient.slot, MAX_SLOT_INDEX, 'recipientSlot');
     const value = exactAmount(amount);
     const token = optionalNumber(tokenSlot, 9, 'tokenSlot');
     return JSON.parse(this._load().wallet_send(JSON.stringify(recipient), value, token));
@@ -151,7 +153,7 @@ class Wallet {
     // Channel zero is the dummy and uint32::MAX is the reserved burn route; neither is an
     // ordinary channel destination. Actual registration/activeness remain checked in WASM.
     const destination = exactNumber(toChannel, 0xfffffffe, 'toChannel', 1);
-    const recipient = exactNumber(toSlot, 1023, 'toSlot');
+    const recipient = exactNumber(toSlot, MAX_SLOT_INDEX, 'toSlot');
     const value = exactAmount(amount);
     const token = optionalNumber(tokenIndex, 0xffffffff, 'tokenIndex');
     return JSON.parse(

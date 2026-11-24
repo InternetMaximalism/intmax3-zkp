@@ -21,12 +21,12 @@ test.after(() => fs.rmSync(work, { recursive: true, force: true }));
 test('deposit numbers are exact canonical protocol values before any spend', () => {
   assert.equal(checks.depositAmount('18446744073709551615'), '18446744073709551615');
   assert.equal(checks.tokenIndex('4294967295'), 4294967295);
-  assert.equal(checks.recipientSlot('1023'), 1023);
+  assert.equal(checks.recipientSlot('1048575'), 1048575);
   for (const amount of ['0', '-1', '01', '1.5', '18446744073709551616', Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => checks.depositAmount(amount));
   }
   for (const token of ['-1', '0.5', '4294967296']) assert.throws(() => checks.tokenIndex(token));
-  assert.throws(() => checks.recipientSlot('1024'));
+  assert.throws(() => checks.recipientSlot('1048576'));
 });
 test('rejoin resolves the original exact identity, not the last participant', () => {
   const snapshot = fixture();

@@ -11,10 +11,10 @@ const manager = `0x${'44'.repeat(20)}`;
 test('provider-only participant-close preflight carries the actual recipient sender', async () => {
   const iface = new Interface([
     'function participantRoot() view returns (bytes32)',
-    'function activeParticipantCount() view returns (uint16)',
+    'function activeParticipantCount() view returns (uint32)',
     'function currentCloseFreezeNonce() view returns (uint64)',
     'function highestCancelledRevivedStateVersion() view returns (uint64)',
-    'function requestCloseAsParticipant(uint16 slot,bytes32 pkG,bytes32[10] siblings,uint64 expectedCurrentCloseFreezeNonce,uint64 expectedHighestCancelledRevivedStateVersion)',
+    'function requestCloseAsParticipant(uint32 slot,bytes32 pkG,bytes32[20] siblings,uint64 expectedCurrentCloseFreezeNonce,uint64 expectedHighestCancelledRevivedStateVersion)',
   ]);
   const snapshot = { record: { memberCount: 1, delegateCount: 1, memberPkGs: [hash('11'), hash('22')] },
     state: { digest: hash('cc'), balanceState: { memberCount: 1, delegateCount: 1,

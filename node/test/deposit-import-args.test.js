@@ -77,15 +77,15 @@ test('malformed tx hashes are refused', () => {
 });
 
 test('out-of-range or non-integer slots are refused', () => {
-  for (const recipientSlot of [-1, 1024, 99999, 1.5, 'abc']) {
+  for (const recipientSlot of [-1, 1048576, 9999999, 1.5, 'abc']) {
     const r = depositImportArgs({ txHash: TX, rpc: RPC, recipientSlot });
     assert.ok(r.error, `must refuse slot ${recipientSlot}`);
   }
 });
 
-test('slot boundaries: 0 and 1023 are accepted', () => {
+test('slot boundaries: 0 and 1048575 are accepted', () => {
   assert.strictEqual(depositImportArgs({ txHash: TX, rpc: RPC, recipientSlot: 0 }).args[1], '0');
-  assert.strictEqual(depositImportArgs({ txHash: TX, rpc: RPC, recipientSlot: 1023 }).args[1], '1023');
+  assert.strictEqual(depositImportArgs({ txHash: TX, rpc: RPC, recipientSlot: 1048575 }).args[1], '1048575');
 });
 
 test('a flag-like or missing rpc url is refused', () => {

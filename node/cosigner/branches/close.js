@@ -60,8 +60,8 @@ async function proxyCloseClaim(event, ctx) {
     return { ok: false, status: 400, body: { error: 'manager must equal the configured channel manager' } };
   }
   const slot = Number(body.slot);
-  if (!Number.isSafeInteger(slot) || slot < 0 || slot >= 1024) {
-    return { ok: false, status: 400, body: { error: 'slot must be an integer in 0..1023' } };
+  if (!Number.isSafeInteger(slot) || slot < 0 || slot >= (1 << 20)) {
+    return { ok: false, status: 400, body: { error: 'slot must be an integer in 0..1048575' } };
   }
   const recipient = String(body.recipient || '');
   if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
