@@ -4222,9 +4222,7 @@ mod delegate_add_gate_tests {
     /// immediately after, each slot carrying a distinct nonzero identity.
     fn record(members: u8, delegates: u16) -> ChannelRecord {
         let active = members as usize + delegates as usize;
-        let member_pk_gs = std::array::from_fn(|i| {
-            if i < active { pkg(i as u8) } else { Bytes32::default() }
-        });
+        let member_pk_gs: Vec<Bytes32> = (0..active).map(|i| pkg(i as u8)).collect();
         ChannelRecord {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: members,

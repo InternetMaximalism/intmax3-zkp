@@ -69,7 +69,7 @@ use crate::{
         encrypt_amount,
         hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
         prove_balance_refresh_witnessed, prove_channel_tx_decrypted,
-        prove_channel_update_decrypted, prove_hash_sig, regev_pk_root, verify_hash_sig,
+        prove_channel_update_decrypted, prove_hash_sig, verify_hash_sig,
     },
     utils::{
         poseidon_hash_out::PoseidonHashOut, trees::incremental_merkle_tree::IncrementalMerkleTree,
@@ -11915,9 +11915,7 @@ mod delegate_send_tests {
             channel_id: ChannelId::new(31).unwrap(),
             member_count: 2,
             delegate_count: 1,
-            member_pk_gs: std::array::from_fn(|i| {
-                members.get(i).map(|m| m.pk_g).unwrap_or_default()
-            }),
+            member_pk_gs: members.iter().map(|m| m.pk_g).collect(),
             member_pubkeys_root: Bytes32::default(),
             set_version: 0,
             bp_member_slot: 0,

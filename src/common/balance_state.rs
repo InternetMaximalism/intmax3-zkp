@@ -34,7 +34,7 @@ use crate::{
     utils::{
         leafable_hasher::{LeafableHasher as _, PoseidonLeafableHasher},
         poseidon_hash_out::PoseidonHashOut,
-        trees::incremental_merkle_tree::{IncrementalMerkleProof, IncrementalMerkleTree},
+        trees::incremental_merkle_tree::IncrementalMerkleProof,
     },
 };
 
@@ -124,7 +124,7 @@ mod token_matrix_serde {
 
     use super::{
         MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS, RegevCiphertext, TokenCiphertexts,
-        TokenPendingAdds, zero_ciphertext, zero_token_row,
+        TokenPendingAdds, zero_ciphertext,
     };
 
     pub mod row {
@@ -1192,6 +1192,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree;
     use crate::regev::{REGEV_N, REGEV_Q};
 
     /// Deterministic canonical ciphertext (raw seed-derived coefficients < q). These are not
