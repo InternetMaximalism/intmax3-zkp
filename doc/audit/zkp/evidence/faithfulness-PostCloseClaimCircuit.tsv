@@ -36,7 +36,7 @@ range stateVersion	post_close_claim_circuit.rs:399	range	ok	U64Target::new(_, tr
 virtual receiverMemberIndex	post_close_claim_circuit.rs:403	range	ok	bare add_virtual_target; bounded only by the slot inclusion verify's split_le
 range slot ciphertext digests + pending adds	post_close_claim_circuit.rs:404-408	range	ok	80 enc-digest limbs + 10 counters, all 32-bit range-checked
 connect finalH1	post_close_claim_circuit.rs:426	connect	ok	recomputed_h1.connect(final_balance_state_h1)
-range active sum	post_close_claim_circuit.rs:439	range	ok	range_check(active, 11)
+range active sum	post_close_claim_circuit.rs:439	range	ok	range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)
 connect active<1025	post_close_claim_circuit.rs:440	constant	ok	assert_one(less_than_u32(active, MAX_CHANNEL_MEMBERS + 1))
 connect receiverMemberIndex<active	post_close_claim_circuit.rs:442-443	constant	ok	connect(less_than_u32(receiver_member_index, active), one)
 virtual a,b,c1,c2	post_close_claim_circuit.rs:446-449	width	ok	4 * REGEV_N bare virtual targets

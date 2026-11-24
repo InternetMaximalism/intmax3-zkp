@@ -1288,21 +1288,32 @@ mod tests {
     #[test]
     fn withdrawal_claim_circuit_rejects_padding_slot() {
         let circuit = circuit();
-        let (mut witness, mut state) = build_full_witness_with_state();
-        // Move the claimant's slot data into padding slot 5 (NOT validate()-legal, but h1() /
-        // slot_tree() are pure functions — exactly the adversarial state a prover would try).
-        state.regev_pk_digests[5] = state.regev_pk_digests[0];
-        state.enc_balances[5] = state.enc_balances[0].clone();
-        state.pending_adds[5] = state.pending_adds[0];
-        state.recipients[5] = state.recipients[0];
-        let tree = state.slot_tree();
-        witness.member_index = 5;
+        use crate::common::balance_state::{BalanceState, SlotTree, slot_padding_ladder};
+        let (mut witness, state) = build_full_witness_with_state();
+        assert_eq!(state.active_slots(), 3, "fixture: slot 5 must lie in the padding region");
+        // Copy the claimant's slot-0 leaf into padding slot 5 (slots 3 and 4 keep the padding
+        // leaf). The state stores only its active slots, so the doctored tree is built from the
+        // leaf list directly — exactly the adversarial tree a prover would try.
+        let mut leaves = state.slot_leaf_hashes();
+        let padding_leaf = slot_padding_ladder()[0];
+        leaves.push(padding_leaf);
+        leaves.push(padding_leaf);
+        leaves.push(leaves[0]);
+        let tree = SlotTree::from_leaves(leaves);
+        let mut header = state.header();
+        header.slot_tree_root = tree.get_root();
         witness.slot_tree_root = tree.get_root();
+        witness.public_inputs.final_balance_state_h1 = header.h1();
+        // Control: the doctored root/H1 are self-consistent — the claimant's ACTIVE slot 0
+        // still proves under them, so slot 5 below can only fail the active-region check.
+        witness.member_index = 0;
+        witness.slot_inclusion = tree.prove(0);
+        let control = circuit.data.prove(circuit.fill_witness(&witness).unwrap());
+        assert!(control.is_ok(), "control: slot 0 must prove under the doctored tree");
+        witness.member_index = 5;
         witness.slot_inclusion = tree.prove(5);
-        witness.slot_ct_digests =
-            crate::common::balance_state::BalanceState::token_ct_digests(&state.enc_balances[5]);
-        witness.slot_pending_adds = state.pending_adds[5];
-        witness.public_inputs.final_balance_state_h1 = state.h1();
+        witness.slot_ct_digests = BalanceState::token_ct_digests(&state.enc_balances[0]);
+        witness.slot_pending_adds = state.pending_adds[0];
         let pw = circuit.fill_witness(&witness).unwrap();
         let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
         assert!(
