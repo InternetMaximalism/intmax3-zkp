@@ -31,8 +31,9 @@ citations are `path:line` in the tree named above; line numbers drift with later
   records who is entitled to what.
 - **N02** The users of the rollup are not people but *channels*: every account on the rollup is a
   channel, identified by a 32-bit number.
-- **N03** A channel is a small group of 2 to 8 signers (the *sig-cluster*) plus up to 1024 balance
-  holders in total; the extra holders are *delegates* who have balances but do not sign.
+- **N03** A channel is a small group of 2 to 8 signers (the *sig-cluster*) plus up to 2^20
+  (1,048,576) balance holders in total; the extra holders are *delegates* who have balances but do
+  not sign.
 - **N04** The rollup keeps almost no per-channel state on Ethereum. Each channel keeps its own
   balance proof and the rollup stores only a chain of block hashes and a few checkpoints.
 - **N05** A *block* is a bundle of *sub-blocks*. Each sub-block belongs to one channel and carries
@@ -565,24 +566,27 @@ frozen or exited bound channel with `VALIDITY_CANDIDATE_CONTAINS_FROZEN_CHANNEL_
 
 **Constants** (`src/constants.rs`): block number u63 (`:13`), channel id 32 bits (`:16`), token
 index 32 bits (`:2`); deposit tree 63, send/nullifier/asset trees 32 (`:15-38`);
-`MAX_SIG_CLUSTER = 8` with `MEMBER_TREE_HEIGHT = 3` (`:135, :62`); `MAX_CHANNEL_MEMBERS = 1024`
-with wallet and balance-slot trees of height 10 (`:96, :79, :110`); `MAX_CHANNEL_TOKENS = 10`
+`MAX_SIG_CLUSTER = 8` with `MEMBER_TREE_HEIGHT = 3`; `MAX_CHANNEL_MEMBERS = 2^20` with wallet and
+balance-slot trees of height 20 (raised from 1024 / height 10 on 2026-11-24); `MAX_CHANNEL_TOKENS = 10`
 (`:189`) → N03, C02.
 
 ### 2.2 Channel state
 
 **`ChannelRecord`** (`src/common/channel.rs`): `member_count: u8` in `2..=MAX_SIG_CLUSTER`
-(`:291-296`), `delegate_count: u16`, total ≤ 1024 (`:310-319`); slots `0..member_count` are
+(`:291-296`), `delegate_count: u32`, total ≤ 2^20 (`:310-319`); slots `0..member_count` are
 cosigners, `member_count..member_count+delegate_count` are delegates (`:216-232`) → N03, C21.
-Its native digest **IMCR** commits `close_freeze_nonce`, `set_version`, both counts, all 1024
-`pk_g` and `regev_pk_root` (`:361-387`).
+Its native digest **IMCR** commits `close_freeze_nonce`, `set_version`, both counts, all 2^20
+`pk_g` (zero past the active slots) and `regev_pk_root` (`:361-387`). Only the active `pk_g` are
+stored; the zero tail is appended when the digest is computed.
 
-**`BalanceState`** (`src/common/balance_state.rs:238-345`): `enc_balances` (1024 rows × 10 Regev
-ciphertexts), `regev_pk_digests`, `recipients` (per-row 20-byte exit address, immutable under every
+**`BalanceState`** (`src/common/balance_state.rs:238-345`): `enc_balances` (one row of 10 Regev
+ciphertexts per ACTIVE slot; padding slots are not stored), `regev_pk_digests`, `recipients` (per-row
+20-byte exit address, immutable under every
 transition, `:296-297`) → C01, C24; `settled_tx_chain`, `settled_tx_accumulator_root`,
-`state_version`, `pending_adds` (1024 × 10, `u32`), `token_registry: [u32; 10]`, `token_count` → C02,
+`state_version`, `pending_adds` (active slots × 10, `u32`), `token_registry: [u32; 10]`, `token_count` → C02,
 C20. **H1** = Poseidon over the 37-element **IMB2** header (counts, registry, chain, accumulator root,
-`state_version`, slot-tree root); each slot leaf (**IMS2**, 104 elements) hashes its ciphertext
+`state_version`, slot-tree root over all 2^20 slots, every unused subtree folded in as the root of an
+all-padding subtree); each slot leaf (**IMS2**, 104 elements) hashes its ciphertext
 digests, pk digest, `pending_adds` and recipient (`:514-573, 816-870`) → C03.
 The per-slot `regev_pk_digests` entry is the key every claim circuit binds the witnessed Regev key
 to, so a wallet must never adopt a state that commits someone else's key at its slot:
@@ -808,8 +812,8 @@ delegate count, participant root, challenge period, verifier, registry (the roll
 2..8 member bindings (`ChannelSettlementManager.sol:845-870`, line numbers at `5382bebd`). On chains
 other than 31337 a challenge period under 86 400 s reverts (`:881-883`; repeated by `releaseRuntime`,
 `:829-833`) → G20. The IMCM member-set commitment must equal the rollup's
-`channelMemberSetCommitment` (`:944-963`) → N27. The participant root is a depth-10 tree of
-`keccak(IMPR ‖ slot ‖ pkG ‖ recipient)` (`:934-944, 966-968`); `activeDelegateCount` is a floor:
+`channelMemberSetCommitment` (`:944-963`) → N27. The participant root is a depth-20 tree of
+`keccak(IMPR ‖ uint32 slot ‖ pkG ‖ recipient)` (unused leaves zero) (`:934-944, 966-968`); `activeDelegateCount` is a floor:
 the verifier rejects close-PI limb 94 below it and sets no ceiling (`:661-672`,
 `ChannelSettlementVerifier.sol:229-238`) → C21. `IntmaxRollup.registerSettlementManager` installs the
 materializer once and calls `bindManager`, which requires a finalized rollup head and seeds

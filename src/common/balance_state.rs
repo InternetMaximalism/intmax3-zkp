@@ -1305,6 +1305,7 @@ mod tests {
         // member_count is part of the H1 preimage (D6): changing it must change H1.
         let mut s = sample_state();
         s.member_count = 4;
+        push_padding_slot(&mut s); // the 4th slot keeps the padding leaf; only the count moves
         assert_ne!(h1, s.h1(), "member_count must affect h1");
 
         for slot in 0..sample_state().member_count as usize {
@@ -1344,6 +1345,16 @@ mod tests {
             s.recipients[slot] = recipient(900 + slot as u32);
             assert_ne!(h1, s.h1(), "recipients[{slot}] must affect h1 (B-1b)");
         }
+    }
+
+    /// Append one slot holding the padding values (zero ciphertexts, default digest, zero
+    /// counters, zero recipient). Its leaf is the padding leaf, so the slot tree root is unchanged:
+    /// what a full-width state held at that index before it became active.
+    fn push_padding_slot(s: &mut BalanceState) {
+        s.enc_balances.push(zero_token_row());
+        s.regev_pk_digests.push(Bytes32::default());
+        s.pending_adds.push([0u32; MAX_CHANNEL_TOKENS]);
+        s.recipients.push(Address::default());
     }
 
     /// Build a `BalanceState` with `count` ACTIVE members (distinct canonical ciphertexts in
@@ -1396,16 +1407,19 @@ mod tests {
             Err(ChannelError::InvalidBalanceState(_))
         ));
 
-        // A non-default (nonzero) PADDING ciphertext slot is rejected (would smuggle hidden value).
+        // Padding slots are never stored: a slot past the active ones (here one carrying a hidden
+        // nonzero ciphertext) is a shape violation and is rejected.
         let mut nonzero_pad = state_with_members(8);
+        push_padding_slot(&mut nonzero_pad);
         nonzero_pad.enc_balances[8][0] = ciphertext(99);
         assert!(matches!(
             nonzero_pad.validate(),
             Err(ChannelError::InvalidBalanceState(_))
         ));
 
-        // A nonzero PADDING add-counter is rejected.
+        // Likewise a stored slot past the active ones carrying an add-counter.
         let mut nonzero_add = state_with_members(8);
+        push_padding_slot(&mut nonzero_add);
         nonzero_add.pending_adds[8][0] = 1;
         assert!(matches!(
             nonzero_add.validate(),
@@ -1424,6 +1438,7 @@ mod tests {
         // B-1b fail-closed: a NONZERO recipient in a PADDING slot is rejected (routing smuggling
         // past the active accounting).
         let mut nonzero_pad_recipient = state_with_members(8);
+        push_padding_slot(&mut nonzero_pad_recipient);
         nonzero_pad_recipient.recipients[8] = recipient(99);
         assert!(matches!(
             nonzero_pad_recipient.validate(),
@@ -1446,6 +1461,8 @@ mod tests {
         // changes H1.
         let mut with_delegate = state_with_members(3);
         with_delegate.delegate_count = 2;
+        push_padding_slot(&mut with_delegate);
+        push_padding_slot(&mut with_delegate);
         with_delegate.enc_balances[3][0] = ciphertext(100);
         with_delegate.enc_balances[4][0] = ciphertext(101);
         with_delegate.recipients[3] = recipient(100);
@@ -1482,17 +1499,21 @@ mod tests {
         // balance slots and must validate (the delegate slot carries an active ciphertext).
         let mut full_members = state_with_members(MAX_SIG_CLUSTER as u8);
         full_members.delegate_count = 1;
+        push_padding_slot(&mut full_members);
         full_members.enc_balances[MAX_SIG_CLUSTER][0] = ciphertext(60);
         full_members.recipients[MAX_SIG_CLUSTER] = recipient(60);
         full_members
             .validate()
-            .expect("a full sig-cluster + 1 active delegate must validate at MAX=1024 slots");
+            .expect("a full sig-cluster + 1 active delegate must validate");
 
         // A slot inside the delegate region must be ACTIVE (non-padding): if a declared delegate
         // slot is left as padding it is fine (padding ct is canonical), but a slot BEYOND
         // member_count+delegate_count that is non-default is rejected.
         let mut bad_pad = state_with_members(3);
         bad_pad.delegate_count = 1; // active region = 0..4
+        for _ in 0..3 {
+            push_padding_slot(&mut bad_pad); // slots 3, 4, 5 stored: two past the active region
+        }
         bad_pad.enc_balances[3][0] = ciphertext(50); // the single delegate slot
         bad_pad.recipients[3] = recipient(50);
         bad_pad.enc_balances[5][0] = ciphertext(51); // a padding slot (>= 4) — must be rejected
@@ -1508,6 +1529,8 @@ mod tests {
         // member/delegate boundary => different H1.
         let mut split_a = state_with_members(2);
         split_a.delegate_count = 2;
+        push_padding_slot(&mut split_a);
+        push_padding_slot(&mut split_a);
         for s in 0..4u32 {
             split_a.enc_balances[s as usize][0] = ciphertext(200 + s);
             split_a.recipients[s as usize] = recipient(200 + s);
