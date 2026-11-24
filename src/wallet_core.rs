@@ -407,8 +407,8 @@ pub fn verify_inter_channel_tx_sender_hash_sig(
 #[serde(rename_all = "camelCase")]
 pub struct MemberInfo {
     /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`):
-    /// u16 — u8 capped joins at 256 slots (2026-07-18 storm).
-    pub slot: u16,
+    /// u32 — u8 capped joins at 256 slots (2026-07-18 storm).
+    pub slot: u32,
     /// The member's Falcon signing identity `pk_g` (canonical `Bytes32`).
     pub pk_g: Bytes32,
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest). Used for
@@ -553,9 +553,9 @@ pub fn verify_channel_backing(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendPayload {
-    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    pub sender_index: u16,
-    pub recipient_index: u16,
+    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    pub sender_index: u32,
+    pub recipient_index: u32,
     pub channel_tx: ChannelTx,
     pub proposed_next_state: ChannelState,
     pub members: Vec<MemberInfo>,
@@ -594,9 +594,9 @@ pub struct SlimSendPayload {
     /// Digest of the anchor state `S` this tx extends (== the digest the sender's A11 tx
     /// signature binds — detail2 §M-3 exact-anchor rule).
     pub anchor_digest: Bytes32,
-    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    pub sender_index: u16,
-    pub recipient_index: u16,
+    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    pub sender_index: u32,
+    pub recipient_index: u32,
     /// `enc_amount`, `nonce`, the mandatory E-1 proof, and the sender's pk_g/pk_b + A11 hash-sig.
     pub channel_tx: ChannelTx,
     /// The sender's fresh post-debit ciphertext (the E-1 statement's `after`).
@@ -616,8 +616,8 @@ const MAX_SLIM_WIRE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct SlimSendPayloadBody {
-    sender_index: u16,
-    recipient_index: u16,
+    sender_index: u32,
+    recipient_index: u32,
     channel_tx: ChannelTx,
     after_ct: RegevCiphertext,
 }
@@ -801,8 +801,8 @@ mod slim_binary_wire_tests {
 /// and DROPS the proofs, so batch memory is K-independent of proof size (detail2 §M-4).
 #[derive(Clone, Debug)]
 pub struct BatchTxApply {
-    pub sender_index: u16,
-    pub recipient_index: u16,
+    pub sender_index: u32,
+    pub recipient_index: u32,
     /// LOCAL token slot this tx moves (TM-14): copied from the SIGNED
     /// `channel_tx.token_slot` of the verified slim payload — the fold debits/credits at
     /// exactly this position of each involved row.
@@ -965,7 +965,7 @@ pub fn build_record(
     channel_id: u32,
     members: &[MemberInfo],
     bp_member_slot: u8,
-    delegate_count: u16,
+    delegate_count: u32,
 ) -> WResult<ChannelRecord> {
     let active = members.len();
     let dc = delegate_count as usize;
@@ -1151,7 +1151,7 @@ pub fn assemble_genesis_state_backed(
 /// public polynomial `h` so any holder of the registered `pk_g` can verify it).
 ///
 /// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_SIG_CLUSTER = 8`), so u8 is
-/// sufficient — delegates never co-sign state (audited 2026-07-18, u16 slot widening).
+/// sufficient — delegates never co-sign state (audited 2026-07-18, u32 slot widening).
 pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<MemberSignature> {
     let digest = state.signing_digest();
     Ok(MemberSignature {
@@ -1325,8 +1325,8 @@ pub fn verify_member_signature(
 /// validity, and (if `my_slot`/`my_keys` given) own-slot decryption sanity.
 pub fn verify_snapshot(
     snapshot: &ChannelSnapshot,
-    // Own BALANCE-SLOT (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    my_keys: Option<(&MemberKeys, u16)>,
+    // Own BALANCE-SLOT (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    my_keys: Option<(&MemberKeys, u32)>,
 ) -> WResult<()> {
     verify_snapshot_structure(snapshot)?;
     verify_all_signatures(&snapshot.record, &snapshot.members, &snapshot.state)?;
@@ -1458,7 +1458,7 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
 /// The own-slot decryption half of [`verify_snapshot`].
 fn verify_snapshot_own_slot(
     snapshot: &ChannelSnapshot,
-    my_keys: Option<(&MemberKeys, u16)>,
+    my_keys: Option<(&MemberKeys, u32)>,
 ) -> WResult<()> {
     let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
     if let Some((keys, slot)) = my_keys {
@@ -1505,7 +1505,7 @@ fn verify_snapshot_own_slot(
 /// Decrypt this member's hidden GENESIS-token (local token slot 0) balance from a snapshot —
 /// the wire-compat single-token view kept for existing callers/API shapes; the per-token query
 /// is [`decrypt_balance_token`].
-pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u16) -> WResult<u64> {
+pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u32) -> WResult<u64> {
     decrypt_balance_token(keys, snapshot, slot, 0)
 }
 
@@ -1515,7 +1515,7 @@ pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u16)
 pub fn decrypt_balance_token(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    slot: u16,
+    slot: u32,
     token_slot: u8,
 ) -> WResult<u64> {
     // Delegates own a balance slot too; admit the full active region (members + delegates).
@@ -1562,8 +1562,8 @@ pub struct BuiltSend {
 pub fn build_send_token_decrypted(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    recipient_slot: u16,
+    sender_slot: u32,
+    recipient_slot: u32,
     token_slot: u8,
     amount: u64,
     nonce: Bytes32,
@@ -1587,8 +1587,8 @@ pub fn build_send_token_decrypted(
 fn build_send_token_with(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
-    recipient_slot: u16,
+    sender_slot: u32,
+    recipient_slot: u32,
     token_slot: u8,
     amount: u64,
     nonce: Bytes32,
@@ -1718,8 +1718,8 @@ fn build_send_token_with(
 /// `InChannelTransferUpdateWitness::verify`.
 pub fn solo_next_state(
     prev: &ChannelState,
-    sender_slot: u16,
-    recipient_slot: u16,
+    sender_slot: u32,
+    recipient_slot: u32,
     token_slot: u8,
     after_ct: &RegevCiphertext,
     enc_amount: &RegevCiphertext,
@@ -1867,8 +1867,8 @@ fn verify_send_core(
     prev: &ChannelState,
     record: &ChannelRecord,
     members: &[MemberInfo],
-    sender_index: u16,
-    recipient_index: u16,
+    sender_index: u32,
+    recipient_index: u32,
     channel_tx: &ChannelTx,
     next_for_check: ChannelState,
     level: RegevSecurityLevel,
@@ -2209,8 +2209,8 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshPayload {
-    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    pub member_index: u16,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    pub member_index: u32,
     /// LOCAL token position being refreshed (TM-13: refreshes are per (member, token)). The
     /// co-signer's `BalanceRefreshUpdateWitness` proves the replacement + counter reset happen
     /// at exactly this position and every other position of the row is frozen.
@@ -2226,7 +2226,7 @@ pub struct RefreshPayload {
 /// and the co-signer's slim-refresh inflation so both rebuild the identical state.
 pub fn refresh_next_state(
     prev: &ChannelState,
-    slot: u16,
+    slot: u32,
     token_slot: u8,
     new_ct: RegevCiphertext,
 ) -> WResult<ChannelState> {
@@ -2271,7 +2271,7 @@ pub fn refresh_next_state(
 pub fn build_refresh(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    slot: u16,
+    slot: u32,
     token_slot: u8,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
@@ -2417,8 +2417,8 @@ pub struct BuiltInterChannelSend {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterChannelDebitPayload {
-    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    pub sender_index: u16,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    pub sender_index: u32,
     pub proposed_next_state: ChannelState,
     pub inter_channel_tx: InterChannelTx,
     pub amount: u64,
@@ -2447,8 +2447,8 @@ pub struct InterChannelDebitPayload {
 pub struct InterChannelTransferDescriptor {
     pub source_channel_id: ChannelId,
     pub destination_channel_id: ChannelId,
-    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
-    pub recipient_slot: u16,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u32, see `MemberInfo::slot`.
+    pub recipient_slot: u32,
     pub amount: u64,
     pub tx_hash: Bytes32,
     /// `H2` = the 1-tx `TxV2Tree` root, computed inside `build_inter_channel_send`.
@@ -2698,9 +2698,9 @@ pub fn verify_small_block_state_binding(
 pub fn build_inter_channel_send_token_at_base_nonce_decrypted(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
+    sender_slot: u32,
     destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
+    destination_recipient_slot: u32,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
     destination_base_transfer_salt: Salt,
@@ -2733,9 +2733,9 @@ pub fn build_inter_channel_send_token_at_base_nonce_decrypted(
 fn build_inter_channel_send_with(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
+    sender_slot: u32,
     destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
+    destination_recipient_slot: u32,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
     destination_base_transfer_salt: Salt,
@@ -3102,7 +3102,7 @@ fn build_inter_channel_send_with(
 pub fn build_burn_send_token_at_base_nonce_decrypted(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
+    sender_slot: u32,
     withdrawal_l1_address: crate::ethereum_types::address::Address,
     token_index: u32,
     base_nonce: u32,
@@ -3129,7 +3129,7 @@ pub fn build_burn_send_token_at_base_nonce_decrypted(
 fn build_burn_send_with(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u16,
+    sender_slot: u32,
     withdrawal_l1_address: crate::ethereum_types::address::Address,
     token_index: u32,
     base_nonce: u32,
@@ -3699,7 +3699,7 @@ pub mod deprecated_member_set_update {
                 new_members.insert(
                     mc,
                     MemberInfo {
-                        slot: mc as u16,
+                        slot: mc as u32,
                         pk_g: *pk_g,
                         pk_b: *pk_b,
                         regev_pk: regev_pk.clone(),
@@ -3838,7 +3838,7 @@ pub mod deprecated_member_set_update {
         new_members.insert(
             mc,
             MemberInfo {
-                slot: mc as u16,
+                slot: mc as u32,
                 pk_g: joiner_keys.pk_g(),
                 pk_b: joiner_keys.pk_b(),
                 regev_pk: joiner_keys.regev_pk.clone(),
@@ -5344,7 +5344,7 @@ pub fn verify_l1_deposit_import_transition(
 pub fn build_token_register(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    builder_slot: u16,
+    builder_slot: u32,
     token_index: u32,
 ) -> WResult<ChannelState> {
     let prev = &snapshot.state;
@@ -6134,7 +6134,7 @@ impl WithdrawalClaimProver {
         let close_intent_digest = close_intent.signing_digest();
         let member = ChannelMember {
             pk_g: member_pk_g,
-            member_slot: member_index as u16,
+            member_slot: member_index as u32,
             l1_withdrawal_recipient: recipient,
         };
         // SECURITY (B-2 blocker fix): the nullifier is keyed on the slot's LEAF-BOUND Regev pk
@@ -7751,7 +7751,7 @@ mod delegate_send_tests {
 
     const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Test;
 
-    fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
+    fn member_info(slot: u32, keys: &MemberKeys) -> MemberInfo {
         MemberInfo {
             slot,
             pk_g: keys.pk_g(),
@@ -7767,14 +7767,14 @@ mod delegate_send_tests {
         channel_id: u32,
         keys: &[MemberKeys],
         member_count: u8,
-        delegate_count: u16,
+        delegate_count: u32,
     ) -> (ChannelRecord, Vec<MemberInfo>) {
         let active = member_count as usize + delegate_count as usize;
         assert_eq!(keys.len(), active, "one key per active slot");
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u16, k))
+            .map(|(i, k)| member_info(i as u32, k))
             .collect();
         // Exercise the PUBLIC delegate-aware build path (build_record derives member_count =
         // active - delegate_count and validates bp is a co-signing member).
@@ -7951,7 +7951,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u16, k))
+            .map(|(i, k)| member_info(i as u32, k))
             .collect();
 
         // 2 co-signing members + 1 delegate (active = 3): OK, member_count derived as active - dc.
@@ -8275,7 +8275,7 @@ mod delegate_send_tests {
             add_signature(&mut bundle, s1);
             snapshot.state = bundle;
             let bal =
-                decrypt_balance(&keys[recipient_slot], &snapshot, recipient_slot as u16).unwrap();
+                decrypt_balance(&keys[recipient_slot], &snapshot, recipient_slot as u32).unwrap();
             assert_eq!(
                 bal,
                 expected,
@@ -8817,7 +8817,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u16, k))
+            .map(|(i, k)| member_info(i as u32, k))
             .collect();
         let record = build_record(channel, &members, 0, 0).expect("record");
         let encs: Vec<RegevCiphertext> = keys
@@ -8905,7 +8905,7 @@ mod delegate_send_tests {
             let members: Vec<MemberInfo> = keys
                 .iter()
                 .enumerate()
-                .map(|(i, k)| member_info(i as u16, k))
+                .map(|(i, k)| member_info(i as u32, k))
                 .collect();
             let encs: Vec<RegevCiphertext> = keys
                 .iter()
@@ -9430,7 +9430,7 @@ mod delegate_send_tests {
             let members: Vec<MemberInfo> = keys
                 .iter()
                 .enumerate()
-                .map(|(i, k)| member_info(i as u16, k))
+                .map(|(i, k)| member_info(i as u32, k))
                 .collect();
             let record = build_record(channel, &members, 0, 0).expect("record");
             let encs: Vec<RegevCiphertext> = keys
@@ -9658,7 +9658,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u16, k))
+            .map(|(i, k)| member_info(i as u32, k))
             .collect();
         let record = build_record(3, &members, 0, 0).expect("record");
         // 3 distinct slot ciphertexts (content is not load-bearing for cancel — only the IMCH
@@ -9685,7 +9685,7 @@ mod delegate_send_tests {
                     member_count: 3,
                     delegate_count: 0,
                     enc_balances: BalanceState::pad_enc_balances_token0(encs),
-                    regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                    regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                     recipients: BalanceState::pad_recipients(&test_recipients(3)),
                     settled_tx_chain: Bytes32::default(),
                     settled_tx_accumulator_root: Bytes32::default(),
@@ -10197,8 +10197,8 @@ mod delegate_send_tests {
         rng: &mut StdRng,
         keys: &MemberKeys,
         snapshot: &ChannelSnapshot,
-        sender_slot: u16,
-        recipient_slot: u16,
+        sender_slot: u32,
+        recipient_slot: u32,
         token_slot: u8,
         amount: u64,
         nonce_seed: u32,
@@ -11908,7 +11908,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u16, k))
+            .map(|(i, k)| member_info(i as u32, k))
             .collect();
         let regev_pks = regev_pks_array(&members);
         let mut record = ChannelRecord {
@@ -12354,7 +12354,7 @@ mod partial_withdrawal_tests {
 
 /// REGRESSION (2026-07-18 1000-connection storm): with u8 slot typing, joins hard-stopped at 256
 /// active slots ("no member at slot 256") even though Option B promises MAX_CHANNEL_MEMBERS =
-/// 1024. These tests walk the native join/assemble path PAST slot 256 with u16 slots — no
+/// 1024. These tests walk the native join/assemble path PAST slot 256 with u32 slots — no
 /// proving, fabricated identities only (build_record validates Regev key shape/nonzero-ness and
 /// distinctness — see `fake_member` — but no signature or keypair consistency), so they run at
 /// ordinary unit-test cost.
@@ -12376,7 +12376,7 @@ mod slot_capacity_tests {
     /// xorshift stream reduced mod q — uniform-looking, nonzero, distinct, canonical — which
     /// satisfies the screen without generating 300 real keypairs and keeps this test cheap
     /// enough to cover 300 slots natively.
-    fn fake_member(slot: u16) -> MemberInfo {
+    fn fake_member(slot: u32) -> MemberInfo {
         let tag = slot as u32 + 1;
         let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ ((u64::from(tag) << 32) | u64::from(tag));
         let mut next = || {
@@ -12404,12 +12404,12 @@ mod slot_capacity_tests {
     #[test]
     fn join_path_reaches_slot_256_and_beyond() {
         const COSIGNERS: usize = 3;
-        let members: Vec<MemberInfo> = (0..300u16).map(fake_member).collect();
+        let members: Vec<MemberInfo> = (0..300u32).map(fake_member).collect();
 
         // Checkpoints: 256 active (the last size the u8 code reached), 257 (the first size it
         // could NOT), and 300 (comfortable margin past the boundary).
         for active in [256usize, 257, 300] {
-            let dc = (active - COSIGNERS) as u16;
+            let dc = (active - COSIGNERS) as u32;
             let record = build_record(7, &members[..active], 0, dc)
                 .unwrap_or_else(|e| panic!("build_record with {active} active slots failed: {e}"));
             assert_eq!(record.member_count, COSIGNERS as u8);
@@ -12421,7 +12421,7 @@ mod slot_capacity_tests {
         }
 
         // The storm's exact failing lookup: slot 256 must resolve.
-        let m256 = member_at(&members, 256).expect("slot 256 must be reachable with u16 slots");
+        let m256 = member_at(&members, 256).expect("slot 256 must be reachable with u32 slots");
         assert_eq!(m256.slot, 256);
 
         // Wire format: a slot > 255 survives the JSON round-trip (browser <-> relay <-> CLI).
@@ -12430,7 +12430,7 @@ mod slot_capacity_tests {
         assert_eq!(back.slot, 299);
     }
 
-    /// The signed balance state also crosses the 256-slot boundary: delegate_count > 253 (u16)
+    /// The signed balance state also crosses the 256-slot boundary: delegate_count > 253 (u32)
     /// must validate and produce an H1 that depends on the count.
     #[test]
     fn balance_state_validates_past_256_active_slots() {
@@ -12453,7 +12453,7 @@ mod slot_capacity_tests {
         let state = BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: MEMBER_COUNT as u8,
-            delegate_count: DELEGATE_COUNT as u16,
+            delegate_count: DELEGATE_COUNT as u32,
             enc_balances: BalanceState::pad_enc_balances_token0(&cts),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&digests),
             recipients: BalanceState::pad_recipients(&recipients),
@@ -12466,9 +12466,9 @@ mod slot_capacity_tests {
         };
         state
             .validate()
-            .expect("257 active slots must validate with u16 delegate_count");
+            .expect("257 active slots must validate with u32 delegate_count");
 
-        // H1 commits the (u16) delegate_count: shrinking the active region changes it.
+        // H1 commits the (u32) delegate_count: shrinking the active region changes it.
         let h1 = state.h1();
         let mut smaller = state.clone();
         smaller.delegate_count -= 1;
@@ -12557,7 +12557,7 @@ mod member_set_update_tests {
             .iter()
             .enumerate()
             .map(|(i, k)| MemberInfo {
-                slot: i as u16,
+                slot: i as u32,
                 pk_g: k.pk_g(),
                 pk_b: k.pk_b(),
                 regev_pk: k.regev_pk.clone(),
@@ -12838,9 +12838,9 @@ mod member_set_update_tests {
                 channel_id: record.channel_id,
                 member_count: 3,
                 delegate_count: 1,
-                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
-                recipients: BalanceState::pad_recipients(&[]),
+                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 4]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 4]),
+                recipients: BalanceState::pad_recipients(&[Address::default(); 4]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 5,

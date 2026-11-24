@@ -157,7 +157,7 @@ contract ManagerCloseGasTest is Test {
             bytes4(channelId),
             bpSlot,
             pkGs[bpSlot],
-            uint16(0),
+            uint32(0),
             bytes32(0),
             1,
             0,

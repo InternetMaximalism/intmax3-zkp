@@ -513,7 +513,7 @@ struct ExpectedClose {
     close_intent_digest: String,
     member_set_commitment: String,
     member_count: u8,
-    delegate_count: u16,
+    delegate_count: u32,
     token_funds_digest: String,
 }
 
@@ -715,7 +715,7 @@ pub struct ObservedDeployment {
     pub challenge_period: u64,
     pub registered_member_set_commitment: String,
     pub active_member_count: u8,
-    pub active_delegate_count: u16,
+    pub active_delegate_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7641,12 +7641,12 @@ impl ClosePublisherBackend for CastCloseBackend {
                 "manager.activeMemberCount",
             )?)
             .expect("one-byte bound"),
-            active_delegate_count: u16::try_from(word_uint(
+            active_delegate_count: u32::try_from(word_uint(
                 &self.one_word(&manifest.manager, "activeDelegateCount()", block_number)?,
-                2,
+                4,
                 "manager.activeDelegateCount",
             )?)
-            .expect("two-byte bound"),
+            .expect("four-byte bound"),
         })
     }
 

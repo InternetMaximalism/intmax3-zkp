@@ -107,7 +107,7 @@ struct TokenWitness {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ControlledMember {
-    slot: u16,
+    slot: u32,
     keygen_seed: u64,
     balance_amount: u64,
     balance_seed: u64,
@@ -153,7 +153,7 @@ struct CliState {
     extra: BTreeMap<String, serde_json::Value>,
 }
 
-fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
+fn member_info(slot: u32, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),
@@ -180,7 +180,7 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| member_info(i as u16, k))
+        .map(|(i, k)| member_info(i as u32, k))
         .collect();
     let record = build_record(channel_id, &members, 0, 0).expect("record");
 
@@ -196,7 +196,7 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
         .expect("enc");
         cts.push(ct);
         controlled.push(ControlledMember {
-            slot: i as u16,
+            slot: i as u32,
             keygen_seed: cli_keygen_seed(i as u8),
             balance_amount: bal,
             balance_seed,
@@ -328,8 +328,8 @@ fn cli_state(fx: ChannelFixture) -> CliState {
 fn build_transfer(
     a_snapshot: &ChannelSnapshot,
     b_record: &ChannelRecord,
-    sender_slot: u16,
-    recipient_slot: u16,
+    sender_slot: u32,
+    recipient_slot: u32,
     amount: u64,
     nullifier_tag: u32,
     rng_seed: u64,
@@ -375,7 +375,7 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
 
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
-    let sender_slot = 0u16;
+    let sender_slot = 0u32;
     let amount = 20u64;
     let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
     let prev_fund = a.snapshot.state.channel_fund.amounts[0];
@@ -483,7 +483,7 @@ fn burn_send_base_chain_matches_channel() {
 
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
-    let sender_slot = 0u16;
+    let sender_slot = 0u32;
     let amount = 20u64;
     let l1 = intmax3_zkp::ethereum_types::address::Address::from_hex(
         "0x00000000000000000000000000000000000000aa",
@@ -575,7 +575,7 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
 
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
-    let sender_slot = 0u16;
+    let sender_slot = 0u32;
     let amount = 20u64;
     let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
 
@@ -685,8 +685,8 @@ fn inter_channel_cli_end_to_end() {
     // ---- Build both channels (members = the binary's CLI members) + seed cli_state.json. ----
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let b = build_cli_channel(B_ID, &[20, 40, 60]);
-    let sender_slot = 0u16;
-    let recipient_slot = 1u16;
+    let sender_slot = 0u32;
+    let recipient_slot = 1u32;
 
     let b_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
     let b_record = b.record.clone();
@@ -971,8 +971,8 @@ fn inter_channel_cli_forged_a_state_refused() {
 
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let b = build_cli_channel(B_ID, &[20, 40, 60]);
-    let sender_slot = 0u16;
-    let recipient_slot = 1u16;
+    let sender_slot = 0u32;
+    let recipient_slot = 1u32;
 
     let b_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
     let b_record = b.record.clone();

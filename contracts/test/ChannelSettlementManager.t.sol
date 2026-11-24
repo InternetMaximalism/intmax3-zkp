@@ -234,26 +234,33 @@ contract MockChannelRegistry is IChannelRegistry {
             return abi.encode(piHash);
         }
 
-        function _participantTree(bytes32[] memory pkGs, address[] memory recipients, uint16 targetSlot)
+        /// The 2^20-leaf participant tree over the occupied prefix: an unoccupied leaf is the zero
+        /// word, so a sibling past the prefix is the root of an all-zero subtree of its height.
+        function _participantTree(bytes32[] memory pkGs, address[] memory recipients, uint32 targetSlot)
             internal
             pure
-            returns (bytes32 root, bytes32[10] memory siblings)
+            returns (bytes32 root, bytes32[20] memory siblings)
         {
-            bytes32[1024] memory nodes;
-            for (uint256 i = 0; i < pkGs.length; i++) {
-                nodes[i] = keccak256(abi.encodePacked(bytes4(0x494d5052), uint16(i), pkGs[i], recipients[i]));
+            uint256 width = pkGs.length;
+            bytes32[] memory nodes = new bytes32[](width);
+            for (uint256 i = 0; i < width; i++) {
+                nodes[i] = keccak256(abi.encodePacked(bytes4(0x494d5052), uint32(i), pkGs[i], recipients[i]));
             }
-            uint256 width = 1024;
+            bytes32 zero = bytes32(0);
             uint256 target = uint256(targetSlot);
-            uint256 level = 0;
-            while (width > 1) {
-                siblings[level] = nodes[target ^ 1];
-                for (uint256 i = 0; i < width; i += 2) {
-                    nodes[i >> 1] = keccak256(abi.encodePacked(bytes4(0x494d504e), nodes[i], nodes[i + 1]));
+            for (uint256 level = 0; level < 20; level++) {
+                uint256 sibling = target ^ 1;
+                siblings[level] = sibling < width ? nodes[sibling] : zero;
+                uint256 parents = (width + 1) >> 1;
+                for (uint256 i = 0; i < parents; i++) {
+                    uint256 left = i << 1;
+                    nodes[i] = keccak256(
+                        abi.encodePacked(bytes4(0x494d504e), nodes[left], left + 1 < width ? nodes[left + 1] : zero)
+                    );
                 }
-                width >>= 1;
+                width = parents;
                 target >>= 1;
-                level++;
+                zero = keccak256(abi.encodePacked(bytes4(0x494d504e), zero, zero));
             }
             root = nodes[0];
         }
@@ -957,10 +964,10 @@ contract MockChannelRegistry is IChannelRegistry {
             assertEq(m8.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h8, 8));
         }
 
-        /// A capacity-sized snapshot costs one root/count immutable, not 1016 delegate SSTOREs.  The
-        /// bound leaves ample headroom below a 30M mainnet block even including the manager's large
-        /// runtime-code deposit.
-        function test_1024ParticipantDeploymentGas_isBoundedAndStoresOnlyCosigners() external {
+        /// A capacity-sized snapshot (2^20 participants) costs one root/count immutable, not
+        /// 2^20 - 8 delegate SSTOREs.  The bound leaves ample headroom below a 30M mainnet block even
+        /// including the manager's large runtime-code deposit.
+        function test_capacityParticipantDeploymentGas_isBoundedAndStoresOnlyCosigners() external {
             ChannelSettlementManager.MemberBinding[] memory b = new ChannelSettlementManager.MemberBinding[](8);
             bytes32[] memory hashes = new bytes32[](8);
             for (uint256 i = 0; i < 8; i++) {
@@ -973,8 +980,8 @@ contract MockChannelRegistry is IChannelRegistry {
                 CHANNEL_ID,
                 0,
                 hashes[0],
-                1016,
-                keccak256("authenticated-1024-participant-root"),
+                uint32((1 << 20) - 8),
+                keccak256("authenticated-capacity-participant-root"),
                 CHALLENGE_PERIOD,
                 SPECIAL_CLOSE_PENALTY,
                 INITIAL_BP_BOND,
@@ -984,11 +991,37 @@ contract MockChannelRegistry is IChannelRegistry {
                 b
             );
             uint256 used = gasBefore - gasleft();
-            assertLt(used, 10_000_000, "1024-participant manager must fit comfortably in one block");
-            assertEq(uint256(maxed.activeParticipantCount()), 1024);
-            assertEq(uint256(maxed.activeDelegateCount()), 1016);
+            assertLt(used, 10_000_000, "capacity-sized manager must fit comfortably in one block");
+            assertEq(uint256(maxed.activeParticipantCount()), 1 << 20);
+            assertEq(uint256(maxed.activeDelegateCount()), (1 << 20) - 8);
             assertEq(maxed.memberCount(), 8, "only cosigners may be materialized");
             assertEq(maxed.registeredMemberIndexPlusOne(keccak256("delegate-not-stored")), 0);
+        }
+
+        /// One participant past the 2^20 capacity is refused at deployment.
+        function test_participantCountAboveCapacity_reverts() external {
+            ChannelSettlementManager.MemberBinding[] memory b = new ChannelSettlementManager.MemberBinding[](8);
+            bytes32[] memory hashes = new bytes32[](8);
+            for (uint256 i = 0; i < 8; i++) {
+                hashes[i] = keccak256(abi.encodePacked("capacity-cosigner", i));
+                b[i] = ChannelSettlementManager.MemberBinding({pkG: hashes[i], recipient: address(uint160(0xCA00 + i))});
+            }
+            registry.register(uint32(CHANNEL_ID), 0, hashes);
+            vm.expectRevert(ChannelSettlementManager.InvalidMemberCount.selector);
+            new ChannelSettlementManager(
+                CHANNEL_ID,
+                0,
+                hashes[0],
+                uint32((1 << 20) - 7),
+                keccak256("authenticated-capacity-participant-root"),
+                CHALLENGE_PERIOD,
+                SPECIAL_CLOSE_PENALTY,
+                INITIAL_BP_BOND,
+                IChannelSettlementVerifier(address(verifier)),
+                IChannelRegistry(address(registry)),
+                address(this),
+                b
+            );
         }
 
         function test_member_count_out_of_range_reverts() external {
@@ -1484,7 +1517,7 @@ contract MockChannelRegistry is IChannelRegistry {
             participantRecipients[0] = alice;
             participantRecipients[1] = bob;
             participantRecipients[2] = dave;
-            (bytes32 root, bytes32[10] memory daveProof) = _participantTree(participantPkGs, participantRecipients, 2);
+            (bytes32 root, bytes32[20] memory daveProof) = _participantTree(participantPkGs, participantRecipients, 2);
 
             ChannelSettlementManager m = new ChannelSettlementManager(
                 CHANNEL_ID,
@@ -1556,7 +1589,7 @@ contract MockChannelRegistry is IChannelRegistry {
             participantRecipients[0] = alice;
             participantRecipients[1] = bob;
             participantRecipients[2] = dave;
-            (bytes32 participantRoot, bytes32[10] memory daveProof) =
+            (bytes32 participantRoot, bytes32[20] memory daveProof) =
                 _participantTree(participantPkGs, participantRecipients, 2);
 
             ChannelSettlementManager m = new ChannelSettlementManager(

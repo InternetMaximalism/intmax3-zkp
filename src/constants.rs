@@ -76,7 +76,8 @@ const _: () = assert!(
 /// that peers verify (`verify_snapshot` / payload checks), while the registered root authenticates
 /// the block producer in the validity circuit. Keeping the heights different (10 vs 3) makes
 /// accidental conflation fail loudly (root mismatch / proof length mismatch) instead of silently.
-pub const WALLET_MEMBER_TREE_HEIGHT: usize = 10;
+/// Height 20 (2^20 participants, raised from 10 / 1024 on 2026-11-24).
+pub const WALLET_MEMBER_TREE_HEIGHT: usize = 20;
 const _: () = assert!(
     1 << WALLET_MEMBER_TREE_HEIGHT == MAX_CHANNEL_MEMBERS,
     "WALLET_MEMBER_TREE_HEIGHT must be log2(MAX_CHANNEL_MEMBERS)"
@@ -87,27 +88,30 @@ const _: () = assert!(
 /// arrays/circuits sized for this constant; a per-channel `member_count` (2..=MAX_CHANNEL_MEMBERS)
 /// selects how many leading slots are active (slots `member_count..MAX_CHANNEL_MEMBERS` are
 /// padding: default/empty ciphertexts, zero pending-adds, `Bytes32::default()` pubkey hashes).
-/// `ChannelRecord`, `BalanceState.enc_balances` and `BalanceState.pending_adds` are all sized by
-/// this constant.
+/// Padding slots are never stored: `ChannelRecord` and `BalanceState` hold only the active slots,
+/// and every commitment folds the padding slots in as constants (value-identical to the full
+/// width). Raised from 1024 to 2^20 on 2026-11-24 (owner decision); slot indices and
+/// `delegate_count` are u32.
 ///
 /// SECURITY: this is the STATIC balance-slot ZK-circuit size. Close signatures instead use the
 /// distinct `MAX_SIG_CLUSTER = 8` width and gate its padding SPHINCS+ slots off. Deviation D6 from
 /// abstract2 §2.1 (which fixes 3 members) — see detail2-implementation-notes.md.
-pub const MAX_CHANNEL_MEMBERS: usize = 1024;
+pub const MAX_CHANNEL_MEMBERS: usize = 1 << 20;
 
-/// Height of the per-channel BALANCE-SLOT Poseidon Merkle tree: the tree whose 1024 leaves are
+/// Height of the per-channel BALANCE-SLOT Poseidon Merkle tree: the tree whose 2^20 leaves are
 /// `balance_slot_leaf_hash(regev_pk_digests[i], enc_balances[i].digest(), pending_adds[i])`
 /// (member slot order) and whose ROOT rides in the `BalanceState::h1()` header. This is the
 /// H1-commitment tree (see `tasks/h1-poseidon-root-threat-model.md`) — DISTINCT from
 /// [`MEMBER_TREE_HEIGHT`] (the validity-side cosigner pubkey tree). Their heights are intentionally
-/// different: balance slots use height 10, while the registered sig-cluster tree uses height 3.
+/// different: balance slots use height 20, while the registered sig-cluster tree uses height 3.
 ///
 /// SECURITY/INVARIANT: `1 << BALANCE_SLOT_TREE_HEIGHT == MAX_CHANNEL_MEMBERS` (const-asserted
 /// below). The claim circuits allocate inclusion proofs of exactly this height and
 /// `split_le(index, height)` bounds the opened slot index to `< MAX_CHANNEL_MEMBERS`; the native
-/// `BalanceState::slot_tree()` populates ALL `MAX_CHANNEL_MEMBERS` leaves, so the root — and
-/// hence H1 — remains a function of the FULL slot array exactly like the retired flat keccak.
-pub const BALANCE_SLOT_TREE_HEIGHT: usize = 10;
+/// `BalanceState::slot_tree()` stores only the ACTIVE leaves and folds every unused subtree in as
+/// the root of an all-padding subtree (`slot_padding_ladder`), so the root — and hence H1 — is
+/// the root over ALL `MAX_CHANNEL_MEMBERS` slots, value-identical to populating every leaf.
+pub const BALANCE_SLOT_TREE_HEIGHT: usize = 20;
 const _: () = assert!(
     1 << BALANCE_SLOT_TREE_HEIGHT == MAX_CHANNEL_MEMBERS,
     "BALANCE_SLOT_TREE_HEIGHT must be log2(MAX_CHANNEL_MEMBERS)"

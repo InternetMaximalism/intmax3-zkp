@@ -12,7 +12,7 @@ struct CapacityResult {
     schema_version: u32,
     channel_id: u64,
     state_digest: String,
-    recipient_slots: Vec<u16>,
+    recipient_slots: Vec<u32>,
     token_index: u32,
     amount: String,
     completed: bool,
@@ -125,10 +125,10 @@ pub(super) fn reserved_recipient(
     Ok(reservation.deposit_recipient.unwrap_or(legacy))
 }
 
-fn slots_csv(value: &str) -> Result<Vec<u16>, String> {
+fn slots_csv(value: &str) -> Result<Vec<u32>, String> {
     let mut slots = value
         .split(',')
-        .map(|slot| decimal(slot, "recipient slot", u16::MAX as u64).map(|slot| slot as u16))
+        .map(|slot| decimal(slot, "recipient slot", u32::MAX as u64).map(|slot| slot as u32))
         .collect::<Result<Vec<_>, _>>()?;
     if slots.len() > MAX_CHANNEL_MEMBERS {
         return Err("too many recipient slots".into());
@@ -175,7 +175,7 @@ fn require_open(cli: &CliState) -> Result<(), String> {
 fn pending_at(
     reservations: &BTreeMap<String, DepositCapacityReservation>,
     excluded: Option<&str>,
-    slot: u16,
+    slot: u32,
     token_index: u32,
 ) -> Result<(u64, u32), String> {
     let mut amount = 0u64;
@@ -211,14 +211,14 @@ pub(super) fn check_candidates(
     cli: &CliState,
     token_index: u32,
     amount: u64,
-    candidates: &[u16],
+    candidates: &[u32],
     excluded: Option<&str>,
     require_every: bool,
-) -> Result<Vec<u16>, String> {
+) -> Result<Vec<u32>, String> {
     require_open(cli)?;
     let head = &cli.snapshot.state;
     let active = usize::from(cli.snapshot.record.member_count)
-        + usize::from(cli.snapshot.record.delegate_count);
+        + (cli.snapshot.record.delegate_count as usize);
     let token_slot = resolve_local_token_slot(&head.balance_state, token_index)
         .map_err(|error| format!("deposit token is not registered: {error}"))?;
     let bounds = credit_bounds_for(cli, head)?;
@@ -226,7 +226,7 @@ pub(super) fn check_candidates(
     let mut accepted = Vec::new();
     for &slot in candidates {
         let check = || -> Result<(), String> {
-            if usize::from(slot) >= active {
+            if (slot as usize) >= active {
                 return Err(format!("recipient slot {slot} is not active"));
             }
             let (reserved, count) = pending_at(
@@ -240,16 +240,16 @@ pub(super) fn check_candidates(
                     .to_string()
             })?;
             check_pending_adds(
-                head.balance_state.pending_adds[usize::from(slot)][token_slot],
+                head.balance_state.pending_adds[(slot as usize)][token_slot],
                 count,
             )?;
             bounds
                 .can_credit(
                     head,
-                    usize::from(slot),
+                    (slot as usize),
                     token_slot,
                     combined,
-                    owned.get(&(usize::from(slot), token_slot)).copied(),
+                    owned.get(&((slot as usize), token_slot)).copied(),
                 )
                 .map_err(|error| format!("recoverable deposit capacity error: {error}"))
         };
@@ -269,7 +269,7 @@ fn same_intent(
     reservation: &DepositCapacityReservation,
     token: u32,
     amount: u64,
-    slots: &[u16],
+    slots: &[u32],
 ) -> bool {
     reservation.token_index == token
         && reservation.amount == amount
@@ -280,7 +280,7 @@ fn includes_import_selection(
     reservation: &DepositCapacityReservation,
     token: u32,
     amount: u64,
-    slots: &[u16],
+    slots: &[u32],
 ) -> bool {
     reservation.token_index == token
         && reservation.amount == amount
@@ -300,7 +300,7 @@ fn is_new_reservation(
     id: &str,
     token: u32,
     amount: u64,
-    slots: &[u16],
+    slots: &[u32],
 ) -> Result<bool, String> {
     if let Some(existing) = reservations.get(id) {
         if !same_intent(existing, token, amount, slots) {
@@ -321,7 +321,7 @@ fn is_new_reservation(
 
 fn result(
     cli: &CliState,
-    slots: Vec<u16>,
+    slots: Vec<u32>,
     token: u32,
     amount: u64,
     completed: bool,
@@ -359,14 +359,14 @@ pub(super) fn preflight(args: &[String]) {
         existing
             .map(|reservation| reservation.recipient_slots.clone())
             .unwrap_or_else(|| {
-                (0..u16::from(cli.snapshot.record.member_count)
+                (0..u32::from(cli.snapshot.record.member_count)
                     + cli.snapshot.record.delegate_count)
                     .collect()
             })
     } else {
         vec![
-            decimal(&args[1], "recipient slot", u16::MAX as u64).unwrap_or_else(|error| die(error))
-                as u16,
+            decimal(&args[1], "recipient slot", u32::MAX as u64).unwrap_or_else(|error| die(error))
+                as u32,
         ]
     };
     if let Some(reservation) = existing {
@@ -502,7 +502,7 @@ pub(super) fn bind(args: &[String]) {
 mod tests {
     use super::*;
 
-    fn pending(amount: u64, slots: Vec<u16>) -> DepositCapacityReservation {
+    fn pending(amount: u64, slots: Vec<u32>) -> DepositCapacityReservation {
         DepositCapacityReservation {
             token_index: 55,
             amount,

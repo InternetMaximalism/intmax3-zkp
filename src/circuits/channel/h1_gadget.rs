@@ -309,7 +309,7 @@ mod tests {
             let state = BalanceState {
                 channel_id: ChannelId::new(rng.gen_range(1..u32::MAX as u64)).unwrap(),
                 member_count: member_count as u8,
-                delegate_count: delegate_count as u16,
+                delegate_count: delegate_count as u32,
                 enc_balances: BalanceState::pad_enc_balances(&enc_active),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&pk_active),
                 recipients: BalanceState::pad_recipients(&recipients_active),
@@ -356,7 +356,7 @@ mod tests {
                 .unwrap();
             pw.set_target(
                 delegate_count_t,
-                F::from_canonical_u16(state.delegate_count),
+                F::from_canonical_u32(state.delegate_count),
             )
             .unwrap();
             pw.set_target(token_count_t, F::from_canonical_u8(state.token_count))

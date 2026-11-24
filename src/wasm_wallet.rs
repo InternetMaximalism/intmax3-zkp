@@ -45,7 +45,7 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 struct Session {
     keys: MemberKeys,
     /// BALANCE-SLOT index (member OR delegate) of this wallet in the imported channel.
-    slot: Option<u16>,
+    slot: Option<u32>,
     /// This wallet's view of the channel head: the signed header, its own slot row and the row's
     /// Merkle path. A DELEGATE never holds more than this (it never sees another participant's
     /// row); every send/refresh/burn/claim is built from it.
@@ -80,7 +80,7 @@ struct PendingDebit {
 fn owned_credit_plaintexts(
     session: &Session,
     state: &ChannelState,
-    slot: u16,
+    slot: u32,
 ) -> Result<OwnedPlaintexts, JsValue> {
     state.balance_state.validate().map_err(js_err)?;
     let active =
@@ -107,7 +107,7 @@ fn owned_credit_plaintexts(
 fn credit_bounds_for(
     session: &Session,
     state: &ChannelState,
-    slot: u16,
+    slot: u32,
 ) -> Result<ChannelCreditBounds, JsValue> {
     if let Some(bounds) = session.credit_safety_bounds.get(&state.digest.to_hex()) {
         bounds.validate_for(state).map_err(js_err)?;
@@ -120,7 +120,7 @@ fn credit_bounds_for(
 fn remember_credit_head(
     session: &mut Session,
     state: &ChannelState,
-    slot: u16,
+    slot: u32,
 ) -> Result<(), JsValue> {
     let bounds = credit_bounds_for(session, state, slot)?;
     session.credit_safety_bounds.clear();
@@ -290,7 +290,7 @@ pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<St
 /// Returns this member's `MemberSignature`. Requires the slot to be known (via a prior import) or
 /// inferable; here the caller passes the slot explicitly.
 #[wasm_bindgen]
-pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValue> {
+pub fn wallet_sign_state(slot: u32, state_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let state: ChannelState = serde_json::from_str(&state_json).map_err(js_err)?;
         if state.digest != state.signing_digest() {
@@ -384,7 +384,7 @@ struct TokenBalanceEntry {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BalanceReport {
-    slot: u16,
+    slot: u32,
     /// GENESIS-token (local slot 0) balance — the wire-compat scalar kept for existing callers;
     /// the per-token view is `balances`. Base units, wire-encoded as a decimal string — see
     /// [`ser_u64_dec_string`].
@@ -531,7 +531,7 @@ pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
             .find(|m| m.regev_pk == session.keys.regev_pk)
             .map(|m| m.slot)
             .ok_or_else(|| js_err("this wallet's key is not a member of the imported channel"))?;
-        if slot >= snapshot.record.member_count as u16 {
+        if slot >= snapshot.record.member_count as u32 {
             return Err(js_err(
                 "delegates hold only their own slot: import the slot view (wallet_import_view), \
                  not the full channel snapshot",
@@ -714,7 +714,7 @@ pub fn wallet_withdrawal_claim(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Recipient {
-    slot: u16,
+    slot: u32,
     pk_g: String,
     pk_b: String,
     regev_pk: crate::regev::RegevPk,
@@ -799,7 +799,7 @@ struct InterChannelOut<'a> {
 #[wasm_bindgen]
 pub fn wallet_send_inter_channel(
     to_channel: u32,
-    to_slot: u16,
+    to_slot: u32,
     amount: u64,
     dest_recipient_json: String,
     token_index: Option<u32>,
@@ -974,7 +974,7 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
         // Co-signing is COSIGNER-only: a delegate session must not emit a state signature
         // (send-only model; a delegate sig would be structurally ignored anyway).
         let mc = snapshot.record.member_count;
-        if slot >= mc as u16 {
+        if slot >= mc as u32 {
             return Err(js_err(format!(
                 "slot {slot} is a delegate (member_count {mc}); delegates do not co-sign state"
             )));

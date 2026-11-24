@@ -267,10 +267,10 @@ fn the_cli_never_reaches_contracts_through_the_working_directory() {
 /// The binary's CLI co-signer keygen labels (`CLI_COSIGNER_SEED_BASE + slot`). Under
 /// `INTMAX_INSECURE_DETERMINISTIC_KEYS=1` a label seeds `StdRng` directly, which is what lets this
 /// test reproduce the binary's co-signer identities exactly.
-fn cli_keygen_label(slot: u16) -> u64 {
+fn cli_keygen_label(slot: u32) -> u64 {
     0xC1_0000 + slot as u64
 }
-fn cli_keys(slot: u16) -> MemberKeys {
+fn cli_keys(slot: u32) -> MemberKeys {
     MemberKeys::generate(&mut StdRng::seed_from_u64(cli_keygen_label(slot)))
 }
 
@@ -293,7 +293,7 @@ fn recipient_for(i: usize) -> Address {
 // refuses a file missing any replay-ledger key.
 #[derive(Serialize)]
 struct ControlledMemberMirror {
-    slot: u16,
+    slot: u32,
     keygen_seed: u64,
     balance_amount: u64,
     balance_seed: u64,
@@ -314,7 +314,7 @@ struct CliStateMirror {
 /// derive) plus ONE browser delegate at slot 3 (whose key it CANNOT) — the live wallet's layout.
 fn write_delegate_channel_state(cwd: &std::path::Path) {
     let channel_id = 7u32;
-    let cosigners: Vec<MemberKeys> = (0..3u16).map(cli_keys).collect();
+    let cosigners: Vec<MemberKeys> = (0..3u32).map(cli_keys).collect();
     let delegate = browser_delegate_keys();
     let all: Vec<&MemberKeys> = cosigners.iter().chain(std::iter::once(&delegate)).collect();
 
@@ -322,7 +322,7 @@ fn write_delegate_channel_state(cwd: &std::path::Path) {
         .iter()
         .enumerate()
         .map(|(i, k)| MemberInfo {
-            slot: i as u16,
+            slot: i as u32,
             pk_g: k.pk_g(),
             pk_b: k.pk_b(),
             regev_pk: k.regev_pk.clone(),
@@ -357,7 +357,7 @@ fn write_delegate_channel_state(cwd: &std::path::Path) {
         add_signature(&mut genesis, s);
     }
 
-    let controlled = (0..3u16)
+    let controlled = (0..3u32)
         .map(|slot| ControlledMemberMirror {
             slot,
             keygen_seed: cli_keygen_label(slot),

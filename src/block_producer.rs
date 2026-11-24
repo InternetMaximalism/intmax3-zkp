@@ -1179,7 +1179,7 @@ impl ProductionBlockProducer {
     }
 
     /// `(channel, member_count, delegate_count)` of every registered record, for status reports.
-    pub fn registered_record_counts(&self) -> Vec<(ChannelId, u8, u16)> {
+    pub fn registered_record_counts(&self) -> Vec<(ChannelId, u8, u32)> {
         let mut counts: Vec<_> = self
             .channel_records
             .iter()
@@ -1339,7 +1339,7 @@ mod delegate_join_adoption_tests {
         Bytes32::from_u32_slice(&[slot as u32 + 1, 0, 0, 0, 0, 0, 0, 7]).unwrap()
     }
 
-    fn record(members: u8, delegates: u16) -> ChannelRecord {
+    fn record(members: u8, delegates: u32) -> ChannelRecord {
         let member_pk_gs: Vec<Bytes32> =
             (0..members as usize + delegates as usize).map(identity).collect();
         ChannelRecord {
@@ -1396,7 +1396,7 @@ mod delegate_join_adoption_tests {
         duplicate.member_pk_gs[4] = identity(0);
         assert!(verify_delegates_appended(&record(3, 1), &duplicate).is_err());
         let mut trailing = record(3, 2);
-        trailing.member_pk_gs[6] = identity(6);
+        trailing.member_pk_gs.push(identity(6)); // an identity past the active prefix
         assert!(verify_delegates_appended(&record(3, 1), &trailing).is_err());
     }
 }

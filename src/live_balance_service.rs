@@ -4220,7 +4220,7 @@ mod delegate_add_gate_tests {
 
     /// A record with `members` co-signers at slots 0..members and `delegates` delegates packed
     /// immediately after, each slot carrying a distinct nonzero identity.
-    fn record(members: u8, delegates: u16) -> ChannelRecord {
+    fn record(members: u8, delegates: u32) -> ChannelRecord {
         let active = members as usize + delegates as usize;
         let member_pk_gs: Vec<Bytes32> = (0..active).map(|i| pkg(i as u8)).collect();
         ChannelRecord {

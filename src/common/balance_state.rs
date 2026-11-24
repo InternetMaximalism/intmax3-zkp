@@ -288,10 +288,10 @@ pub struct BalanceState {
     /// a delegate. Delegate slots are ACTIVE balance slots (non-padding ciphertexts) exactly
     /// like member slots.
     ///
-    /// WIDTH: `u16` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
+    /// WIDTH: `u32` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
     /// member_count`), which does not fit in u8. The H1 preimage encodes this as a u64 field
     /// input, so the widening is digest-transparent.
-    pub delegate_count: u16,
+    pub delegate_count: u32,
     /// One `MAX_CHANNEL_TOKENS`-wide row of balance ciphertexts per slot, in member slot order
     /// (detail2 §N-2): `enc_balances[slot][token_slot]`. Padding member slots (`>= member_count +
     /// delegate_count`) are all-zero rows; within active slots, positions `t >= token_count` are
@@ -385,7 +385,7 @@ pub struct BalanceState {
 struct BalanceStateWire {
     channel_id: ChannelId,
     member_count: u8,
-    delegate_count: u16,
+    delegate_count: u32,
     #[serde(with = "token_matrix_serde::ciphertexts")]
     enc_balances: Vec<TokenCiphertexts>,
     regev_pk_digests: Vec<Bytes32>,
@@ -981,7 +981,7 @@ pub fn balance_slot_leaf_preimage(
 pub struct BalanceStateHeader {
     pub channel_id: ChannelId,
     pub member_count: u8,
-    pub delegate_count: u16,
+    pub delegate_count: u32,
     pub token_count: u8,
     pub token_registry: [u32; MAX_CHANNEL_TOKENS],
     pub slot_tree_root: PoseidonHashOut,
@@ -1223,7 +1223,7 @@ mod tests {
                 ciphertext(2),
                 ciphertext(3),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
             recipients: BalanceState::pad_recipients(&[recipient(1), recipient(2), recipient(3)]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -1356,7 +1356,7 @@ mod tests {
             member_count: count,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances_token0(&active),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); count as usize]),
             recipients: BalanceState::pad_recipients(&recipients),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -1466,11 +1466,11 @@ mod tests {
             ),
             "member_count > MAX_SIG_CLUSTER must be rejected"
         );
-        // Slot-capacity check: with u16 delegate_count (2026-07-18 slot widening) the
+        // Slot-capacity check: with u32 delegate_count (2026-07-18 slot widening) the
         // `member_count + delegate_count > MAX_CHANNEL_MEMBERS` boundary is now REACHABLE
         // (it was dead code with u8 counts: 16 + 255 = 271 < 1024). Exercise it.
         let mut over_capacity = state_with_members(MAX_SIG_CLUSTER as u8);
-        over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_SIG_CLUSTER + 1) as u16;
+        over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_SIG_CLUSTER + 1) as u32;
         assert!(
             matches!(
                 over_capacity.validate(),

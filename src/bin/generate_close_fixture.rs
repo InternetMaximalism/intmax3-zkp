@@ -155,9 +155,9 @@ struct CloseIntentDescriptor {
     /// The channel's `registeredMemberSetCommitment()` MUST equal this.
     member_set_commitment: String,
     member_count: u8,
-    // u16: delegate slots span the full 1024 balance-slot space (Option B) — matches the
+    // u32: delegate slots span the full 1024 balance-slot space (Option B) — matches the
     // `ChannelClosePublicInputs.delegate_count` width.
-    delegate_count: u16,
+    delegate_count: u32,
     /// The active members' `pk_g` hashes (slot order) that the close proof verified signatures
     /// for. The Solidity test registers the channel with EXACTLY these so its member-set
     /// commitment matches the proof's. Padding slots (>= member_count) are NOT emitted (zeroed

@@ -227,10 +227,10 @@ pub struct ChannelRecord {
     /// delegates do NOT appear in the N-of-N co-sign set (those loops stay `0..member_count`;
     /// later phases).
     ///
-    /// WIDTH: `u16` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
+    /// WIDTH: `u32` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
     /// member_count`), which does not fit in u8 (the 2026-07-18 storm capped joins at 256). The
     /// IMCR digest encodes this as a u32 limb, so the widening is digest-transparent.
-    pub delegate_count: u16,
+    pub delegate_count: u32,
     /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order. Holds exactly
     /// the ACTIVE slots (`member_count + delegate_count`), each nonzero and pairwise-distinct;
     /// padding slots are never stored (their value is `Bytes32::default()` in every digest).
@@ -254,7 +254,7 @@ pub struct ChannelRecord {
     /// member_count`.
     ///
     /// WIDTH: u8 is sufficient — this is COSIGNER-slot space (`< member_count <= MAX_SIG_CLUSTER =
-    /// 8`), never a delegate/balance slot (audited 2026-07-18, u16 slot widening).
+    /// 8`), never a delegate/balance slot (audited 2026-07-18, u32 slot widening).
     pub bp_member_slot: u8,
     pub special_close_penalty: U256,
     pub close_freeze_nonce: u64,
@@ -274,7 +274,7 @@ pub struct ChannelRecord {
 struct ChannelRecordWire {
     channel_id: ChannelId,
     member_count: u8,
-    delegate_count: u16,
+    delegate_count: u32,
     member_pk_gs: Vec<Bytes32>,
     member_pubkeys_root: Bytes32,
     #[serde(default)]
@@ -627,8 +627,8 @@ pub struct ChannelBalance {
 pub struct ChannelMember {
     pub pk_g: Bytes32,
     /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`) —
-    /// delegates withdraw at close too, so this is NOT bounded by `MAX_SIG_CLUSTER`; u16.
-    pub member_slot: u16,
+    /// delegates withdraw at close too, so this is NOT bounded by `MAX_SIG_CLUSTER`; u32.
+    pub member_slot: u32,
     pub l1_withdrawal_recipient: Address,
 }
 
@@ -1907,7 +1907,7 @@ pub fn l1_deposit_import_digest(
     deposit_nullifier: Bytes32,
     token_index: u32,
     amount: u64,
-    depositor_slot: u16,
+    depositor_slot: u32,
 ) -> Bytes32 {
     hash_words(
         &[
@@ -2033,7 +2033,7 @@ mod tests {
                 ciphertext(2),
                 ciphertext(3),
             ]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
             // B-1b: nonzero per-active-slot L1 exit addresses (validate() rejects zero actives).
             recipients: BalanceState::pad_recipients(&[
                 Address::from_u32_slice(&[11, 12, 13, 14, 15]).unwrap(),
@@ -2395,7 +2395,8 @@ mod tests {
 
         // A nonzero PADDING slot (>= member_count) is rejected (would smuggle a non-member key).
         let mut nonzero_pad = record_with_members(8);
-        nonzero_pad.member_pk_gs[8] = pubkey_hash(500);
+        // Padding is never stored: an identity past the active prefix is a shape violation.
+        nonzero_pad.member_pk_gs.push(pubkey_hash(500));
         assert!(matches!(
             nonzero_pad.validate(),
             Err(ChannelError::InvalidChannelRecord(_))

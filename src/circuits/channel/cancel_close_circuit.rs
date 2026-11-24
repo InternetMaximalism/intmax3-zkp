@@ -591,7 +591,7 @@ where
         witness
             .set_target(
                 self.revived_delegate_count,
-                F::from_canonical_u16(revived.balance_state.delegate_count),
+                F::from_canonical_u32(revived.balance_state.delegate_count),
             )
             .unwrap();
         self.revived_epoch
@@ -872,7 +872,7 @@ pub mod test_fixture {
                         .map(|i| ciphertext(i as u32 + 1))
                         .collect::<Vec<_>>(),
                 ),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); active as usize]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..active)

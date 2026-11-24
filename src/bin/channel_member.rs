@@ -234,8 +234,8 @@ const POST_CLOSE_CLAIM_MLE_FILE: &str = "post_close_claim_mle.json";
 // so a stress box can exercise a full 8-of-8 co-sign round (MAX_SIG_CLUSTER). Slots 0..2 keep their
 // historical genesis balances and any EXTRA cosigner slot holds 0, so Σ(genesis balances) — and
 // therefore the deposit-backing `fund` reconciliation — is IDENTICAL for every cosigner count.
-fn cli_cosigner_count() -> u16 {
-    let n: u16 = std::env::var("INTMAX_CLI_COSIGNERS")
+fn cli_cosigner_count() -> u32 {
+    let n: u32 = std::env::var("INTMAX_CLI_COSIGNERS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
@@ -246,12 +246,12 @@ fn cli_cosigner_count() -> u16 {
     }
     n
 }
-fn cli_slots() -> Vec<u16> {
+fn cli_slots() -> Vec<u32> {
     (0..cli_cosigner_count()).collect()
 }
 // Genesis allocations in BASE UNITS (= wei). With TOKEN_DECIMALS=18, 1 token = 1 ETH.
 // 0.04 + 0.03 + 0.02 = 0.09 ETH total — fits comfortably in u64 (max ~18.4 ETH).
-fn genesis_amount(slot: u16) -> u64 {
+fn genesis_amount(slot: u32) -> u64 {
     match slot {
         0 => TOKEN_UNIT / 25,      // 0.04 ETH
         1 => TOKEN_UNIT / 100 * 3, // 0.03 ETH
@@ -259,7 +259,7 @@ fn genesis_amount(slot: u16) -> u64 {
         _ => 0,                    // extra stress cosigners co-sign but hold no balance
     }
 }
-fn first_delegate_slot() -> u16 {
+fn first_delegate_slot() -> u32 {
     cli_cosigner_count()
 }
 // The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
@@ -297,7 +297,7 @@ struct TokenWitness {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ControlledMember {
-    slot: u16,
+    slot: u32,
     keygen_seed: u64,
     balance_amount: u64,
     balance_seed: u64,
@@ -917,7 +917,7 @@ fn require_durable_head_backing_finalized_with(
 struct StateSigningLedgerEntry {
     channel_id: ChannelId,
     predecessor_digest: Bytes32,
-    member_slot: u16,
+    member_slot: u32,
     successor_digest: Bytes32,
     purpose: StateSigningPurpose,
     plan_digest: Option<Bytes32>,
@@ -936,7 +936,7 @@ struct SettlementBinding {
     channel_id: u32,
     snapshot_state_digest: Bytes32,
     participant_root: Bytes32,
-    participant_count: u16,
+    participant_count: u32,
     rollup: String,
     verifier: Option<String>,
     manager: Option<String>,
@@ -1133,7 +1133,7 @@ struct CliState {
 struct DepositCapacityReservation {
     token_index: u32,
     amount: u64,
-    recipient_slots: Vec<u16>,
+    recipient_slots: Vec<u32>,
     /// Exact one-time address from the trusted local live service, pinned before L1 signing.
     /// Never taken from a public import request. Legacy reservations keep the backing address.
     #[serde(default)]
@@ -1237,7 +1237,7 @@ fn check_reserved_credit_capacity(
                 !r.completed
                     && Some(id.as_str()) != excluded
                     && r.token_index == token_index
-                    && r.recipient_slots.contains(&(slot as u16))
+                    && r.recipient_slots.contains(&(slot as u32))
             })
             .count();
         if u64::from(head.balance_state.pending_adds[slot][token]) + reserved_adds as u64
@@ -1300,7 +1300,7 @@ fn admit_credit_safe_successor_excluding(
 fn state_signing_ledger_key(
     channel_id: ChannelId,
     predecessor_digest: Bytes32,
-    member_slot: u16,
+    member_slot: u32,
 ) -> String {
     format!(
         "{}:{}:{}",
@@ -1401,7 +1401,7 @@ fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
         if entry.channel_id != record.channel_id {
             return Err("signing ledger entry belongs to a different channel".into());
         }
-        if entry.member_slot >= u16::from(record.member_count) {
+        if entry.member_slot >= u32::from(record.member_count) {
             return Err(format!(
                 "signing ledger member slot {} is outside member_count {}",
                 entry.member_slot, record.member_count
@@ -1410,7 +1410,7 @@ fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
         if entry.successor_digest == Bytes32::default() {
             return Err("signing ledger contains a zero successor digest".into());
         }
-        if entry.signature.member_slot as u16 != entry.member_slot
+        if entry.signature.member_slot as u32 != entry.member_slot
             || entry.signature.pk_g != record.member_pk_gs[entry.member_slot as usize]
         {
             return Err(format!(
@@ -1468,7 +1468,7 @@ where
     if successor.digest != successor.signing_digest() {
         return Err("state-signing request digest does not match its signed preimage".into());
     }
-    if controlled.slot >= u16::from(record.member_count) {
+    if controlled.slot >= u32::from(record.member_count) {
         return Err(format!(
             "controlled slot {} is outside member_count {}",
             controlled.slot, record.member_count
@@ -1573,7 +1573,7 @@ where
         Some(signature) => signature,
         None => signer(&keys)?,
     };
-    if signature.member_slot as u16 != controlled.slot || signature.pk_g != expected_pk_g {
+    if signature.member_slot as u32 != controlled.slot || signature.pk_g != expected_pk_g {
         return Err(format!(
             "candidate signature identity disagrees with controlled slot {}",
             controlled.slot
@@ -1608,7 +1608,7 @@ fn ledgered_state_signature(
     let candidates: Vec<MemberSignature> = successor
         .member_signatures
         .iter()
-        .filter(|signature| signature.member_slot as u16 == controlled.slot)
+        .filter(|signature| signature.member_slot as u32 == controlled.slot)
         .cloned()
         .collect();
     if candidates.len() > 1 {
@@ -2177,7 +2177,7 @@ fn delegate_seed() -> u64 {
         .unwrap_or(1)
 }
 
-fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
+fn member_info_for(slot: u32, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),
@@ -2187,7 +2187,7 @@ fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
 }
 
 /// Env name of the per-slot GENESIS leaf-recipient override consumed by `create_channel`.
-fn cosigner_recipient_env(slot: u16) -> String {
+fn cosigner_recipient_env(slot: u32) -> String {
     format!("CLI_RECIPIENT_SLOT_{slot}")
 }
 
@@ -2196,7 +2196,7 @@ fn cosigner_recipient_env(slot: u16) -> String {
 /// still required to be nonzero in that mode so malformed settings never silently fall back.
 fn resolve_cosigner_leaf_recipient(
     channel_id: u32,
-    slot: u16,
+    slot: u32,
     configured: Option<&str>,
     allow_test_default: bool,
 ) -> Result<Address, String> {
@@ -2248,7 +2248,7 @@ fn resolve_cosigner_leaf_recipient(
 /// recovery address for every controlled member; only insecure deterministic fixtures retain
 /// the old synthetic fallback. No new key is generated and no operator address is substituted.
 /// This function does not read or rewrite recipients in an existing signed channel state.
-fn cosigner_leaf_recipient(channel_id: u32, slot: u16) -> Address {
+fn cosigner_leaf_recipient(channel_id: u32, slot: u32) -> Address {
     let key = cosigner_recipient_env(slot);
     let configured = match std::env::var(&key) {
         Ok(raw) => Some(raw),
@@ -2383,7 +2383,7 @@ fn cmd_slot_view(args: &[String]) {
     let usage = "slot-view <out.json> [--snapshot <file>] (--slots <s>[,<s>...] | --pk-g <0x..>)";
     let out_path = args.get(1).unwrap_or_else(|| die(usage));
     let snapshot = view_source_snapshot(args);
-    let slots: Vec<u16> = if let Some(pk_g) = flag_value(args, "--pk-g") {
+    let slots: Vec<u32> = if let Some(pk_g) = flag_value(args, "--pk-g") {
         let pk_g = Bytes32::from_hex(pk_g).unwrap_or_else(|e| die(format!("--pk-g: {e}")));
         let slot = snapshot
             .members
@@ -2396,7 +2396,7 @@ fn cmd_slot_view(args: &[String]) {
         flag_value(args, "--slots")
             .unwrap_or_else(|| die(usage))
             .split(',')
-            .map(|t| t.trim().parse::<u16>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
+            .map(|t| t.trim().parse::<u32>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
             .collect()
     };
     let mut views = serde_json::Map::new();
@@ -2417,7 +2417,7 @@ fn cmd_slot_view(args: &[String]) {
 fn cmd_member_info(args: &[String]) {
     let usage = "member-info <out.json> [--snapshot <file>] --slot <s>";
     let out_path = args.get(1).unwrap_or_else(|| die(usage));
-    let slot: u16 = flag_value(args, "--slot")
+    let slot: u32 = flag_value(args, "--slot")
         .unwrap_or_else(|| die(usage))
         .parse()
         .unwrap_or_else(|e| die(format!("--slot: {e}")));
@@ -3475,10 +3475,10 @@ fn cmd_member_update_future(args: &[String]) {
 
     let (update, new_controlled_seed_change): (
         intmax3_zkp::wallet_core::deprecated_member_set_update::MemberSetUpdate,
-        Option<(u16, u64)>,
+        Option<(u32, u64)>,
     ) = match sub {
         "rotate" => {
-            let slot: u16 = args
+            let slot: u32 = args
                 .get(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_else(|| die("member-update rotate <slot> <new_keygen_seed>"));
@@ -3523,7 +3523,7 @@ fn cmd_member_update_future(args: &[String]) {
             let joiner_keys = keys_for(joiner_seed);
             let update = propose_add_cosigner(&joiner_keys, recipient, &record, &members)
                 .unwrap_or_else(|e| die(format!("propose add: {e}")));
-            (update, Some((record.member_count as u16, joiner_seed)))
+            (update, Some((record.member_count as u32, joiner_seed)))
         }
         other => die(format!("member-update: unknown op {other:?} (rotate|add)")),
     };
@@ -5211,7 +5211,7 @@ struct CloseIntentDescriptor {
     close_intent_digest: String,
     member_set_commitment: String,
     member_count: u8,
-    delegate_count: u16,
+    delegate_count: u32,
     member_pk_gs: Vec<String>,
     /// Multi-token (§N-6, Phase 5b): the FULL per-token fund vector of the proved final state
     /// (10 x 0x-hex U256, registry-aligned; `[0]` == the legacy `channel_fund_amount` burn leg).
@@ -6506,7 +6506,7 @@ fn claim_keys_for_slot(
     cmd: &str,
     controlled: &[ControlledMember],
     final_balance_state: &BalanceState,
-    slot: u16,
+    slot: u32,
 ) -> MemberKeys {
     let active =
         final_balance_state.member_count as usize + final_balance_state.delegate_count as usize;
@@ -6606,7 +6606,7 @@ fn cmd_claim(args: &[String]) {
         .get(1)
         .cloned()
         .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url] [token_slot]"));
-    let member_slot: u16 = args
+    let member_slot: u32 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("claim needs <member_slot>"));
@@ -6972,7 +6972,7 @@ fn cmd_post_close_claim(args: &[String]) {
     let manager = args.get(1).cloned().unwrap_or_else(|| {
         die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]")
     });
-    let receiver_slot: u16 = args
+    let receiver_slot: u32 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("post-close-claim needs <receiver_slot>"));
@@ -10794,8 +10794,8 @@ fn require_daemon_signer(record: &ChannelRecord, controlled: &[ControlledMember]
     let member_count = usize::from(record.member_count);
     let held = controlled
         .iter()
-        .filter(|c| usize::from(c.slot) < member_count)
-        .any(|c| keys_for(c.keygen_seed).pk_g() == record.member_pk_gs[usize::from(c.slot)]);
+        .filter(|c| (c.slot as usize) < member_count)
+        .any(|c| keys_for(c.keygen_seed).pk_g() == record.member_pk_gs[(c.slot as usize)]);
     if held {
         return Ok(());
     }
@@ -11242,7 +11242,7 @@ fn cmd_init(args: &[String]) {
 /// The three CLI co-signing members (deterministic keys + genesis balances).
 fn cli_members() -> (
     Vec<MemberInfo>,
-    Vec<(u16, RegevCiphertext)>,
+    Vec<(u32, RegevCiphertext)>,
     Vec<ControlledMember>,
 ) {
     let mut members = Vec::new();
@@ -11320,7 +11320,7 @@ fn create_channel(
     ChannelState,
     Vec<MemberInfo>,
     Vec<ControlledMember>,
-    u16,
+    u32,
 ) {
     let delegate_slot = first_delegate_slot();
     nd.slot = delegate_slot;
@@ -11449,7 +11449,7 @@ fn join_delegate(
     ChannelState,
     Vec<MemberInfo>,
     Vec<ControlledMember>,
-    u16,
+    u32,
 ) {
     // SECURITY (B-1b uniqueness, adversarial review finding 1): a joining member declares its own
     // L1 exit address. If it were allowed to declare an address ALREADY bound to another active
@@ -11476,12 +11476,12 @@ fn join_delegate(
         .iter()
         .filter(|m| m.slot >= delegate_slot)
         .count();
-    // Check capacity BEFORE computing the slot (u16 arithmetic; the old `as u8` add wrapped at
+    // Check capacity BEFORE computing the slot (u32 arithmetic; the old `as u8` add wrapped at
     // slot 256 — the 2026-07-18 storm bug).
     if delegate_slot as usize + existing + 1 > MAX_CHANNEL_MEMBERS {
         die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
     }
-    let new_slot = delegate_slot + existing as u16;
+    let new_slot = delegate_slot + existing as u32;
     nd.slot = new_slot;
     // SECURITY (A-1 finding 1 — THE EXIT LANE): capture the joiner's Regev pk digest BEFORE `nd` is
     // moved into `members`. Until now `join_delegate` never wrote `balance_state.regev_pk_digests`
@@ -11511,7 +11511,7 @@ fn join_delegate(
     let mut members = prev.snapshot.members.clone();
     members.push(nd);
     members.sort_by_key(|m| m.slot);
-    let new_delegate_count = (existing + 1) as u16;
+    let new_delegate_count = (existing + 1) as u32;
     let mut record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count)
         .unwrap_or_else(|e| die(e));
     // §Q: a delegate join does not change the registered co-signer set — carry the version.
@@ -11655,7 +11655,7 @@ fn cmd_gen_send(args: &[String]) {
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <seed>"));
-    let to: u16 = args
+    let to: u32 = args
         .get(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <to_slot>"));
@@ -11806,11 +11806,11 @@ fn invalidate_witness(cm: &mut ControlledMember, token_slot: u8, new_balance: u6
 /// deposit import, incoming transfer) or just spent by a previous send is spendable directly —
 /// no `refresh` and no reproducible witness required.
 fn cmd_send(args: &[String]) {
-    let from: u16 = args
+    let from: u32 = args
         .get(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("send <from> <to> <amount> [out.json] [token_slot]"));
-    let to: u16 = args
+    let to: u32 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <to>"));
@@ -11939,11 +11939,11 @@ fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path:
 /// deployment). `INTMAX_CLUSTER_SIGN_SLOTS=0,3` restricts signing to the listed slots — the
 /// per-host half of the cluster co-signing protocol, where each host holds and signs only its own
 /// slot(s) and receives the others' signatures over the network.
-fn cluster_sign_slots(cli: &CliState) -> Vec<u16> {
-    let all: Vec<u16> = cli.controlled.iter().map(|c| c.slot).collect();
+fn cluster_sign_slots(cli: &CliState) -> Vec<u32> {
+    let all: Vec<u32> = cli.controlled.iter().map(|c| c.slot).collect();
     match std::env::var("INTMAX_CLUSTER_SIGN_SLOTS") {
         Ok(v) if !v.trim().is_empty() => {
-            let wanted: Vec<u16> = v
+            let wanted: Vec<u32> = v
                 .split(',')
                 .map(|t| {
                     t.trim()
@@ -12009,7 +12009,7 @@ fn cmd_cosign_partial(args: &[String]) {
     struct PartialCosign {
         prev_digest: Bytes32,
         next_digest: Bytes32,
-        slots: Vec<u16>,
+        slots: Vec<u32>,
         signatures: Vec<MemberSignature>,
     }
     write_json(
@@ -13341,7 +13341,7 @@ fn cmd_register_token(args: &[String]) {
 /// upstream change in RNG consumption stops the command instead of silently recording a witness
 /// that would fail E-1 later.
 fn cmd_refresh(args: &[String]) {
-    let slot: u16 = args
+    let slot: u32 = args
         .get(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("refresh <slot> [token_slot] [out.json]"));
@@ -13597,11 +13597,11 @@ fn cmd_deploy_settlement(args: &[String]) {
 /// unchanged, in its slot, and the live list may only be longer.
 fn deployed_participants_are_prefix(
     deployed_root: Bytes32,
-    deployed_count: u16,
+    deployed_count: u32,
     pk_gs: &[String],
     recipients: &[String],
 ) -> bool {
-    let deployed = usize::from(deployed_count);
+    let deployed = (deployed_count as usize);
     recipients.len() == pk_gs.len()
         && pk_gs.len() >= deployed
         && settlement_participant_root(&pk_gs[..deployed], &recipients[..deployed]) == deployed_root
@@ -13613,7 +13613,10 @@ fn settlement_participant_root(pk_gs: &[String], recipients: &[String]) -> Bytes
     assert_eq!(pk_gs.len(), recipients.len());
     assert!(pk_gs.len() <= MAX_CHANNEL_MEMBERS);
 
-    let mut nodes = vec![[0u8; 32]; MAX_CHANNEL_MEMBERS];
+    // Only the occupied prefix is materialized: an unoccupied leaf is the zero word, so a missing
+    // right child at height `k` is the root of an all-zero subtree of height `k` (`zero`). Same
+    // root as the full 2^20-leaf tree (pinned by `sparse_participant_root_matches_the_full_tree`).
+    let mut nodes = vec![[0u8; 32]; pk_gs.len()];
     for (slot, (pk_g_hex, recipient_hex)) in pk_gs.iter().zip(recipients).enumerate() {
         let pk_g = Bytes32::from_hex(pk_g_hex)
             .unwrap_or_else(|e| die(format!("participant slot {slot} pk_g: {e:?}")));
@@ -13624,25 +13627,31 @@ fn settlement_participant_root(pk_gs: &[String], recipients: &[String]) -> Bytes
                 "participant slot {slot} has a zero pk_g or recipient"
             ));
         }
-        let mut preimage = Vec::with_capacity(4 + 2 + 32 + 20);
+        let mut preimage = Vec::with_capacity(4 + 4 + 32 + 20);
         preimage.extend_from_slice(&LEAF_DOMAIN);
-        preimage.extend_from_slice(&(slot as u16).to_be_bytes());
+        preimage.extend_from_slice(&(slot as u32).to_be_bytes());
         preimage.extend_from_slice(&pk_g.to_bytes_be());
         preimage.extend_from_slice(&recipient.to_bytes_be());
         nodes[slot] = keccak_hash::keccak(preimage).0;
     }
-    let mut width = MAX_CHANNEL_MEMBERS;
-    while width > 1 {
-        for i in (0..width).step_by(2) {
-            let mut preimage = Vec::with_capacity(68);
-            preimage.extend_from_slice(&NODE_DOMAIN);
-            preimage.extend_from_slice(&nodes[i]);
-            preimage.extend_from_slice(&nodes[i + 1]);
-            nodes[i >> 1] = keccak_hash::keccak(preimage).0;
-        }
-        width >>= 1;
+    let node = |left: &[u8; 32], right: &[u8; 32]| {
+        let mut preimage = Vec::with_capacity(68);
+        preimage.extend_from_slice(&NODE_DOMAIN);
+        preimage.extend_from_slice(left);
+        preimage.extend_from_slice(right);
+        keccak_hash::keccak(preimage).0
+    };
+    // Depth = log2(MAX_CHANNEL_MEMBERS) = `ChannelSettlementManager.PARTICIPANT_TREE_DEPTH`.
+    let depth = MAX_CHANNEL_MEMBERS.trailing_zeros();
+    let mut zero = [0u8; 32];
+    for _ in 0..depth {
+        nodes = nodes
+            .chunks(2)
+            .map(|pair| node(&pair[0], pair.get(1).unwrap_or(&zero)))
+            .collect();
+        zero = node(&zero, &zero);
     }
-    Bytes32::from_bytes_be(&nodes[0]).expect("32-byte participant root")
+    Bytes32::from_bytes_be(nodes.first().unwrap_or(&zero)).expect("32-byte participant root")
 }
 
 fn settlement_reg_json(
@@ -13722,9 +13731,39 @@ mod deployed_participant_prefix_tests {
         ((1..=n).map(pk).collect(), (1..=n).map(recipient).collect())
     }
     /// Deployed with 3 cosigners + 1 delegate.
-    fn deployed() -> (Bytes32, u16) {
+    fn deployed() -> (Bytes32, u32) {
         let (pks, rs) = participants(4);
         (settlement_participant_root(&pks, &rs), 4)
+    }
+
+    /// The prefix-only fold equals the participant tree with every one of the
+    /// `MAX_CHANNEL_MEMBERS` leaves materialized (unused leaves zero), the shape
+    /// `ChannelSettlementManager` proves against.
+    #[test]
+    fn sparse_participant_root_matches_the_full_tree() {
+        let (pks, rs) = participants(5);
+        let mut nodes = vec![[0u8; 32]; MAX_CHANNEL_MEMBERS];
+        for (slot, (pk, r)) in pks.iter().zip(&rs).enumerate() {
+            let mut preimage = b"IMPR".to_vec();
+            preimage.extend_from_slice(&(slot as u32).to_be_bytes());
+            preimage.extend_from_slice(&Bytes32::from_hex(pk).unwrap().to_bytes_be());
+            preimage.extend_from_slice(&Address::from_hex(r).unwrap().to_bytes_be());
+            nodes[slot] = keccak_hash::keccak(preimage).0;
+        }
+        let mut width = MAX_CHANNEL_MEMBERS;
+        while width > 1 {
+            for i in (0..width).step_by(2) {
+                let mut preimage = b"IMPN".to_vec();
+                preimage.extend_from_slice(&nodes[i]);
+                preimage.extend_from_slice(&nodes[i + 1]);
+                nodes[i >> 1] = keccak_hash::keccak(preimage).0;
+            }
+            width >>= 1;
+        }
+        assert_eq!(
+            settlement_participant_root(&pks, &rs),
+            Bytes32::from_bytes_be(&nodes[0]).unwrap()
+        );
     }
 
     #[test]
@@ -13863,7 +13902,7 @@ mod settlement_reg_record_tests {
     }
 }
 
-fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u16) {
+fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u32) {
     let root = reg["participant_root"]
         .as_str()
         .and_then(|s| Bytes32::from_hex(s).ok())
@@ -13871,7 +13910,7 @@ fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u16) {
     let count = reg["member_count"]
         .as_u64()
         .and_then(|m| reg["active_delegate_count"].as_u64().map(|d| m + d))
-        .and_then(|n| u16::try_from(n).ok())
+        .and_then(|n| u32::try_from(n).ok())
         .unwrap_or_else(|| die("staged settlement record has an invalid participant count"));
     (root, count)
 }
@@ -14914,7 +14953,7 @@ fn cast_encode_settlement_calldata(function: &str, args: &[&str]) -> Result<Stri
 }
 
 fn cast_encode_settlement_constructor(args: &[&str]) -> Result<String, String> {
-    const SIGNATURE: &str = "constructor(bytes4,uint8,bytes32,uint16,bytes32,uint64,uint256,uint256,address,address,address,(bytes32,address)[])";
+    const SIGNATURE: &str = "constructor(bytes4,uint8,bytes32,uint32,bytes32,uint64,uint256,uint256,address,address,address,(bytes32,address)[])";
     let output = Command::new("cast")
         .arg("abi-encode")
         .arg(SIGNATURE)
@@ -18093,7 +18132,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let bound_participants = cast_call_at(
         rpc,
         &manager,
-        "activeParticipantCount()(uint16)",
+        "activeParticipantCount()(uint32)",
         &[],
         activation_checkpoint.block_number,
     );
@@ -18107,7 +18146,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let bound_delegates = cast_call_at(
         rpc,
         &manager,
-        "activeDelegateCount()(uint16)",
+        "activeDelegateCount()(uint32)",
         &[],
         activation_checkpoint.block_number,
     );
@@ -18872,7 +18911,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
             || reservation.amount != onchain.amount
             || !reservation
                 .recipient_slots
-                .contains(&(recipient_slot as u16))
+                .contains(&(recipient_slot as u32))
         {
             die("on-chain deposit differs from its reserved transaction/token/amount/recipient");
         }
@@ -20932,7 +20971,7 @@ mod daemon_signer_rule_tests {
         let delegate_only: Vec<ControlledMember> = cli
             .controlled
             .iter()
-            .map(|c| ControlledMember { slot: c.slot + u16::from(member_count), ..c.clone() })
+            .map(|c| ControlledMember { slot: c.slot + u32::from(member_count), ..c.clone() })
             .collect();
         assert!(require_daemon_signer(&cli.snapshot.record, &delegate_only).is_err());
     }
@@ -20947,7 +20986,7 @@ mod signing_ledger_tests {
         // in before `keys_for` is first resolved, exactly like the process E2Es do.
         unsafe { std::env::set_var(INSECURE_KEYS_ENV, "1") };
 
-        let controlled: Vec<ControlledMember> = (0..2u16)
+        let controlled: Vec<ControlledMember> = (0..2u32)
             .map(|slot| ControlledMember {
                 slot,
                 keygen_seed: CLI_COSIGNER_SEED_BASE + u64::from(slot),
@@ -20964,7 +21003,7 @@ mod signing_ledger_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(slot, keys)| member_info_for(slot as u16, keys))
+            .map(|(slot, keys)| member_info_for(slot as u32, keys))
             .collect();
         let record = build_record(7, &members, 0, 0).expect("two-member record");
         let zero = intmax3_zkp::common::balance_state::zero_ciphertext().clone();
@@ -22214,7 +22253,7 @@ mod deploy_plan_tests {
 mod cosigner_recipient_setup_tests {
     use super::*;
 
-    fn explicit_recipient(slot: u16) -> Address {
+    fn explicit_recipient(slot: u32) -> Address {
         Address::from_u32_slice(&[0xaabb_ccdd, u32::from(slot) + 1, 12, 34, 0x1234_5678])
             .expect("fixed-width test address")
     }
@@ -22222,7 +22261,7 @@ mod cosigner_recipient_setup_tests {
     #[test]
     fn production_requires_explicit_recipient_for_every_controlled_slot() {
         let channel_id = 17;
-        for slot in 0..MAX_SIG_CLUSTER as u16 {
+        for slot in 0..MAX_SIG_CLUSTER as u32 {
             let error = resolve_cosigner_leaf_recipient(channel_id, slot, None, false)
                 .expect_err("production has no synthetic fallback, including zero-funded slots");
             assert!(error.contains(&cosigner_recipient_env(slot)));
@@ -22263,7 +22302,7 @@ mod cosigner_recipient_setup_tests {
 
     #[test]
     fn insecure_fixtures_keep_the_exact_historical_default() {
-        for slot in 0..MAX_SIG_CLUSTER as u16 {
+        for slot in 0..MAX_SIG_CLUSTER as u32 {
             let synthetic = test_recipient_for(17, slot as usize);
             assert_eq!(
                 resolve_cosigner_leaf_recipient(17, slot, None, true)

@@ -1058,7 +1058,7 @@ impl L1DepositImportUpdateWitness {
             self.deposit_nullifier,
             self.token_index,
             self.amount,
-            self.depositor_slot as u16,
+            self.depositor_slot as u32,
         );
         let public_inputs = ChannelStateUpdatePublicInputs {
             kind: ChannelTransitionKind::L1DepositImport,
@@ -2395,7 +2395,7 @@ mod tests {
                     before_r.0.clone(),
                     before_t.0.clone(),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),
@@ -2427,7 +2427,7 @@ mod tests {
                     after_r.clone(),
                     before_t.0.clone(),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),
@@ -2963,7 +2963,7 @@ mod tests {
                     row(&r0.0, &r1.0),
                     row(&t0.0, &zero1),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),
@@ -3505,8 +3505,8 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 3]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),
@@ -3539,8 +3539,8 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 3]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),
@@ -3936,7 +3936,7 @@ mod tests {
                     before_r.0.clone(),
                     before_t.0.clone(),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
                     recipient(20),

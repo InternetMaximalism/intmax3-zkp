@@ -224,8 +224,8 @@ pub struct WithdrawalClaimFullWitness {
     pub state_version: u64,
     /// active region size = member_count + delegate_count.
     pub member_count: u8,
-    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
-    pub delegate_count: u16,
+    /// WIDTH: u32 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u32,
     /// claimant slot index (`< member_count + delegate_count`).
     pub member_index: usize,
     /// Decryption Stage 2: the claimant's Regev public key `(a, b)` coefficients (canonical `< q`,
@@ -414,12 +414,11 @@ where
         // 32-bit range-checked above; here we additionally pin their SUM <= MAX_CHANNEL_MEMBERS.
         {
             let max_active = builder.constant(F::from_canonical_usize(MAX_CHANNEL_MEMBERS));
-            // Range-check active to ceil(log2(MAX_CHANNEL_MEMBERS)) + 1 = 11 bits (MAX = 1024
-            // needs 11 bits to represent), then assert active <= MAX via the strict less-than
-            // (active < MAX + 1). NOTE: the former 8-bit check was a stale MAX = 16 leftover
-            // that would have REJECTED legal states with active > 255 (completeness, not
-            // soundness).
-            builder.range_check(active, 11);
+            // Range-check active to log2(MAX_CHANNEL_MEMBERS) + 1 = BALANCE_SLOT_TREE_HEIGHT + 1
+            // bits (MAX = 2^20 needs 21 bits to represent), then assert active <= MAX via the
+            // strict less-than (active < MAX + 1). NOTE: a narrower check would REJECT legal
+            // states with more active slots (completeness, not soundness).
+            builder.range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1);
             let max_plus_one = builder.add_const(max_active, F::ONE);
             let active_le_max = less_than_u32(&mut builder, active, max_plus_one);
             builder.assert_one(active_le_max.target);
@@ -673,7 +672,7 @@ where
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u16(witness_value.delegate_count),
+                F::from_canonical_u32(witness_value.delegate_count),
             )
             .unwrap();
         // H1 Poseidon-root form: the slot tree root + the claimant slot's inclusion proof
@@ -768,7 +767,7 @@ where
 
 /// Strict less-than on two SMALL u32-range targets (`a, b < 2^32`; here `member_index <
 /// MAX_CHANNEL_MEMBERS` via the inclusion proof's `split_le` and `active <= MAX_CHANNEL_MEMBERS`
-/// via its 11-bit range check). Returns a Boolean `a < b` from the canonical 33-bit borrow
+/// via its 21-bit range check). Returns a Boolean `a < b` from the canonical 33-bit borrow
 /// comparison of `b - a + 2^32` (bit 32 = "no borrow" ⇔ a <= b; nonzero low limbs ⇔ a != b).
 fn less_than_u32<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
@@ -1611,8 +1610,8 @@ mod tests {
         // .activeSumAnd11Bits — src:377-379
         table.check(
             "activeSumAnd11Bits", "withdrawal_claim_circuit.rs:377-379", "range",
-            view.range_bits(p.active).contains(&11),
-            "range_check(active, 11)",
+            view.range_bits(p.active).contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
+            "range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)",
         );
         table.note(
             "activeSumAnd11Bits", "withdrawal_claim_circuit.rs:378", "arith", NOT_STATIC,

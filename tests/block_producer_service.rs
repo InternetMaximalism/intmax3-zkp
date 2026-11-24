@@ -73,7 +73,7 @@ impl Drop for TestDirectory {
 
 fn public_member(slot: usize, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
-        slot: slot as u16,
+        slot: slot as u32,
         pk_g: keys.pk_g(),
         pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),

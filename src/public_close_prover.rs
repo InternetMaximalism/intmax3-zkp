@@ -173,7 +173,7 @@ pub struct PublicCloseIntentDescriptor {
     pub close_intent_digest: String,
     pub member_set_commitment: String,
     pub member_count: u8,
-    pub delegate_count: u16,
+    pub delegate_count: u32,
     pub member_pk_gs: Vec<String>,
     pub channel_fund_amounts: Vec<String>,
     pub token_registry: Vec<u32>,

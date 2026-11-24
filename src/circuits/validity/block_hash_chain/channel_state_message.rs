@@ -372,7 +372,7 @@ mod tests {
             member_count: 3,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
             recipients: BalanceState::pad_recipients(
                 &(0..3u32)
                     .map(|i| Address::from_u32_slice(&[0x7E57_0000u32.wrapping_add(i); 5]).unwrap())

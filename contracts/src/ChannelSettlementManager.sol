@@ -210,15 +210,16 @@ contract ChannelSettlementManager {
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
     /// order 0..memberCount. Slots `memberCount..MAX_MEMBER_COUNT` are zero padding. Mirrors the
-    /// Rust `MAX_SIG_CLUSTER` constant (src/constants.rs); the 1024-slot balance capacity is separate.
+    /// Rust `MAX_SIG_CLUSTER` constant (src/constants.rs); the 2^20-slot balance capacity is separate.
     uint256 internal constant MAX_MEMBER_COUNT = 8;
     uint256 internal constant MIN_MEMBER_COUNT = 2;
     /// Balance-state participant capacity.  Unlike `MAX_MEMBER_COUNT`, this includes delegates.
-    /// The participant identity tree has a fixed ten-level shape (2**10 leaves), matching Rust's
-    /// `MAX_CHANNEL_MEMBERS`.  Keeping the full set in ONE immutable root avoids an O(1024)
-    /// constructor SSTORE bill that cannot fit safely inside a mainnet block.
-    uint256 internal constant MAX_PARTICIPANT_COUNT = 1024;
-    uint256 internal constant PARTICIPANT_TREE_DEPTH = 10;
+    /// The participant identity tree has a fixed twenty-level shape (2**20 leaves), matching Rust's
+    /// `MAX_CHANNEL_MEMBERS`.  Keeping the full set in ONE immutable root avoids an O(participants)
+    /// constructor SSTORE bill that cannot fit safely inside a mainnet block.  Unused leaves are the
+    /// zero word, so an all-unused subtree of height `k` has a fixed root and is never materialized.
+    uint256 internal constant MAX_PARTICIPANT_COUNT = 1 << 20;
+    uint256 internal constant PARTICIPANT_TREE_DEPTH = 20;
     uint32 internal constant PARTICIPANT_LEAF_DOMAIN = 0x494d5052; // "IMPR"
     uint32 internal constant PARTICIPANT_NODE_DOMAIN = 0x494d504e; // "IMPN"
     /// Fixed per-channel token capacity — the width of every `channelFundAmounts` / `tokenRegistry`
@@ -668,18 +669,18 @@ contract ChannelSettlementManager {
     /// deployment — they are appended by cosigner-signed states and never leave — so a state with
     /// more delegates closes normally; one with fewer would drop registered delegates and is rejected.
     /// Joins are refused only while a deployment is PREPARED (the deploy must match one snapshot).
-    /// Deployment invariant: `activeMemberCount + activeDelegateCount <= 1024`.
-    uint16 public immutable activeDelegateCount;
+    /// Deployment invariant: `activeMemberCount + activeDelegateCount <= MAX_PARTICIPANT_COUNT`.
+    uint32 public immutable activeDelegateCount;
 
     /// @notice Number/root of the slot-ordered member+delegate identity snapshot taken at
-    /// deployment (a prefix of every later state: delegates only append).  Leaves are `keccak256(IMPR || uint16(slot) || pkG || recipient)`, padded by
-    /// raw zero leaves to 1024; nodes are `keccak256(IMPN || left || right)`.  Only the at-most-eight
+    /// deployment (a prefix of every later state: delegates only append).  Leaves are `keccak256(IMPR || uint32(slot) || pkG || recipient)`, padded by
+    /// raw zero leaves to 2^20; nodes are `keccak256(IMPN || left || right)`.  Only the at-most-eight
     /// cosigners are materialized in mappings below.  A participant registered at deployment proves
     /// its slot binding against this root to request a close on its own (`requestCloseAsParticipant`),
-    /// keeping a 1024-participant deployment constant-storage. A delegate that joined later is not in
+    /// keeping a 2^20-participant deployment constant-storage. A delegate that joined later is not in
     /// this root: it is closed like any delegate of the original design (by a registered participant
     /// or cosigner), and it claims its balance from the H1-bound leaf exactly as registered ones do.
-    uint16 public immutable activeParticipantCount;
+    uint32 public immutable activeParticipantCount;
     bytes32 public immutable participantRoot;
 
     /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order, ZERO-padded to
@@ -846,7 +847,7 @@ contract ChannelSettlementManager {
         bytes4 channelId_,
         uint8 bpMemberSlot_,
         bytes32 bpPkG_,
-        uint16 delegateCount_,
+        uint32 delegateCount_,
         bytes32 participantRoot_,
         uint64 challengePeriod_,
         uint256 specialClosePenalty_,
@@ -910,7 +911,7 @@ contract ChannelSettlementManager {
             revert InvalidMemberCount();
         }
         activeDelegateCount = delegateCount_;
-        activeParticipantCount = uint16(participantCount);
+        activeParticipantCount = uint32(participantCount);
 
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
@@ -963,7 +964,7 @@ contract ChannelSettlementManager {
         }
     }
 
-    function participantLeaf(uint16 slot, bytes32 pkG_, address recipient_) public pure returns (bytes32) {
+    function participantLeaf(uint32 slot, bytes32 pkG_, address recipient_) public pure returns (bytes32) {
         return keccak256(abi.encodePacked(bytes4(PARTICIPANT_LEAF_DOMAIN), slot, pkG_, recipient_));
     }
 
@@ -972,21 +973,27 @@ contract ChannelSettlementManager {
     }
 
     function _memberOnlyParticipantRoot(MemberBinding[] memory bindings) private pure returns (bytes32) {
-        bytes32[1024] memory nodes;
+        bytes32[] memory nodes = new bytes32[](bindings.length);
         for (uint256 i = 0; i < bindings.length; i++) {
-            nodes[i] = participantLeaf(uint16(i), bindings[i].pkG, bindings[i].recipient);
+            nodes[i] = participantLeaf(uint32(i), bindings[i].pkG, bindings[i].recipient);
         }
-        uint256 width = MAX_PARTICIPANT_COUNT;
-        while (width > 1) {
-            for (uint256 i = 0; i < width; i += 2) {
-                nodes[i >> 1] = _participantNode(nodes[i], nodes[i + 1]);
+        // Fold the occupied prefix level by level; a missing right child is the root of an
+        // all-zero subtree of the current height (`zero`), so the 2^20-leaf tree is never built.
+        uint256 width = nodes.length;
+        bytes32 zero = bytes32(0);
+        for (uint256 level = 0; level < PARTICIPANT_TREE_DEPTH; level++) {
+            uint256 parents = (width + 1) >> 1;
+            for (uint256 i = 0; i < parents; i++) {
+                uint256 left = i << 1;
+                nodes[i] = _participantNode(nodes[left], left + 1 < width ? nodes[left + 1] : zero);
             }
-            width >>= 1;
+            width = parents;
+            zero = _participantNode(zero, zero);
         }
-        return nodes[0];
+        return width == 0 ? zero : nodes[0];
     }
 
-    function _isParticipant(uint16 slot, bytes32 pkG_, address recipient_, bytes32[10] calldata siblings)
+    function _isParticipant(uint32 slot, bytes32 pkG_, address recipient_, bytes32[20] calldata siblings)
         private
         view
         returns (bool)
@@ -1057,15 +1064,15 @@ contract ChannelSettlementManager {
 
     /// @notice The same unilateral freeze right for any participant, including a delegate.  The
     /// fixed-depth proof authenticates `(slot, pkG, msg.sender)` against the immutable live-snapshot
-    /// root without storing up to 1024 delegate bindings in contract storage. The two expected
+    /// root without storing up to 2^20 delegate bindings in contract storage. The two expected
     /// era values make a journaled raw request one-shot across both a foreign freeze and a later
     /// cancel: `currentCloseFreezeNonce` is restored by cancel for protocol liveness, whereas
     /// `highestCancelledRevivedStateVersion` is monotone and prevents the old calldata becoming
     /// valid again after that restoration.
     function requestCloseAsParticipant(
-        uint16 slot,
+        uint32 slot,
         bytes32 pkG_,
-        bytes32[10] calldata siblings,
+        bytes32[20] calldata siblings,
         uint64 expectedCurrentCloseFreezeNonce,
         uint64 expectedHighestCancelledRevivedStateVersion
     ) external releaseRuntime {

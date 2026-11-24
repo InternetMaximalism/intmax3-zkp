@@ -62,8 +62,8 @@ contract FixtureParsingGuardsTest is Test {
     }
 
     function test_parseRegRecord_rejectsActiveDelegateCountOverflow() public {
-        vm.expectRevert(bytes("reg record: active_delegate_count exceeds uint16"));
-        harness.parseRegRecord(_regScalarJson(7, 0, 2, uint256(type(uint16).max) + 1));
+        vm.expectRevert(bytes("reg record: active_delegate_count exceeds uint32"));
+        harness.parseRegRecord(_regScalarJson(7, 0, 2, uint256(type(uint32).max) + 1));
     }
 
     function test_parseRegRecord_preservesCheckedInFixture() public view {
