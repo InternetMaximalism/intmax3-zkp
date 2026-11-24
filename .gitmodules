@@ -5,7 +5,7 @@
 	path = contracts/lib/polygon-plonky2
 	url = https://github.com/InternetMaximalism/intmax-plonky2.git
 	# Release builds must use `git submodule update --init --recursive`, not --remote.
-	# The gitlink pins the tested merge of wire-v3/main legacy isolation and the
-	# target-105/inverse-rate-6 optimizations. Do not replace it with the older
-	# feature branch, main, or mleintroduction (which lacks the Solidity verifier).
-	branch = codex/mle-node-safety-integration-20260906
+	# The gitlink pins the tested commit; it must always be on the submodule's `main`,
+	# which is the integration branch (verify-pinned-inputs.sh checks this). The former
+	# `codex/mle-node-safety-integration-20260906` no longer exists on the remote.
+	branch = main
