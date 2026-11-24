@@ -1615,6 +1615,34 @@ mod tests {
         assert_eq!(s.slot_tree_root(), s.slot_tree().get_root());
     }
 
+    /// Past the old u16 slot range: with 70 001 occupied slots, the prefix-only tree gives the
+    /// same root and the same 20-sibling paths (around index 65 536 and at the last slot) as the
+    /// tree with all `MAX_CHANNEL_MEMBERS` leaves materialized, and each path folds back to it.
+    #[test]
+    fn slot_tree_matches_the_full_tree_past_the_u16_range() {
+        const OCCUPIED: usize = 70_001;
+        let leaves: Vec<PoseidonHashOut> = (0..OCCUPIED as u64)
+            .map(|i| PoseidonHashOut::hash_inputs_u64(&[0x5107, i]))
+            .collect();
+        let sparse = SlotTree::from_leaves(leaves.clone());
+        let padding = slot_padding_ladder()[0];
+        let mut full = IncrementalMerkleTree::<PoseidonHashOut>::new(BALANCE_SLOT_TREE_HEIGHT);
+        for i in 0..MAX_CHANNEL_MEMBERS {
+            full.push(leaves.get(i).copied().unwrap_or(padding));
+        }
+        assert_eq!(sparse.get_root(), full.get_root());
+        for index in [0u64, 65_535, 65_536, 65_537, (OCCUPIED - 1) as u64] {
+            let path = sparse.prove(index);
+            assert_eq!(path.0.siblings.len(), BALANCE_SLOT_TREE_HEIGHT);
+            assert_eq!(path.0.siblings, full.prove(index).0.siblings, "path of slot {index}");
+            assert_eq!(
+                path.get_root(&leaves[index as usize], index),
+                sparse.get_root(),
+                "slot {index} folds to the root"
+            );
+        }
+    }
+
     /// Older encodings carried every padding slot; they decode to the same active-only state.
     #[test]
     fn full_width_encoding_decodes_to_the_active_state() {

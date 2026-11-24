@@ -12417,7 +12417,8 @@ mod slot_capacity_tests {
             // Every active slot — including 256+ — carries its member's pk_g.
             let last = active - 1;
             assert_eq!(record.member_pk_gs[last], members[last].pk_g);
-            assert_eq!(record.member_pk_gs[active], Bytes32::default());
+            // Padding slots are not stored: the identity list ends at the last active slot.
+            assert_eq!(record.member_pk_gs.len(), active);
         }
 
         // The storm's exact failing lookup: slot 256 must resolve.
@@ -12468,11 +12469,23 @@ mod slot_capacity_tests {
             .validate()
             .expect("257 active slots must validate with u32 delegate_count");
 
-        // H1 commits the (u32) delegate_count: shrinking the active region changes it.
-        let h1 = state.h1();
-        let mut smaller = state.clone();
+        // H1 commits the (u32) delegate_count. Give the last slot the padding values, so its leaf
+        // is the padding leaf and dropping it leaves the slot tree root unchanged: the two states
+        // below differ ONLY in delegate_count.
+        let mut padded_last = state.clone();
+        let last = active - 1;
+        padded_last.enc_balances[last] = crate::common::balance_state::zero_token_row();
+        padded_last.regev_pk_digests[last] = Bytes32::default();
+        padded_last.pending_adds[last] = [0; MAX_CHANNEL_TOKENS];
+        padded_last.recipients[last] = Address::default();
+        let mut smaller = padded_last.clone();
         smaller.delegate_count -= 1;
-        assert_ne!(h1, smaller.h1(), "delegate_count must be committed in H1");
+        smaller.enc_balances.pop();
+        smaller.regev_pk_digests.pop();
+        smaller.pending_adds.pop();
+        smaller.recipients.pop();
+        assert_eq!(padded_last.slot_tree_root(), smaller.slot_tree_root());
+        assert_ne!(padded_last.h1(), smaller.h1(), "delegate_count must be committed in H1");
     }
 }
 

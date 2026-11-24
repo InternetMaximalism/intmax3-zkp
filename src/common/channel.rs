@@ -406,37 +406,35 @@ impl ChannelRecord {
     /// NOTE: this IMCR digest is NATIVE-ONLY (it has no in-circuit or Solidity recompute twin), so
     /// `delegate_count` is threaded here only.
     pub fn signing_digest(&self) -> Bytes32 {
-        hash_words(
-            &[
-                vec![CHANNEL_RECORD_DOMAIN],
-                self.channel_id.to_u32_vec(),
-                vec![self.bp_member_slot as u32],
-                split_u64(self.close_freeze_nonce),
-                // §Q: the member-set version is part of the record identity (native-only digest —
-                // this preimage has no circuit/Solidity twin, see the note above this fn).
-                split_u64(self.set_version),
-                vec![
-                    self.status as u32,
-                    self.member_count as u32,
-                    self.delegate_count as u32,
-                ],
-                {
-                    // Value-identical to the full-width digest: every padding slot hashes as the
-                    // zero identity.
-                    let mut words: Vec<u32> = self
-                        .member_pk_gs
-                        .iter()
-                        .flat_map(Bytes32::to_u32_vec)
-                        .collect();
-                    words.resize(MAX_CHANNEL_MEMBERS * 8, 0);
-                    words
-                },
-                self.member_pubkeys_root.to_u32_vec(),
-                self.special_close_penalty.to_u32_vec(),
-                self.regev_pk_root.to_u32_vec(),
-            ]
-            .concat(),
-        )
+        let prefix = [
+            vec![CHANNEL_RECORD_DOMAIN],
+            self.channel_id.to_u32_vec(),
+            vec![self.bp_member_slot as u32],
+            split_u64(self.close_freeze_nonce),
+            // §Q: the member-set version is part of the record identity (native-only digest —
+            // this preimage has no circuit/Solidity twin, see the note above this fn).
+            split_u64(self.set_version),
+            vec![
+                self.status as u32,
+                self.member_count as u32,
+                self.delegate_count as u32,
+            ],
+            self.member_pk_gs
+                .iter()
+                .flat_map(Bytes32::to_u32_vec)
+                .collect::<Vec<_>>(),
+        ]
+        .concat();
+        let suffix = [
+            self.member_pubkeys_root.to_u32_vec(),
+            self.special_close_penalty.to_u32_vec(),
+            self.regev_pk_root.to_u32_vec(),
+        ]
+        .concat();
+        // Every one of the MAX_CHANNEL_MEMBERS slots is in the preimage; the ones past the stored
+        // active identities hash as the zero identity (8 zero words each), streamed, not stored.
+        let padding_slots = MAX_CHANNEL_MEMBERS.saturating_sub(self.member_pk_gs.len());
+        keccak_words(&prefix, &[0u32; 8], padding_slots, &suffix)
     }
 }
 
@@ -1839,7 +1837,33 @@ fn bytes_to_u32_words(bytes: &[u8]) -> Vec<u32> {
 }
 
 pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
-    Bytes32::from_u32_slice(&solidity_keccak256(words)).expect("keccak output must be bytes32")
+    keccak_words(words, &[], 0, &[])
+}
+
+/// Solidity `keccak256(abi.encodePacked(uint32 w...))` over `prefix`, then `repeat` appended
+/// `count` times, then `suffix`: Keccak-256 of the words' big-endian bytes. Value-identical to
+/// `solidity_keccak256` over the concatenated words (pinned by `keccak_words_matches_solidity_keccak256`),
+/// which also records every permutation's input and output and so is several times slower on the
+/// 2^20-slot digests; `repeat` lets those digests append their padding tail without first
+/// building it as a word vector.
+pub(crate) fn keccak_words(prefix: &[u32], repeat: &[u32], count: usize, suffix: &[u32]) -> Bytes32 {
+    let mut bytes = Vec::with_capacity(4 * (prefix.len() + repeat.len() * count + suffix.len()));
+    for w in prefix {
+        bytes.extend_from_slice(&w.to_be_bytes());
+    }
+    if !repeat.is_empty() {
+        let mut block = Vec::with_capacity(4 * repeat.len());
+        for w in repeat {
+            block.extend_from_slice(&w.to_be_bytes());
+        }
+        for _ in 0..count {
+            bytes.extend_from_slice(&block);
+        }
+    }
+    for w in suffix {
+        bytes.extend_from_slice(&w.to_be_bytes());
+    }
+    Bytes32::from_bytes_be(&keccak_hash::keccak(&bytes).0).expect("keccak output must be bytes32")
 }
 
 /// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding; pad-to-MAX D6).
@@ -1925,6 +1949,60 @@ pub fn l1_deposit_import_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `keccak_words` is `solidity_keccak256` over the concatenated words, at every length around
+    /// the 34-word (136-byte) rate boundary and with a repeated tail.
+    #[test]
+    fn keccak_words_matches_solidity_keccak256() {
+        let word = |i: usize| (i as u32).wrapping_mul(0x9E37_79B9) ^ 0xA5A5_0F0F;
+        for len in (0..=140).chain([1000, 4099]) {
+            let words: Vec<u32> = (0..len).map(word).collect();
+            let expected = Bytes32::from_u32_slice(&solidity_keccak256(&words)).unwrap();
+            assert_eq!(keccak_words(&words, &[], 0, &[]), expected, "len {len}");
+            assert_eq!(hash_words(&words), expected, "len {len}");
+        }
+        let prefix: Vec<u32> = (0..13).map(word).collect();
+        let repeat: Vec<u32> = (100..108).map(word).collect();
+        let suffix: Vec<u32> = (200..224).map(word).collect();
+        for count in [0usize, 1, 5, 17, 300] {
+            let mut all = prefix.clone();
+            for _ in 0..count {
+                all.extend_from_slice(&repeat);
+            }
+            all.extend_from_slice(&suffix);
+            assert_eq!(
+                keccak_words(&prefix, &repeat, count, &suffix),
+                Bytes32::from_u32_slice(&solidity_keccak256(&all)).unwrap(),
+                "count {count}"
+            );
+        }
+    }
+
+    /// The IMCR digest streams its zero tail; it equals the digest over the full-width
+    /// `MAX_CHANNEL_MEMBERS` identity array the record used to store.
+    #[test]
+    fn imcr_digest_equals_the_full_width_preimage() {
+        let record = record_with_members(5);
+        let mut full = record.member_pk_gs.iter().flat_map(Bytes32::to_u32_vec).collect::<Vec<_>>();
+        full.resize(MAX_CHANNEL_MEMBERS * 8, 0);
+        let words = [
+            vec![CHANNEL_RECORD_DOMAIN],
+            record.channel_id.to_u32_vec(),
+            vec![record.bp_member_slot as u32],
+            split_u64(record.close_freeze_nonce),
+            split_u64(record.set_version),
+            vec![record.status as u32, record.member_count as u32, record.delegate_count as u32],
+            full,
+            record.member_pubkeys_root.to_u32_vec(),
+            record.special_close_penalty.to_u32_vec(),
+            record.regev_pk_root.to_u32_vec(),
+        ]
+        .concat();
+        assert_eq!(
+            record.signing_digest(),
+            Bytes32::from_u32_slice(&solidity_keccak256(&words)).unwrap()
+        );
+    }
     use crate::{
         ethereum_types::u32limb_trait::U32LimbTrait,
         regev::{REGEV_N, REGEV_Q},

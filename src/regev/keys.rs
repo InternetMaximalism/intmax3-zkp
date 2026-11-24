@@ -240,16 +240,14 @@ pub fn channel_regev_pk_root(active: &[RegevPk]) -> Bytes32 {
     assert!(active.len() <= MAX_CHANNEL_MEMBERS, "more keys than balance slots");
     static PADDING_DIGEST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
     let padding = PADDING_DIGEST.get_or_init(|| RegevPk::padding().digest().to_u32_vec());
-    let mut words = Vec::with_capacity(2 + 8 * MAX_CHANNEL_MEMBERS);
+    let mut words = Vec::with_capacity(2 + 8 * active.len());
     words.push(REGEV_PK_ROOT_DOMAIN);
     words.push(MAX_CHANNEL_MEMBERS as u32);
     for pk in active {
         words.extend(pk.digest().to_u32_vec());
     }
-    for _ in active.len()..MAX_CHANNEL_MEMBERS {
-        words.extend_from_slice(padding);
-    }
-    hash_words(&words)
+    // The padding tail is streamed into the hash, never built as a word vector.
+    crate::common::channel::keccak_words(&words, padding, MAX_CHANNEL_MEMBERS - active.len(), &[])
 }
 
 #[cfg(test)]
@@ -257,6 +255,28 @@ mod tests {
     use rand010::{SeedableRng, rngs::SmallRng};
 
     use super::*;
+
+    /// The streamed padding tail gives exactly `regev_pk_root` over the full MAX_CHANNEL_MEMBERS
+    /// key array (the padding keys' digests materialized as words).
+    #[test]
+    fn channel_root_equals_the_full_width_word_preimage() {
+        use crate::constants::MAX_CHANNEL_MEMBERS;
+        let mut rng = SmallRng::seed_from_u64(9);
+        let active: Vec<RegevPk> = (0..3).map(|_| channel_keygen(&mut rng).0).collect();
+        let mut words = vec![REGEV_PK_ROOT_DOMAIN, MAX_CHANNEL_MEMBERS as u32];
+        for pk in &active {
+            words.extend(pk.digest().to_u32_vec());
+        }
+        let padding = RegevPk::padding().digest().to_u32_vec();
+        for _ in active.len()..MAX_CHANNEL_MEMBERS {
+            words.extend_from_slice(&padding);
+        }
+        let expected = Bytes32::from_u32_slice(
+            &plonky2_keccak::utils::solidity_keccak256(&words),
+        )
+        .unwrap();
+        assert_eq!(channel_regev_pk_root(&active), expected);
+    }
 
     #[test]
     fn keygen_produces_valid_canonical_keys() {
