@@ -303,7 +303,7 @@ pub fn verify_state_sig(pk_g: Bytes32, digest: &Bytes32, sig: &[u8]) -> WResult<
 /// (`decompose_digest_to_limbs`), the SAME map the verifier recomputes; the proof's public values
 /// bind `[pk_b ‖ m]`. Production verification uses `RegevSecurityLevel::Production` — but the
 /// `level` is the caller's (tests pass `Test`).
-fn sign_channel_tx_sender(
+pub(crate) fn sign_channel_tx_sender(
     keys: &MemberKeys,
     tx_digest: &Bytes32,
     level: RegevSecurityLevel,
@@ -2198,6 +2198,47 @@ pub struct RefreshPayload {
     pub record: ChannelRecord,
 }
 
+/// The refresh successor of `prev`: `slot`'s ciphertext at `token_slot` replaced by `new_ct`, its
+/// add counter reset, epoch and state version bumped, `h2_tag` zero. Shared by the wallet builder
+/// and the co-signer's slim-refresh inflation so both rebuild the identical state.
+pub fn refresh_next_state(
+    prev: &ChannelState,
+    slot: u16,
+    token_slot: u8,
+    new_ct: RegevCiphertext,
+) -> WResult<ChannelState> {
+    let ts = token_slot as usize;
+    if ts >= MAX_CHANNEL_TOKENS || ts >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "refresh token_slot {ts} out of range (token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
+    if slot as usize >= prev.balance_state.enc_balances.len() {
+        return bail("refresh slot out of range");
+    }
+    let mut enc_balances = prev.balance_state.enc_balances.clone();
+    enc_balances[slot as usize][ts] = new_ct;
+    let mut pending_adds = prev.balance_state.pending_adds.clone();
+    pending_adds[slot as usize][ts] = 0;
+    Ok(ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds,
+            ..prev.balance_state.clone()
+        },
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        // §C-2 (no small block): the next-state h2_tag MUST be zero; a preceding inter-channel
+        // send leaves a NON-zero h2_tag that must not be inherited.
+        h2_tag: Bytes32::default(),
+        ..prev.clone()
+    }
+    .with_computed_digest())
+}
+
 /// Build a balance-refresh for `slot` (this wallet's own slot): re-encrypt the current balance to a
 /// FRESH ciphertext (clean digits, same value), prove `old_ct ≡ new_ct` (RefreshAir), and propose
 /// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the
@@ -2232,28 +2273,7 @@ pub fn build_refresh(
     let (new_ct, new_witness, proof) =
         prove_balance_refresh_witnessed(rng, level, pk, &keys.regev_sk, old_ct).map_err(we)?;
 
-    let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[slot as usize][ts] = new_ct;
-    let mut pending_adds = prev.balance_state.pending_adds.clone();
-    pending_adds[slot as usize][ts] = 0;
-    let next_state = ChannelState {
-        epoch: prev.epoch + 1,
-        balance_state: BalanceState {
-            enc_balances,
-            state_version: prev.balance_state.state_version + 1,
-            pending_adds,
-            ..prev.balance_state.clone()
-        },
-        prev_digest: prev.digest,
-        member_signatures: Vec::new(),
-        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
-        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
-        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
-        // InvalidH2Tag.
-        h2_tag: Bytes32::default(),
-        ..prev.clone()
-    }
-    .with_computed_digest();
+    let next_state = refresh_next_state(prev, slot, token_slot, new_ct)?;
 
     // Refresh is also an unsigned proposal; being the owner is not a substitute for the
     // co-signer's transition, exit-kit and durable anti-equivocation checks.
@@ -6155,6 +6175,102 @@ impl WithdrawalClaimProver {
             state_version: final_balance_state.state_version,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
+            member_index,
+            regev_a: user_pk.a.clone(),
+            regev_b: user_pk.b.clone(),
+            ct_c1: ct.c1.clone(),
+            ct_c2: ct.c2.clone(),
+            regev_s: regev_sk.s.clone(),
+        })
+    }
+
+    /// [`Self::build_full_witness`] from a delegate's [`crate::slot_view::SlotView`] of the
+    /// finalized close state: the claim opens exactly one slot, so its row and Merkle siblings are
+    /// all the witness needs. Applies the same bindings as the native witness checks (close
+    /// intent/withdrawal digests, H1, the row under the signed slot root, the slot's ciphertext
+    /// and recipient).
+    #[allow(clippy::too_many_arguments)]
+    pub fn full_witness_from_view(
+        view: &crate::slot_view::SlotView,
+        token_slot: u8,
+        member_pk_g: Bytes32,
+        user_pk: &RegevPk,
+        regev_sk: &RegevSk,
+        close_intent: &CloseIntent,
+        close_tx: &CloseWithdrawal,
+        _level: RegevSecurityLevel,
+    ) -> WResult<WithdrawalClaimFullWitness> {
+        let header = &view.state.balance_state;
+        let member_index = view.slot as usize;
+        if member_index >= header.active_slots() {
+            return bail(format!(
+                "withdrawal claim: member_index {member_index} >= active region {}",
+                header.active_slots()
+            ));
+        }
+        if token_slot as usize >= header.token_count as usize {
+            return bail(format!(
+                "withdrawal claim: token_slot {token_slot} >= token_count {}",
+                header.token_count
+            ));
+        }
+        if close_tx.signing_digest() != close_intent.close_withdrawal_digest
+            || close_tx.final_balance_state_h1 != close_intent.final_balance_state_h1
+            || close_tx.channel_id != close_intent.channel_id
+        {
+            return bail("withdrawal claim: close withdrawal does not match the close intent");
+        }
+        if header.h1() != close_intent.final_balance_state_h1
+            || header.channel_id != close_intent.channel_id
+        {
+            return bail("withdrawal claim: the view is not the close intent's final state");
+        }
+        if view.slot_root_for(&view.row) != header.slot_tree_root {
+            return bail("withdrawal claim: the slot's row is not under the final slot root");
+        }
+        let slot_regev_pk_digest = Bytes32::from(user_pk.poseidon_digest());
+        if view.row.regev_pk_digest != slot_regev_pk_digest {
+            return bail("withdrawal claim: the slot's committed key is not the claimant's key");
+        }
+        let ct = view.row.enc_balances[token_slot as usize].clone();
+        let amount = decrypt_amount(regev_sk, &ct).map_err(|e| {
+            WalletError(format!(
+                "withdrawal claim: slot-balance decryption failed: {e:?}"
+            ))
+        })?;
+        let close_intent_digest = close_intent.signing_digest();
+        let recipient = view.row.recipient;
+        let public_inputs = crate::circuits::channel::withdrawal_claim_pis::WithdrawalClaimPublicInputs {
+            close_intent_digest,
+            channel_id: close_intent.channel_id,
+            final_balance_state_h1: close_intent.final_balance_state_h1,
+            member_pk_g,
+            recipient,
+            user_amount_digest: ct.digest(),
+            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                close_intent_digest,
+                slot_regev_pk_digest,
+                token_slot,
+            ),
+            amount,
+            token_slot,
+            token_index: header.token_registry[token_slot as usize],
+        };
+        Ok(WithdrawalClaimFullWitness {
+            public_inputs,
+            slot_tree_root: header.slot_tree_root,
+            slot_inclusion: crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::from_siblings(
+                view.slot_siblings.clone(),
+            ),
+            slot_ct_digests: BalanceState::token_ct_digests(&view.row.enc_balances),
+            slot_pending_adds: view.row.pending_adds,
+            token_count: header.token_count,
+            token_registry: header.token_registry,
+            settled_tx_chain: header.settled_tx_chain,
+            settled_tx_accumulator_root: header.settled_tx_accumulator_root,
+            state_version: header.state_version,
+            member_count: header.member_count,
+            delegate_count: header.delegate_count,
             member_index,
             regev_a: user_pk.a.clone(),
             regev_b: user_pk.b.clone(),

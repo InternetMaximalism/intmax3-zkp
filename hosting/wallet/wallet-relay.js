@@ -207,6 +207,105 @@ function sendRouteError(res, e) {
     ? e.status : (e && e.staleAnchor ? 409 : 500);
   res.status(status).json(e && e.code === 'NOT_AVAILABLE' ? { error, code: e.code } : { error });
 }
+// ---- Delegate views (src/slot_view.rs) ---------------------------------------------------------
+// A delegate holds only its own slot: the relay serves it the signed head's header, its own row
+// and that row's Merkle path — never the full snapshot. The CLI projects the PUBLISHED snapshot
+// file without the channel lock (`slot-view --snapshot`), and the result is cached per (snapshot
+// file identity, selector) so polls never re-run it for an unchanged head.
+const PK_G_RE = /^0x[0-9a-fA-F]{64}$/;
+const viewCache = new Map();
+let viewSeq = 0;
+function publishedSnapshotStamp(ch) {
+  const st = fs.statSync(wc(ch, 'channel_snapshot.json'));
+  return `${st.ino}:${st.mtimeMs}:${st.size}`;
+}
+function cliProjection(ch, command, selectorArgs, cacheKey) {
+  const key = `${ch}|${command}|${publishedSnapshotStamp(ch)}|${cacheKey}`;
+  const hit = viewCache.get(key);
+  if (hit) return hit;
+  const out = `${command}.${process.pid}.${++viewSeq}.json`;
+  try {
+    cli(ch, [command, out, '--snapshot', 'channel_snapshot.json', ...selectorArgs]);
+    const text = fs.readFileSync(wc(ch, out), 'utf8');
+    if (viewCache.size > 1024) viewCache.clear();
+    viewCache.set(key, text);
+    return text;
+  } finally { try { fs.unlinkSync(wc(ch, out)); } catch (_) {} }
+}
+// The signed head's view of the slot holding `pkG` (or of `slot`), as JSON text.
+function slotViewText(ch, { pkG, slot }) {
+  const text = pkG
+    ? cliProjection(ch, 'slot-view', ['--pk-g', pkG], 'g' + pkG.toLowerCase())
+    : cliProjection(ch, 'slot-view', ['--slots', String(slot)], 's' + slot);
+  const views = JSON.parse(text);
+  const keys = Object.keys(views);
+  if (keys.length !== 1) throw new Error('slot-view returned ' + keys.length + ' views');
+  return JSON.stringify(views[keys[0]]);
+}
+function requesterPkG(req) {
+  const raw = req.query && req.query.pkG;
+  if (raw === undefined) return null;
+  if (!PK_G_RE.test(String(raw))) throw Object.assign(new Error('pkG must be 0x + 64 hex chars'), { status: 400 });
+  return String(raw);
+}
+// What a delegate learns about a head it did not hold: its version and digest. It then fetches
+// its own slot view (/api/view) — the relay never hands a delegate the full successor state.
+function headAck(state) {
+  const bs = (state && (state.balanceState || state.balance_state)) || {};
+  return { stateVersion: bs.stateVersion ?? bs.state_version, digest: state && state.digest };
+}
+// The reply for a route that used to return the full snapshot: the requester's own view when it
+// names itself (`pkG`), otherwise only the head acknowledgement.
+function delegateReply(ch, req, res, extra) {
+  const pkG = requesterPkG(req);
+  if (pkG) {
+    const view = JSON.parse(slotViewText(ch, { pkG }));
+    return res.json(extra ? { ...view, ...extra } : view);
+  }
+  const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  return res.json({ ...headAck(snap.state), ...(extra || {}) });
+}
+
+// A delegate's inter-channel debit / burn arrives SLIM (no proposed successor: it holds only its
+// slot view). Rebuild the full payload once, under the channel lock, against this host's head
+// (`inflate-debit`) so the producer and recovery paths keep handling full payloads. The result is
+// kept per slim payload, so a retry of the same request reuses the same full payload even after
+// the head moved on.
+function fullDebitPayload(ch, debitPayload) {
+  if (!debitPayload || !debitPayload.proposedDigest) return debitPayload;
+  const key = require('crypto').createHash('sha256').update(JSON.stringify(debitPayload)).digest('hex');
+  const dir = wc(ch, 'slim_debits');
+  const file = path.join(dir, key + '.json');
+  if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.mkdirSync(dir, { recursive: true });
+  const slimFile = path.join('slim_debits', key + '.slim.json');
+  const outFile = path.join('slim_debits', key + '.tmp.json');
+  fs.writeFileSync(wc(ch, slimFile), JSON.stringify(debitPayload));
+  try {
+    cli(ch, ['inflate-debit', slimFile, outFile]);
+  } catch (e) {
+    // Built on a head the channel has since left: the wallet must rebuild from its new view (409,
+    // like a stale /api/cosign anchor), not a relay failure.
+    if (/anchor is not the channel head/.test(fullCliError(e))) e.staleAnchor = true;
+    throw e;
+  }
+  fs.renameSync(wc(ch, outFile), file);
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+// The inter-channel route's body carries both channels' full signed heads for the relay's own
+// recovery; a delegate is answered with their acknowledgements only.
+function delegateInterBody(body) {
+  if (!body || body.error) return body;
+  const { sourceHead, aHead, destSnapshot, ...rest } = body;
+  const source = sourceHead || aHead;
+  return {
+    ...rest,
+    ...(source ? { sourceHead: headAck(source) } : {}),
+    ...(destSnapshot && destSnapshot.state ? { destHead: headAck(destSnapshot.state) } : {}),
+  };
+}
+
 // The CLI prints the insecure-test-keys notice on stderr on every run. It is an operator notice
 // for the relay log, never part of a wallet-facing error: strip it (and the blank lines around
 // it) from every stream of a failed command at the source, so no route can leak it to a browser.
@@ -740,7 +839,9 @@ app.post('/api/init', (req, res) => {
         await installHeadExitKit(ch);
       }
     }
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
+    const joinerPkG = req.body && req.body.pkG;
+    if (!PK_G_RE.test(String(joinerPkG))) throw new Error('contribution pkG must be 0x + 64 hex chars');
+    res.type('json').send(slotViewText(ch, { pkG: String(joinerPkG) }));
   }).catch((e) => {
     const detail = fullCliError(e);
     console.error(detail);
@@ -944,6 +1045,33 @@ app.get('/api/snapshot', (req, res) => {
   res.json(snap);
 });
 
+// GET /api/view?channel=N&pkG=0x..  (or &slot=S): the signed head's view of one slot. This is the
+// only head a delegate wallet imports.
+app.get('/api/view', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const pkG = requesterPkG(req);
+    const slotRaw = req.query && req.query.slot;
+    if (!pkG && !/^\d{1,7}$/.test(String(slotRaw ?? ''))) {
+      throw Object.assign(new Error('name the slot: pkG=0x.. or slot=N'), { status: 400 });
+    }
+    if (!fs.existsSync(wc(ch, 'channel_snapshot.json'))) return res.status(404).json({ error: 'no channel yet' });
+    res.type('json').send(slotViewText(ch, pkG ? { pkG } : { slot: Number(slotRaw) }));
+  } catch (e) { sendRouteError(res, e); }
+});
+
+// GET /api/member?channel=N&slot=S: one slot's public participant record {slot, pkG, pkB, regevPk}
+// — what a sender needs to address a recipient without holding the member list.
+app.get('/api/member', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const slotRaw = req.query && req.query.slot;
+    if (!/^\d{1,7}$/.test(String(slotRaw ?? ''))) throw Object.assign(new Error('slot must be a decimal integer'), { status: 400 });
+    if (!fs.existsSync(wc(ch, 'channel_snapshot.json'))) return res.status(404).json({ error: 'no channel yet' });
+    res.type('json').send(cliProjection(ch, 'member-info', ['--slot', String(Number(slotRaw))], 'm' + Number(slotRaw)));
+  } catch (e) { sendRouteError(res, e); }
+});
+
 // GET /api/poll?channel=N&since=<stateVersion>
 // Cheap change-check for the browser's balance poller. Reads the channel state_version WITHOUT any
 // decryption/proving and returns the full snapshot ONLY if the channel advanced past `since` (a
@@ -969,8 +1097,7 @@ app.get('/api/poll', (req, res) => {
   // of a user's own sends leaves the client holding a head the relay cannot recognise
   // (`unknown-base`) and the send pays a full download -- i.e. on a live channel the delta would
   // almost never fire. Cheap: fingerprintCached re-uses the index when the digest is already known.
-  try { fingerprintCached(ch, snap.state || snap.State); } catch (e) { /* never fail a poll over the index */ }
-  res.json(snap);
+  res.json(headAck(st));
 });
 
 // The channel's REAL Intmax deposit backing (detail2 §F-1): { fund, settledTxChain,
@@ -1121,7 +1248,8 @@ function drainCosignWindow(ch, entries) {
           }
         } catch (recoveryError) { en.reject(recoveryError); continue; }
         const head = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')).state.digest;
-        if (String(en.payload.proposedNextState.prevDigest).toLowerCase() !== String(head).toLowerCase()) {
+        const anchor = en.payload.anchorDigest || (en.payload.proposedNextState && en.payload.proposedNextState.prevDigest);
+        if (String(anchor).toLowerCase() !== String(head).toLowerCase()) {
           const err = new Error('staleAnchor: payload does not extend the current head — re-sign against the latest snapshot');
           err.staleAnchor = true; en.reject(err); continue;
         }
@@ -1142,7 +1270,7 @@ const cosignBatcher = createBatchWindow({
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
   cosignBatcher.enqueue(ch, req.body).then(
-    (result) => res.json(result),
+    (result) => res.json(headAck(result)),
     (e) => {
       const error = fullCliError(e);
       console.error(error);
@@ -1154,6 +1282,16 @@ app.post('/api/cosign', (req, res) => {
     }
   );
 });
+
+// A signing route's failure: a head whose block is not finalized on L1 yet is a wait, not a
+// failure (C25/G16). Answer 409 with backingPendingHint, which publishes the pending candidate
+// (nothing else would retry a failed publication), so the wallet re-sends the same request.
+function sendSigningError(res, ch, e) {
+  const error = fullCliError(e);
+  if (!/HEAD BACKING NOT FINALIZED/.test(error)) return sendRouteError(res, e);
+  console.error(error);
+  res.status(409).json({ error, ...backingPendingHint(ch) });
+}
 
 // The channel's head is backed by an exit kit anchored after a block that is not finalized on L1
 // (a deposit import, debit or burn whose validity candidate has not been published yet). The CLI
@@ -1195,7 +1333,7 @@ app.post('/api/refresh-cosign', (req, res) => {
     fs.writeFileSync(wc(ch, 'refresh_payload.json'), JSON.stringify(req.body));
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
     await flushPublishedHead(ch); // the live balance refuses a later bind that skips this version
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8')));
+    res.json(headAck(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8'))));
   }).catch((e) => {
     const error = fullCliError(e);
     console.error(error);
@@ -1270,15 +1408,15 @@ app.post('/api/inter/send', (req, res) => {
   // The daemon-backed shared module supplies the resident base-state nonce the legacy relay used
   // to lack (hence the old 503). Any transfer left pending on this source channel is completed
   // FIRST, so an abandoned sender never blocks the next one.
-  const runLocked = () => interChannelSend(ch, {
-    debitPayload: req.body && req.body.debitPayload,
+  const runLocked = async () => interChannelSend(ch, {
+    debitPayload: fullDebitPayload(ch, req.body && req.body.debitPayload),
     transferDescriptor: descriptor,
     tokenIndex: req.body && req.body.tokenIndex,
-  }).then(({ status, body }) => res.status(status).json(body));
+  }).then(({ status, body }) => res.status(status).json(delegateInterBody(body)));
   resumePendingInterTransferLocked(ch)
     .catch((e) => console.error(`[inter] channel ${ch}: pending transfer resume failed before a new send: ${String(e.stderr || e.message || e).slice(0, 300)}`))
     .then(() => withInterLocks(ch, destination, runLocked))
-    .catch((e) => sendRouteError(res, e));
+    .catch((e) => sendSigningError(res, ch, e));
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -1458,8 +1596,7 @@ app.post('/api/import-deposit', (req, res) => {
     await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: operatorFunded });
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket && String(depTicket.params?.txHash).toLowerCase() === txHash.toLowerCase()) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
-    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-    res.json(snap);
+    delegateReply(ch, req, res);
     // A failing `channel_member` step writes its real diagnosis to STDOUT and only its persistent
     // key-safety banner to STDERR, so `e.stderr` alone hides the actual cause (a CLI exit surfaced
     // as just the banner). Surface message + stdout + stderr so the wallet shows why an import
@@ -1489,7 +1626,7 @@ function importViaSequencer(ch, req, res) {
     if (b.recipientSlot !== undefined && outcome.slot !== undefined && Number(b.recipientSlot) !== outcome.slot) {
       console.error(`import-deposit: ${b.txHash} credited slot ${outcome.slot} (its depositor's), not the requested ${b.recipientSlot}`);
     }
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
+    delegateReply(ch, req, res);
   })().catch((e) => {
     const full = fullCliError(e); console.error(full);
     // Not failures but waits: the chain's confirmation depth, the deposit queue, and the durable
@@ -1529,8 +1666,7 @@ app.post('/api/faucet', (req, res) => {
     });
     if (!verdict.ok) {
       if (verdict.alreadyFunded) {
-        const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-        return res.json({ ...snap, _faucet: { funded: true, alreadyFunded: true, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
+        return delegateReply(ch, req, res, { _faucet: { funded: true, alreadyFunded: true, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
       }
       const status = verdict.code === 'cooldown' || verdict.code === 'cap_reached' ? 429 : 400;
       return res.status(status).json({ error: verdict.reason, code: verdict.code, retryAfterMs: verdict.retryAfterMs });
@@ -1553,8 +1689,7 @@ app.post('/api/faucet', (req, res) => {
     }
     writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'done'));
     console.log(`[faucet] channel ${ch}: DRIPPED ${amount} of base token ${FAUCET.tokenIndex} to slot ${slot}`);
-    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
-    res.json({ ...snap, _faucet: { funded: true, alreadyFunded: false, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
+    delegateReply(ch, req, res, { _faucet: { funded: true, alreadyFunded: false, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
@@ -1572,11 +1707,13 @@ app.post('/api/cosign-burn', (req, res) => {
       throw Object.assign(new Error(`Withdrawal is not available now: ${settlementFunding.reason}. Nothing was signed or sent.`),
         { status: 501, code: 'NOT_AVAILABLE' });
     }
-    const cosignedHead = await burnOperations.run(ch, req.body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
-    res.json(cosignedHead);
+    const body = req.body && req.body.debitPayload
+      ? { ...req.body, debitPayload: fullDebitPayload(ch, req.body.debitPayload) } : req.body;
+    const cosignedHead = await burnOperations.run(ch, body, {findActiveTicket,upsertTicket,getTicket:(ch,id)=>readTickets(ch).concat(readHistory(ch)).find(t=>t.id===id)});
+    res.json(headAck(cosignedHead));
     // Public chain: settle it on L1 in the background, starting now; the channel stays open.
     pwSettlement.start(ch);
-  }).catch((e) => sendRouteError(res, e));
+  }).catch((e) => sendSigningError(res, ch, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)

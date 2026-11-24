@@ -8,7 +8,8 @@ for (const [file,endpoint] of [['burn','/cosign'],['partial-withdrawal','/burn']
   const owner={run:async(ch,input,store)=>{seen={ch,input};assert.equal(store.getTicket(ch,'pw_test'),active);return {digest:'signed'};},result:()=>({id:'burn:test',blockReceipt:{block:1},liveReceipt:{baseNonce:2}})};
   const load=Module._load;
   Module._load=function(request,parent,isMain){
-   if(request==='express')return {Router:()=>({post:(url,fn)=>{if(url===endpoint)handler=fn;}})};
+   // GET routes (the payout receipt) are registered too; only the POST under test is captured.
+   if(request==='express')return {Router:()=>({post:(url,fn)=>{if(url===endpoint)handler=fn;},get:()=>{}})};
    if(request==='../lib/burn-operation')return {createBurnOperations:()=>owner};
    if(request==='../lib/lock')return {withLock:(_,fn)=>Promise.resolve().then(fn)};
    if(request==='../lib/tickets')return {findActiveTicket:()=>active,readTickets:()=>[active],upsertTicket:()=>{}};

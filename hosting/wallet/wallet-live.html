@@ -1774,9 +1774,9 @@ async function awaitReceipt(txHash, what, timeoutSec = 120) {
 // that address is the wallet connected at Join. A deposit from any other account belongs to no
 // slot; the relay holds it with the channel operator for a refund instead of crediting this slot.
 async function boundRecipientOfMySlot() {
-  const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
-  const recipients = snap && snap.state && snap.state.balanceState && snap.state.balanceState.recipients;
-  return Array.isArray(recipients) && recipients[mySlot] ? String(recipients[mySlot]).toLowerCase() : null;
+  // Our own row carries the co-signer-signed exit address; WASM verifies the row on import.
+  const view = JSON.parse(await fetchMyView());
+  return view && view.row && view.row.recipient ? String(view.row.recipient).toLowerCase() : null;
 }
 
 async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDepositInfo()) {
@@ -1913,6 +1913,10 @@ async function importDepositAwaitingConfirmations(recipientSlot, txHash, onPendi
 // ---- State ---------------------------------------------------------------------------------
 let mySlot = 0;
 let myChannel = null;
+// This wallet's Falcon identity (from keygen): it names our slot to the relay's /api/view.
+let myPkG = null;
+// Digest of the slot view the wasm session last verified and adopted.
+let myViewDigest = null;
 let activeCh = 7;
 let sendPhase = 'Proving';
 // Balance auto-refresh: the last state_version we've decrypted+rendered. The poller asks the relay
@@ -2033,35 +2037,6 @@ function setChannelFrom(snapJson) {
 const worker = new Worker('./wallet-worker.js', { type: 'module' });
 const handlers = {};
 let _callId = 0;
-// ---- SLIM DOWNLINK: the wallet's VERIFIED head (the only thing usable as a delta base) -------
-// `verifiedHeadState` is a projection (deltaBaseOf) of a ChannelState this wallet has actually
-// VERIFIED wasm-side. It is maintained HERE, in the single worker chokepoint, so it can never
-// drift from the wasm session:
-//   * a SUCCESSFUL `finalize`      → the state that was finalized (verify_snapshot passed on it)
-//   * a SUCCESSFUL `importChannel` → the imported snapshot's `state` (same verification)
-//   * every other action, and every FAILURE of those two → CLEARED.
-// Clearing is always safe: a missing base just means the next fetch is a full snapshot. Offering a
-// base that is not the session head cannot forge anything either — `wallet_finalize` rejects any
-// state that does not extend its own head — it would only waste a round trip.
-let verifiedHeadState = null;
-// Actions that provably leave the wasm session's head where it is, so the base survives them.
-const HEAD_PRESERVING_ACTIONS = ['send', 'refresh', 'sendInterChannel', 'cosign', 'burnSend', 'withdrawalClaim'];
-
-// Both head-adopting actions return a BalanceReport read from the state the wasm ACTUALLY adopted,
-// so its stateVersion is an independent witness of the head. Cross-check it against the base we are
-// about to store: if a future wasm change makes an action adopt a different state than the payload
-// we sent, this notices instead of silently keeping a stale base.
-function adoptHead(state, report) {
-  const base = deltaBaseOf(state);
-  const seen = report && report.stateVersion;
-  if (base && seen !== undefined && seen !== null && Number(seen) !== Number(base.balanceState.stateVersion)) {
-    console.warn('delta: wasm adopted stateVersion ' + seen + ', payload said '
-      + base.balanceState.stateVersion + ' -- dropping the delta base');
-    return null;
-  }
-  return base;
-}
-
 function claimCanonicalJson(value) {
   if (Array.isArray(value)) return '[' + value.map(claimCanonicalJson).join(',') + ']';
   if (value && typeof value === 'object') {
@@ -2071,33 +2046,12 @@ function claimCanonicalJson(value) {
 }
 
 async function noteVerifiedHead(action, payload, ok, result) {
-  try {
-    if (action === 'finalize') {
-      if (!ok) { verifiedHeadState = null; return; }
-      const expectedState = JSON.parse(payload.stateJson);
-      verifiedHeadState = adoptHead(expectedState, result);
-      // A bare finalized ChannelState is enough for the current WASM session but not for restart
-      // recovery (record, member keys and settled accumulator live in the complete snapshot).
-      // Require the relay to publish that exact value now, verify the full snapshot again in WASM,
-      // and wait for the IndexedDB transaction before reporting finalization to the UI.
-      const snapshotJson = await api('/api/snapshot', null, 'GET');
-      const snapshot = JSON.parse(snapshotJson);
-      if (!snapshot || claimCanonicalJson(snapshot.state) !== claimCanonicalJson(expectedState)) {
-        throw new Error('relay did not publish the exact WASM-finalized state for durable claim recovery');
-      }
-      await call('importChannel', { snapshotJson });
-      return;
-    }
-    if (action === 'importChannel') {
-      if (!ok) { verifiedHeadState = null; return; }
-      const snapshot = JSON.parse(payload.snapshotJson);
-      const adopted = adoptHead(snapshot.state, result);
-      await archiveVerifiedClaimSnapshot(payload.snapshotJson);
-      verifiedHeadState = adopted;
-      return;
-    }
-  } catch (e) { verifiedHeadState = null; throw e; }
-  if (HEAD_PRESERVING_ACTIONS.indexOf(action) < 0) verifiedHeadState = null;
+  if (action !== 'finalize' && action !== 'importView') return;
+  if (!ok) { myViewDigest = null; return; }
+  // Every own-slot view WASM verified is archived: a withdrawal claim must later prove against the
+  // exact Manager-finalized head, which the relay may no longer serve.
+  await archiveVerifiedClaimSnapshot(payload.viewJson);
+  try { myViewDigest = String(JSON.parse(payload.viewJson).state.digest).toLowerCase(); } catch (_) { myViewDigest = null; }
 }
 
 function call(action, payload={}) {
@@ -2130,21 +2084,83 @@ worker.onerror = (e) => {
 };
 
 // ---- API -----------------------------------------------------------------------------------
+// ---- OWN SLOT VIEW: a delegate holds only its own slot ----------------------------------------
+// The relay serves this wallet the signed head's header, its OWN row and that row's Merkle path
+// (/api/view, src/slot_view.rs). The full channel snapshot is never downloaded: WASM verifies the
+// co-signatures over the digest it recomputes from the header and our row's path.
+async function fetchMyView(ch) {
+  if (!myPkG) throw new Error('no channel key loaded');
+  const r = await fetch('/api/view?channel=' + (ch ?? activeCh) + '&pkG=' + myPkG);
+  const text = await r.text();
+  if (!r.ok) {
+    let detail; try { detail = JSON.parse(text); } catch (_) {}
+    throw new Error(detail && detail.error || 'relay /api/view: ' + text);
+  }
+  return text;
+}
+async function importMyView(viewJson) {
+  const json = viewJson ?? await fetchMyView();
+  const r = JSON.parse(await call('importView', { viewJson: json }));
+  setChannelFrom(json);
+  mySlot = r.slot;
+  return r;
+}
+// One slot's public participant record {slot, pkG, pkB, regevPk}: all a sender needs to address a
+// recipient (the co-signers re-derive the statement from their own record).
+async function fetchMember(ch, slot) {
+  const r = await fetch('/api/member?channel=' + ch + '&slot=' + slot);
+  const text = await r.text();
+  if (!r.ok) {
+    let detail; try { detail = JSON.parse(text); } catch (_) {}
+    throw new Error(detail && detail.error || ('channel ' + ch + ' has no participant at slot ' + slot));
+  }
+  return JSON.parse(text);
+}
+
 async function api(pathname, body, method='POST') {
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if (method !== 'GET') opts.body = body;
   const url = pathname.startsWith('/api/')
     ? pathname + (pathname.includes('?') ? '&' : '?') + 'channel=' + activeCh
+      + (myPkG ? '&pkG=' + myPkG : '')
     : pathname;
   const r = await fetch(url, opts);
   const text = await r.text();
-  if (!r.ok) {
-    let detail; try { detail = JSON.parse(text); } catch (_) {}
-    const error = new Error(detail && detail.error || 'relay '+pathname+': '+text);
-    error.code = detail && detail.code;
-    throw error;
-  }
+  if (!r.ok) throw relayError(r.status, text, detail => (detail && detail.error) || 'relay '+pathname+': '+text);
   return text;
+}
+
+// A relay refusal, keeping what the wallet acts on: the code and whether the channel's head is
+// still waiting for L1 finality (`backingPending`, see untilBacked).
+function relayError(status, text, message) {
+  let detail; try { detail = JSON.parse(text); } catch (_) {}
+  const error = new Error(message(detail));
+  error.status = status;
+  error.code = detail && detail.code;
+  error.backingPending = !!(detail && detail.backingPending);
+  return error;
+}
+
+// C25/G16: after an asset-moving head (a deposit import, an inter-channel debit or a burn) the
+// co-signers sign nothing on top of it until that head's block is finalized on L1; the relay
+// answers 409 `backingPending` and publishes the block meanwhile. Nothing was signed, so the wallet
+// waits and re-sends the SAME request (seconds on the devnet, minutes on a public chain).
+const BACKING_WAIT_MS = 40 * 60 * 1000, BACKING_RETRY_MS = 10 * 1000;
+async function untilBacked(attempt, what) {
+  const t0 = Date.now();
+  let told = false;
+  for (;;) {
+    try { return await attempt(); }
+    catch (e) {
+      if (!e.backingPending || Date.now() - t0 > BACKING_WAIT_MS) throw e;
+      if (!told) {
+        log('  ' + what + ' waits until the previous deposit or transfer is finalized on L1 (nothing was signed yet); it continues by itself...');
+        told = true;
+      }
+      sendPhase = 'Waiting for L1 finality';
+      await new Promise(resolve => setTimeout(resolve, BACKING_RETRY_MS));
+    }
+  }
 }
 
 // ---- UI updates ----------------------------------------------------------------------------
@@ -2263,19 +2279,21 @@ function showBalance(r) {
 
 // ---- Balance auto-refresh (efficient poll) -------------------------------------------------
 // Cheap ping: /api/poll returns 204 (nothing) when the channel state_version is unchanged, or the
-// full snapshot when it advanced. We re-decrypt (importChannel) ONLY on a change, and never while a
+// new head's {stateVersion, digest} when it advanced. We fetch and verify OUR slot view ONLY on a
+// change, and never while a
 // multi-step op is running (_inflight guards join/send/deposit/etc — importing mid-op would corrupt
 // the wasm session state).
 async function pollBalanceOnce() {
   if (_polling || mySeenVersion == null || _inflight.size > 0) return;
   _polling = true;
   try {
-    const snap = await api('/api/poll?since=' + mySeenVersion, null, 'GET');
-    if (!snap) return;              // 204 → no change, no work
+    const ack = await api('/api/poll?since=' + mySeenVersion, null, 'GET');
+    if (!ack) return;               // 204 → no change, no work
     if (_inflight.size > 0) return; // an op started during the await — let it own the session
-    setChannelFrom(snap);
-    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
-    mySlot = r.slot; showBalance(r);
+    const view = await fetchMyView();
+    if (_inflight.size > 0) return;
+    const r = await importMyView(view);
+    showBalance(r);
     log('balance updated (v' + r.stateVersion + '): ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (refresh to send)'), 'ok');
   } catch (e) { /* transient (mid-write / offline) — next tick retries */ }
   finally { _polling = false; }
@@ -2396,8 +2414,8 @@ async function claimFaucet(quiet) {
     try { already = JSON.parse(snapJson)._faucet.alreadyFunded === true; } catch (e) {}
     setChannelFrom(snapJson);
     await loadTokenMeta(true); // the drip may be the first time this token position exists
-    const r = JSON.parse(await call('importChannel', { snapshotJson: snapJson }));
-    mySlot = r.slot; showBalance(r);
+    const r = await importMyView(snapJson);
+    showBalance(r);
     renderFaucetUi();
     log(already
       ? 'faucet: this account already received its test tokens'
@@ -2666,12 +2684,13 @@ async function connectExistingChannel() {
     const seed = localStorage.getItem(SEED_KEY);
     if (!seed) throw new Error('No channel key is saved in this browser for this site. Open the browser and URL you used to join. MetaMask alone cannot restore an existing channel account.');
     activeCh = channel;
-    await call('keygenSeeded', { seed });
-    const snap = await api('/api/snapshot', null, 'GET');
+    myPkG = JSON.parse(await call('keygenSeeded', { seed })).pkG;
+    const snap = await fetchMyView(channel);
     const snapshotChannel = Number(JSON.parse(snap).record.channelId);
     if (snapshotChannel !== channel) throw new Error('The relay returned a different channel.');
-    // WASM checks membership, signatures, roots, and decrypts our balance before we show it.
-    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    // WASM checks the co-signatures, our row under the signed slot root, and decrypts our balance
+    // before we show it. Only our own slot is ever downloaded.
+    const r = JSON.parse(await call('importView', { viewJson: snap }));
     setChannelFrom(snap);
     saveChannel(channel);
     mySlot = r.slot;
@@ -2688,7 +2707,7 @@ async function connectExistingChannel() {
     return true;
   } catch (e) {
     const reason = String(e.message || e);
-    const message = reason.includes("this wallet's key is not a member")
+    const message = (reason.includes("this wallet's key is not a member") || reason.includes('no participant has that pk_g'))
       ? 'The saved channel key does not match a member of channel ' + activeCh + '. Use the browser and URL where you joined. Connecting the same MetaMask address does not recover that key.'
       : 'Could not connect: ' + reason;
     $('connectStatus').textContent = message;
@@ -2748,11 +2767,11 @@ $('btnOpen').onclick = guard('account', async () => {
     // balance-slot leaf (the delegate's only payout binding), so a connected wallet is required and
     // its address is passed as the recipient.
     await ensureWallet();
-    await step('generate keys', () => call('keygenSeeded', { seed: channelSeed() }));
+    myPkG = JSON.parse(await step('generate keys', () => call('keygenSeeded', { seed: channelSeed() }))).pkG;
     const contribution = await step('genesis contribution (balance 0)', () => call('genesisContribution', { balance: toBase('0'), recipient: walletAccount }));
     const snapshot = await step('CLI co-signs genesis', () => api('/api/init', contribution));
     setChannelFrom(snapshot);
-    const r = JSON.parse(await step('import channel', () => call('importChannel', { snapshotJson: snapshot })));
+    const r = JSON.parse(await step('import own slot view', () => call('importView', { viewJson: snapshot })));
     await loadTokenMeta(true); // per-channel token map for the per-token balance rows
     mySlot = r.slot;
     showBalance(r);
@@ -2804,16 +2823,16 @@ $('btnClear').onclick = guard('clear', async () => {
 // SECURITY: `token` MUST come from selectedSendToken() (i.e. from sendableTokens()), and
 // `amountBase` MUST already be denominated with THAT token's verified decimals.
 async function attemptSend(to, amountBase, token) {
-  const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
-  let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
-  mySlot = rr.slot; showBalance(rr);
+  const rr = await importMyView();
+  showBalance(rr);
   // No pre-send refresh: `wallet_send` opens the position being spent by DECRYPTION under this
   // wallet's own Regev key (the refresh-free decrypted-send proof), so a position that just received
   // a deposit or a transfer is spendable directly. `wallet_refresh` remains available as a manual
   // maintenance step (e.g. a pure receiver approaching the 64-add noise budget).
   sendPhase = 'Proving';
   log('  generating ZKP (zero-knowledge proof)...', 'zk');
-  const payload = await call('send', { recipientSlot: to, amount: amountBase, tokenSlot: token.tokenSlot });
+  const recipient = await fetchMember(myChannel ?? activeCh, to);
+  const payload = await call('send', { recipientJson: JSON.stringify(recipient), amount: amountBase, tokenSlot: token.tokenSlot });
   log('  ZKP generated · amount encrypted', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
@@ -2840,96 +2859,32 @@ async function validateSavedSend(pending) {
 
 async function resumeSoloSend(pending, fresh = false) {
   await validateSavedSend(pending);
-  const response = await fetch('/api/cosign2?channel=' + pending.channel, {
-    method:'POST',headers:{'Content-Type':'application/vnd.intmax.slim+binary'},body:pending.slim,
-  });
-  let accepted;
-  if (response.status === 404 || response.status === 405) {
-    accepted = JSON.parse(await api('/api/cosign',pending.payload));
-  } else {
+  const accepted = await untilBacked(async () => {
+    const response = await fetch('/api/cosign2?channel=' + pending.channel, {
+      method:'POST',headers:{'Content-Type':'application/vnd.intmax.slim+binary'},body:pending.slim,
+    });
+    if (response.status === 404 || response.status === 405) return JSON.parse(await api('/api/cosign',pending.payload));
     const text = await response.text();
-    if (!response.ok) throw new Error('The saved send is still unresolved: ' + text);
-    accepted = JSON.parse(text);
-  }
-  if (fresh) {
-    let state = accepted.balanceState ? accepted : null;
-    for (let i=0; !state && i<120; i++) {
-      const head = await fetchHeadState(accepted);
-      if (head?.balanceState?.stateVersion >= accepted.stateVersion) state = head;
-      else await new Promise(resolve => setTimeout(resolve,1000));
-    }
-    if (!state) throw new Error('The accepted send is waiting for its signed snapshot. Retry Send.');
-    const report = JSON.parse(await call('finalize',{stateJson:JSON.stringify(state)}));
-    await walletOutbox.clear((await sendOutboxKey()));
-    return report;
-  }
-  const raw = await api('/api/snapshot',null,'GET');
-  const snapshot = JSON.parse(raw);
+    if (!response.ok) throw relayError(response.status, text, () => 'The saved send is still unresolved: ' + text);
+    return JSON.parse(text);
+  }, 'This send');
+  // The relay acknowledges the co-signed head ({stateVersion, digest}); we then fetch OUR slot view
+  // of a head at least that new and let WASM verify it before anything is shown.
   const version = accepted.stateVersion ?? accepted.balanceState?.stateVersion;
-  if (!Number.isInteger(version) || snapshot.state?.balanceState?.stateVersion < version) {
-    throw new Error('The accepted send is waiting for its signed snapshot. Retry Send.');
+  if (!Number.isInteger(version)) throw new Error('The relay did not acknowledge the send. Retry Send.');
+  let view = null;
+  for (let i=0; !view && i<120; i++) {
+    const v = await fetchMyView();
+    if (JSON.parse(v).state?.balanceState?.stateVersion >= version) view = v;
+    else await new Promise(resolve => setTimeout(resolve,1000));
   }
-  const report = JSON.parse(await call('importChannel',{snapshotJson:raw}));
-  setChannelFrom(raw); mySlot = report.slot;
+  if (!view) throw new Error('The accepted send is waiting for its signed head. Retry Send.');
+  const report = fresh
+    ? JSON.parse(await call('finalize', { viewJson: view }))
+    : await importMyView(view);
+  setChannelFrom(view); mySlot = report.slot;
   await walletOutbox.clear((await sendOutboxKey()));
   return report;
-}
-
-// ---- SLIM DOWNLINK: fetch the head `state`, as a delta when possible -------------------------
-// Returns the full head state object, or null when the head has not advanced yet (caller retries).
-// EVERY failure path here falls back to a full snapshot; none of them proceeds on a partial state.
-async function fetchHeadState(ack) {
-  const base = verifiedHeadState;
-  if (base) {
-    try {
-      const r = await fetch('/api/snapshot?channel=' + activeCh
-        + '&since=' + encodeURIComponent(String(base.balanceState.stateVersion))
-        + '&sinceDigest=' + encodeURIComponent(String(base.digest)));
-      // 404 = a relay without the delta route (or no channel yet) → plain full fetch below.
-      if (r.ok) {
-        const txt = await r.text();
-        const body = JSON.parse(txt);
-        let carry;
-        // A body that declares ANY `deltaFormat` is a delta and must never be read as a snapshot:
-        // a delta's `state` is PARTIAL (no encBalances), so treating an unrecognized version as a
-        // full reply would hand a truncated state to finalize. Unknown version → full fetch.
-        if (body && body.deltaFormat !== undefined && body.deltaFormat !== DELTA_FORMAT) {
-          log('  relay speaks delta format ' + body.deltaFormat + ', this wallet speaks '
-            + DELTA_FORMAT + ' — fetching the full snapshot');
-        } else if (body && body.deltaFormat === DELTA_FORMAT) {
-          if (body.unchanged === true) return null;          // head has not advanced yet
-          const rec = reconcileStateDelta(body, base, ack);
-          if (!rec.ok) {
-            log('  delta not applicable (' + rec.reason + ') — fetching the full snapshot');
-          } else if ((carry = await carryHashMatches(base, body)) !== 'ok') {
-            // The base we hold is not the material the relay committed to. Sound either way (the
-            // rebuilt state would simply fail verification), but a full fetch is the clean answer.
-            if (carry === 'unavailable') {
-              log('  delta: no SubtleCrypto (page not in a secure context) — fetching in full');
-            } else {
-              log('  delta: carried material does not match the relay commitment — fetching in full', 'warn');
-            }
-          } else {
-            const rebuilt = applyStateDelta(body, base, rec.plan);
-            if (reconstructedMatchesAck(rebuilt, ack)) {
-              log('  state delta applied: ' + fmtKB(txt.length) + ' instead of a full snapshot'
-                + ' (' + Object.keys(body.changedRows).length + ' of ' + body.rowCount + ' balance rows changed)', 'ok');
-              return rebuilt;
-            }
-            log('  delta: rebuilt state is not the head the co-sign ACK named — fetching in full', 'warn');
-          }
-        } else if (body && body.deltaFormat === undefined && body.state) {
-          return body.state;   // the relay answered in full (X-Delta-Fallback carries the reason)
-        }
-      }
-    } catch (e) {
-      // Defensive `(e && e.message) || e`: this runs after the co-sign, so a TypeError raised INSIDE
-      // the handler (a thrown non-Error) would escape attemptSend at the worst possible moment.
-      log('  delta fetch failed (' + ((e && e.message) || e) + ') — fetching the full snapshot');
-    }
-  }
-  const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
-  return snap && snap.state;
 }
 
 const fmtKB = (n) => (n / 1024).toFixed(0) + ' KB';
@@ -2939,34 +2894,14 @@ async function sha256Hex(s) {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Does our base's carried material — the carry fields AND every row the delta declares unchanged —
-// hash to what the relay committed to? Only ever called AFTER `reconcileStateDelta` has validated
-// `carry` and `unchangedRows`, so the indices hashed here are already known in-range and unique.
-// Returns 'ok' | 'mismatch' | 'unavailable'. The caller treats everything but 'ok' as "fetch in
-// full"; the three-way answer exists so the LOG can tell a genuine commitment mismatch (worth
-// investigating) from the page simply having no SubtleCrypto because it is not in a secure context
-// (worth fixing, but not a relay attack).
-async function carryHashMatches(base, delta) {
-  if (!(window.crypto && window.crypto.subtle)) return 'unavailable';
-  try {
-    const material = deltaCarryMaterial(base, delta.carry, delta.unchangedRows);
-    return (await sha256Hex(material)) === delta.carryHash ? 'ok' : 'mismatch';
-  } catch (e) { return 'unavailable'; }
-}
-
 // Inter-channel: NATIVE asset only for now (see the guard in the Send handler) — `amountBase` is
 // therefore 18-dp native base units, exactly as before.
 async function attemptInterChannelSend(toCh, to, amountBase) {
-  const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
-  let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
-  mySlot = rr.slot; showBalance(rr);
+  const rr = await importMyView();
+  showBalance(rr);
   // No pre-send refresh: `wallet_send_inter_channel` opens the debited position by decryption
   // (refresh-free decrypted E-2 proof) — see attemptSend.
-  const bSnapRaw = await fetch('/api/snapshot?channel=' + toCh).then(r => r.text());
-  if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error('destination channel ' + toCh + ' not available');
-  const bSnap = JSON.parse(bSnapRaw);
-  const bMember = (bSnap.members || []).find(m => m.slot === to);
-  if (!bMember) throw new Error('channel ' + toCh + ' has no member at slot ' + to);
+  const bMember = await fetchMember(toCh, to);
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
   // Base sends use the persisted base-account cursor, not the channel small-block number (an
   // incoming channel transition advances only the latter). The co-signer re-checks this nonce.
@@ -2992,18 +2927,19 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
 async function resumeInterSend(pending) {
   await validateSavedSend(pending);
   log('Checking the saved transfer; no new transfer will be created.');
-  const sendRes = await fetch('/api/inter/send?channel=' + pending.channel, {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:pending.body,
-  });
-  const sendTxt = await sendRes.text();
-  if (!sendRes.ok) throw new Error('inter-channel transfer failed: ' + sendTxt);
+  const sendTxt = await untilBacked(async () => {
+    const sendRes = await fetch('/api/inter/send?channel=' + pending.channel, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:pending.body,
+    });
+    const text = await sendRes.text();
+    if (!sendRes.ok) throw relayError(sendRes.status, text, () => 'inter-channel transfer failed: ' + text);
+    return text;
+  }, 'This transfer');
   const transfer = JSON.parse(sendTxt);
   // The relay (api/lib/inter-channel-send.js) answers with `sourceHead`; older builds said `aHead`.
   if (!(transfer.sourceHead || transfer.aHead)) throw new Error('Transfer completion is incomplete; retry Send.');
-  // Reloads lose the worker's pending proof, so restore through its full signature-verified import.
-  const snapshot = await api('/api/snapshot', null, 'GET');
-  const report = JSON.parse(await call('importChannel', {snapshotJson:snapshot}));
-  setChannelFrom(snapshot); mySlot = report.slot;
+  // Adopt our own slot view of the new head (WASM verifies it; a pending debit commits there).
+  const report = await importMyView();
   await walletOutbox.clear((await sendOutboxKey()));
   return report;
 }
@@ -3276,8 +3212,8 @@ $('btnDeposit').onclick = guard('deposit', async () => {
     pend.classList.add('hidden');
     setChannelFrom(snap);
     await loadTokenMeta(true);           // the deposit may be this channel's first position for the token
-    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
-    mySlot = r.slot; showBalance(r);
+    const r = await importMyView(snap);
+    showBalance(r);
     walletTransactions.clear((await depositJournalKey()));
     log('deposit imported into slot ' + mySlot, 'ok');
     $('depositModal').classList.add('hidden');
@@ -3292,11 +3228,9 @@ $('btnDeposit').onclick = guard('deposit', async () => {
 $('btnRefresh').onclick = guard('refresh', async () => {
   try {
     $('btnRefresh').disabled = true;
-    const latest = await api('/api/snapshot', null, 'GET');
-    setChannelFrom(latest);
-    const r = JSON.parse(await call('importChannel', { snapshotJson: latest }));
+    const r = await importMyView();
     await loadTokenMeta(true); // manual refresh re-pulls the token map too
-    mySlot = r.slot; showBalance(r);
+    showBalance(r);
     log('refreshed: ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (received funds -- refresh needed before next send)'), 'ok');
   } catch (e) { log('refresh failed: '+e.message, 'err'); }
   $('btnRefresh').disabled = false;
@@ -3327,10 +3261,9 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     if (ticketLoadFailed) throw new Error('Cannot verify withdrawal status. Retry when the relay is available; no new burn was made.');
     const existing = ticketOfType('partial_withdrawal');
     if (existing?.status === 'burn_pending') {
-      await api('/api/cosign-burn', '{}');
-      const snapshot = await api('/api/snapshot', null, 'GET');
-      const report = JSON.parse(await call('importChannel', {snapshotJson:snapshot}));
-      setChannelFrom(snapshot); mySlot = report.slot; showBalance(report);
+      await untilBacked(() => api('/api/cosign-burn', '{}'), 'The saved burn');
+      const report = await importMyView();
+      showBalance(report);
       await fetchTickets(); applyTicketState();
       log('Saved burn completed. Continue with Step 2.', 'ok');
       clearInterval(tick); $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
@@ -3345,9 +3278,8 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) throw new Error('enter a valid positive burn amount');
     const addr = $('pwAddress').value.trim();
     if (!addr || !addr.startsWith('0x') || addr.length !== 42) throw new Error('enter a valid L1 recipient address (0x + 40 hex chars)');
-    const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
-    let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
-    mySlot = rr.slot; showBalance(rr);
+    const rr = await importMyView();
+    showBalance(rr);
     // No pre-burn refresh: `wallet_burn_send` opens the debited position by decryption
     // (refresh-free decrypted E-2 proof) — see attemptSend.
     log('burn send ' + amt + ' ETH -> ' + addr + '...');
@@ -3361,13 +3293,21 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     log('  burn ZKP generated · amount encrypted', 'zk');
     log('  burn proved -- co-signing...');
     sendPhase = 'Co-signing';
-    const cosigned = await api('/api/cosign-burn', JSON.stringify({
+    const burnBody = JSON.stringify({
       debitPayload: built.debitPayload,
       transferDescriptor: built.transferDescriptor,
       amount: toBase(amt),
       recipient: addr,
-    }));
-    const r = JSON.parse(await call('finalize', { stateJson: cosigned }));
+    });
+    const cosigned = JSON.parse(await untilBacked(() => api('/api/cosign-burn', burnBody), 'This burn'));
+    let burnView = null;
+    for (let i = 0; !burnView && i < 120; i++) {
+      const v = await fetchMyView();
+      if (JSON.parse(v).state?.balanceState?.stateVersion >= cosigned.stateVersion) burnView = v;
+      else await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    if (!burnView) throw new Error('The burn was co-signed but its head is not published yet. Reload to resume.');
+    const r = JSON.parse(await call('finalize', { viewJson: burnView }));
     mySlot = r.slot; showBalance(r);
     log('burn complete -- balance ' + fmtAmt(r.balance) + '. Click "Settle on L1" to finalize.', 'ok');
     $('btnPwSettle').disabled = false;
@@ -3548,23 +3488,23 @@ async function fetchBrowserClaimContext() {
 
 async function ensureFinalizedClaimSnapshot(context) {
   const wanted = String(context.finalized.finalChannelStateDigest).toLowerCase();
-  if (verifiedHeadState && String(verifiedHeadState.digest).toLowerCase() === wanted) return;
-  let snapshotJson = await loadVerifiedClaimSnapshot(context.authority.channelId, wanted);
-  if (!snapshotJson) {
-    const current = await api('/api/snapshot', null, 'GET');
+  if (myViewDigest === wanted) return;
+  let viewJson = await loadVerifiedClaimSnapshot(context.authority.channelId, wanted);
+  if (!viewJson) {
+    const current = await fetchMyView();
     let digest = '';
     try { digest = String(JSON.parse(current).state.digest).toLowerCase(); } catch (_) { /* fail below */ }
     if (digest !== wanted) {
       throw new Error(
         'the Manager finalized an older signed head that this browser did not archive; ' +
-        'restore this account\'s authenticated snapshot archive or run its delegate recovery'
+        'restore this account\'s authenticated view archive or run its delegate recovery'
       );
     }
-    snapshotJson = current;
+    viewJson = current;
   }
-  const report = JSON.parse(await call('importChannel', { snapshotJson }));
-  if (!verifiedHeadState || String(verifiedHeadState.digest).toLowerCase() !== wanted) {
-    throw new Error('wallet WASM did not adopt the exact finalized claim snapshot');
+  const report = JSON.parse(await call('importView', { viewJson }));
+  if (myViewDigest !== wanted) {
+    throw new Error('wallet WASM did not adopt the exact finalized claim view');
   }
   mySlot = report.slot;
   showBalance(report);

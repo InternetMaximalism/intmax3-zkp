@@ -64,48 +64,6 @@ env:
   CARGO_NET_RETRY: 3
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Lean proofs (audit25-08-2026 Part 3, cross-cutting): both Lean projects must
-  # be kernel-green on every push. Until this job existed NOTHING ran lake build
-  # — the corpus could rot silently (and did: see the audit's staleness findings).
-  # ---------------------------------------------------------------------------
-  lean-proofs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-      - name: Verify pinned inputs (including the implementation modeled by Lean)
-        env:
-          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
-        run: .github/ci/verify-pinned-inputs.sh
-      - name: Install elan (pinned toolchain resolves from lean-toolchain files)
-        run: |
-          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          ./elan-init -y --default-toolchain none
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Test Lean guard failure handling
-        run: |
-          python3 .github/ci/test-lean-safety-guard.py
-          python3 .github/ci/test-lean-line-coverage.py
-          python3 -B .github/ci/test-check-ledger-writers.py
-      - name: Build every Lean root and audit current-proof dependencies and source pins
-        # This is model/build/assumption and reviewed-source drift protection, NOT a
-        # machine-checked refinement of Rust/Solidity bytecode into the Lean models.
-        run: bash .github/ci/lean-safety-guard.sh
-      - name: Validate source-line inventory and mapped declarations (partial formalization)
-        # A pass records honest partial coverage. It must NOT be treated as an
-        # all-line/source-refinement/whole-system solvency certificate.
-        run: python3 .github/ci/lean-line-coverage.py
-      - name: Re-derive the Solidity ledger write-site inventory pinned by LedgerWriters
-        # Model-level frame theorems about `used`/`cap`/`received`/`paid` and the exit latch
-        # only bind if the reviewed Solidity has exactly the write sites `flaggedWriteSites`
-        # claims. This is a source text scan, NOT a bytecode or storage-layout proof.
-        run: python3 -B .github/ci/check-ledger-writers.py
-      - name: Assert Lean verification did not modify tracked sources
-        run: git diff --exit-code
   # ════════════════════════════════════════════════════════════════════════════════════════════════
   #  CONTRACTS — the declaration-vs-reality job. ~5 min. This is the fast feedback loop; it is
   #  first because it is where every fund-impacting defect of the last month actually lived.

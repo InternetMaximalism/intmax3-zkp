@@ -7,7 +7,7 @@ use thiserror::Error;
 pub use crate::common::channel_id::ChannelId;
 use crate::{
     common::{
-        balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
+        balance_state::{BalanceState, BalanceStateHeader, settled_tx_chain_push, tx_leaf_hash},
         salt::Salt,
     },
     constants::{
@@ -621,34 +621,121 @@ impl ChannelState {
     /// IMCH; keccak collision resistance over the differing fixed widths rules out v1<->v2
     /// preimage aliasing, and the v3 reset retires all v1-signed digests.
     pub fn signing_digest(&self) -> Bytes32 {
-        hash_words(
-            &[
-                vec![CHANNEL_STATE_DOMAIN],
-                self.channel_id.to_u32_vec(),
-                split_u64(self.epoch),
-                split_u64(self.small_block_number),
-                split_u64(self.close_freeze_nonce),
-                self.channel_fund.channel_id.to_u32_vec(),
-                self.channel_fund
-                    .amounts
-                    .iter()
-                    .flat_map(U256::to_u32_vec)
-                    .collect(),
-                self.channel_fund.intmax_state_root.to_u32_vec(),
-                self.balance_state.h1().to_u32_vec(),
-                self.shared_native_nullifier_root.to_u32_vec(),
-                self.unallocated_confirmed_incoming.to_u32_vec(),
-                self.prev_digest.to_u32_vec(),
-                self.h2_tag.to_u32_vec(),
-                split_u64(self.balance_state.state_version),
-            ]
-            .concat(),
+        imch_digest(
+            self.channel_id,
+            self.epoch,
+            self.small_block_number,
+            self.close_freeze_nonce,
+            &self.channel_fund,
+            self.balance_state.h1(),
+            self.shared_native_nullifier_root,
+            self.unallocated_confirmed_incoming,
+            self.prev_digest,
+            self.h2_tag,
+            self.balance_state.state_version,
         )
+    }
+
+    /// This state with its balance body replaced by the H1 header (what a delegate holds).
+    pub fn header(&self) -> ChannelStateHeader {
+        ChannelStateHeader {
+            channel_id: self.channel_id,
+            epoch: self.epoch,
+            small_block_number: self.small_block_number,
+            close_freeze_nonce: self.close_freeze_nonce,
+            channel_fund: self.channel_fund.clone(),
+            balance_state: self.balance_state.header(),
+            h2_tag: self.h2_tag,
+            shared_native_nullifier_root: self.shared_native_nullifier_root,
+            unallocated_confirmed_incoming: self.unallocated_confirmed_incoming,
+            prev_digest: self.prev_digest,
+            digest: self.digest,
+            member_signatures: self.member_signatures.clone(),
+        }
     }
 
     pub fn with_computed_digest(mut self) -> Self {
         self.digest = self.signing_digest();
         self
+    }
+}
+
+/// The IMCH preimage, shared by [`ChannelState::signing_digest`] and
+/// [`ChannelStateHeader::signing_digest`] so a full state and its header can never disagree.
+#[allow(clippy::too_many_arguments)]
+fn imch_digest(
+    channel_id: ChannelId,
+    epoch: u64,
+    small_block_number: u64,
+    close_freeze_nonce: u64,
+    channel_fund: &ChannelFund,
+    h1: Bytes32,
+    shared_native_nullifier_root: Bytes32,
+    unallocated_confirmed_incoming: U256,
+    prev_digest: Bytes32,
+    h2_tag: Bytes32,
+    state_version: u64,
+) -> Bytes32 {
+    hash_words(
+        &[
+            vec![CHANNEL_STATE_DOMAIN],
+            channel_id.to_u32_vec(),
+            split_u64(epoch),
+            split_u64(small_block_number),
+            split_u64(close_freeze_nonce),
+            channel_fund.channel_id.to_u32_vec(),
+            channel_fund
+                .amounts
+                .iter()
+                .flat_map(U256::to_u32_vec)
+                .collect(),
+            channel_fund.intmax_state_root.to_u32_vec(),
+            h1.to_u32_vec(),
+            shared_native_nullifier_root.to_u32_vec(),
+            unallocated_confirmed_incoming.to_u32_vec(),
+            prev_digest.to_u32_vec(),
+            h2_tag.to_u32_vec(),
+            split_u64(state_version),
+        ]
+        .concat(),
+    )
+}
+
+/// A [`ChannelState`] whose balance body is replaced by its H1 header. It carries the same
+/// signing digest and signatures, so a holder of one slot verifies the N-of-N over the header and
+/// its slot's Merkle path instead of the full slot array.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStateHeader {
+    pub channel_id: ChannelId,
+    pub epoch: u64,
+    pub small_block_number: u64,
+    pub close_freeze_nonce: u64,
+    pub channel_fund: ChannelFund,
+    pub balance_state: BalanceStateHeader,
+    pub h2_tag: Bytes32,
+    pub shared_native_nullifier_root: Bytes32,
+    pub unallocated_confirmed_incoming: U256,
+    pub prev_digest: Bytes32,
+    pub digest: Bytes32,
+    pub member_signatures: Vec<MemberSignature>,
+}
+
+impl ChannelStateHeader {
+    pub fn signing_digest(&self) -> Bytes32 {
+        imch_digest(
+            self.channel_id,
+            self.epoch,
+            self.small_block_number,
+            self.close_freeze_nonce,
+            &self.channel_fund,
+            self.balance_state.h1(),
+            self.shared_native_nullifier_root,
+            self.unallocated_confirmed_incoming,
+            self.prev_digest,
+            self.h2_tag,
+            self.balance_state.state_version,
+        )
     }
 }
 
@@ -1093,6 +1180,15 @@ pub struct CloseIntent {
 impl CloseIntent {
     pub fn new(
         final_channel_state: &ChannelState,
+        close_withdrawal: &CloseWithdrawal,
+    ) -> Result<Self, ChannelError> {
+        Self::from_header(&final_channel_state.header(), close_withdrawal)
+    }
+
+    /// [`Self::new`] over the signed state header (what a delegate holds). Every value the intent
+    /// binds is a header field, so both constructors yield the identical intent.
+    pub fn from_header(
+        final_channel_state: &ChannelStateHeader,
         close_withdrawal: &CloseWithdrawal,
     ) -> Result<Self, ChannelError> {
         if final_channel_state.channel_id != close_withdrawal.channel_id {

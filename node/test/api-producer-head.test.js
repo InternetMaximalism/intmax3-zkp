@@ -38,6 +38,9 @@ producer.liveSettleInterChannel = async (channelId, receipt, state, debitPayload
   calls.push({ kind: 'settle', channelId, receipt, state, debitPayload, descriptor });
   return { baseNonce: calls.length };
 };
+// flushPublishedHead asks the live balance whether a received deposit is still awaiting its
+// import's signed head before it binds (api/lib/producer-head.js); none is pending here.
+producer.liveStatus = async channelId => ({ channelId, awaitingChannelBinding: false });
 producer.liveBindSnapshot = async (channelId, snapshot) => {
   calls.push({ kind: 'bind', channelId, snapshot });
   return { channelId, signedHeadDigest: snapshot.state.digest };

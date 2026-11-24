@@ -115,9 +115,32 @@ async function cliWithPreparedExitKit(ch, args, extraEnv, options = {}) {
   // After invocation begins, timeout/ENOSPC/nonzero exit cannot prove that no signature escaped.
   // Keep the exact proposal, kit, cursor and producer reservation. An identical retry resumes
   // the native signing/recovery command without reproposing against an already-advanced head.
-  const result = cliModule.cli(ch, signingArgs, { ...operation.extraEnv, [ENVELOPE_ENV]: ENVELOPE_FILE });
+  let result;
+  try {
+    result = cliModule.cli(ch, signingArgs, { ...operation.extraEnv, [ENVELOPE_ENV]: ENVELOPE_FILE });
+  } catch (error) {
+    await releaseStagedBurnOnBackingRefusal(ch, signingArgs, operation, error);
+    throw error;
+  }
   writeJson(wc(ch, OPERATION_FILE), { ...operation, status: 'complete' });
   return result;
+}
+
+// C25/G16: the backing gate (`enforce_exit_kit_before_signature_release`) runs before the replay
+// lookup and before any signer, so a HEAD BACKING NOT FINALIZED exit proves that no signature of
+// this burn exists. Its staged producer block must not outlive that refusal: the validity prover
+// targets a staged block ahead of the authoritative head, an unsigned one can never be proved
+// (FalconAggCircuit: 0 active signers), and the head's own block the gate is waiting for would then
+// never reach L1 — a deadlock measured on rh1123 (2026-11-23). The inter-channel path releases its
+// own staged block (inter-channel-send.js abandonUncommittedTransfer); a burn is released here, and
+// its durable burn operation re-proposes once the head is backed.
+async function releaseStagedBurnOnBackingRefusal(ch, args, operation, error) {
+  const text = [error && error.message, error && error.stdout, error && error.stderr].filter(Boolean).map(String).join('\n');
+  if (args[0] !== 'cosign-burn-send' || !/HEAD BACKING NOT FINALIZED/.test(text)) return;
+  if (!operation.proposal || operation.proposal.kind !== 'interChannelDebit' || !operation.proposal.requestId) return;
+  await producer.liveAbandonPreparedExitKit(ch, operation.proposal.requestId);
+  for (const file of [OPERATION_FILE, PROPOSAL_FILE, ENVELOPE_FILE]) fs.rmSync(wc(ch, file), { force: true });
+  console.error(`[exit-kit] channel ${ch}: released the staged burn block ${operation.proposal.requestId}; nothing was signed (the head's block is not finalized on L1 yet)`);
 }
 
 // Archive the live balance service's kit for the channel's CURRENT head into the CLI state. Used

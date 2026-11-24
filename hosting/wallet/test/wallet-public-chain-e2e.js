@@ -75,11 +75,23 @@ function api(ch, route, body, { raw = false } = {}) {
   });
 }
 
+// A delegate holds only its own slot: it imports the relay's view of its slot, never the snapshot.
+const pkGOf = {};
 async function load(user) {
   const u = USERS[user];
-  wallet.keygen(read('seed-' + user));
-  wallet.importChannel(await api(u.ch, '/api/snapshot'));
-  return wallet.balance();
+  pkGOf[user] = wallet.keygen(read('seed-' + user)).pkG;
+  return wallet.importView(await api(u.ch, '/api/view?pkG=' + pkGOf[user], null, { raw: true }));
+}
+
+// Wait for the published head to reach `ack.stateVersion`, then return this user's view of it.
+async function viewAtLeast(user, ack) {
+  const u = USERS[user];
+  for (let i = 0; i < 600; i++) {
+    const text = await api(u.ch, '/api/view?pkG=' + pkGOf[user], null, { raw: true });
+    if (JSON.parse(text).state.balanceState.stateVersion >= ack.stateVersion) return text;
+    await sleep(1000);
+  }
+  throw Error(`${user}: head did not reach version ${ack.stateVersion}`);
 }
 
 async function join(user) {
@@ -148,14 +160,41 @@ async function waitWithdrawal(ch, done, what) {
   throw Error('withdrawal did not reach ' + what);
 }
 
+// After a (re)start the relay offers withdrawals only once it has checked the operator's L1 funds;
+// a resumed run reaches the burn within seconds, so wait for that check like for deposits above.
+async function untilWithdrawalsOffered(ch) {
+  for (let i = 0; ; i++) {
+    const health = await api(ch, '/api/health');
+    if (health.capabilities.partialWithdrawal === true) return;
+    const why = (health.unavailable || {}).partialWithdrawal || '';
+    if (!/still checking/.test(why) || i >= 300) throw Error('the relay offers no withdrawals: ' + why);
+    await sleep(1000);
+  }
+}
+
 async function withdraw(user, amount, tag) {
   const u = USERS[user];
+  await untilWithdrawalsOffered(u.ch);
   const t0 = Date.now();
   await once(tag + '-burn', async () => {
-    await load(user);
-    const head = await api(u.ch, '/api/base-head');
-    const payload = wallet.burnSend(amount, u.address, 0, head.nonce);
-    wallet.finalize(await untilBacked(() => api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }), `withdraw ${tag}`));
+    // Persisted like a send's payload: a run resumed after a crash must re-send the SAME burn (the
+    // relay answers its replay from the durable record), never build a second one on the old head.
+    const before = await once(tag + '-burn-before', async () => ({ balance: String((await load(user)).balance) }));
+    let builtHere = false;
+    const payload = await once(tag + '-burn-payload', async () => {
+      builtHere = true;
+      await load(user);
+      const head = await api(u.ch, '/api/base-head');
+      const built = wallet.burnSend(amount, u.address, 0, head.nonce);
+      return { debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor };
+    });
+    if (payload.debitPayload.proposedNextState) throw Error('a delegate burn must be slim');
+    const ack = await untilBacked(() => api(u.ch, '/api/cosign-burn', { ...payload, amount, recipient: u.address }), `withdraw ${tag}`);
+    const view = await viewAtLeast(user, ack);
+    // The wallet that built the burn commits its pending debit; a resumed run (a new process with no
+    // pending debit) adopts the burned head's view of its slot instead.
+    const after = builtHere ? wallet.finalize(view) : wallet.importView(view);
+    if (BigInt(after.balance) !== BigInt(before.balance) - BigInt(amount)) throw Error('burn debit not installed in the view');
     log(`withdraw ${tag}: ${user} burned ${amount} to ${u.address}`);
     return { at: Date.now() };
   });
@@ -203,7 +242,9 @@ async function sendIntra(from, to, amount, tag) {
   const f = USERS[from], t = USERS[to];
   if (f.ch !== t.ch) throw Error('intra-channel send needs one channel');
   const toSlot = (await load(to)).slot;
-  const payload = await once(tag + '-payload', async () => { await load(from); return wallet.send(null, toSlot, amount); });
+  const recipient = await api(f.ch, '/api/member?slot=' + toSlot);
+  const payload = await once(tag + '-payload', async () => { await load(from); return wallet.send(null, recipient, amount); });
+  if (payload.proposedNextState || payload.members || payload.record) throw Error('a delegate send must be slim');
   const t0 = Date.now();
   await once(tag + '-result', () => untilBacked(() => api(f.ch, '/api/cosign', payload), `send ${tag}`));
   log(`send ${tag}: ${from} -> ${to} ${amount} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
@@ -213,8 +254,7 @@ async function sendInter(from, to, amount, tag) {
   const f = USERS[from], t = USERS[to];
   const payload = await once(tag + '-payload', async () => {
     const toSlot = (await load(to)).slot;
-    const destination = await api(t.ch, '/api/snapshot');
-    const member = destination.members.find(m => m.slot === toSlot);
+    const member = await api(t.ch, '/api/member?slot=' + toSlot);
     await load(from);
     const head = await api(f.ch, '/api/base-head');
     const built = wallet.sendInterChannel(t.ch, toSlot, amount, { regevPk: member.regevPk, pkG: member.pkG }, 0, head.nonce);
@@ -225,9 +265,11 @@ async function sendInter(from, to, amount, tag) {
   // A repeated delivery of the same transfer must not credit twice (checked once, right after it
   // landed: a resumed run may meet the channel paused by a later withdrawal).
   await once(tag + '-replayed', async () => {
-    const before = (await api(t.ch, '/api/snapshot')).state.digest;
+    const toPkG = pkGOf[to] || wallet.keygen(read('seed-' + to)).pkG;
+    const headOf = async () => JSON.parse(await api(t.ch, '/api/view?pkG=' + toPkG, null, { raw: true })).state.digest;
+    const before = await headOf();
     await untilBacked(() => api(f.ch, '/api/inter/send', payload), `send ${tag} replay`);
-    if ((await api(t.ch, '/api/snapshot')).state.digest !== before) throw Error('duplicate delivery advanced the destination');
+    if (await headOf() !== before) throw Error('duplicate delivery advanced the destination');
     return { at: Date.now() };
   });
   log(`send ${tag}: ${from}(ch${f.ch}) -> ${to}(ch${t.ch}) ${amount} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);

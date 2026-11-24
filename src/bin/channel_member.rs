@@ -2287,6 +2287,149 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse {path}: {e}")))
 }
 
+// --- Slim intents from delegates -----------------------------------------------------------------
+//
+// A delegate holds only its own slot view, so it sends SLIM intents without a proposed successor
+// state. These readers accept either form: a slim intent is rebuilt into the full payload against
+// THIS host's trusted head (the successor computed by the same state-application functions the
+// full-state builders use), then every caller runs its unchanged full-state verification on it.
+
+fn read_send_payload(path: &str, snapshot: &ChannelSnapshot) -> SendPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("anchorDigest").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::wallet_core::SlimSendPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    if slim.anchor_digest != snapshot.state.digest {
+        die("stale send: the slim payload's anchor is not the channel head");
+    }
+    let proposed_next_state = intmax3_zkp::wallet_core::solo_next_state(
+        &snapshot.state,
+        slim.sender_index,
+        slim.recipient_index,
+        slim.channel_tx.token_slot,
+        &slim.after_ct,
+        &slim.channel_tx.enc_amount,
+    )
+    .unwrap_or_else(|e| die(format!("slim send: {e}")));
+    SendPayload {
+        sender_index: slim.sender_index,
+        recipient_index: slim.recipient_index,
+        channel_tx: slim.channel_tx,
+        proposed_next_state,
+        members: snapshot.members.clone(),
+        record: snapshot.record.clone(),
+    }
+}
+
+fn read_refresh_payload(path: &str, snapshot: &ChannelSnapshot) -> RefreshPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("newCt").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::slot_view::SlimRefreshPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    intmax3_zkp::slot_view::inflate_refresh(snapshot, &slim)
+        .unwrap_or_else(|e| die(format!("slim refresh: {e}")))
+}
+
+fn read_debit_payload(path: &str, snapshot: &ChannelSnapshot) -> InterChannelDebitPayload {
+    let value: serde_json::Value = read_json(path);
+    if value.get("proposedDigest").is_none() {
+        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+    }
+    let slim: intmax3_zkp::slot_view::SlimInterChannelDebitPayload =
+        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    intmax3_zkp::slot_view::inflate_inter_channel_debit(snapshot, &slim)
+        .unwrap_or_else(|e| die(format!("slim inter-channel debit: {e}")))
+        .0
+}
+
+/// `inflate-debit <slim_debit.json> <out_full_debit.json>`: rebuild the full inter-channel debit
+/// payload a delegate's slim debit stands for, against this channel's committed head. The relay
+/// runs it once at its boundary so the producer and recovery paths keep handling full payloads;
+/// the full payload never leaves the host.
+fn cmd_inflate_debit(args: &[String]) {
+    let usage = "inflate-debit <slim_debit.json> <out_full_debit.json>";
+    let in_path = args.get(1).unwrap_or_else(|| die(usage));
+    let out_path = args.get(2).unwrap_or_else(|| die(usage));
+    let state = load_state();
+    let full = read_debit_payload(in_path, &state.snapshot);
+    write_json(out_path, &full);
+}
+
+/// Flag value `--name <value>` anywhere in `args`.
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+
+/// The published signed snapshot to project: `--snapshot <file>` (what the relay serves; read
+/// without the state lock), else this process's own committed head.
+fn view_source_snapshot(args: &[String]) -> ChannelSnapshot {
+    match flag_value(args, "--snapshot") {
+        Some(path) => read_json(path),
+        None => load_state().snapshot,
+    }
+}
+
+/// `slot-view <out.json> [--snapshot <file>] (--slots <s>[,<s>...] | --pk-g <0x..>)`: write the
+/// signed head's view for each slot as `{ "<slot>": SlotView }`. This is all a delegate is
+/// served; it never receives the full snapshot.
+fn cmd_slot_view(args: &[String]) {
+    let usage = "slot-view <out.json> [--snapshot <file>] (--slots <s>[,<s>...] | --pk-g <0x..>)";
+    let out_path = args.get(1).unwrap_or_else(|| die(usage));
+    let snapshot = view_source_snapshot(args);
+    let slots: Vec<u16> = if let Some(pk_g) = flag_value(args, "--pk-g") {
+        let pk_g = Bytes32::from_hex(pk_g).unwrap_or_else(|e| die(format!("--pk-g: {e}")));
+        let slot = snapshot
+            .members
+            .iter()
+            .find(|m| m.pk_g == pk_g)
+            .map(|m| m.slot)
+            .unwrap_or_else(|| die("slot-view: no participant has that pk_g"));
+        vec![slot]
+    } else {
+        flag_value(args, "--slots")
+            .unwrap_or_else(|| die(usage))
+            .split(',')
+            .map(|t| t.trim().parse::<u16>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
+            .collect()
+    };
+    let mut views = serde_json::Map::new();
+    for slot in slots {
+        let view = intmax3_zkp::slot_view::SlotView::from_snapshot(&snapshot, slot)
+            .unwrap_or_else(|e| die(format!("slot-view {slot}: {e}")));
+        views.insert(
+            slot.to_string(),
+            serde_json::to_value(view).unwrap_or_else(|e| die(format!("slot-view: {e}"))),
+        );
+    }
+    write_json(out_path, &serde_json::Value::Object(views));
+}
+
+/// `member-info <out.json> [--snapshot <file>] --slot <s>`: the public participant record of one
+/// slot (`{slot, pkG, pkB, regevPk}`) — what a sender needs to address a recipient without holding
+/// the member list.
+fn cmd_member_info(args: &[String]) {
+    let usage = "member-info <out.json> [--snapshot <file>] --slot <s>";
+    let out_path = args.get(1).unwrap_or_else(|| die(usage));
+    let slot: u16 = flag_value(args, "--slot")
+        .unwrap_or_else(|| die(usage))
+        .parse()
+        .unwrap_or_else(|e| die(format!("--slot: {e}")));
+    let snapshot = view_source_snapshot(args);
+    let member = snapshot
+        .members
+        .iter()
+        .find(|m| m.slot == slot)
+        .unwrap_or_else(|| die(format!("member-info: slot {slot} is not an active participant")));
+    write_json(out_path, member);
+}
+
 /// Refuse symlink substitution and repair legacy overly-broad permissions before reading a file
 /// that contains cosigner seeds or the base private witness.
 fn secure_private_path(path: &Path) {
@@ -10767,12 +10910,15 @@ fn main() {
     // or write `cli_state.json`. They wait minutes on L1 finality while the channel keeps
     // advancing, so they take neither the channel state lock nor run its state recovery.
     let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize");
+    // Read-only projections of a published snapshot file: never queue behind a writer, never
+    // run recoveries.
+    let read_only_view = matches!(cmd, "slot-view" | "member-info");
     // SECURITY: this lock is deliberately process-wide and acquired before recovery.  Per-file
     // atomic writes prevent torn JSON, but only serialization prevents an older init/cosign image
     // from overwriting a settlement PREPARED by another process.  The bypasses are the
     // digest-keyed detached proof-cache worker described at its spawn site above and the two L1
     // drivers, none of which touches the channel state.
-    let state_lock_bypass = detached_precompute_bypass || l1_driver;
+    let state_lock_bypass = detached_precompute_bypass || l1_driver || read_only_view;
     let _state_process_lock = (!state_lock_bypass).then(CliStateProcessLock::acquire);
     // A prepared two-channel transfer is a mutation barrier for either involved channel command,
     // not merely for the next inter-transfer. If the previous process died after replacing A but
@@ -10795,6 +10941,9 @@ fn main() {
         "install-exit-kit" => cmd_install_exit_kit(&args),
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
+        "slot-view" => cmd_slot_view(&args),
+        "inflate-debit" => cmd_inflate_debit(&args),
+        "member-info" => cmd_member_info(&args),
         "cosign-partial" => cmd_cosign_partial(&args),
         "cosign-merge" => cmd_cosign_merge(&args),
         "cosign-batch" => cmd_cosign_batch(&args),
@@ -11821,7 +11970,7 @@ fn cmd_cosign_partial(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("partial_cosign.json");
     let mut state = load_state();
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
     let slots = cluster_sign_slots(&state);
     let record = state.snapshot.record.clone();
@@ -11889,7 +12038,7 @@ fn cmd_cosign_merge(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("cosigned_state.json");
     let mut state = load_state();
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
     // Accept either a bare array of `MemberSignature`s or an object carrying `signatures`.
     #[derive(Deserialize)]
@@ -11943,7 +12092,7 @@ fn cmd_cosign(args: &[String]) {
 
     // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
     // re-verifies the transition before signing — never sign a bare state we did not validate.
-    let payload: SendPayload = read_json(in_path);
+    let payload: SendPayload = read_send_payload(in_path, &state.snapshot);
     let mut next_state = cosign_gate(&state, &payload);
 
     // CHECK-AND-SIGN (detail2 §3.1): each member signs the next state ONLY IF its settled_tx_chain
@@ -12126,7 +12275,7 @@ fn cmd_cosign_refresh(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("cosigned_state.json");
     let mut state = load_state();
-    let payload: RefreshPayload = read_json(in_path);
+    let payload: RefreshPayload = read_refresh_payload(in_path, &state.snapshot);
     let mut next_state = payload.proposed_next_state.clone();
     if next_state.prev_digest != state.snapshot.state.digest {
         die("payload does not extend the current head");
@@ -12468,11 +12617,10 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("inter_transfer.json");
 
-    let payload: InterChannelDebitPayload = read_json(payload_path);
-    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
-
     // ---- Load A's COMMITTED head (this process's own cli_state). ----
     let mut a_state = load_state();
+    let payload: InterChannelDebitPayload = read_debit_payload(payload_path, &a_state.snapshot);
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
 
     verify_inter_channel_descriptor_matches_debit(&payload, &descriptor)
         .unwrap_or_else(|e| die(format!("inter-channel descriptor/debit mismatch: {e}")));
@@ -12555,6 +12703,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::InterChannelDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -12824,10 +12977,9 @@ fn cmd_cosign_burn_send(args: &[String]) {
         .map(String::as_str)
         .unwrap_or("burn_cosigned.json");
 
-    let payload: InterChannelDebitPayload = read_json(payload_path);
-    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
-
     let mut a_state = load_state();
+    let payload: InterChannelDebitPayload = read_debit_payload(payload_path, &a_state.snapshot);
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
 
     // P0-7: bind descriptor economics to the E-2-proved payload BEFORE any member signature or
     // channel debit. In particular, `descriptor.amount = X+1` with an honest proof for X dies here.
@@ -12883,6 +13035,11 @@ fn cmd_cosign_burn_send(args: &[String]) {
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::BurnDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13091,6 +13248,11 @@ fn cmd_register_token(args: &[String]) {
         build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
             .unwrap_or_else(|e| die(format!("build token register: {e}")));
     if propose_exit_kit_requested(args) {
+        // The proposal stages a PREPARED producer block for this successor; refused only later,
+        // in the signing run, that unsigned block would sit in every next validity candidate
+        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
+        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
+        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::TokenRegister);
         verify_token_register_state_transition(
             &state.snapshot.state,
             &state.snapshot.record,
@@ -18853,6 +19015,92 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     );
 }
 
+/// EIP-7825 (Osaka): a chain that enforces it refuses any transaction whose gas LIMIT exceeds 2^24
+/// before executing it, whatever the transaction would actually use. Mainnet enforces it; Sepolia's
+/// fork of 2026-10-06 does not.
+const EIP7825_TX_GAS_LIMIT_CAP: u64 = 1 << 24;
+
+/// The per-transaction gas limit cap to respect: `L1_TX_GAS_LIMIT_CAP` when set (0 = none), else
+/// EIP-7825's.
+fn l1_tx_gas_limit_cap() -> Option<u64> {
+    match std::env::var("L1_TX_GAS_LIMIT_CAP") {
+        Ok(value) if !value.is_empty() => {
+            let cap = value.parse::<u64>().unwrap_or_else(|_| {
+                die(format!("L1_TX_GAS_LIMIT_CAP must be a decimal gas amount, got {value:?}"))
+            });
+            (cap > 0).then_some(cap)
+        }
+        _ => Some(EIP7825_TX_GAS_LIMIT_CAP),
+    }
+}
+
+/// The largest simulated gas among the transactions of a `forge script` broadcast record (0 when
+/// it sends none).
+fn max_simulated_gas(record: &serde_json::Value) -> u64 {
+    record["transactions"]
+        .as_array()
+        .unwrap_or_else(|| die("forge script record has no transactions array"))
+        .iter()
+        .map(|tx| {
+            parse_u64_quantity(
+                tx["transaction"]["gas"].as_str().unwrap_or_else(|| die("forge transaction without gas")),
+                "simulated gas",
+            )
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// The `--gas-estimate-multiplier` (percent, at most `preferred`) under which forge's gas limit
+/// `simulated * multiplier / 100` stays within `cap` for the largest simulated transaction. `None`
+/// when even the bare simulated gas exceeds the cap.
+fn capped_gas_multiplier(max_simulated: u64, preferred: u64, cap: Option<u64>) -> Option<u64> {
+    let (Some(cap), true) = (cap, max_simulated > 0) else {
+        return Some(preferred);
+    };
+    let fitting = u64::try_from(u128::from(cap) * 100 / u128::from(max_simulated)).unwrap_or(u64::MAX);
+    (fitting >= 100).then(|| fitting.min(preferred))
+}
+
+#[cfg(test)]
+mod tx_gas_limit_cap_tests {
+    use super::{capped_gas_multiplier, max_simulated_gas, EIP7825_TX_GAS_LIMIT_CAP};
+
+    const CAP: Option<u64> = Some(EIP7825_TX_GAS_LIMIT_CAP);
+
+    #[test]
+    fn keeps_the_preferred_multiplier_when_it_fits() {
+        assert_eq!(capped_gas_multiplier(8_000_000, 200, CAP), Some(200));
+        assert_eq!(capped_gas_multiplier(30_000_000, 200, None), Some(200));
+        assert_eq!(capped_gas_multiplier(0, 200, CAP), Some(200));
+    }
+
+    #[test]
+    fn lowers_the_multiplier_until_the_largest_limit_fits() {
+        // attestProofData simulated at 15,400,187 in the 2026-11-03 rehearsal.
+        let multiplier = capped_gas_multiplier(15_400_187, 200, CAP).unwrap();
+        assert_eq!(multiplier, 108);
+        assert!(15_400_187 * multiplier / 100 <= EIP7825_TX_GAS_LIMIT_CAP);
+        assert!(15_400_187 * (multiplier + 1) / 100 > EIP7825_TX_GAS_LIMIT_CAP);
+    }
+
+    #[test]
+    fn refuses_a_transaction_that_cannot_fit_at_all() {
+        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP + 1, 200, CAP), None);
+        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP, 200, CAP), Some(100));
+    }
+
+    #[test]
+    fn reads_the_largest_simulated_gas_of_a_forge_record() {
+        let record = serde_json::json!({"transactions": [
+            {"transaction": {"gas": "0xeafec3"}},
+            {"transaction": {"gas": "0x8f0d18"}},
+        ]});
+        assert_eq!(max_simulated_gas(&record), 0xeafec3);
+        assert_eq!(max_simulated_gas(&serde_json::json!({"transactions": []})), 0);
+    }
+}
+
 // Publishes the resident producer's validity candidate: one blob post per producer block (each
 // with that block's own pending-chain checkpoint), then proof-DA attestation and finalization.
 // Off the devnet every post is `postBlockAndSubmitGuarded`, bound to the rollup head it extends,
@@ -18973,42 +19221,69 @@ fn cmd_publish_wallet_validity(args: &[String]) {
         ));
     }
     let (sub_id, sidecars) = last.unwrap();
-    let mut forge = Command::new("forge");
-    forge
-        .current_dir(&contracts)
-        .args([
-            "script",
-            "script/WalletL1Lifecycle.s.sol",
-            "--sig",
-            "finalizeValidity()",
-            "--rpc-url",
-            rpc,
-            "--broadcast",
-            "--slow",
-            // NOT --skip-simulation: `finalize` catches a failed verification (out of gas included)
-            // and returns after emitting FinalizeRejected, so the cheapest gas at which it does not
-            // revert is the rejecting one, and eth_estimateGas finds that (rehearsal: 6.6M limit,
-            // FinalizeRejected(MleVerificationFailed); the accepted finalize used 16.8M). The
-            // simulated gas of the accepted run is the right base. Twice it, not 1.3x: the
-            // simulation prices by foundry.toml's evm_version, and Sepolia's fork of 2026-10-06
-            // charges ~111k (was 22.1k) per new storage slot.
-            "--gas-estimate-multiplier",
-            "200",
-        ])
-        .env("ROLLUP", &rollup)
-        .env("SUB_ID", &sub_id)
-        .env("BLOB_SIDECARS", &sidecars)
-        .env("WALLET_VPIS_PATH", &vpis_path)
-        .env("WALLET_VALIDITY_PATH", &mle_path);
-    signer.get().append_to_command(&mut forge);
-    let output = forge.output().unwrap_or_else(|e| die(e));
-    if !output.status.success() {
+    // NOT --skip-simulation: `finalize` catches a failed verification (out of gas included) and
+    // returns after emitting FinalizeRejected, so the cheapest gas at which it does not revert is
+    // the rejecting one, and eth_estimateGas finds that (rehearsal: 6.6M limit,
+    // FinalizeRejected(MleVerificationFailed); the accepted finalize used 16.8M). The simulated gas
+    // of the accepted run is the right base, and forge gives each transaction that gas times
+    // --gas-estimate-multiplier as its limit.
+    let run_finalize_script = |broadcast: bool, multiplier: u64| {
+        let multiplier = multiplier.to_string();
+        let mut forge = Command::new("forge");
+        forge
+            .current_dir(&contracts)
+            .args([
+                "script",
+                "script/WalletL1Lifecycle.s.sol",
+                "--sig",
+                "finalizeValidity()",
+                "--rpc-url",
+                rpc,
+                "--slow",
+                "--gas-estimate-multiplier",
+                &multiplier,
+            ])
+            .env("ROLLUP", &rollup)
+            .env("SUB_ID", &sub_id)
+            .env("BLOB_SIDECARS", &sidecars)
+            .env("WALLET_VPIS_PATH", &vpis_path)
+            .env("WALLET_VALIDITY_PATH", &mle_path);
+        if broadcast {
+            forge.arg("--broadcast");
+        }
+        signer.get().append_to_command(&mut forge);
+        let output = forge.output().unwrap_or_else(|e| die(e));
+        if !output.status.success() {
+            die(format!(
+                "wallet validity finalize: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    };
+    // Twice the simulation, not 1.3x: the simulation prices by foundry.toml's evm_version, and
+    // Sepolia's fork of 2026-10-06 charges ~111k (was 22.1k) per new storage slot. But an EIP-7825
+    // chain refuses any transaction whose LIMIT exceeds 2^24 before running it, and attestProofData
+    // alone simulates at ~15.4M. So simulate first (forge records each transaction's simulated gas
+    // under dry-run/), then lower the multiplier until the largest transaction fits under the cap.
+    run_finalize_script(false, 100);
+    let dry_run = contracts.join(format!(
+        "broadcast/WalletL1Lifecycle.s.sol/{chain_id}/dry-run/finalizeValidity-latest.json"
+    ));
+    let simulated = max_simulated_gas(&read_json::<serde_json::Value>(dry_run.to_str().unwrap()));
+    let cap = l1_tx_gas_limit_cap();
+    let multiplier = capped_gas_multiplier(simulated, 200, cap).unwrap_or_else(|| {
         die(format!(
-            "wallet validity finalize: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+            "wallet validity finalize: a transaction simulates at {simulated} gas, above the \
+             {cap:?} per-transaction gas limit cap (EIP-7825; L1_TX_GAS_LIMIT_CAP=0 lifts it on a \
+             chain that does not enforce one)"
+        ))
+    });
+    eprintln!(
+        "[validity] largest simulated transaction {simulated} gas; gas limits at {multiplier}% of \
+         the simulation (cap {cap:?})"
+    );
+    run_finalize_script(true, multiplier);
     // The candidate is finalized at or after its last post. Public RPCs cap eth_getLogs ranges,
     // so scan forward from that receipt in bounded windows instead of from genesis.
     let topic = format!(

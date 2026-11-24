@@ -13,6 +13,10 @@
 //   * historical STATE is pruned: a state read at a block older than head - RPC_STATE_RETENTION
 //     (default 10 000; publicnode keeps a few thousand to ~20 000) fails as publicnode's does.
 //     Anvil keeps every state, which hid a deployment-block probe that failed on the testnet.
+//   * a transaction whose gas LIMIT exceeds RPC_TX_GAS_LIMIT_CAP (default 2^24 = EIP-7825, 0 = no
+//     cap) is refused at submission as mainnet's nodes refuse it ("gas limit too high"). Anvil, even
+//     with --hardfork osaka, mines such transactions, which hid a finalize sent at twice its
+//     simulated gas (Sepolia does not enforce the cap either).
 // Anvil itself is started with the public chain's id and gas limit (see the rehearsal script).
 //
 // Usage: node rpc-limits-proxy.js <listen port> <upstream url>
@@ -65,9 +69,61 @@ async function resolveTag(tag, head) {
 
 const RETENTION = Number(process.env.RPC_STATE_RETENTION || 10000);
 const STATE_TAG_INDEX = { eth_call: 1, eth_getBalance: 1, eth_getCode: 1, eth_getTransactionCount: 1, eth_getStorageAt: 2, eth_getProof: 2 };
+const TX_GAS_LIMIT_CAP = BigInt(process.env.RPC_TX_GAS_LIMIT_CAP ?? 2 ** 24);
+
+// Minimal RLP: the item at `offset` as { value: Buffer | item[], end }.
+function rlpItem(bytes, offset) {
+  const prefix = bytes[offset];
+  if (prefix < 0x80) return { value: bytes.subarray(offset, offset + 1), end: offset + 1 };
+  const isList = prefix >= 0xc0;
+  const base = isList ? 0xc0 : 0x80;
+  let start = offset + 1, length = prefix - base;
+  if (length > 55) {
+    const lengthOfLength = length - 55;
+    length = Number(BigInt('0x' + bytes.subarray(start, start + lengthOfLength).toString('hex')));
+    start += lengthOfLength;
+  }
+  const end = start + length;
+  if (!isList) return { value: bytes.subarray(start, end), end };
+  const items = [];
+  for (let cursor = start; cursor < end;) {
+    const item = rlpItem(bytes, cursor);
+    items.push(item.value);
+    cursor = item.end;
+  }
+  return { value: items, end };
+}
+
+// The gas limit of a signed raw transaction: legacy, EIP-2930, EIP-1559, EIP-4844 (with or without
+// its network sidecar wrapper) and EIP-7702.
+function rawTransactionGas(raw) {
+  const bytes = Buffer.from(raw.replace(/^0x/, ''), 'hex');
+  if (bytes[0] >= 0xc0) return rlpItem(bytes, 0).value[2];
+  let fields = rlpItem(bytes, 1).value;
+  if (bytes[0] === 0x03 && Array.isArray(fields[0])) fields = fields[0];
+  return fields[bytes[0] === 0x01 ? 3 : 4];
+}
+
+function gasLimitRefusal(call) {
+  if (TX_GAS_LIMIT_CAP === 0n) return null;
+  let gas;
+  if (call.method === 'eth_sendRawTransaction') {
+    const field = rawTransactionGas(call.params[0]);
+    gas = field.length ? BigInt('0x' + field.toString('hex')) : 0n;
+  } else if (call.method === 'eth_sendTransaction' && call.params[0] && call.params[0].gas) {
+    gas = BigInt(call.params[0].gas);
+  } else {
+    return null;
+  }
+  if (gas <= TX_GAS_LIMIT_CAP) return null;
+  console.log(`refused a transaction with gas limit ${gas} > ${TX_GAS_LIMIT_CAP}`);
+  return { code: -32000, message: `gas limit too high - ${gas}` };
+}
 
 // Returns an error object to answer with, or null to forward.
 async function refusal(call) {
+  const gasRefusal = gasLimitRefusal(call);
+  if (gasRefusal) return gasRefusal;
   const tagIndex = STATE_TAG_INDEX[call.method];
   if (tagIndex !== undefined) {
     const tag = (call.params || [])[tagIndex];
@@ -113,4 +169,4 @@ http.createServer((req, res) => {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: String(error.message || error) } }));
     }
   });
-}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE})`));
+}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE}, tx gas limit <= ${TX_GAS_LIMIT_CAP || 'unlimited'})`));

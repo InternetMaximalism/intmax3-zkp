@@ -4,8 +4,8 @@
 //! secret key, balance encryption witnesses) lives ONLY in the in-memory [`Session`] and is never
 //! returned to JS or serialized. The worker drives these in order: `wallet_keygen` →
 //! `wallet_genesis_contribution` → (CLI assembles + sends back genesis) → `wallet_sign_state` →
-//! `wallet_import_channel` → `wallet_balance` / `wallet_send` / `wallet_cosign` /
-//! `wallet_finalize`.
+//! `wallet_import_view` (delegates: own slot view only; co-signers may `wallet_import_channel`) →
+//! `wallet_balance` / `wallet_send` / `wallet_cosign` (co-signers) / `wallet_finalize`.
 //!
 //! SECURITY: `RegevSecurityLevel::Production` is used for all real proving. Keys are session-only
 //! (lost on reload) per the approved threat-model default.
@@ -20,16 +20,21 @@ use crate::{
     circuits::channel::withdrawal_claim_pis::{
         WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
     },
-    common::channel::{
-        ChannelState, CloseIntent, CloseWithdrawal, MemberSignature, close_state_id,
+    common::{
+        channel::{ChannelState, CloseIntent, CloseWithdrawal, MemberSignature, close_state_id},
+        channel_id::ChannelId,
     },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
-    regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
+    regev::{AmountWitness, RegevCiphertext, RegevSecurityLevel, decrypt_amount, encrypt_amount},
+    slot_view::{
+        SlimInterChannelDebitPayload, SlotView, build_view_burn_send,
+        build_view_inter_channel_send, build_view_refresh, build_view_send,
+    },
     utils::conversion::ToU64 as _,
     wallet_core::{
-        BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, WithdrawalClaimProver, add_signature,
-        build_refresh, build_send_token_decrypted, decrypt_balance_token, resolve_local_token_slot,
-        sign_state, verify_exit_kit_preserving_successor, verify_send_transition, verify_snapshot,
+        ChannelSnapshot, InterChannelTransferDescriptor, MemberInfo, MemberKeys, SendPayload,
+        SlimSendPayload, WithdrawalClaimProver, add_signature, sign_state,
+        verify_exit_kit_preserving_successor, verify_send_transition, verify_snapshot,
     },
 };
 
@@ -39,28 +44,37 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 /// In-memory wallet session (single member). Holds all secrets; never serialized.
 struct Session {
     keys: MemberKeys,
-    /// BALANCE-SLOT index (member OR delegate, `0..MAX_CHANNEL_MEMBERS = 1024`) — u16.
+    /// BALANCE-SLOT index (member OR delegate) of this wallet in the imported channel.
     slot: Option<u16>,
-    snapshot: Option<ChannelSnapshot>,
-    /// The member's current balance + its encryption witness AT ONE token position (multitoken
-    /// §N-2 — the witness backs exactly one `(slot, token)` ciphertext):
-    /// `(token_slot, amount, witness)`. Present only when this wallet freshly encrypted that
-    /// position (genesis contribution at token 0, a completed send, or a refresh of the
-    /// position). `None` after a homomorphic receive (a refresh restores it).
+    /// This wallet's view of the channel head: the signed header, its own slot row and the row's
+    /// Merkle path. A DELEGATE never holds more than this (it never sees another participant's
+    /// row); every send/refresh/burn/claim is built from it.
+    view: Option<SlotView>,
+    /// CO-SIGNER sessions only (slot < member_count): the full verified head, needed to verify
+    /// and co-sign other participants' transitions. Always `None` for a delegate.
+    cosigner_snapshot: Option<ChannelSnapshot>,
+    /// The channel id and co-signer identities seen at the first import. The sig-cluster cannot
+    /// change after deployment, so every later view must name the same set.
+    pinned: Option<(ChannelId, Vec<Bytes32>)>,
+    /// The member's current balance + its encryption witness AT ONE token position:
+    /// `(token_slot, amount, witness)`. `None` after a homomorphic receive.
     balance: Option<(u8, u64, AmountWitness)>,
-    /// A send/refresh awaiting finalization:
-    /// (next_state_digest, token_slot, new_balance, new_witness).
-    pending_send: Option<(Bytes32, u8, u64, AmountWitness)>,
+    /// A send/refresh/burn awaiting the co-signed head that installs it.
+    pending: Option<PendingDebit>,
     /// SECURITY (B-1b, obligation 1): the L1 exit address this wallet SUBMITTED in its genesis
-    /// contribution. Under Option B a joining delegate has no on-chain registration to cross-check
-    /// its recipient, so a malicious relay could substitute a different address between the
-    /// contribution and cosigner signing. We remember what we asked for and, on every import,
-    /// assert `recipients[my_slot]` equals it — fail-closed. `None` until a contribution is made
-    /// (e.g. a pure importer with no contribution of its own).
+    /// contribution; every import asserts the slot's signed recipient equals it.
     expected_recipient: Option<crate::ethereum_types::address::Address>,
-    /// Private host evidence only; never serialized into a public snapshot. A reload loses
-    /// precision, not safety: import bootstraps unknown cells conservatively from the fund.
+    /// Signer-side credit-safety bounds (co-signer sessions only).
     credit_safety_bounds: BTreeMap<String, ChannelCreditBounds>,
+}
+
+/// A debit this wallet built and is waiting to see installed: once a verified head carries
+/// `expected_ct` at `token_slot` of this wallet's row, `witness` opens it with `new_balance`.
+struct PendingDebit {
+    token_slot: u8,
+    expected_ct: RegevCiphertext,
+    new_balance: u64,
+    witness: AmountWitness,
 }
 
 fn owned_credit_plaintexts(
@@ -182,9 +196,11 @@ fn keygen_with_rng(rng: &mut impl rand010::Rng) -> Result<String, JsValue> {
         *s.borrow_mut() = Some(Session {
             keys,
             slot: None,
-            snapshot: None,
+            view: None,
+            cosigner_snapshot: None,
+            pinned: None,
             balance: None,
-            pending_send: None,
+            pending: None,
             expected_recipient: None,
             credit_safety_bounds: BTreeMap::new(),
         });
@@ -386,143 +402,159 @@ struct BalanceReport {
 }
 
 /// Build the standard per-token balance report for `slot` from a verified snapshot.
-fn balance_report(
-    session: &Session,
-    snapshot: &ChannelSnapshot,
-    slot: u16,
-) -> Result<BalanceReport, JsValue> {
-    let bs = &snapshot.state.balance_state;
-    let mut balances = Vec::with_capacity(bs.token_count as usize);
-    for t in 0..bs.token_count {
+fn balance_report(session: &Session, view: &SlotView) -> Result<BalanceReport, JsValue> {
+    let header = &view.state.balance_state;
+    let mut balances = Vec::with_capacity(header.token_count as usize);
+    for t in 0..header.token_count {
         balances.push(TokenBalanceEntry {
             token_slot: t,
-            token_index: bs.token_registry[t as usize],
-            balance: decrypt_balance_token(&session.keys, snapshot, slot, t).map_err(js_err)?,
+            token_index: header.token_registry[t as usize],
+            balance: decrypt_amount(&session.keys.regev_sk, &view.row.enc_balances[t as usize])
+                .map_err(js_err)?,
         });
     }
     let balance = balances.first().map(|b| b.balance).unwrap_or(0);
     Ok(BalanceReport {
-        slot,
+        slot: view.slot,
         balance,
         can_send: true,
-        state_version: bs.state_version,
+        state_version: header.state_version,
         balances,
         witness_token_slot: session.balance.as_ref().map(|(t, _, _)| *t),
     })
 }
 
-/// SECURITY (B-1b, obligation 1 from the recipient-binding adversarial review): a joining delegate
-/// has no L1 registration cross-checking its exit address, so a malicious relay could substitute a
-/// different `recipient` between the delegate's contribution and cosigner signing. The cosigners
-/// cannot detect it (they don't know the delegate's intended address). This is the delegate's own
-/// fail-closed guard: if we submitted a contribution (`expected_recipient` is set), the imported,
-/// cosigner-signed leaf at our slot MUST bind exactly that address. A mismatch means our funds
-/// would exit to someone else — refuse the import rather than adopt a poisoned head.
-fn assert_own_recipient_bound(
-    session: &Session,
-    snapshot: &ChannelSnapshot,
-    slot: u16,
-) -> Result<(), JsValue> {
-    if let Some(expected) = session.expected_recipient {
-        let bound = snapshot.state.balance_state.recipients[slot as usize];
-        if bound != expected {
-            return Err(js_err(
-                "SECURITY: my slot's cosigner-signed L1 recipient does not match the address I \
-                 submitted — the relay may have substituted my exit address; refusing import",
-            ));
-        }
+fn assert_own_recipient_bound(session: &Session, view: &SlotView) -> Result<(), JsValue> {
+    if session
+        .expected_recipient
+        .is_some_and(|expected| view.row.recipient != expected)
+    {
+        return Err(js_err(
+            "SECURITY: my slot's cosigner-signed L1 recipient does not match the address I \
+             submitted — the relay may have substituted my exit address; refusing import",
+        ));
     }
     Ok(())
 }
 
-/// Import a fully-signed channel snapshot, verify it end-to-end (real signatures, roots, own-slot
-/// decryption), adopt it as the wallet's head, and report the balance.
+/// Verify `view` for this wallet and make it the session head. Shared by import and finalize.
+fn adopt_view(session: &mut Session, view: SlotView) -> Result<BalanceReport, JsValue> {
+    view.verify_for(&session.keys).map_err(js_err)?;
+    let identity = (view.record.channel_id, view.record.cosigner_pk_gs.clone());
+    match &session.pinned {
+        Some(pinned) if *pinned != identity => {
+            return Err(js_err(
+                "SECURITY: the view names a different channel or co-signer set than this wallet \
+                 joined; refusing it",
+            ));
+        }
+        _ => {}
+    }
+    assert_own_recipient_bound(session, &view)?;
+    if session.slot.is_some_and(|slot| slot != view.slot) {
+        return Err(js_err("the view is for another slot than this wallet's"));
+    }
+    // A pending debit commits once a verified head installs exactly the ciphertext we built.
+    if let Some(p) = session.pending.take() {
+        let ts = p.token_slot as usize;
+        if view.row.enc_balances[ts] == p.expected_ct && view.row.pending_adds[ts] == 0 {
+            session.balance = Some((p.token_slot, p.new_balance, p.witness));
+        } else if view.state.balance_state.state_version
+            <= session
+                .view
+                .as_ref()
+                .map(|v| v.state.balance_state.state_version)
+                .unwrap_or(0)
+        {
+            // Not installed yet and the head did not move past it: keep waiting.
+            session.pending = Some(p);
+        }
+    }
+    // Keep the witness only while it still opens the installed ciphertext. A canonical-zero
+    // position adopts the public all-zero witness (A-1 finding 4), which opens only 0.
+    let held_token_slot = session.balance.as_ref().map(|(t, _, _)| *t);
+    let can_send = match &session.balance {
+        Some((token_slot, amt, _w)) => {
+            let ts = *token_slot as usize;
+            let bal_at = decrypt_amount(&session.keys.regev_sk, &view.row.enc_balances[ts])
+                .map_err(js_err)?;
+            *amt == bal_at && view.row.pending_adds[ts] == 0
+        }
+        None => false,
+    };
+    let ts = held_token_slot.unwrap_or(0) as usize;
+    let installed_is_canonical_zero = view.row.enc_balances[ts]
+        == *crate::common::balance_state::zero_ciphertext()
+        && view.row.pending_adds[ts] == 0;
+    if installed_is_canonical_zero {
+        session.balance = Some((ts as u8, 0, crate::regev::encrypt::zero_amount_witness()));
+    } else if !can_send {
+        session.balance = None;
+    }
+    let report = balance_report(session, &view)?;
+    session.pinned = Some(identity);
+    session.slot = Some(view.slot);
+    session.view = Some(view);
+    Ok(report)
+}
+
+fn current_view(session: &Session) -> Result<SlotView, JsValue> {
+    session
+        .view
+        .clone()
+        .ok_or_else(|| js_err("no channel imported"))
+}
+
+/// Import this wallet's view of the channel head (the only import a DELEGATE may make): the
+/// signed header, its own slot row and the row's Merkle path. Verifies the co-signatures over
+/// the recomputed digest, the row under the signed slot root, the slot's Regev key and L1
+/// recipient, and that every own token position decrypts.
+#[wasm_bindgen]
+pub fn wallet_import_view(view_json: String) -> Result<String, JsValue> {
+    with_session(|session| {
+        let view: SlotView = serde_json::from_str(&view_json).map_err(js_err)?;
+        let report = adopt_view(session, view)?;
+        serde_json::to_string(&report).map_err(js_err)
+    })
+}
+
+/// CO-SIGNER import of the full signed snapshot (a co-signer verifies other participants'
+/// transitions, so it holds the whole state). Refused for a delegate slot: a delegate imports
+/// only its slot view ([`wallet_import_view`]).
 #[wasm_bindgen]
 pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let snapshot: ChannelSnapshot = serde_json::from_str(&snapshot_json).map_err(js_err)?;
-        // Locate our slot by matching our Regev public key.
         let slot = snapshot
             .members
             .iter()
             .find(|m| m.regev_pk == session.keys.regev_pk)
             .map(|m| m.slot)
             .ok_or_else(|| js_err("this wallet's key is not a member of the imported channel"))?;
-        verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
-        assert_own_recipient_bound(session, &snapshot, slot)?;
-
-        // Keep the witness only if the imported (slot, token) ciphertext is exactly the one we
-        // encrypted (completed send / refresh of that position). Otherwise we cannot send that
-        // token until a refresh.
-        //
-        // SECURITY (A-1 finding 4 — the CANONICAL-ZERO case must be handled EXPLICITLY):
-        // the plaintext comparison below is NOT a proof that our witness opens the installed
-        // ciphertext, because re-deriving the ciphertext by re-encrypting is impossible (fresh
-        // randomness). It is a heuristic, and A-1 broke it in the direction that matters. Since
-        // A-1 the cosigners install the CANONICAL ZERO ciphertext at a new delegate slot — at
-        // genesis (`create_channel`) and at join (`join_delegate`) — instead of the ciphertext this
-        // wallet contributed. So:
-        //   * a wallet that contributed a NONZERO balance is the SAFE case: `amt != 0 == bal_at`,
-        //     the heuristic drops the witness, and it must refresh — correct.
-        //   * a wallet that contributed ZERO is the PRODUCTION case (`wallet-live.html` passes
-        //     `toBase('0')`): `0 == 0` passes the compare, and the old code RETAINED a witness for
-        //     our own `encrypt_amount(rng, pk, 0)`, which does NOT open the installed canonical
-        //     zero. The first send would then fail fail-closed inside the E-1 witness check
-        //     (`regev::transfer_stark::check_amount_witness`) — sound, but a dead-end for the user.
-        // The fix is exact rather than defensive: when the installed ciphertext IS the canonical
-        // zero, the correct witness is the PUBLIC all-zero witness (`zero_amount_witness()`), which
-        // opens `padding()` under any key and can only ever open the amount 0. Adopt it and keep
-        // the wallet able to send.
-        let held_token_slot = session.balance.as_ref().map(|(t, _, _)| *t);
-        let can_send = match &session.balance {
-            Some((token_slot, amt, _w)) => {
-                let ts = *token_slot as usize;
-                let bal_at = decrypt_balance_token(&session.keys, &snapshot, slot, *token_slot)
-                    .map_err(js_err)?;
-                *amt == bal_at && snapshot.state.balance_state.pending_adds[slot as usize][ts] == 0
-            }
-            None => false,
-        };
-        // SECURITY: order matters — the canonical-zero adoption runs AFTER `can_send` is decided,
-        // and only when the installed ciphertext is literally the canonical zero AND the position
-        // is free of pending homomorphic adds (an add would have moved the ciphertext away from
-        // the canonical zero anyway; the check is belt-and-braces).
-        let ts = held_token_slot.unwrap_or(0);
-        let installed_is_canonical_zero = snapshot.state.balance_state.enc_balances[slot as usize]
-            [ts as usize]
-            == *crate::common::balance_state::zero_ciphertext()
-            && snapshot.state.balance_state.pending_adds[slot as usize][ts as usize] == 0;
-        if installed_is_canonical_zero {
-            session.balance = Some((ts, 0, crate::regev::encrypt::zero_amount_witness()));
-        } else if !can_send {
-            session.balance = None;
+        if slot >= snapshot.record.member_count as u16 {
+            return Err(js_err(
+                "delegates hold only their own slot: import the slot view (wallet_import_view), \
+                 not the full channel snapshot",
+            ));
         }
-        let report = balance_report(session, &snapshot, slot)?;
-        session.slot = Some(slot);
+        verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
+        let view = SlotView::from_snapshot(&snapshot, slot).map_err(js_err)?;
+        let report = adopt_view(session, view)?;
         remember_credit_head(session, &snapshot.state, slot)?;
-        session.snapshot = Some(snapshot);
+        session.cosigner_snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })
 }
 
-/// Report the current decrypted balances of this member's slot: the token-0 scalar (wire
-/// compat) plus the per-token `balances` array over all active registry positions.
 #[wasm_bindgen]
 pub fn wallet_balance() -> Result<String, JsValue> {
     with_session(|session| {
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
-        let report = balance_report(session, &snapshot, slot)?;
+        let view = current_view(session)?;
+        let report = balance_report(session, &view)?;
         serde_json::to_string(&report).map_err(js_err)
     })
 }
 
-/// Chain-authoritative fields needed to bind a local withdrawal proof to the manager's finalized
-/// close.  The caller reads these from `ChannelSettlementManager` at a finalized block.  They are
-/// all public; no key material ever crosses this boundary.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FinalizedClaimContext {
@@ -580,22 +612,18 @@ pub fn wallet_withdrawal_claim(
     with_session(|session| {
         let finalized: FinalizedClaimContext =
             serde_json::from_str(&finalized_context_json).map_err(js_err)?;
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
-        let state = &snapshot.state;
+        let view = current_view(session)?;
+        let state = &view.state;
 
         if state.digest != finalized.final_channel_state_digest {
             return Err(js_err(
-                "imported signed snapshot is not the manager's finalized channel state",
+                "imported slot view is not the manager's finalized channel state",
             ));
         }
         let balance_h1 = state.balance_state.h1();
         if balance_h1 != finalized.final_balance_state_h1 {
             return Err(js_err(
-                "imported signed snapshot balance H1 is not the manager's finalized H1",
+                "imported slot view balance H1 is not the manager's finalized H1",
             ));
         }
         let finalized_freeze_nonce = state
@@ -606,14 +634,9 @@ pub fn wallet_withdrawal_claim(
             close_state_id(state.channel_id, state.digest, finalized_freeze_nonce);
         if expected_close_id != finalized.close_intent_digest {
             return Err(js_err(
-                "manager finalized close-intent digest is not the close state-id of the imported signed snapshot",
+                "manager finalized close-intent digest is not the close state-id of the imported view",
             ));
         }
-
-        // WithdrawalClaimProver's native builder also validates a mutually-bound CloseIntent /
-        // CloseWithdrawal. Claim verification only exposes their canonical close state-id + H1;
-        // transport metadata (nonce, burn hash, snapshot MBN) is deliberately excluded from that
-        // state-id. Reconstruct a valid local carrier from the already matched signed state.
         let close_tx = CloseWithdrawal {
             channel_id: state.channel_id,
             final_channel_state_digest: state.digest,
@@ -623,29 +646,26 @@ pub fn wallet_withdrawal_claim(
             burn_amount: state.channel_fund.amounts[0],
             zkp: Vec::new(),
         };
-        let close_intent = CloseIntent::new(state, &close_tx).map_err(js_err)?;
+        let close_intent = CloseIntent::from_header(state, &close_tx).map_err(js_err)?;
         if close_intent.signing_digest() != finalized.close_intent_digest {
             return Err(js_err(
                 "locally reconstructed finalized close state-id mismatch",
             ));
         }
 
-        let recipient = state.balance_state.recipients[slot as usize];
+        let recipient = view.row.recipient;
         let prover = WithdrawalClaimProver::new();
-        let witness = prover
-            .build_full_witness(
-                &state.balance_state,
-                slot as usize,
-                token_slot,
-                session.keys.pk_g(),
-                &session.keys.regev_pk,
-                &session.keys.regev_sk,
-                recipient,
-                &close_intent,
-                &close_tx,
-                LEVEL,
-            )
-            .map_err(js_err)?;
+        let witness = WithdrawalClaimProver::full_witness_from_view(
+            &view,
+            token_slot,
+            session.keys.pk_g(),
+            &session.keys.regev_pk,
+            &session.keys.regev_sk,
+            &close_intent,
+            &close_tx,
+            LEVEL,
+        )
+        .map_err(js_err)?;
         let proof = prover.prove(&witness).map_err(js_err)?;
         prover
             .vd()
@@ -691,34 +711,54 @@ pub fn wallet_withdrawal_claim(
 /// `ChannelTx` (IMPA-v2 binds the token slot) and the proposed next state, and returns the
 /// `SendPayload` for the co-signers. The new balance is committed only once `wallet_finalize`
 /// receives the fully-signed state.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Recipient {
+    slot: u16,
+    pk_g: String,
+    pk_b: String,
+    regev_pk: crate::regev::RegevPk,
+}
+
+impl Recipient {
+    fn into_member(self) -> Result<MemberInfo, JsValue> {
+        Ok(MemberInfo {
+            slot: self.slot,
+            pk_g: Bytes32::from_hex(&self.pk_g).map_err(js_err)?,
+            pk_b: Bytes32::from_hex(&self.pk_b).map_err(js_err)?,
+            regev_pk: self.regev_pk,
+        })
+    }
+}
+
+fn fresh_bytes32(rng: &mut impl rand010::Rng) -> Result<Bytes32, JsValue> {
+    let mut words = [0u32; 8];
+    for w in words.iter_mut() {
+        *w = rand010::Rng::next_u32(rng);
+    }
+    Bytes32::from_u32_slice(&words).map_err(js_err)
+}
+
+/// In-channel send from this wallet's slot view. `recipient_json` is the recipient slot's public
+/// participant record (`{slot, pkG, pkB, regevPk}`) as the relay serves it. Returns the SLIM send
+/// payload (no proposed state: the co-signers build the successor from their own head).
 #[wasm_bindgen]
 pub fn wallet_send(
-    recipient_slot: u16,
+    recipient_json: String,
     amount: u64,
     token_slot: Option<u8>,
 ) -> Result<String, JsValue> {
     let token_slot = token_slot.unwrap_or(0);
     with_session(|session| {
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
+        let view = current_view(session)?;
+        let recipient: Recipient = serde_json::from_str(&recipient_json).map_err(js_err)?;
+        let recipient = recipient.into_member()?;
         let mut rng = rand010::rng();
-        let mut nonce_bytes = [0u32; 8];
-        for w in nonce_bytes.iter_mut() {
-            *w = rand010::Rng::next_u32(&mut rng);
-        }
-        let nonce = Bytes32::from_u32_slice(&nonce_bytes).map_err(js_err)?;
-        let BuiltSend {
-            payload,
-            new_balance_witness,
-            new_balance,
-        } = build_send_token_decrypted(
+        let nonce = fresh_bytes32(&mut rng)?;
+        let built = build_view_send(
             &session.keys,
-            &snapshot,
-            slot,
-            recipient_slot,
+            &view,
+            &recipient,
             token_slot,
             amount,
             nonce,
@@ -726,40 +766,36 @@ pub fn wallet_send(
             &mut rng,
         )
         .map_err(js_err)?;
-        // (We do not self-verify the freshly built proof here: it roughly doubles send latency and
-        // is redundant — every co-signer verifies the E-1 proof before signing. Portability of
-        // wasm-built proofs is covered by tests/verify_wasm_proof.rs.)
-        session.pending_send = Some((
-            payload.proposed_next_state.digest,
+        session.pending = Some(PendingDebit {
             token_slot,
-            new_balance,
-            new_balance_witness,
-        ));
-        serde_json::to_string(&payload).map_err(js_err)
+            expected_ct: built.payload.after_ct.clone(),
+            new_balance: built.new_balance,
+            witness: built.after_witness,
+        });
+        serde_json::to_string(&built.payload).map_err(js_err)
     })
 }
 
-/// Project a just-built [`SendPayload`] into the versioned binary slim wire. Keeping this inside
-/// Rust avoids re-encoding megabytes of Regev coefficients and proof bytes as decimal JSON in the
-/// browser, while reusing the exact production projection and codec consumed by the CLI.
+/// Encode a slim send payload (as returned by [`wallet_send`]) into the versioned binary slim
+/// wire, so the browser never re-encodes Regev coefficient vectors as decimal JSON.
 #[wasm_bindgen]
 pub fn wallet_slim_send_wire(payload_json: String) -> Result<Vec<u8>, JsValue> {
-    let payload: SendPayload = serde_json::from_str(&payload_json).map_err(js_err)?;
-    payload.to_slim().to_wire_bytes().map_err(js_err)
+    let payload: SlimSendPayload = serde_json::from_str(&payload_json).map_err(js_err)?;
+    payload.to_wire_bytes().map_err(js_err)
 }
 
-/// Inter-channel send: debit `amount` from this wallet's slot and produce the cross-channel
-/// transfer to `to_slot` in `to_channel`. `dest_recipient_json` = `{ "regevPk": <RegevPk>, "pkG":
-/// "0x.." }` of the destination channel's recipient slot (the browser reads it from channel B's
-/// snapshot). Returns `{ "debitPayload": <InterChannelDebitPayload>, "transferDescriptor":
-/// <InterChannelTransferDescriptor> }`: the browser POSTs the debit payload to channel A's
-/// `/api/inter/debit` (A members co-sign), then the descriptor + A's co-signed state to channel B's
-/// `/api/inter/credit`. The debit commits on `wallet_finalize` of A's co-signed state. Mirrors
-/// `wallet_send`.
-/// `token_index` (OPTIONAL — `undefined`/omitted = this channel's genesis `registry[0]`) is the
-/// BASE-layer token index to move (multitoken §N-4, TM-6): it must be registered in the SOURCE
-/// channel's registry (fail-closed otherwise), the held witness must back the resolved local
-/// position, and the destination channel resolves the same base index against its OWN registry.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InterChannelOut<'a> {
+    debit_payload: &'a SlimInterChannelDebitPayload,
+    transfer_descriptor: &'a InterChannelTransferDescriptor,
+}
+
+/// Inter-channel send from this wallet's slot view. `dest_recipient_json` = `{ "regevPk": ..,
+/// "pkG": "0x.." }` of the destination channel's recipient slot. Returns `{ debitPayload (slim),
+/// transferDescriptor }`. The debit commits when a co-signed head installs it.
+/// `token_index` defaults to this channel's genesis token; `base_nonce` is required (read the
+/// live base head immediately before proving).
 #[wasm_bindgen]
 pub fn wallet_send_inter_channel(
     to_channel: u32,
@@ -775,49 +811,24 @@ pub fn wallet_send_inter_channel(
         regev_pk: crate::regev::RegevPk,
         pk_g: String,
     }
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Out<'a> {
-        debit_payload: &'a crate::wallet_core::InterChannelDebitPayload,
-        transfer_descriptor: &'a crate::wallet_core::InterChannelTransferDescriptor,
-    }
     with_session(|session| {
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
-        let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        let view = current_view(session)?;
+        let token_index = token_index.unwrap_or(view.state.balance_state.token_registry[0]);
         let base_nonce = base_nonce.ok_or_else(|| {
-            js_err(
-                "base nonce is required: read the current live base head immediately before proving",
-            )
+            js_err("base nonce is required: read the current live base head immediately before proving")
         })?;
-        // The LOCAL position this base token resolves to (TM-6) — the position the decrypted
-        // debit opens and re-encrypts.
-        let local_slot =
-            resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
+        let local_slot = view.local_token_slot(token_index).map_err(js_err)?;
         let dest: DestRecipient = serde_json::from_str(&dest_recipient_json).map_err(js_err)?;
         let dest_pk_g = Bytes32::from_hex(&dest.pk_g).map_err(js_err)?;
-        let dest_channel =
-            crate::common::channel_id::ChannelId::new(to_channel as u64).map_err(js_err)?;
+        let dest_channel = ChannelId::new(to_channel as u64).map_err(js_err)?;
         let mut rng = rand010::rng();
-        // Fresh shared_native_nullifier_root for this debit (must differ from prev; §C-3).
-        let mut nr = [0u32; 8];
-        for w in nr.iter_mut() {
-            *w = rand010::Rng::next_u32(&mut rng);
-        }
-        let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        // The UID recipient opening is public in the returned descriptor, but is generated in
-        // Rust so every caller gets a fresh canonical salt without a JS-side encoding ambiguity.
-        // `Salt::rand` is bound to the rand-0.8 `Rng` (rand_core 0.6); `rng` above is rand 0.10
-        // (rand_core 0.9), so it cannot be reused here — same idiom as wallet_core's callers.
+        let new_nullifier_root = fresh_bytes32(&mut rng)?;
+        // `Salt::rand` is bound to the rand-0.8 `Rng`; see wallet_core's callers.
         let destination_base_transfer_salt =
             crate::common::salt::Salt::rand(&mut rand::thread_rng());
-        let built = crate::wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted(
+        let built = build_view_inter_channel_send(
             &session.keys,
-            &snapshot,
-            slot,
+            &view,
             dest_channel,
             to_slot,
             dest.regev_pk,
@@ -831,14 +842,13 @@ pub fn wallet_send_inter_channel(
             &mut rng,
         )
         .map_err(js_err)?;
-        // The sender's debit commits when wallet_finalize receives channel A's co-signed state.
-        session.pending_send = Some((
-            built.debit_payload.proposed_next_state.digest,
-            local_slot as u8,
-            built.new_balance,
-            built.new_balance_witness.clone(),
-        ));
-        let out = Out {
+        session.pending = Some(PendingDebit {
+            token_slot: local_slot as u8,
+            expected_ct: built.debit_payload.after_ct.clone(),
+            new_balance: built.new_balance,
+            witness: built.new_balance_witness.clone(),
+        });
+        let out = InterChannelOut {
             debit_payload: &built.debit_payload,
             transfer_descriptor: &built.transfer_descriptor,
         };
@@ -846,15 +856,8 @@ pub fn wallet_send_inter_channel(
     })
 }
 
-/// Burn `amount` from this wallet's slot for a partial withdrawal to `withdrawal_address_hex`
-/// (an L1 Ethereum address, hex with 0x prefix). Internally calls `build_burn_send` which wraps
-/// `build_inter_channel_send` with `BURN_CHANNEL_ID` + `RegevPk::padding()` (architecture-audit
-/// /partial-withdrawal-impl-plan.md). Returns `{ debitPayload, transferDescriptor }` — the
-/// browser POSTs `debitPayload` to `/api/cosign-burn` for N-of-N co-signing, then finalizes.
-/// Mirrors `wallet_send_inter_channel`.
-/// `token_index` (OPTIONAL — `undefined`/omitted = the genesis `registry[0]`) is the BASE token
-/// to burn (multitoken §N): the debit lands at the local position the source registry resolves,
-/// and the resulting L1 partial withdrawal pays out in that asset (IPW2 binds `tokenIndex`).
+/// L1 partial withdrawal (burn) from this wallet's slot view: an inter-channel send to
+/// `BURN_CHANNEL_ID` paid to `withdrawal_address_hex`.
 #[wasm_bindgen]
 pub fn wallet_burn_send(
     amount: u64,
@@ -862,38 +865,20 @@ pub fn wallet_burn_send(
     token_index: Option<u32>,
     base_nonce: Option<u32>,
 ) -> Result<String, JsValue> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Out<'a> {
-        debit_payload: &'a crate::wallet_core::InterChannelDebitPayload,
-        transfer_descriptor: &'a crate::wallet_core::InterChannelTransferDescriptor,
-    }
     with_session(|session| {
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
-        let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        let view = current_view(session)?;
+        let token_index = token_index.unwrap_or(view.state.balance_state.token_registry[0]);
         let base_nonce = base_nonce.ok_or_else(|| {
-            js_err(
-                "base nonce is required: read the current live base head immediately before proving",
-            )
+            js_err("base nonce is required: read the current live base head immediately before proving")
         })?;
-        let local_slot =
-            resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
+        let local_slot = view.local_token_slot(token_index).map_err(js_err)?;
         let address = crate::ethereum_types::address::Address::from_hex(&withdrawal_address_hex)
             .map_err(js_err)?;
         let mut rng = rand010::rng();
-        let mut nr = [0u32; 8];
-        for w in nr.iter_mut() {
-            *w = rand010::Rng::next_u32(&mut rng);
-        }
-        let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_burn_send_token_at_base_nonce_decrypted(
+        let new_nullifier_root = fresh_bytes32(&mut rng)?;
+        let built = build_view_burn_send(
             &session.keys,
-            &snapshot,
-            slot,
+            &view,
             address,
             token_index,
             base_nonce,
@@ -903,13 +888,13 @@ pub fn wallet_burn_send(
             &mut rng,
         )
         .map_err(js_err)?;
-        session.pending_send = Some((
-            built.debit_payload.proposed_next_state.digest,
-            local_slot as u8,
-            built.new_balance,
-            built.new_balance_witness.clone(),
-        ));
-        let out = Out {
+        session.pending = Some(PendingDebit {
+            token_slot: local_slot as u8,
+            expected_ct: built.debit_payload.after_ct.clone(),
+            new_balance: built.new_balance,
+            witness: built.new_balance_witness.clone(),
+        });
+        let out = InterChannelOut {
             debit_payload: &built.debit_payload,
             transfer_descriptor: &built.transfer_descriptor,
         };
@@ -917,36 +902,30 @@ pub fn wallet_burn_send(
     })
 }
 
-/// Balance-refresh THIS wallet's own (slot, token) position: re-encrypt the current balance to
-/// clean digits (same value) so the position can SEND again after receiving (a received
-/// homomorphic credit blocks the next send until a refresh). `token_slot` (OPTIONAL —
-/// `undefined`/omitted = 0, the genesis token) selects the LOCAL token position (multitoken
-/// §B-3 × §N, TM-13 — refreshes are per (member, token); the verifier enforces any active
-/// selector). Returns the `RefreshPayload` for the members to co-sign; once finalized, the
-/// position is spendable again. Identical for a member or a delegate slot.
+/// Re-encrypt one own token position to a fresh ciphertext (value unchanged). Returns the slim
+/// refresh payload; the refreshed witness commits when a co-signed head installs it.
 #[wasm_bindgen]
 pub fn wallet_refresh(token_slot: Option<u8>) -> Result<String, JsValue> {
     let token_slot = token_slot.unwrap_or(0);
     with_session(|session| {
-        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
-        let value =
-            decrypt_balance_token(&session.keys, &snapshot, slot, token_slot).map_err(js_err)?;
+        let view = current_view(session)?;
+        let value = decrypt_amount(
+            &session.keys.regev_sk,
+            view.row
+                .enc_balances
+                .get(token_slot as usize)
+                .ok_or_else(|| js_err("token_slot out of range"))?,
+        )
+        .map_err(js_err)?;
         let mut rng = rand010::rng();
         let (payload, new_witness) =
-            build_refresh(&session.keys, &snapshot, slot, token_slot, LEVEL, &mut rng)
-                .map_err(js_err)?;
-        // The refreshed position holds the SAME value with a fresh witness; commit it on
-        // finalize so the wallet can send that token again.
-        session.pending_send = Some((
-            payload.proposed_next_state.digest,
+            build_view_refresh(&session.keys, &view, token_slot, LEVEL, &mut rng).map_err(js_err)?;
+        session.pending = Some(PendingDebit {
             token_slot,
-            value,
-            new_witness,
-        ));
+            expected_ct: payload.new_ct.clone(),
+            new_balance: value,
+            witness: new_witness,
+        });
         serde_json::to_string(&payload).map_err(js_err)
     })
 }
@@ -959,10 +938,9 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let payload: SendPayload = serde_json::from_str(&payload_json).map_err(js_err)?;
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session
-            .snapshot
-            .as_ref()
-            .ok_or_else(|| js_err("no channel imported"))?;
+        let snapshot = session.cosigner_snapshot.as_ref().ok_or_else(|| {
+            js_err("only a co-signer session (full snapshot import) can co-sign")
+        })?;
         // Must extend our current head.
         if payload.proposed_next_state.prev_digest != snapshot.state.digest {
             return Err(js_err("payload does not extend the wallet's current head"));
@@ -1029,48 +1007,49 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
 
 /// Adopt a fully-signed next state as the new head after verifying every member's real signature.
 /// Updates the balance view; if this wallet was the sender, commits the pending send witness.
+/// Adopt the co-signed head returned for an operation this wallet started (or any later head):
+/// `view_json` is this wallet's slot view of it. It must verify like an import and advance the
+/// wallet's head; a pending debit commits when the view installs the ciphertext it built.
 #[wasm_bindgen]
-pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
+pub fn wallet_finalize(view_json: String) -> Result<String, JsValue> {
+    with_session(|session| {
+        let view: SlotView = serde_json::from_str(&view_json).map_err(js_err)?;
+        let current = current_view(session)?;
+        if view.state.balance_state.state_version <= current.state.balance_state.state_version {
+            return Err(js_err("finalized view does not advance the wallet's current head"));
+        }
+        if view.state.balance_state.state_version == current.state.balance_state.state_version + 1
+            && view.state.prev_digest != current.state.digest
+        {
+            return Err(js_err("finalized view does not extend the wallet's current head"));
+        }
+        let report = adopt_view(session, view)?;
+        serde_json::to_string(&report).map_err(js_err)
+    })
+}
+
+/// CO-SIGNER finalize: adopt the full co-signed successor state of the held snapshot.
+#[wasm_bindgen]
+pub fn wallet_finalize_state(state_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let next_state: ChannelState = serde_json::from_str(&state_json).map_err(js_err)?;
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let mut snapshot = session
-            .snapshot
-            .clone()
-            .ok_or_else(|| js_err("no channel imported"))?;
+        let mut snapshot = session.cosigner_snapshot.clone().ok_or_else(|| {
+            js_err("only a co-signer session holds the full state; delegates finalize a view")
+        })?;
         if next_state.prev_digest != snapshot.state.digest {
-            return Err(js_err(
-                "finalized state does not extend the wallet's current head",
-            ));
+            return Err(js_err("finalized state does not extend the wallet's current head"));
         }
         if next_state.balance_state.state_version != snapshot.state.balance_state.state_version + 1
         {
             return Err(js_err("state_version must increment by exactly 1"));
         }
-        // Adopt, then fully verify (record/root/balance-state validity, every member's REAL
-        // Goldilocks SingleSig proof, own-slot decryption). `verify_snapshot` already runs the full
-        // signature check, so we don't call `verify_all_signatures` separately (it would re-run all
-        // SingleSig proof verifications and roughly double finalize latency).
         snapshot.state = next_state;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
-        assert_own_recipient_bound(session, &snapshot, slot)?;
-
-        // Commit the pending send/refresh witness (with its token position) if this finalized
-        // state is the one we proposed.
-        let committed = match session.pending_send.take() {
-            Some((digest, token_slot, new_balance, witness)) if digest == snapshot.state.digest => {
-                session.balance = Some((token_slot, new_balance, witness));
-                true
-            }
-            _ => false,
-        };
-        if !committed {
-            // We were recipient/uninvolved: our slot may now be a homomorphic sum → witness stale.
-            session.balance = None;
-        }
-        let report = balance_report(session, &snapshot, slot)?;
+        let view = SlotView::from_snapshot(&snapshot, slot).map_err(js_err)?;
+        let report = adopt_view(session, view)?;
         remember_credit_head(session, &snapshot.state, slot)?;
-        session.snapshot = Some(snapshot);
+        session.cosigner_snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })
 }

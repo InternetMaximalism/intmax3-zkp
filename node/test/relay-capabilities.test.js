@@ -55,7 +55,7 @@ const depositRoutes = slice('function deploymentOf(ch)', '// POST /api/l1-deposi
 const health = slice("app.get('/api/health'", '// GET /api/deployment');
 const ROLLUP = '0x' + '3c'.repeat(20), RECIPIENT = '0x' + '07'.repeat(32);
 
-function relay({ devnet = false, readiness } = {}) {
+function relay({ devnet = false, readiness, replicated = true } = {}) {
   const handlers = {}, touched = [], logged = [], retries = [];
   const ctx = {
     isDevnet: () => devnet, relayChainId: () => (devnet ? 31337 : 11155111), CHANNELS: [7, 8], process,
@@ -69,15 +69,25 @@ function relay({ devnet = false, readiness } = {}) {
     },
     setTimeout: (fn, ms) => { retries.push(ms); return { unref() {} }; },
     console: { log: (m) => logged.push(m), error: (m) => logged.push(m) },
+    // The deposit target is served only once a cluster peer holds the private base state
+    // (live-replica.js, cluster-held state, bdf2ef4d).
+    liveReplica: { ensureReplicated: async (_ch, why) => { touched.push('replica:' + why); return replicated; } },
   };
   vm.createContext(ctx);
   vm.runInContext(helpers + health + depositRoutes, ctx);
+  // Refusals answer synchronously; a served deposit target awaits the replica check, so its
+  // callers use getAsync.
   const get = (route) => {
     let status = 200, body = null;
     handlers[route]({ query: { channel: '7' } }, { status(n) { status = n; return this; }, json(b) { body = b; } });
     return { status, body };
   };
-  return { ctx, get, touched, logged, retries };
+  const getAsync = async (route) => {
+    let status = 200, body = null;
+    await handlers[route]({ query: { channel: '7' } }, { status(n) { status = n; return this; }, json(b) { body = b; } });
+    return { status, body };
+  };
+  return { ctx, get, getAsync, touched, logged, retries };
 }
 
 test('before the startup check, a public-chain relay offers no deposit target and touches nothing', () => {
@@ -112,12 +122,13 @@ test('a transient chain-read failure keeps deposits off and re-checks a minute l
   assert.deepEqual(r.retries, [60 * 1000]);
 });
 
-test('a verified rollup serves the deposit target, and withdrawals once its validity prover is configured', () => {
+test('a verified rollup serves the deposit target, and withdrawals once its validity prover is configured', async () => {
   const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }) });
   let configured = null;
   r.ctx.checkSettlementReadiness((rollup) => { configured = rollup; });
   assert.equal(configured, ROLLUP, 'the validity prover is configured for the verified rollup');
-  const info = r.get('/api/deposit-info');
+  const info = await r.getAsync('/api/deposit-info');
+  assert.ok(r.touched.includes('replica:deposit-info'), 'a peer holds the deposit salt before anyone deposits to it');
   assert.equal(info.status, 200);
   assert.deepEqual(JSON.parse(JSON.stringify(info.body)),
     { rollup: ROLLUP, rpc: 'https://rpc.example', chainId: 11155111, minConfirmations: 12, depositRecipient: RECIPIENT });
@@ -139,6 +150,15 @@ test('a verified rollup serves the deposit target, and withdrawals once its vali
   assert.deepEqual(JSON.parse(JSON.stringify(h.unavailable)), {});
 });
 
+test('a verified rollup withholds the deposit target until a cluster peer holds the private base state', async () => {
+  const r = relay({ readiness: () => ({ ok: true, record: { rollup: ROLLUP } }), replicated: false });
+  r.ctx.checkSettlementReadiness(() => {});
+  const info = await r.getAsync('/api/deposit-info');
+  assert.equal(info.status, 503);
+  assert.match(info.body.error, /no cluster peer holds the private base state/);
+  assert.equal(info.body.depositRecipient, undefined, 'no deposit target is handed out');
+});
+
 test('the deployment (chain and rollup) is served whatever the deposit capability, without a deposit target', () => {
   const r = relay({ readiness: () => ({ ok: false, reason: 'unverified' }) });
   r.ctx.checkSettlementReadiness();
@@ -147,9 +167,9 @@ test('the deployment (chain and rollup) is served whatever the deposit capabilit
   assert.deepEqual(JSON.parse(JSON.stringify(d.body)), { rollup: ROLLUP, rpc: 'https://rpc.example', chainId: 11155111, minConfirmations: 12 });
 });
 
-test('the local devnet offers deposits without a validity deployment record', () => {
+test('the local devnet offers deposits without a validity deployment record', async () => {
   const r = relay({ devnet: true, readiness: () => assert.fail('devnet is not checked') });
-  assert.equal(r.get('/api/deposit-info').status, 200);
+  assert.equal((await r.getAsync('/api/deposit-info')).status, 200);
   const h = r.get('/api/health').body;
   assert.equal(h.capabilities.deposit, true);
   assert.equal(h.capabilities.partialWithdrawal, true);
