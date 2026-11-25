@@ -123,12 +123,17 @@ forge_fees() {
   echo --priority-gas-price "$tip" --with-gas-price "${FORGE_MAX_FEE_WEI:-$((2 * base + tip))}"
 }
 forge_broadcast() {
-  local log=$1 attempt fees; shift
+  local log=$1 attempt fees start=0; shift
   read -ra fees <<< "$(forge_fees)"
   (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
     --broadcast --slow --skip-simulation "${fees[@]}") > "$log" 2>&1 && return 0
   for attempt in 1 2 3 4 5; do
-    tail -5 "$log" | grep -q 'Failed to estimate gas' || break
+    # Search the whole output of the attempt that just failed: forge prints "Failed to estimate
+    # gas" and then one or more "Context:" blocks, so a fixed tail missed it on Sepolia
+    # (2026-11-25: the revert data and a "missing keys gas_limit" context pushed it out of the
+    # last 5 lines, and the rebuild stopped instead of resuming).
+    tail -n +"$((start + 1))" "$log" | grep -q 'Failed to estimate gas' || break
+    start=$(wc -l < "$log")
     log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
     sleep 30
     read -ra fees <<< "$(forge_fees)"
