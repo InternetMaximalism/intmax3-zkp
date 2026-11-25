@@ -59,6 +59,8 @@ flowchart TB
   BP -->|"postBlock"| L1
 ```
 
+This video summarize of the architecture concept: [Youtube Intmax3](https://www.youtube.com/watch?v=otQEyhxpQd0)
+
 **Two transfer types**
 
 | | A · intra‑channel (`H2 = 0`) | B · inter‑channel (`H2 = tx_tree_root`) |
