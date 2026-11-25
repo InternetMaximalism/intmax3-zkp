@@ -211,7 +211,7 @@ abstract contract CloseE2EBase is Test {
                 channelId,
                 bpSlot,
                 hashes[bpSlot],
-                uint16(0),
+                uint32(0),
                 bytes32(0),
                 CHALLENGE_PERIOD,
                 SPECIAL_CLOSE_PENALTY,

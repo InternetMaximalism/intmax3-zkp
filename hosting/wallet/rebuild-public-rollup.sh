@@ -122,18 +122,36 @@ forge_fees() {
   base=$(cast base-fee --rpc-url "$RPC" | awk '{print $1}')
   echo --priority-gas-price "$tip" --with-gas-price "${FORGE_MAX_FEE_WEI:-$((2 * base + tip))}"
 }
+# The same load balancing also answers forge's first state read (the fork, at the head) from a
+# backend that has not imported the head yet: "block not found" before anything is sent. On the
+# 2026-11-25 Sepolia rebuild that hit 7 of 9 forge runs. Retry: afresh while this deploy has sent
+# nothing, with --resume once it has (forge saved its sequence, or a gas estimate failed mid-run).
 forge_broadcast() {
-  local log=$1 attempt fees; shift
-  read -ra fees <<< "$(forge_fees)"
-  (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-    --broadcast --slow --skip-simulation "${fees[@]}") > "$log" 2>&1 && return 0
-  for attempt in 1 2 3 4 5; do
-    tail -5 "$log" | grep -q 'Failed to estimate gas' || break
-    log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
-    sleep 30
+  # `resume` is one word or empty (unquoted on purpose): an empty array trips `set -u` in bash 3.2.
+  local log=$1 attempt fees start=0 out resume="" attempts=${FORGE_BROADCAST_ATTEMPTS:-12}; shift
+  : > "$log"
+  for attempt in $(seq 1 "$attempts"); do
     read -ra fees <<< "$(forge_fees)"
+    # shellcheck disable=SC2086
     (cd "$CONTRACTS" && forge script "$@" --rpc-url "$RPC" --account "$INTMAX_L1_ACCOUNT" \
-      --broadcast --slow --skip-simulation "${fees[@]}" --resume) >> "$log" 2>&1 && return 0
+      --broadcast --slow --skip-simulation "${fees[@]}" $resume) >> "$log" 2>&1 && return 0
+    # Search the whole output of the attempt that just failed: forge prints "Failed to estimate
+    # gas" and then one or more "Context:" blocks, so a fixed tail missed it on Sepolia
+    # (2026-11-25: the revert data and a "missing keys gas_limit" context pushed it out of the
+    # last 5 lines, and the rebuild stopped instead of resuming).
+    out=$(tail -n +"$((start + 1))" "$log")
+    start=$(wc -l < "$log")
+    if grep -q 'Transactions saved to' <<< "$out"; then resume=--resume; fi
+    [ "$attempt" -lt "$attempts" ] || break
+    if grep -q 'Failed to estimate gas' <<< "$out"; then
+      resume=--resume
+      log "a gas estimate failed; resuming $1 in 30 s (attempt $attempt)"
+    elif grep -q 'block not found' <<< "$out"; then
+      log "the RPC answered from a backend behind the head (block not found); retrying $1 ${resume:-afresh} in 30 s (attempt $attempt)"
+    else
+      break
+    fi
+    sleep 30
   done
   tail -30 "$log"
   return 1

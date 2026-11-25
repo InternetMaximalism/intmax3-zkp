@@ -54,7 +54,7 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 const CHANNEL: u32 = 1;
 
-fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u32, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -83,7 +83,7 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     let _members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     // falcon-sig Phase 4: the member identity registered on L1 is the FALCON pk_g, read off the
     // wallet's own `MemberKeys` (which now carries the single Falcon signing key).
@@ -331,7 +331,7 @@ fn block_producer_consumes_real_member_cosignatures() {
         .iter()
         .enumerate()
         .map(|(slot, key)| MemberInfo {
-            slot: slot as u16,
+            slot: slot as u32,
             pk_g: key.pk_g(),
             pk_b: key.pk_b(),
             regev_pk: key.regev_pk.clone(),

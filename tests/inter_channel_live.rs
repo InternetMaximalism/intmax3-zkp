@@ -62,7 +62,7 @@ const A_ID: u32 = 7;
 const B_ID: u32 = 8;
 const AMT: u64 = 5;
 
-fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
+fn member_info(slot: u32, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),
@@ -90,7 +90,7 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| member_info(i as u16, k))
+        .map(|(i, k)| member_info(i as u32, k))
         .collect();
     // 4th arg = delegate_count = 0 (this branch's `build_record` signature).
     let record = build_record(channel_id, &members, 0, 0).expect("record");
@@ -153,8 +153,8 @@ fn co_sign_all(mut state: ChannelState, keys: &[MemberKeys]) -> ChannelState {
 fn run_positive(
     a: &ChannelFixture,
     b: &ChannelFixture,
-    sender_slot: u16,
-    recipient_slot: u16,
+    sender_slot: u32,
+    recipient_slot: u32,
     amount: u64,
     rng: &mut StdRng,
 ) -> (
@@ -231,8 +231,8 @@ fn inter_channel_live_send_and_credit() {
     // member 1 (a non-trivial slot, to prove slot routing).
     let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
     let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);
-    let sender_slot = 0u16;
-    let recipient_slot = 1u16;
+    let sender_slot = 0u32;
+    let recipient_slot = 1u32;
 
     let a_fund_before = a.snapshot.state.channel_fund.amounts[0];
     let b_fund_before = b.snapshot.state.channel_fund.amounts[0];
@@ -572,8 +572,8 @@ fn inter_channel_live_token1_send_and_credit() {
     let mut rng = StdRng::seed_from_u64(0x1C_5E_71);
     let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
     let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);
-    let sender_slot = 0u16;
-    let recipient_slot = 1u16;
+    let sender_slot = 0u32;
+    let recipient_slot = 1u32;
 
     // Upgrade A to a two-token channel: register 55 (local slot 1), fund the sender's token-1
     // position with a REAL self-encryption (its E-1/E-2 witness), and re-co-sign the head.
@@ -862,7 +862,7 @@ fn inter_channel_live_credit_into_a_channel_at_its_debit_head() {
 
     // B -> A (decrypted debit from B's slot 0), credited INTO A at its debit head.
     let dest_id = ChannelId::new(A_ID as u64).unwrap();
-    let recipient_slot = 2u16;
+    let recipient_slot = 2u32;
     let built = build_inter_channel_send_token_at_base_nonce_decrypted(
         &b.keys[0],
         &b.snapshot,

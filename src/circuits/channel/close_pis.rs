@@ -97,8 +97,8 @@ pub struct ChannelClosePublicInputs {
     /// (final limb). Anchored in-circuit as the unique count inside the signed H1 preimage.
     /// NOT part of the member_set_commitment (delegates do not co-sign), but bound to H1 so
     /// the close circuit recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
-    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
-    pub delegate_count: u16,
+    /// WIDTH: u32 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u32,
     /// Multi-token (detail2 §N-6, TM-11): `keccak([IMTF, token_registry(10), token_count,
     /// amounts(10 x U256)])` — the fixed 92-word commitment to the per-token fund vector,
     /// appended at the very END of the close PI vector (limbs 95..103). Recomputed IN-CIRCUIT
@@ -187,9 +187,9 @@ impl ChannelClosePublicInputs {
                     values[93]
                 ))
             })?,
-            delegate_count: u16::try_from(values[94]).map_err(|_| {
+            delegate_count: u32::try_from(values[94]).map_err(|_| {
                 ChannelClosePublicInputsError::InvalidField(format!(
-                    "delegate_count limb {} does not fit in u16",
+                    "delegate_count limb {} does not fit in u32",
                     values[94]
                 ))
             })?,
@@ -339,7 +339,7 @@ mod tests {
                     ciphertext(2),
                     ciphertext(3),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..3)

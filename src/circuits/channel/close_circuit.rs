@@ -320,7 +320,7 @@ impl ChannelClosePublicInputsTarget {
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u16(value.delegate_count),
+                F::from_canonical_u32(value.delegate_count),
             )
             .unwrap();
         self.token_funds_digest
@@ -1381,7 +1381,7 @@ pub mod test_fixture {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)
@@ -1568,7 +1568,7 @@ pub mod test_fixture {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)
                         .map(|i| {
@@ -1688,7 +1688,7 @@ mod tests {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)

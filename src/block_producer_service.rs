@@ -322,7 +322,7 @@ pub struct BlockProducerServiceStatus {
 pub struct RegisteredRecordStatus {
     pub channel_id: u64,
     pub member_count: u8,
-    pub delegate_count: u16,
+    pub delegate_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2436,8 +2436,8 @@ mod journal_roundtrip_tests {
                 member_count: 1,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&[nonzero_ciphertext()]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
-                recipients: BalanceState::pad_recipients(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default()]),
+                recipients: BalanceState::pad_recipients(&[crate::ethereum_types::address::Address::default()]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 1,

@@ -23,7 +23,7 @@ pub use encrypt::{
 };
 pub use keys::{
     REGEV_PK_DOMAIN, REGEV_PK_POSEIDON_DOMAIN, REGEV_PK_ROOT_DOMAIN, RegevPk, RegevSk,
-    channel_keygen, regev_pk_root,
+    channel_keygen, channel_regev_pk_root, regev_pk_root,
 };
 pub use params::{
     MAX_HOMO_ADDS_BEFORE_REFRESH, REGEV_ETA, REGEV_N, REGEV_PLAIN_BITS, REGEV_Q,
@@ -45,12 +45,10 @@ pub(crate) use transfer_stark::{
     prove_channel_tx, prove_channel_update, verify_channel_tx, verify_channel_update,
 };
 
-use plonky2_keccak::utils::solidity_keccak256;
-
-use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _};
+use crate::ethereum_types::bytes32::Bytes32;
 
 /// Keccak over a u32-word stream, same convention as `src/common/channel.rs` digests
-/// (`solidity_keccak256` packs each word big-endian, matching `abi.encodePacked` on-chain).
+/// (each word big-endian, matching `abi.encodePacked` on-chain).
 pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
-    Bytes32::from_u32_slice(&solidity_keccak256(words)).expect("keccak output must be bytes32")
+    crate::common::channel::hash_words(words)
 }

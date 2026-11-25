@@ -24,7 +24,9 @@ use intmax3_zkp::{
         channel::{ChannelFund, ChannelState, MemberSignature},
         channel_id::ChannelId,
     },
-    ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _},
+    ethereum_types::{
+        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
+    },
     regev::{encrypt::RegevCiphertext, REGEV_N, REGEV_Q},
 };
 
@@ -56,8 +58,8 @@ fn state_with_sparse_row(channel: u64) -> ChannelState {
             member_count: 1,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances_token0(&[nonzero_ciphertext()]),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
-            recipients: BalanceState::pad_recipients(&[]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default()]),
+            recipients: BalanceState::pad_recipients(&[Address::default()]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 3,

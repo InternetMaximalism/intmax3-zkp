@@ -25,7 +25,7 @@ observeNullifier	withdrawal_claim_circuit.rs:341/436/462/494/510/539/548	no-gate
 observeBeforePadding	withdrawal_claim_circuit.rs:341/436/462/494/510/539/548	no-gate	trivial	builder.num_gates() profiling read; Lean holds = True
 recomputeH1	withdrawal_claim_circuit.rs:344-355	gadget	not-static	the Poseidon IMB2 header relation is Environment.poseidonWords
 connectH1	withdrawal_claim_circuit.rs:356	connect	ok	recomputed_h1.connect(final_balance_state_h1)
-activeSumAnd11Bits	withdrawal_claim_circuit.rs:377-379	range	ok	range_check(active, 11)
+activeSumAnd11Bits	withdrawal_claim_circuit.rs:377-379	range	ok	range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)
 activeSumAnd11Bits	withdrawal_claim_circuit.rs:378	arith	not-static	active = add(member_count, delegate_count) is an arithmetic gate output
 compareActive1025	withdrawal_claim_circuit.rs:380-382	constant	ok	assert_one(less_than_u32(active, MAX_CHANNEL_MEMBERS + 1))
 compareMemberActive	withdrawal_claim_circuit.rs:384-385	constant	ok	connect(less_than_u32(member_index, active), one)

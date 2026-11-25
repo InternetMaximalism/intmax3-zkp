@@ -74,7 +74,7 @@ fn err<T>(m: impl Into<String>) -> WResult<T> {
 pub struct SlotViewRecord {
     pub channel_id: ChannelId,
     pub member_count: u8,
-    pub delegate_count: u16,
+    pub delegate_count: u32,
     pub bp_member_slot: u8,
     pub cosigner_pk_gs: Vec<Bytes32>,
     pub slot_pk_g: Bytes32,
@@ -87,7 +87,7 @@ pub struct SlotView {
     pub format: u32,
     pub record: SlotViewRecord,
     pub state: ChannelStateHeader,
-    pub slot: u16,
+    pub slot: u32,
     pub row: SlotRow,
     /// Siblings of `slot` in the balance-slot tree, leaf level first.
     pub slot_siblings: Vec<PoseidonHashOut>,
@@ -100,7 +100,7 @@ pub struct SlotView {
 
 impl SlotView {
     /// Co-signer side: project the full signed snapshot onto `slot`.
-    pub fn from_snapshot(snapshot: &ChannelSnapshot, slot: u16) -> WResult<Self> {
+    pub fn from_snapshot(snapshot: &ChannelSnapshot, slot: u32) -> WResult<Self> {
         Self::from_parts(
             &snapshot.record,
             &snapshot.state,
@@ -113,7 +113,7 @@ impl SlotView {
         record: &ChannelRecord,
         state: &ChannelState,
         accumulator: &IncrementalMerkleTree<Bytes32>,
-        slot: u16,
+        slot: u32,
     ) -> WResult<Self> {
         let bs = &state.balance_state;
         let active = bs.member_count as usize + bs.delegate_count as usize;
@@ -436,7 +436,7 @@ pub fn build_view_send(
 #[serde(rename_all = "camelCase")]
 pub struct SlimRefreshPayload {
     pub anchor_digest: Bytes32,
-    pub member_index: u16,
+    pub member_index: u32,
     pub token_slot: u8,
     pub refresh_proof: ChannelProofEnvelope,
     pub new_ct: RegevCiphertext,
@@ -513,7 +513,7 @@ pub fn inflate_refresh(
 #[serde(rename_all = "camelCase")]
 pub struct SlimInterChannelDebitPayload {
     pub anchor_digest: Bytes32,
-    pub sender_index: u16,
+    pub sender_index: u32,
     pub proposed_digest: Bytes32,
     pub inter_channel_tx: InterChannelTx,
     pub amount: u64,
@@ -567,7 +567,7 @@ pub fn build_view_inter_channel_send(
     keys: &MemberKeys,
     view: &SlotView,
     destination_channel_id: ChannelId,
-    destination_recipient_slot: u16,
+    destination_recipient_slot: u32,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
     destination_base_transfer_salt: Salt,
@@ -914,7 +914,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, k)| MemberInfo {
-                slot: i as u16,
+                slot: i as u32,
                 pk_g: k.pk_g(),
                 pk_b: k.pk_b(),
                 regev_pk: k.regev_pk.clone(),
@@ -953,7 +953,7 @@ mod tests {
     fn view_recomputes_the_signed_digest_and_verifies() {
         let mut rng = StdRng::seed_from_u64(0x51_07);
         let (snapshot, keys) = channel(&mut rng, [5, 6, 7, 8]);
-        for slot in 0..4u16 {
+        for slot in 0..4u32 {
             let view = SlotView::from_snapshot(&snapshot, slot).unwrap();
             assert_eq!(view.state.balance_state.h1(), snapshot.state.balance_state.h1());
             assert_eq!(view.state.signing_digest(), snapshot.state.digest);

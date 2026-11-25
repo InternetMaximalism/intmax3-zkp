@@ -57,7 +57,8 @@ library RegRecordLib {
     /// Minimum co-signing members, mirroring `IntmaxRollup.MIN_CHANNEL_MEMBERS`. Checked here too
     /// so a malformed record fails on a readable message before it costs a broadcast.
     uint8 internal constant MIN_MEMBERS = 2;
-    uint256 internal constant MAX_PARTICIPANTS = 1024;
+    uint256 internal constant MAX_PARTICIPANTS = 1 << 20;
+    uint256 internal constant PARTICIPANT_TREE_DEPTH = 20;
     uint32 internal constant PARTICIPANT_LEAF_DOMAIN = 0x494d5052; // "IMPR"
     uint32 internal constant PARTICIPANT_NODE_DOMAIN = 0x494d504e; // "IMPN"
 
@@ -68,7 +69,7 @@ library RegRecordLib {
         uint8 bpSlot;
         uint8 memberCount;
         /// The LIVE delegate count — for the SETTLEMENT MANAGER only. Never for `registerChannel`.
-        uint16 activeDelegateCount;
+        uint32 activeDelegateCount;
         bytes32 participantRoot;
         /// Production records written from an authenticated live snapshot must carry the root
         /// explicitly. Legacy/dev fixtures may omit it; `parse` still derives it so older mock
@@ -94,11 +95,11 @@ library RegRecordLib {
         require(channelId <= type(uint32).max, "reg record: channel_id exceeds uint32");
         require(bpSlot <= type(uint8).max, "reg record: bp_member_slot exceeds uint8");
         require(memberCount <= type(uint8).max, "reg record: member_count exceeds uint8");
-        require(activeDelegateCount <= type(uint16).max, "reg record: active_delegate_count exceeds uint16");
+        require(activeDelegateCount <= type(uint32).max, "reg record: active_delegate_count exceeds uint32");
         r.channelId = uint32(channelId);
         r.bpSlot = uint8(bpSlot);
         r.memberCount = uint8(memberCount);
-        r.activeDelegateCount = uint16(activeDelegateCount);
+        r.activeDelegateCount = uint32(activeDelegateCount);
         require(
             vm.parseJsonUint(json, ".reg_delegate_count") == 0,
             "reg record: reg_delegate_count must be 0 (Option B: L1 registration is cosigner-only; a nonzero registration is unprovable by channel_reg_step)"
@@ -112,7 +113,7 @@ library RegRecordLib {
         require(r.memberCount >= MIN_MEMBERS, "reg record: member_count < MIN_CHANNEL_MEMBERS");
         require(r.bpSlot < r.memberCount, "reg record: bp_member_slot must be a co-signing member");
         uint256 active = uint256(r.memberCount) + uint256(r.activeDelegateCount);
-        require(active <= MAX_PARTICIPANTS, "reg record: active participants exceed 1024");
+        require(active <= MAX_PARTICIPANTS, "reg record: active participants exceed 2^20");
         require(
             r.pkGs.length == active && r.pkBs.length == active && r.regevDigests.length == active
                 && r.recipients.length == active,
@@ -160,22 +161,30 @@ library RegRecordLib {
         pure
         returns (bytes32)
     {
-        bytes32[1024] memory nodes;
+        bytes32[] memory nodes = new bytes32[](pkGs.length);
         for (uint256 i = 0; i < pkGs.length; i++) {
             require(pkGs[i] != bytes32(0) && recipients[i] != address(0), "reg record: zero participant binding");
             nodes[i] = keccak256(
-                abi.encodePacked(bytes4(PARTICIPANT_LEAF_DOMAIN), uint16(i), pkGs[i], recipients[i])
+                abi.encodePacked(bytes4(PARTICIPANT_LEAF_DOMAIN), uint32(i), pkGs[i], recipients[i])
             );
         }
-        uint256 width = MAX_PARTICIPANTS;
-        while (width > 1) {
-            for (uint256 i = 0; i < width; i += 2) {
-                nodes[i >> 1] = keccak256(
-                    abi.encodePacked(bytes4(PARTICIPANT_NODE_DOMAIN), nodes[i], nodes[i + 1])
+        // Same fold as `ChannelSettlementManager._memberOnlyParticipantRoot`: unused leaves are the
+        // zero word and an all-unused subtree is its fixed root, so only the occupied prefix is hashed.
+        uint256 width = nodes.length;
+        bytes32 zero = bytes32(0);
+        for (uint256 level = 0; level < PARTICIPANT_TREE_DEPTH; level++) {
+            uint256 parents = (width + 1) >> 1;
+            for (uint256 i = 0; i < parents; i++) {
+                uint256 left = i << 1;
+                nodes[i] = keccak256(
+                    abi.encodePacked(
+                        bytes4(PARTICIPANT_NODE_DOMAIN), nodes[left], left + 1 < width ? nodes[left + 1] : zero
+                    )
                 );
             }
-            width >>= 1;
+            width = parents;
+            zero = keccak256(abi.encodePacked(bytes4(PARTICIPANT_NODE_DOMAIN), zero, zero));
         }
-        return nodes[0];
+        return width == 0 ? zero : nodes[0];
     }
 }

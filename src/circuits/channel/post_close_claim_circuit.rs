@@ -245,8 +245,8 @@ pub struct PostCloseClaimFullWitness {
     pub settled_tx_chain: Bytes32,
     pub state_version: u64,
     pub member_count: u8,
-    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
-    pub delegate_count: u16,
+    /// WIDTH: u32 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u32,
     /// Receiver slot index in the closed channel (`< member_count + delegate_count`) — the Merkle
     /// position of the opened slot leaf.
     pub receiver_member_index: usize,
@@ -500,9 +500,9 @@ where
         let mut active_le_max_probe: Option<Target> = None;
         {
             let max_active = builder.constant(F::from_canonical_usize(MAX_CHANNEL_MEMBERS));
-            // 11 bits: MAX_CHANNEL_MEMBERS = 1024 (the former 8-bit check was a stale MAX = 16
-            // leftover — completeness, not soundness).
-            builder.range_check(active, 11);
+            // BALANCE_SLOT_TREE_HEIGHT + 1 = 21 bits: MAX_CHANNEL_MEMBERS = 2^20 (a narrower
+            // check would reject legal states — completeness, not soundness).
+            builder.range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1);
             let max_plus_one = builder.add_const(max_active, F::ONE);
             let active_le_max = less_than_u32(&mut builder, active, max_plus_one);
             builder.assert_one(active_le_max.target);
@@ -687,7 +687,7 @@ where
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u16(witness_value.delegate_count),
+                F::from_canonical_u32(witness_value.delegate_count),
             )
             .unwrap();
         // Multi-token (v2): the signed token_count/registry (H1 header scalars).
@@ -779,7 +779,7 @@ where
 
 /// Strict less-than on two SMALL u32-range targets (mirror of the withdrawal claim's helper).
 /// Here `receiver_member_index < MAX_CHANNEL_MEMBERS` (inclusion-verify `split_le`) and `active
-/// <= MAX_CHANNEL_MEMBERS` (11-bit range check). Returns `a < b`.
+/// <= MAX_CHANNEL_MEMBERS` (21-bit range check). Returns `a < b`.
 fn less_than_u32<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     a: Target,
@@ -1625,8 +1625,8 @@ mod tests {
         // `.range "active sum" 1 11` — :439
         table.check(
             "range active sum", "post_close_claim_circuit.rs:439", "range",
-            view.range_bits(p.active).contains(&11),
-            "range_check(active, 11)",
+            view.range_bits(p.active).contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
+            "range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)",
         );
         // `.connect "active<1025"` / `"receiverMemberIndex<active"` — :439-443
         table.check(

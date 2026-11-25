@@ -2,7 +2,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../../api/lib/wallet-l1.js'), 'utf8');
-function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, proved = [], statusErrors = [] } = {}) {
+function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, proved = [], statusErrors = [], cliErrors = [] } = {}) {
   const id = '0x' + '12'.repeat(32), rollup = '0x' + '34'.repeat(20);
   const posting = { receipt: { candidateId: id }, subBlocks: [{ channelId: 7 }] };
   const pinned = { rollup, posting: mismatch ? { ...posting, subBlocks: [] } : posting,
@@ -18,7 +18,10 @@ function runner(mismatch = false, { candidate = {}, finalizedBlockNumber = 4, pr
       throw new Error('unexpected read ' + file);
     },
     writeJson: (file, value) => written.set(file, value), sh: () => '',
-    cli() { published = true; assert.deepEqual(written.get('/work/ch7/wallet_validity_finalize.json'), pinned.finalize); },
+    cli() {
+      if (cliErrors.length) throw cliErrors.shift();
+      published = true; assert.deepEqual(written.get('/work/ch7/wallet_validity_finalize.json'), pinned.finalize);
+    },
     async cliAsync(...args) { return this.cli(...args); }, DEVNET_CHAIN_ID: 31337,
   };
   const producer = { enableLocalValidity: async () => {},
@@ -84,5 +87,21 @@ test('a finalized-head race during the read-back is retried; any other refusal i
   assert.deepEqual(raced.state(), { published: true, acknowledged: true });
   const refused = runner(false, { statusErrors: [new Error('L1 finalization read-back rejected: L1 authority block was replaced during state binding (reorg detected)')] });
   await assert.rejects(refused.run(), /reorg detected/);
+  assert.deepEqual(refused.state(), { published: false, acknowledged: false });
+});
+
+// publicnode answers forge's fork read at the head from a backend that lags it ("block not found";
+// 7 of 9 forge runs of the 2026-11-25 Sepolia rebuild). publish-wallet-validity runs forge, so the
+// publish re-runs on it, with the exact pinned publication, and still stops on any other failure.
+test('a "block not found" from a lagging RPC backend is retried with the pinned publication', async () => {
+  process.env.WALLET_L1_LAGGING_BACKEND_RETRY_MS = '1';
+  const lagging = () => Object.assign(new Error('channel_member publish-wallet-validity failed'), {
+    stderr: 'Error: failed to get account for 0x1804c8AB1F12E6bbf3894d4083f33e07309d1f38: server returned an error response: error code -32001: block not found: 0xba4c27',
+  });
+  const retried = runner(false, { cliErrors: [lagging(), lagging()] });
+  await retried.run();
+  assert.deepEqual(retried.state(), { published: true, acknowledged: true });
+  const refused = runner(false, { cliErrors: [new Error('execution reverted: FinalizeRejected')] });
+  await assert.rejects(refused.run(), /FinalizeRejected/);
   assert.deepEqual(refused.state(), { published: false, acknowledged: false });
 });

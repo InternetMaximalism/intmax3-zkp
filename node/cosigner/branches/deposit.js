@@ -23,7 +23,7 @@ function depositImportArgs({ txHash, recipientSlot, rpc }) {
   let slot = 'auto';
   if (recipientSlot != null) {
     const n = Number(recipientSlot);
-    if (!Number.isInteger(n) || n < 0 || n > 1023) return { error: 'recipientSlot out of range' };
+    if (!Number.isInteger(n) || n < 0 || n >= (1 << 20)) return { error: 'recipientSlot out of range' };
     slot = String(n);
   }
   if (!/^[a-z0-9:/._-]+$/i.test(String(rpc || '')) || String(rpc).startsWith('-')) {

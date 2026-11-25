@@ -78,7 +78,7 @@ test('an empty environment yields a disabled faucet (never a permissive default)
 });
 
 test('FAUCET_SLOT must be a plain slot index', () => {
-  for (const v of [undefined, '', '-1', '1.5', 'two', '0x2', '1024']) {
+  for (const v of [undefined, '', '-1', '1.5', 'two', '0x2', '1048576']) {
     assert.strictEqual(faucetConfig(env({ FAUCET_SLOT: v })).enabled, false, `FAUCET_SLOT=${JSON.stringify(v)}`);
   }
   assert.strictEqual(faucetConfig(env({ FAUCET_SLOT: '0' })).enabled, true);

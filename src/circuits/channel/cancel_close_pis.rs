@@ -243,7 +243,7 @@ mod tests {
                     ciphertext(2),
                     ciphertext(3),
                 ]),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..3)

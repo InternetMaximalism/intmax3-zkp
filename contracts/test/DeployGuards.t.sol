@@ -851,7 +851,7 @@ contract DeployGuardsTest is Test {
         assertEq(manager.activeMemberCount(), GUARD_MEMBER_COUNT, "the co-signing set is unchanged by the decoupling");
 
         // Counted is not enough: the immutable root must bind the full live pkG/recipient array.
-        // Delegates are deliberately NOT expanded into mappings (1024 SSTOREs would make the
+        // Delegates are deliberately NOT expanded into mappings (2^20 SSTOREs would make the
         // deployment unmineable); they open their fixed-depth leaf when requesting a close.
         string memory json = _guardRecord();
         bytes32[] memory pkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
@@ -865,8 +865,8 @@ contract DeployGuardsTest is Test {
         );
         for (uint256 i = GUARD_MEMBER_COUNT; i < pkGs.length; i++) {
             assertEq(
-                manager.participantLeaf(uint16(i), pkGs[i], recipients[i]),
-                keccak256(abi.encodePacked(bytes4("IMPR"), uint16(i), pkGs[i], recipients[i])),
+                manager.participantLeaf(uint32(i), pkGs[i], recipients[i]),
+                keccak256(abi.encodePacked(bytes4("IMPR"), uint32(i), pkGs[i], recipients[i])),
                 "delegate leaf encoding drifted"
             );
             assertEq(
@@ -885,15 +885,23 @@ contract DeployGuardsTest is Test {
     }
 
     function _participantRoot(bytes32[] memory pkGs, address[] memory recipients) internal pure returns (bytes32) {
-        assert(pkGs.length == recipients.length && pkGs.length <= 1024);
-        bytes32[] memory nodes = new bytes32[](1024);
-        for (uint256 slot = 0; slot < pkGs.length; slot++) {
-            nodes[slot] = keccak256(abi.encodePacked(bytes4("IMPR"), uint16(slot), pkGs[slot], recipients[slot]));
+        assert(pkGs.length == recipients.length && pkGs.length <= 1 << 20);
+        uint256 width = pkGs.length;
+        bytes32[] memory nodes = new bytes32[](width);
+        for (uint256 slot = 0; slot < width; slot++) {
+            nodes[slot] = keccak256(abi.encodePacked(bytes4("IMPR"), uint32(slot), pkGs[slot], recipients[slot]));
         }
-        for (uint256 width = 1024; width > 1; width >>= 1) {
-            for (uint256 i = 0; i < width; i += 2) {
-                nodes[i >> 1] = keccak256(abi.encodePacked(bytes4("IMPN"), nodes[i], nodes[i + 1]));
+        // 2^20 leaves, the unoccupied ones zero: a missing right child is the all-zero subtree root.
+        bytes32 zero = bytes32(0);
+        for (uint256 level = 0; level < 20; level++) {
+            uint256 parents = (width + 1) >> 1;
+            for (uint256 i = 0; i < parents; i++) {
+                uint256 left = i << 1;
+                nodes[i] =
+                    keccak256(abi.encodePacked(bytes4("IMPN"), nodes[left], left + 1 < width ? nodes[left + 1] : zero));
             }
+            width = parents;
+            zero = keccak256(abi.encodePacked(bytes4("IMPN"), zero, zero));
         }
         return nodes[0];
     }

@@ -162,7 +162,7 @@ fn json_hex_quantity(value: &serde_json::Value, label: &str) -> u64 {
     u64::from_str_radix(raw.strip_prefix("0x").unwrap_or(raw), 16)
         .unwrap_or_else(|e| panic!("invalid {label} hex quantity {raw}: {e}"))
 }
-fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u32, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -170,9 +170,8 @@ fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
         regev_pk: k.regev_pk.clone(),
     }
 }
-fn pks_array(keys: &[MemberKeys]) -> [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] {
-    let mut arr: [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] =
-        std::array::from_fn(|_| RegevPk::padding());
+fn pks_array(keys: &[MemberKeys]) -> Vec<RegevPk> {
+    let mut arr: Vec<RegevPk> = vec![RegevPk::padding(); keys.len()];
     for (i, k) in keys.iter().enumerate() {
         arr[i] = k.regev_pk.clone();
     }
@@ -462,7 +461,7 @@ fn build_signed_genesis(
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     verify_all_signatures(record, &members, &state).expect("genesis fully signed");
     state
@@ -520,7 +519,7 @@ fn partial_withdrawal_e2e_anvil() {
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     let record = build_record(42, &members, 0, 0).expect("channel record");
     let all_pks = pks_array(&keys);
@@ -1477,6 +1476,7 @@ fn partial_withdrawal_e2e_anvil() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
             "--code-size-limit",
             "50000",
         ])

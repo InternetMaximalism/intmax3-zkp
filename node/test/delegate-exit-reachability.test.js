@@ -69,12 +69,12 @@ function fakeStore(initial = {}) {
   };
 }
 
-test('delegate derives the exact depth-10 participant path from an authenticated signed snapshot', () => {
+test('delegate derives the exact depth-20 participant path from an authenticated signed snapshot', () => {
   const proof = buildParticipantCloseProof(snapshot(), 2, RECIPIENTS[2]);
   assert.equal(proof.slot, 2);
   assert.equal(proof.pkG, PK_GS[2]);
   assert.equal(proof.activeParticipantCount, 3);
-  assert.equal(proof.siblings.length, 10);
+  assert.equal(proof.siblings.length, 20);
   assert.notEqual(proof.participantRoot, ZeroHash);
   assert.equal(recomputeRoot(proof), proof.participantRoot);
 

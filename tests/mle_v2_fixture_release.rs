@@ -542,7 +542,7 @@ struct CloseIntentDescriptor {
     close_intent_digest: Bytes32,
     member_set_commitment: Bytes32,
     member_count: u8,
-    delegate_count: u16,
+    delegate_count: u32,
     member_pk_gs: Vec<Bytes32>,
     channel_fund_amounts: Vec<U256>,
     token_registry: Vec<u32>,

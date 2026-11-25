@@ -69,6 +69,13 @@ const RETRYABLE_FINALITY = /not finalized yet|retry after the finalized head adv
 // moved), once the node has caught up.
 const RETRYABLE_ESTIMATE = /Failed to estimate gas for tx/;
 const ESTIMATE_RETRIES = 5;
+// The same load balancing answers forge's first state read (its fork, at the head) from a node that
+// has not imported the head yet: "block not found" before anything is broadcast. The CLI keeps its
+// journal (cli_state PREPARED) and a retry resumes the pinned artifact or restarts at the same
+// pinned nonce. On the 2026-11-25 Sepolia rebuild this failed ch8's deploy-settlement 4 times in a row.
+const RETRYABLE_FORK_READ = /block not found/;
+const FORK_READ_RETRIES = 12;
+const FORK_READ_RETRY_MS = 30 * 1000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function step(ch, name, message) { console.log(`[ch${ch}] ${name}: ${message}`); }
@@ -138,7 +145,7 @@ async function settlement(ch, bundleDir) {
     // head (~13 min on Sepolia after the broadcast), or finality advanced while it read the stack
     // back at one pinned head (Sepolia finalizes an epoch at a time, so a readback can straddle
     // one). Both are waits, not failures: retry the same command, which resumes from its journal.
-    for (let attempt = 1, estimateFailures = 0; ; attempt++) {
+    for (let attempt = 1, estimateFailures = 0, forkReadFailures = 0; ; attempt++) {
       try {
         cli(ch, ['deploy-settlement', RPC], {
           INTMAX_PUBLIC_CLOSE_BUNDLE: bundleDir,
@@ -153,6 +160,11 @@ async function settlement(ch, bundleDir) {
         if (RETRYABLE_ESTIMATE.test(text) && ++estimateFailures <= ESTIMATE_RETRIES) {
           step(ch, 'settlement', `a gas estimate failed; resuming the broadcast (attempt ${estimateFailures})`);
           await sleep(FINALITY_RETRY_MS);
+          continue;
+        }
+        if (RETRYABLE_FORK_READ.test(text) && ++forkReadFailures <= FORK_READ_RETRIES) {
+          step(ch, 'settlement', `the RPC answered from a node behind the head (block not found); retrying (attempt ${forkReadFailures})`);
+          await sleep(FORK_READ_RETRY_MS);
           continue;
         }
         if (!RETRYABLE_FINALITY.test(text) || attempt >= FINALITY_RETRIES) throw e;

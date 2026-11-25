@@ -337,6 +337,7 @@ fn two_token_cli_e2e() {
                 "--private-key",
                 ANVIL0_KEY,
                 "--broadcast",
+                "--slow", // one tx per receipt: a burst can overfill an automine block and stall
             ]),
         "forge DeployCloseCli",
     );

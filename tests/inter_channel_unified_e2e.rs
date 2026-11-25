@@ -117,7 +117,7 @@ fn cast(rpc: &str, a: &[&str], l: &str) -> String {
 fn word(d: &str, i: usize) -> &str {
     &d[i * 64..(i + 1) * 64]
 }
-fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u32, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -125,9 +125,8 @@ fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
         regev_pk: k.regev_pk.clone(),
     }
 }
-fn pks_array(keys: &[MemberKeys]) -> [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] {
-    let mut a: [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] =
-        std::array::from_fn(|_| RegevPk::padding());
+fn pks_array(keys: &[MemberKeys]) -> Vec<RegevPk> {
+    let mut a: Vec<RegevPk> = vec![RegevPk::padding(); keys.len()];
     for (i, k) in keys.iter().enumerate() {
         a[i] = k.regev_pk.clone();
     }
@@ -171,6 +170,7 @@ fn unified_inter_channel_transfer_e2e() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
         ]),
         "deploy",
     );
@@ -200,7 +200,7 @@ fn unified_inter_channel_transfer_e2e() {
     let a_members: Vec<MemberInfo> = a_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     let a_record = build_record(A_ID, &a_members, 0, 0).expect("A record");
     let a_pks = pks_array(&a_keys);

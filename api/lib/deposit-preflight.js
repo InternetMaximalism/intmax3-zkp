@@ -24,8 +24,11 @@ function tokenIndex(value = 0) {
   return Number(uint(value, 0xffffffffn, 'tokenIndex'));
 }
 
+// src/constants.rs MAX_CHANNEL_MEMBERS (2^20 balance slots per channel).
+const MAX_CHANNEL_MEMBERS = 1n << 20n;
+
 function recipientSlot(value) {
-  return Number(uint(value, 1023n, 'recipientSlot'));
+  return Number(uint(value, MAX_CHANNEL_MEMBERS - 1n, 'recipientSlot'));
 }
 
 function address(value, label) {
@@ -45,9 +48,9 @@ function resolveContributionSlot(snapshot, contribution) {
     throw new Error('contribution must carry its complete public identity');
   }
   const balance = wire.balanceState(snapshot && snapshot.state);
-  const active = Number(uint(wire.field(balance, 'memberCount', 'member_count'), 1024n, 'memberCount'))
-    + Number(uint(wire.field(balance, 'delegateCount', 'delegate_count'), 1024n, 'delegateCount'));
-  if (active < 1 || active > 1024 || !Array.isArray(snapshot.members)) {
+  const active = Number(uint(wire.field(balance, 'memberCount', 'member_count'), MAX_CHANNEL_MEMBERS, 'memberCount'))
+    + Number(uint(wire.field(balance, 'delegateCount', 'delegate_count'), MAX_CHANNEL_MEMBERS, 'delegateCount'));
+  if (active < 1 || active > Number(MAX_CHANNEL_MEMBERS) || !Array.isArray(snapshot.members)) {
     throw new Error('snapshot has no valid active participant set');
   }
   const matches = snapshot.members.filter(member => (

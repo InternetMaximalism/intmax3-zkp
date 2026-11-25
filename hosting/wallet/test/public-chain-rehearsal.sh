@@ -48,7 +48,13 @@ export RPC_LOGS_MAX_RANGE="${RPC_LOGS_MAX_RANGE:-2000}"
 # Historical state is pruned well inside the rehearsal's lifetime (it spans ~1 500 blocks after the
 # rollup deploys), so anything probing old state fails here as it does on publicnode.
 export RPC_STATE_RETENTION="${RPC_STATE_RETENTION:-300}"
-ACCOUNT=intmax-rehearsal-anvil0
+# publicnode load-balances over backends that lag the head: a state read naming one of the newest
+# blocks by number (forge's fork read at the head) can come back "block not found". It did on 7 of
+# 9 forge runs of the 2026-11-25 testnet rebuild, so half the blocks lag here (0 turns it off).
+export RPC_LAGGING_BLOCK_RATE="${RPC_LAGGING_BLOCK_RATE:-0.5}"
+# The keystore name is global to ~/.foundry/keystores and `chain` replaces it under a fresh
+# password, so a second concurrent rehearsal must pick its own name or it breaks the first one.
+ACCOUNT="${REHEARSAL_ACCOUNT:-intmax-rehearsal-anvil0}"
 # anvil's PUBLIC dev accounts (worthless outside a local anvil).
 ANVIL0_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 OPERATOR=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266

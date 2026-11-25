@@ -73,6 +73,6 @@
     "final_ext_commitment": "0x197b65003d2144e420a690bb3edf8231daa461cbd815724099603ad947d579a9",
     "prover": "0x0000000000000000000000000000000000000000"
   },
-  "proof_hash": "0x59aa91a327b6d84a2cec2a3a80b0a88d9ec18ac54225f8ba0cbddd1a9f5776d1",
-  "proof_length": 131244
+  "proof_hash": "0x96f347b6ad9a3d172c0df9da865ddaf9186d4d149ecf3cb4942f6839a5bc4577",
+  "proof_length": 130604
 }

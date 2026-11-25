@@ -235,21 +235,20 @@ pub(crate) fn verify_delegates_appended(old: &ChannelRecord, new: &ChannelRecord
     if new_boundary > MAX_CHANNEL_MEMBERS {
         return Err("delegate join: more participants than the channel holds".into());
     }
-    for slot in 0..MAX_CHANNEL_MEMBERS {
-        let (was, is) = (old.member_pk_gs[slot], new.member_pk_gs[slot]);
-        if slot < old_boundary {
-            if is != was {
-                return Err(format!("delegate join: existing slot {slot} changed"));
-            }
-        } else if slot < new_boundary {
-            if was != Bytes32::default() || is == Bytes32::default() {
-                return Err(format!("delegate join: slot {slot} is not a new nonzero identity"));
-            }
-            if (0..new_boundary).any(|other| other != slot && new.member_pk_gs[other] == is) {
-                return Err(format!("delegate join: slot {slot} duplicates another identity"));
-            }
-        } else if is != Bytes32::default() || was != Bytes32::default() {
-            return Err(format!("delegate join: slot {slot} beyond the participants is not empty"));
+    if old.member_pk_gs.len() != old_boundary || new.member_pk_gs.len() != new_boundary {
+        return Err("delegate join: the identity list does not match the participant counts".into());
+    }
+    if new.member_pk_gs[..old_boundary] != old.member_pk_gs[..] {
+        return Err("delegate join: an existing slot changed".into());
+    }
+    let mut seen: std::collections::HashSet<Bytes32> = new.member_pk_gs[..old_boundary].iter().copied().collect();
+    for slot in old_boundary..new_boundary {
+        let is = new.member_pk_gs[slot];
+        if is == Bytes32::default() {
+            return Err(format!("delegate join: slot {slot} is not a new nonzero identity"));
+        }
+        if !seen.insert(is) {
+            return Err(format!("delegate join: slot {slot} duplicates another identity"));
         }
     }
     Ok(())
@@ -1180,7 +1179,7 @@ impl ProductionBlockProducer {
     }
 
     /// `(channel, member_count, delegate_count)` of every registered record, for status reports.
-    pub fn registered_record_counts(&self) -> Vec<(ChannelId, u8, u16)> {
+    pub fn registered_record_counts(&self) -> Vec<(ChannelId, u8, u32)> {
         let mut counts: Vec<_> = self
             .channel_records
             .iter()
@@ -1340,11 +1339,9 @@ mod delegate_join_adoption_tests {
         Bytes32::from_u32_slice(&[slot as u32 + 1, 0, 0, 0, 0, 0, 0, 7]).unwrap()
     }
 
-    fn record(members: u8, delegates: u16) -> ChannelRecord {
-        let mut member_pk_gs = [Bytes32::default(); MAX_CHANNEL_MEMBERS];
-        for (slot, pk) in member_pk_gs.iter_mut().enumerate().take(members as usize + delegates as usize) {
-            *pk = identity(slot);
-        }
+    fn record(members: u8, delegates: u32) -> ChannelRecord {
+        let member_pk_gs: Vec<Bytes32> =
+            (0..members as usize + delegates as usize).map(identity).collect();
         ChannelRecord {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: members,
@@ -1399,7 +1396,7 @@ mod delegate_join_adoption_tests {
         duplicate.member_pk_gs[4] = identity(0);
         assert!(verify_delegates_appended(&record(3, 1), &duplicate).is_err());
         let mut trailing = record(3, 2);
-        trailing.member_pk_gs[6] = identity(6);
+        trailing.member_pk_gs.push(identity(6)); // an identity past the active prefix
         assert!(verify_delegates_appended(&record(3, 1), &trailing).is_err());
     }
 }

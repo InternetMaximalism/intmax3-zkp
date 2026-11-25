@@ -309,7 +309,7 @@ mod tests {
             let state = BalanceState {
                 channel_id: ChannelId::new(rng.gen_range(1..u32::MAX as u64)).unwrap(),
                 member_count: member_count as u8,
-                delegate_count: delegate_count as u16,
+                delegate_count: delegate_count as u32,
                 enc_balances: BalanceState::pad_enc_balances(&enc_active),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&pk_active),
                 recipients: BalanceState::pad_recipients(&recipients_active),
@@ -326,17 +326,24 @@ mod tests {
             // Alternate between an ACTIVE slot (random nonzero recipient) and a PADDING slot
             // (zero recipient, all-zero token row) so the circuit leaf gadget is exercised on
             // BOTH leaf forms of the widened 104-element encoding.
-            let slot = if rng.r#gen::<bool>() {
-                rng.gen_range(0..active)
-            } else {
-                MAX_CHANNEL_MEMBERS - 1 // always padding: active <= MAX_SIG_CLUSTER + 16 < 1023
+            // Padding slots are not stored: their row is the all-default row (the padding leaf).
+            let padding_row = crate::common::balance_state::SlotRow {
+                regev_pk_digest: Bytes32::default(),
+                enc_balances: crate::common::balance_state::zero_token_row(),
+                pending_adds: [0; crate::constants::MAX_CHANNEL_TOKENS],
+                recipient: crate::ethereum_types::address::Address::default(),
             };
-            let slot_ct_digests = BalanceState::token_ct_digests(&state.enc_balances[slot]);
+            let row = if rng.r#gen::<bool>() {
+                state.slot_row(rng.gen_range(0..active))
+            } else {
+                padding_row
+            };
+            let slot_ct_digests = BalanceState::token_ct_digests(&row.enc_balances);
             let expected_leaf = balance_slot_leaf_hash(
-                state.regev_pk_digests[slot],
+                row.regev_pk_digest,
                 &slot_ct_digests,
-                &state.pending_adds[slot],
-                state.recipients[slot],
+                &row.pending_adds,
+                row.recipient,
             );
 
             let mut pw = PartialWitness::<F>::new();
@@ -349,7 +356,7 @@ mod tests {
                 .unwrap();
             pw.set_target(
                 delegate_count_t,
-                F::from_canonical_u16(state.delegate_count),
+                F::from_canonical_u32(state.delegate_count),
             )
             .unwrap();
             pw.set_target(token_count_t, F::from_canonical_u8(state.token_count))
@@ -362,15 +369,15 @@ mod tests {
             settled_tx_chain_t.set_witness(&mut pw, state.settled_tx_chain);
             settled_tx_accumulator_root_t.set_witness(&mut pw, state.settled_tx_accumulator_root);
             state_version_t.set_witness(&mut pw, U64::from(state.state_version));
-            leaf_pk_t.set_witness(&mut pw, state.regev_pk_digests[slot]);
+            leaf_pk_t.set_witness(&mut pw, row.regev_pk_digest);
             for (t, digest) in slot_ct_digests.iter().enumerate() {
                 leaf_enc_t[t].set_witness(&mut pw, *digest);
             }
-            for (t, &adds) in state.pending_adds[slot].iter().enumerate() {
+            for (t, &adds) in row.pending_adds.iter().enumerate() {
                 pw.set_target(leaf_adds_t[t], F::from_canonical_u32(adds))
                     .unwrap();
             }
-            leaf_recipient_t.set_witness(&mut pw, state.recipients[slot]);
+            leaf_recipient_t.set_witness(&mut pw, row.recipient);
 
             let proof = data.prove(pw).expect("h1 recompute proof");
             data.verify(proof.clone()).expect("h1 recompute verify");
@@ -397,8 +404,9 @@ mod tests {
                 "in-circuit leaf gadget must equal native balance_slot_leaf_hash"
             );
 
-            // Sanity: MAX_CHANNEL_MEMBERS stays in sync with the tree the native root builds.
-            assert_eq!(state.slot_leaf_hashes().len(), MAX_CHANNEL_MEMBERS);
+            // Sanity: the native leaves cover exactly the active slots (padding is folded in).
+            assert_eq!(state.slot_leaf_hashes().len(), active);
+            assert!(active <= MAX_CHANNEL_MEMBERS);
         }
     }
 }

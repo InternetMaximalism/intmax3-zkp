@@ -78,14 +78,24 @@ function publish(ch, { prove = true } = {}) {
 const STABLE_HEAD = /retry against one stable finalized block/;
 const STABLE_HEAD_RETRIES = Number(process.env.WALLET_L1_STABLE_HEAD_RETRIES || 12);
 const STABLE_HEAD_RETRY_MS = Number(process.env.WALLET_L1_STABLE_HEAD_RETRY_MS || 5000);
+// A load-balanced RPC (publicnode) answers a state read at the head from a backend that has not
+// imported it yet: forge's fork read in publish-wallet-validity fails "block not found" (rehearsed
+// with rpc-limits-proxy's RPC_LAGGING_BLOCK_RATE, rh-bnf 2026-11-25: channel 8's publish failed
+// so, and only the next client retry of a refused send published it). Same idempotent re-run,
+// after a pause that lets the head age past the lagging backends.
+const LAGGING_BACKEND = /block not found/;
+const LAGGING_BACKEND_RETRY_MS = Number(process.env.WALLET_L1_LAGGING_BACKEND_RETRY_MS || 15000);
 async function publishCandidateRetrying(ch, prove) {
   for (let attempt = 1; ; attempt++) {
     try { return await publishCandidate(ch, prove); }
     catch (e) {
       const text = [e && e.message, e && e.stdout, e && e.stderr].filter(Boolean).map(String).join('\n');
-      if (!STABLE_HEAD.test(text) || attempt >= STABLE_HEAD_RETRIES) throw e;
-      console.error(`[wallet-l1] channel ${ch}: the L1 finalized head moved during a read-back; publishing again (${attempt}/${STABLE_HEAD_RETRIES})`);
-      await sleep(STABLE_HEAD_RETRY_MS);
+      const stableHead = STABLE_HEAD.test(text), lagging = !stableHead && LAGGING_BACKEND.test(text);
+      if ((!stableHead && !lagging) || attempt >= STABLE_HEAD_RETRIES) throw e;
+      console.error(lagging
+        ? `[wallet-l1] channel ${ch}: the RPC answered from a backend behind the head (block not found); publishing again (${attempt}/${STABLE_HEAD_RETRIES})`
+        : `[wallet-l1] channel ${ch}: the L1 finalized head moved during a read-back; publishing again (${attempt}/${STABLE_HEAD_RETRIES})`);
+      await sleep(lagging ? LAGGING_BACKEND_RETRY_MS : STABLE_HEAD_RETRY_MS);
     }
   }
 }

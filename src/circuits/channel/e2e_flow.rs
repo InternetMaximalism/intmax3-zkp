@@ -63,7 +63,6 @@ use crate::{
             WithdrawalClaim,
         },
     },
-    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -71,7 +70,6 @@ use crate::{
         MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier, RegevPk, RegevSecurityLevel, RegevSk,
         add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount, prove_balance_refresh,
         prove_channel_tx_decrypted, prove_channel_update_decrypted, prove_withdraw_claim,
-        regev_pk_root,
     },
 };
 
@@ -96,14 +94,14 @@ const B_GENESIS: [u64; E2E_ACTIVE] = [10, 20, 30];
 
 /// Pad an active prefix of Regev pubkeys to the full MAX_CHANNEL_MEMBERS array (padding =
 /// `RegevPk::padding()`, pad-to-MAX D6).
-fn pad_pks(active: &[RegevPk]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
-    std::array::from_fn(|i| active.get(i).cloned().unwrap_or_else(RegevPk::padding))
+fn pad_pks(active: &[RegevPk]) -> Vec<RegevPk> {
+    active.to_vec()
 }
 
 /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array (padding =
 /// `Bytes32::default()`).
-fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
-    std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+fn pad_hashes(active: &[Bytes32]) -> Vec<Bytes32> {
+    active.to_vec()
 }
 
 /// Transport-level (Plonky2 intmax) proof verifier for this flow.
@@ -220,7 +218,7 @@ fn transport_envelope() -> ChannelProofEnvelope {
 fn genesis_state(
     rng: &mut SmallRng,
     record: &ChannelRecord,
-    pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    pks: &[RegevPk],
     balances: [u64; E2E_ACTIVE],
     fund_amount: u32,
     nullifier_root: Bytes32,
@@ -294,9 +292,9 @@ fn u256_from_u64(value: u64) -> U256 {
 /// dry-run construction here; tests verify clones (happy path) or tampered clones (negatives),
 /// so the proof generation count stays bounded.
 struct FlowFixture {
-    a_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    a_pks: Vec<RegevPk>,
     a_sks: Vec<RegevSk>,
-    b_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
+    b_pks: Vec<RegevPk>,
     b_sks: Vec<RegevSk>,
     in_channel: InChannelTransferUpdateWitness,
     send: InterChannelSendUpdateWitness,
@@ -326,7 +324,7 @@ fn build_flow() -> FlowFixture {
         a_id,
         0,
         [user(a_id, 10), user(a_id, 11), user(a_id, 12)],
-        regev_pk_root(&a_pks),
+        crate::regev::channel_regev_pk_root(&a_pks),
     );
 
     // Channel B: dave (key 21, slot 0), erin (key 22, slot 1), frank (key 23, slot 2).
@@ -338,7 +336,7 @@ fn build_flow() -> FlowFixture {
         b_id,
         0,
         [user(b_id, 21), user(b_id, 22), user(b_id, 23)],
-        regev_pk_root(&b_pks),
+        crate::regev::channel_regev_pk_root(&b_pks),
     );
 
     let (a0, _a_genesis_witnesses) = genesis_state(
@@ -387,9 +385,9 @@ fn build_flow() -> FlowFixture {
                 bob_after,
                 a0.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: a0.balance_state.regev_pk_digests,
+            regev_pk_digests: a0.balance_state.regev_pk_digests.clone(),
             // B-1b: recipients are carried UNCHANGED across a transition.
-            recipients: a0.balance_state.recipients,
+            recipients: a0.balance_state.recipients.clone(),
             settled_tx_chain: a0.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 1,
@@ -478,9 +476,9 @@ fn build_flow() -> FlowFixture {
                 a1.balance_state.enc_balances[1][0].clone(),
                 a1.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: a1.balance_state.regev_pk_digests,
+            regev_pk_digests: a1.balance_state.regev_pk_digests.clone(),
             // B-1b: recipients are carried UNCHANGED across a transition.
-            recipients: a1.balance_state.recipients,
+            recipients: a1.balance_state.recipients.clone(),
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
@@ -614,7 +612,7 @@ fn build_flow() -> FlowFixture {
             ]),
             // The import already chained this logical receive; bundle application is not another
             // base settlement.
-            regev_pk_digests: b1.balance_state.regev_pk_digests,
+            regev_pk_digests: b1.balance_state.regev_pk_digests.clone(),
             settled_tx_chain: b1.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: applied_root,
             state_version: 2,
@@ -1518,7 +1516,7 @@ fn degenerate_sender_e2_witnesses() -> (
         a_id,
         0,
         [user(a_id, 10), user(a_id, 11), user(a_id, 12)],
-        regev_pk_root(&a_pks),
+        crate::regev::channel_regev_pk_root(&a_pks),
     );
     // Channel B: dave / erin / frank, honest.
     let (b_pk0, _b_sk0) = channel_keygen(&mut rng);
@@ -1529,7 +1527,7 @@ fn degenerate_sender_e2_witnesses() -> (
         b_id,
         0,
         [user(b_id, 21), user(b_id, 22), user(b_id, 23)],
-        regev_pk_root(&b_pks),
+        crate::regev::channel_regev_pk_root(&b_pks),
     );
 
     // Alice's position is the canonical ZERO ciphertext; the fund (40) is bob's and carol's.
@@ -1611,8 +1609,8 @@ fn degenerate_sender_e2_witnesses() -> (
                 a0.balance_state.enc_balances[1][0].clone(),
                 a0.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: a0.balance_state.regev_pk_digests,
-            recipients: a0.balance_state.recipients,
+            regev_pk_digests: a0.balance_state.regev_pk_digests.clone(),
+            recipients: a0.balance_state.recipients.clone(),
             settled_tx_chain: settled_tx_chain_push(a0.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 1,
@@ -1728,7 +1726,7 @@ fn degenerate_sender_e2_witnesses() -> (
                 b1.balance_state.enc_balances[1][0].clone(),
                 b1.balance_state.enc_balances[2][0].clone(),
             ]),
-            regev_pk_digests: b1.balance_state.regev_pk_digests,
+            regev_pk_digests: b1.balance_state.regev_pk_digests.clone(),
             settled_tx_chain: b1.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: applied_root,
             state_version: 2,

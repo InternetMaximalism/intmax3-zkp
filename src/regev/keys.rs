@@ -232,11 +232,44 @@ pub fn regev_pk_root(pks: &[RegevPk]) -> Bytes32 {
     hash_words(&words)
 }
 
+/// The channel's Regev key root: [`regev_pk_root`] over the ACTIVE slots' keys
+/// (`member_count + delegate_count`, slot order). The preimage carries the key count, so the root
+/// binds the active set exactly; the padding slots past it are not hashed, and the cost is linear
+/// in the active participants, not in `MAX_CHANNEL_MEMBERS`.
+pub fn channel_regev_pk_root(active: &[RegevPk]) -> Bytes32 {
+    assert!(
+        active.len() <= crate::constants::MAX_CHANNEL_MEMBERS,
+        "more keys than balance slots"
+    );
+    regev_pk_root(active)
+}
+
 #[cfg(test)]
 mod tests {
     use rand010::{SeedableRng, rngs::SmallRng};
 
     use super::*;
+
+    /// The channel root is `regev_pk_root` over the active keys alone: `[IMRR, len, digests...]`
+    /// with `len` = the active count and no padding keys.
+    #[test]
+    fn channel_root_hashes_only_the_active_keys() {
+        let mut rng = SmallRng::seed_from_u64(9);
+        let active: Vec<RegevPk> = (0..3).map(|_| channel_keygen(&mut rng).0).collect();
+        let mut words = vec![REGEV_PK_ROOT_DOMAIN, active.len() as u32];
+        for pk in &active {
+            words.extend(pk.digest().to_u32_vec());
+        }
+        let expected = Bytes32::from_u32_slice(
+            &plonky2_keccak::utils::solidity_keccak256(&words),
+        )
+        .unwrap();
+        assert_eq!(channel_regev_pk_root(&active), expected);
+        // The count is in the preimage: one more (padding) key is a different root.
+        let mut extended = active.clone();
+        extended.push(RegevPk::padding());
+        assert_ne!(channel_regev_pk_root(&extended), expected);
+    }
 
     #[test]
     fn keygen_produces_valid_canonical_keys() {

@@ -97,6 +97,7 @@ fn self_driving_real_anvil_deposit_matches_rust() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
         ]),
         "forge deploy",
     );

@@ -34,7 +34,7 @@ const MAX_U32 = 0xffffffff;
 // Same balance-slot ceiling as the protocol (`MAX_CHANNEL_MEMBERS`); the authoritative bound is
 // the channel's own `member_count + delegate_count`, which the caller passes in. This is only a
 // sanity ceiling on the configured faucet slot.
-const MAX_SLOTS = 1024;
+const MAX_SLOTS = 1 << 20;
 
 // Defaults, all overridable by env. Chosen for a demo testnet: enough to try a transfer, far too
 // little to be worth farming, and a per-channel ceiling that bounds the total exposure of one
@@ -100,7 +100,7 @@ function faucetConfig(env) {
 
   const faucetSlot = parseIntStrict(e.FAUCET_SLOT);
   if (faucetSlot === null || faucetSlot >= MAX_SLOTS) {
-    return off('FAUCET_SLOT must be a balance slot index (integer, 0..1023) of a CLI-controlled co-signing member');
+    return off('FAUCET_SLOT must be a balance slot index (integer, 0..2^20-1) of a CLI-controlled co-signing member');
   }
   const tokenIndex = parseIntStrict(e.ITX_TOKEN_INDEX);
   if (tokenIndex === null || tokenIndex > MAX_U32) {

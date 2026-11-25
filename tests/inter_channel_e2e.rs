@@ -175,7 +175,7 @@ fn cast(rpc: &str, args: &[&str], label: &str) -> String {
 fn abi_word(data: &str, i: usize) -> &str {
     &data[i * 64..(i + 1) * 64]
 }
-fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u32, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -183,9 +183,8 @@ fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
         regev_pk: k.regev_pk.clone(),
     }
 }
-fn pks_array(keys: &[MemberKeys]) -> [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] {
-    let mut arr: [RegevPk; intmax3_zkp::constants::MAX_CHANNEL_MEMBERS] =
-        std::array::from_fn(|_| RegevPk::padding());
+fn pks_array(keys: &[MemberKeys]) -> Vec<RegevPk> {
+    let mut arr: Vec<RegevPk> = vec![RegevPk::padding(); keys.len()];
     for (i, k) in keys.iter().enumerate() {
         arr[i] = k.regev_pk.clone();
     }
@@ -274,6 +273,7 @@ fn inter_channel_transfer_real_deposit_backed() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
         ]),
         "forge deploy",
     );
@@ -301,12 +301,12 @@ fn inter_channel_transfer_real_deposit_backed() {
     let a_members: Vec<MemberInfo> = a_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     let b_members: Vec<MemberInfo> = b_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     let a_record = build_record(5, &a_members, 0, 0).expect("A record");
     let b_record = build_record(7, &b_members, 0, 0).expect("B record");
@@ -724,7 +724,7 @@ fn record_members(record: &ChannelRecord, keys: &[MemberKeys]) -> Vec<MemberInfo
     let _ = record;
     keys.iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect()
 }
 

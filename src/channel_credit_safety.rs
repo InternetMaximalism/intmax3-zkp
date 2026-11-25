@@ -100,7 +100,7 @@ impl ChannelCreditBounds {
             schema_version: CREDIT_BOUNDS_SCHEMA_VERSION,
             channel_id: state.channel_id,
             state_digest: state.digest,
-            upper_bounds: vec![[Some(0); MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS],
+            upper_bounds: vec![[Some(0); MAX_CHANNEL_TOKENS]; active],
         };
         for slot in 0..active {
             for token_slot in 0..tokens {
@@ -135,12 +135,13 @@ impl ChannelCreditBounds {
         if self.channel_id != state.channel_id || self.state_digest != state.digest {
             return Err(CreditSafetyError::StateMismatch);
         }
-        if self.upper_bounds.len() != MAX_CHANNEL_MEMBERS {
+        // One bounds row per ACTIVE slot (padding slots hold nothing and are never stored).
+        if self.upper_bounds.len() != active {
             return Err(CreditSafetyError::InvalidLayout("bounds row count"));
         }
-        for (slot, row) in self.upper_bounds.iter().enumerate() {
+        for row in self.upper_bounds.iter() {
             for (token_slot, &bound) in row.iter().enumerate() {
-                if (slot >= active || token_slot >= tokens) && bound != Some(0) {
+                if token_slot >= tokens && bound != Some(0) {
                     return Err(CreditSafetyError::InvalidLayout(
                         "nonzero/unknown padding bound",
                     ));
@@ -194,7 +195,7 @@ impl ChannelCreditBounds {
             next.unallocated_confirmed_incoming,
         );
         let mut pools = [Some(0); MAX_CHANNEL_TOKENS];
-        let mut changed = vec![[false; MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS];
+        let mut changed = vec![[false; MAX_CHANNEL_TOKENS]; next_active];
         for (token_slot, pool) in pools.iter_mut().enumerate().take(next_tokens) {
             *pool = add_bounds(
                 positive_difference_bound(
@@ -207,12 +208,17 @@ impl ChannelCreditBounds {
                 // Including the key digest makes an unchanged ciphertext under a new key a
                 // changed cell too. Legitimate zero-opening joins must have been authenticated
                 // by their dedicated caller before reaching this module.
-                row[token_slot] = prev.balance_state.enc_balances[slot][token_slot]
-                    != next.balance_state.enc_balances[slot][token_slot]
-                    || prev.balance_state.regev_pk_digests[slot]
-                        != next.balance_state.regev_pk_digests[slot];
+                // A slot the predecessor did not hold (a join) is a changed cell; its prior
+                // bound is the canonical zero opening.
+                row[token_slot] = prev.balance_state.enc_balances.get(slot).map(|r| &r[token_slot])
+                    != Some(&next.balance_state.enc_balances[slot][token_slot])
+                    || prev.balance_state.regev_pk_digests.get(slot)
+                        != Some(&next.balance_state.regev_pk_digests[slot]);
                 if row[token_slot] {
-                    *pool = add_bounds(*pool, self.upper_bounds[slot][token_slot]);
+                    *pool = add_bounds(
+                        *pool,
+                        self.upper_bounds.get(slot).map_or(Some(0), |r| r[token_slot]),
+                    );
                 }
             }
         }
@@ -221,9 +227,9 @@ impl ChannelCreditBounds {
             schema_version: CREDIT_BOUNDS_SCHEMA_VERSION,
             channel_id: next.channel_id,
             state_digest: next.digest,
-            upper_bounds: vec![[Some(0); MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS],
+            upper_bounds: vec![[Some(0); MAX_CHANNEL_TOKENS]; next_active],
         };
-        for (slot, row) in changed.iter().enumerate().take(next_active) {
+        for (slot, row) in changed.iter().enumerate() {
             for (token_slot, &is_changed) in row.iter().enumerate().take(next_tokens) {
                 if is_changed {
                     next.balance_state.enc_balances[slot][token_slot]
@@ -236,7 +242,7 @@ impl ChannelCreditBounds {
                 let carried = if is_changed {
                     pools[token_slot]
                 } else {
-                    self.upper_bounds[slot][token_slot]
+                    self.upper_bounds.get(slot).map_or(Some(0), |r| r[token_slot])
                 };
                 let known = tighter_bound(carried, as_u64(next.channel_fund.amounts[token_slot]));
                 let bound = with_owned_plaintext(
@@ -301,7 +307,7 @@ fn checked_layout(state: &ChannelState) -> Result<(usize, usize), CreditSafetyEr
             "active participant/token count",
         ));
     }
-    if balance.enc_balances.len() != MAX_CHANNEL_MEMBERS {
+    if balance.enc_balances.len() != active {
         return Err(CreditSafetyError::InvalidLayout("ciphertext row count"));
     }
     Ok((active, tokens))
@@ -390,14 +396,14 @@ mod tests {
                     std::array::from_fn(|_| {
                         crate::common::balance_state::zero_ciphertext().clone()
                     });
-                    MAX_CHANNEL_MEMBERS
+                    3
                 ],
-                regev_pk_digests: [Bytes32::default(); MAX_CHANNEL_MEMBERS],
-                recipients: [Address::default(); MAX_CHANNEL_MEMBERS],
+                regev_pk_digests: vec![Bytes32::default(); 3],
+                recipients: vec![Address::default(); 3],
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 0,
-                pending_adds: vec![[0; MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS],
+                pending_adds: vec![[0; MAX_CHANNEL_TOKENS]; 3],
                 token_registry: [0; MAX_CHANNEL_TOKENS],
                 token_count: 1,
             },

@@ -16,7 +16,7 @@ use rand010::{SeedableRng, rngs::StdRng};
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 
-fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u32, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -45,7 +45,7 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
     let mut members: Vec<MemberInfo> = member_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     members.push(info(3, &delegate_keys));
 
@@ -173,7 +173,7 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     let mut members: Vec<MemberInfo> = member_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     members.push(info(3, &d3));
     members.push(info(4, &d4));
@@ -286,7 +286,7 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut members: Vec<MemberInfo> = mk
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     members.push(info(3, &d3));
     let record = build_record(7, &members, 0, 1).unwrap();
@@ -347,11 +347,21 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut v2: ChannelState = v1.clone();
     v2.prev_digest = v2.digest;
     v2.balance_state.delegate_count = 2;
-    v2.balance_state.enc_balances[4][0] = c4;
-    v2.balance_state.pending_adds[4][0] = 0;
+    // The state stores only active slots: the joiner's row is APPENDED at the old boundary, and
+    // (as channel_member::join_delegate does) its leaf binds the joiner's own Regev pk digest —
+    // the import checks every active slot's digest against that slot's member key.
+    let mut row4 = intmax3_zkp::common::balance_state::zero_token_row();
+    row4[0] = c4;
+    v2.balance_state.enc_balances.push(row4);
+    v2.balance_state
+        .pending_adds
+        .push([0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS]);
+    v2.balance_state
+        .regev_pk_digests
+        .push(Bytes32::from(d4.regev_pk.poseidon_digest()));
     // B-1b: a join MUST bind the new delegate's L1 exit address into its slot leaf (mirrors
     // channel_member::join_delegate; validate() fail-closes on a zero active recipient).
-    v2.balance_state.recipients[4] = test_recipients_b1b(5)[4];
+    v2.balance_state.recipients.push(test_recipients_b1b(5)[4]);
     v2.balance_state.state_version += 1;
     v2.member_signatures.clear();
     let mut v2 = v2.with_computed_digest();
@@ -431,7 +441,7 @@ fn delegate_refresh_after_receive_enables_send() {
     let mut members: Vec<MemberInfo> = mk
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u16, k))
+        .map(|(i, k)| info(i as u32, k))
         .collect();
     members.push(info(3, &d3));
     members.push(info(4, &d4));

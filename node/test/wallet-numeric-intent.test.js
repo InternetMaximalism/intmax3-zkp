@@ -78,7 +78,7 @@ test('recipient/local-token/base-token/destination/nonce inputs cannot be trunca
     assert.throws(() => h.wallet.burnSend('1', recipient, value, 0), /tokenIndex/);
     assert.throws(() => h.wallet.burnSend('1', recipient, 0, value), /base nonce/);
   }
-  for (const value of [1024, 65536]) {
+  for (const value of [1 << 20, 2 ** 32]) {
     assert.throws(() => h.wallet.send(0, member(value), '1'), /recipientSlot/);
     assert.throws(() => h.wallet.sendInterChannel(8, value, '1', {}, 0, 0), /toSlot/);
   }
