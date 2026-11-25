@@ -367,8 +367,13 @@ jobs:
       # Filter gotcha: libtest filters are substrings, so `foo::` does NOT match `foo_circuit::`.
       # The module names below are top-level and safe; do not add trailing-`::` submodule filters
       # without checking `-- --list`.
+      #
+      # YAML gotcha: a plain scalar may not contain ": ", so the filters (`common:: utils::`) must
+      # stay inside a block scalar. Written on one `run:` line (150bb195, 2026-09-09), they made this
+      # whole file invalid YAML until 2026-11-25, and GitHub ran NO job of this workflow meanwhile.
       - name: lib unit tests (modules that fit the runner)
-        run: .github/ci/rust-test-guard.sh 240 0 -- cargo test --release --locked --lib -- --test-threads=1 common:: utils:: ethereum_types:: regev::
+        run: |
+          .github/ci/rust-test-guard.sh 240 0 -- cargo test --release --locked --lib -- --test-threads=1 common:: utils:: ethereum_types:: regev::
 
       - name: nullifier and exclusivity soundness suites
         run: |
