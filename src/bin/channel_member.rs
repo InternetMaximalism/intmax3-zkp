@@ -81,7 +81,7 @@ use intmax3_zkp::{
     },
     close_funding::{CloseFundingProposal, verify_close_funding_proposal},
     common::{
-        balance_state::{BalanceState, tx_leaf_hash},
+        balance_state::{BalanceState, tx_leaf_hash, with_decode_slot_limit},
         channel::{
             ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
             MemberSignature, burn_descriptor, close_member_set_commitment, token_funds_digest,
@@ -2294,13 +2294,30 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
 // THIS host's trusted head (the successor computed by the same state-application functions the
 // full-state builders use), then every caller runs its unchanged full-state verification on it.
 
+/// Decode a payload that claims to extend `snapshot`'s head.
+///
+/// SECURITY (decode-time memory): this runs BEFORE any signature or proof in the payload is
+/// checked, on bytes anyone can send, and a decoded state costs ~160 KB per slot it DECLARES
+/// active. Every transition these payloads carry keeps the participant split of the head it
+/// extends (`verify_ordinary_state_metadata` pins both sides to this host's own record), so a
+/// successor declaring more slots than that record could only be rejected later — it is refused
+/// here instead, before its rows are built.
+fn from_value_at_head<T: for<'de> Deserialize<'de>>(
+    snapshot: &ChannelSnapshot,
+    value: serde_json::Value,
+) -> serde_json::Result<T> {
+    let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
+    with_decode_slot_limit(active, || serde_json::from_value(value))
+}
+
 fn read_send_payload(path: &str, snapshot: &ChannelSnapshot) -> SendPayload {
     let value: serde_json::Value = read_json(path);
     if value.get("anchorDigest").is_none() {
-        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+        return from_value_at_head(snapshot, value)
+            .unwrap_or_else(|e| die(format!("parse {path}: {e}")));
     }
-    let slim: intmax3_zkp::wallet_core::SlimSendPayload =
-        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    let slim: intmax3_zkp::wallet_core::SlimSendPayload = from_value_at_head(snapshot, value)
+        .unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
     if slim.anchor_digest != snapshot.state.digest {
         die("stale send: the slim payload's anchor is not the channel head");
     }
@@ -2326,10 +2343,11 @@ fn read_send_payload(path: &str, snapshot: &ChannelSnapshot) -> SendPayload {
 fn read_refresh_payload(path: &str, snapshot: &ChannelSnapshot) -> RefreshPayload {
     let value: serde_json::Value = read_json(path);
     if value.get("newCt").is_none() {
-        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+        return from_value_at_head(snapshot, value)
+            .unwrap_or_else(|e| die(format!("parse {path}: {e}")));
     }
-    let slim: intmax3_zkp::slot_view::SlimRefreshPayload =
-        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+    let slim: intmax3_zkp::slot_view::SlimRefreshPayload = from_value_at_head(snapshot, value)
+        .unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
     intmax3_zkp::slot_view::inflate_refresh(snapshot, &slim)
         .unwrap_or_else(|e| die(format!("slim refresh: {e}")))
 }
@@ -2337,10 +2355,12 @@ fn read_refresh_payload(path: &str, snapshot: &ChannelSnapshot) -> RefreshPayloa
 fn read_debit_payload(path: &str, snapshot: &ChannelSnapshot) -> InterChannelDebitPayload {
     let value: serde_json::Value = read_json(path);
     if value.get("proposedDigest").is_none() {
-        return serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse {path}: {e}")));
+        return from_value_at_head(snapshot, value)
+            .unwrap_or_else(|e| die(format!("parse {path}: {e}")));
     }
     let slim: intmax3_zkp::slot_view::SlimInterChannelDebitPayload =
-        serde_json::from_value(value).unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
+        from_value_at_head(snapshot, value)
+            .unwrap_or_else(|e| die(format!("parse slim {path}: {e}")));
     intmax3_zkp::slot_view::inflate_inter_channel_debit(snapshot, &slim)
         .unwrap_or_else(|e| die(format!("slim inter-channel debit: {e}")))
         .0
@@ -12227,7 +12247,9 @@ fn cmd_cosign_batch(args: &[String]) {
         applies = verified.into_iter().map(|(apply, _)| apply).collect();
     } else {
         // LEGACY: a JSON array of fat SendPayloads.
-        let payloads: Vec<SendPayload> = read_json(in_path);
+        let payloads: Vec<SendPayload> = serde_json::from_str(&raw)
+            .and_then(|value| from_value_at_head(&state.snapshot, value))
+            .unwrap_or_else(|e| die(format!("parse {in_path}: {e}")));
         if payloads.is_empty() {
             die("cosign-batch: empty batch");
         }

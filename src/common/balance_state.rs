@@ -124,7 +124,7 @@ mod token_matrix_serde {
 
     use super::{
         MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS, RegevCiphertext, TokenCiphertexts,
-        TokenPendingAdds, zero_ciphertext,
+        TokenPendingAdds, zero_ciphertext, zero_token_row,
     };
 
     pub mod row {
@@ -183,29 +183,62 @@ mod token_matrix_serde {
             sparse.serialize(serializer)
         }
 
-        pub fn deserialize<'de, D: Deserializer<'de>>(
+        /// The rows exactly as encoded: one map per slot holding only the positions the encoding
+        /// spells out.
+        ///
+        /// SECURITY (decode-time memory): this deliberately does NOT fill the omitted positions.
+        /// A dense row is `MAX_CHANNEL_TOKENS` full ciphertexts (~160 KB) while an empty row costs
+        /// the sender three bytes, and the row count here is whatever the encoding carries. The
+        /// zero-fill happens in [`materialize`], for the ACTIVE slots only and after the active
+        /// count has been bounded.
+        pub type Sparse = Vec<BTreeMap<u8, RegevCiphertext>>;
+
+        pub fn deserialize_sparse<'de, D: Deserializer<'de>>(
             deserializer: D,
-        ) -> Result<Vec<TokenCiphertexts>, D::Error> {
-            let sparse: Vec<BTreeMap<u8, RegevCiphertext>> = Vec::deserialize(deserializer)?;
+        ) -> Result<Sparse, D::Error> {
+            let sparse: Sparse = Vec::deserialize(deserializer)?;
             if sparse.len() > MAX_CHANNEL_MEMBERS {
                 return Err(D::Error::custom(format!(
                     "encBalances has {} slot rows (> MAX_CHANNEL_MEMBERS = {MAX_CHANNEL_MEMBERS})",
                     sparse.len()
                 )));
             }
-            let mut rows: Vec<TokenCiphertexts> = Vec::with_capacity(sparse.len());
-            for (slot, mut row) in sparse.into_iter().enumerate() {
+            for (slot, row) in sparse.iter().enumerate() {
                 if row.keys().any(|&t| t as usize >= MAX_CHANNEL_TOKENS) {
                     return Err(D::Error::custom(format!(
                         "encBalances[{slot}] has a token position >= MAX_CHANNEL_TOKENS = \
                          {MAX_CHANNEL_TOKENS}"
                     )));
                 }
+            }
+            Ok(sparse)
+        }
+
+        /// The dense rows of the `active` slots. Rows past them are the padding slots an older
+        /// full-width encoding carried: they must hold nothing but the canonical zero ciphertext
+        /// and are dropped without ever being built; missing trailing rows are all-zero.
+        pub fn materialize(
+            mut sparse: Sparse,
+            active: usize,
+        ) -> Result<Vec<TokenCiphertexts>, String> {
+            if sparse
+                .iter()
+                .skip(active)
+                .any(|row| row.values().any(|ct| ct != zero_ciphertext()))
+            {
+                return Err(format!(
+                    "encBalances carries a nonzero value past the active slots ({active})"
+                ));
+            }
+            sparse.truncate(active);
+            let mut rows: Vec<TokenCiphertexts> = Vec::with_capacity(active);
+            for mut row in sparse {
                 rows.push(std::array::from_fn(|t| {
                     row.remove(&(t as u8))
                         .unwrap_or_else(|| zero_ciphertext().clone())
                 }));
             }
+            rows.resize_with(active, zero_token_row);
             Ok(rows)
         }
     }
@@ -301,7 +334,7 @@ pub struct BalanceState {
     /// are never stored: their committed value is the canonical padding leaf, folded into the
     /// slot root by the padding ladder (see [`Self::slot_tree_root`]). Re-checked fail-closed by
     /// [`Self::validate`]; the deserializer normalizes older full-width encodings.
-    #[serde(with = "token_matrix_serde::ciphertexts")]
+    #[serde(serialize_with = "token_matrix_serde::ciphertexts::serialize")]
     pub enc_balances: Vec<TokenCiphertexts>,
     /// Decryption Stage 1: per-slot Regev public-key Poseidon digests, in member slot order.
     /// Active slots carry `Bytes32::from(RegevPk::poseidon_digest())` (the SAME injective
@@ -386,8 +419,8 @@ struct BalanceStateWire {
     channel_id: ChannelId,
     member_count: u8,
     delegate_count: u32,
-    #[serde(with = "token_matrix_serde::ciphertexts")]
-    enc_balances: Vec<TokenCiphertexts>,
+    #[serde(deserialize_with = "token_matrix_serde::ciphertexts::deserialize_sparse")]
+    enc_balances: token_matrix_serde::ciphertexts::Sparse,
     regev_pk_digests: Vec<Bytes32>,
     recipients: Vec<Address>,
     settled_tx_chain: Bytes32,
@@ -422,6 +455,33 @@ fn trim_to_active<T: PartialEq + Clone>(
     Ok(rows)
 }
 
+thread_local! {
+    /// See [`with_decode_slot_limit`].
+    static DECODE_SLOT_LIMIT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(MAX_CHANNEL_MEMBERS) };
+}
+
+/// Runs `decode` with every [`BalanceState`] decoded on this thread refused if it declares more
+/// than `limit` active slots (never more than `MAX_CHANNEL_MEMBERS`).
+///
+/// SECURITY (decode-time memory): a decoded state holds one dense row of `MAX_CHANNEL_TOKENS`
+/// ciphertexts (~160 KB) per ACTIVE slot, and the active count is read from the encoding itself:
+/// declaring a slot costs its sender a digest and an address. So a caller decoding input it has
+/// not authenticated yet bounds the count by what it already trusts — the slot count of its own
+/// channel head — and the refusal happens before any row is built. Without a limit the only
+/// bound is the protocol maximum.
+pub fn with_decode_slot_limit<T>(limit: usize, decode: impl FnOnce() -> T) -> T {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECODE_SLOT_LIMIT.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore =
+        Restore(DECODE_SLOT_LIMIT.with(|cell| cell.replace(limit.min(MAX_CHANNEL_MEMBERS))));
+    decode()
+}
+
 impl TryFrom<BalanceStateWire> for BalanceState {
     type Error = String;
 
@@ -430,12 +490,18 @@ impl TryFrom<BalanceStateWire> for BalanceState {
         if active > MAX_CHANNEL_MEMBERS {
             return Err(format!("{active} active slots exceed MAX_CHANNEL_MEMBERS"));
         }
+        let limit = DECODE_SLOT_LIMIT.with(std::cell::Cell::get);
+        if active > limit {
+            return Err(format!(
+                "{active} active slots exceed the {limit} this decoder accepts"
+            ));
+        }
         Ok(Self {
             channel_id: w.channel_id,
             member_count: w.member_count,
             delegate_count: w.delegate_count,
             // Ciphertext and add-counter rows drop trailing all-zero rows on the wire.
-            enc_balances: trim_to_active(w.enc_balances, active, zero_token_row(), true, "encBalances")?,
+            enc_balances: token_matrix_serde::ciphertexts::materialize(w.enc_balances, active)?,
             regev_pk_digests: trim_to_active(
                 w.regev_pk_digests,
                 active,
@@ -1666,6 +1732,83 @@ mod tests {
         value["regevPkDigests"][active] =
             serde_json::to_value(Bytes32::from_u32_slice(&[1; 8]).unwrap()).unwrap();
         assert!(serde_json::from_value::<BalanceState>(value).is_err());
+    }
+
+    /// SECURITY (decode-time memory): rows past the active slots are checked and dropped in their
+    /// sparse form. An empty row costs its sender three bytes; built dense it is
+    /// `MAX_CHANNEL_TOKENS` full ciphertexts here.
+    #[test]
+    fn rows_past_the_active_slots_are_dropped_without_being_built() {
+        let state = sample_state();
+        let active = state.active_slots();
+        let extra = 5_000;
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["encBalances"]
+            .as_array_mut()
+            .unwrap()
+            .resize(active + extra, serde_json::json!({}));
+
+        // The wire form holds every row exactly as encoded, nothing filled in …
+        let wire: BalanceStateWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(wire.enc_balances.len(), active + extra);
+        assert!(wire.enc_balances[active..].iter().all(|row| row.is_empty()));
+        // … and only the active rows are ever made dense.
+        let decoded = BalanceState::try_from(wire).unwrap();
+        assert_eq!(decoded, state);
+        assert_eq!(decoded.enc_balances.len(), active);
+
+        // An explicit canonical zero past the active slots is the older full-width encoding.
+        value["encBalances"][active] =
+            serde_json::json!({ "0": serde_json::to_value(zero_ciphertext()).unwrap() });
+        assert_eq!(
+            serde_json::from_value::<BalanceState>(value.clone()).unwrap(),
+            state
+        );
+        // Any other value there is refused, never silently dropped.
+        value["encBalances"][active] =
+            serde_json::json!({ "0": serde_json::to_value(ciphertext(9)).unwrap() });
+        assert!(serde_json::from_value::<BalanceState>(value).is_err());
+    }
+
+    /// SECURITY (decode-time memory): the active count is read from the encoding and every slot
+    /// it declares becomes a dense row, so a caller that knows its channel's slot count refuses a
+    /// larger declaration before any row is built.
+    #[test]
+    fn decode_slot_limit_refuses_a_larger_declared_slot_count() {
+        let state = sample_state();
+        let active = state.active_slots();
+        let json = serde_json::to_string(&state).unwrap();
+
+        let at_limit =
+            with_decode_slot_limit(active, || serde_json::from_str::<BalanceState>(&json));
+        assert_eq!(at_limit.unwrap(), state);
+        let below =
+            with_decode_slot_limit(active - 1, || serde_json::from_str::<BalanceState>(&json));
+        assert!(
+            below
+                .unwrap_err()
+                .to_string()
+                .contains("active slots exceed")
+        );
+
+        // A state that only DECLARES more slots: digests and recipients extended, no rows sent.
+        let declared = 64usize;
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["delegateCount"] = serde_json::json!(declared - state.member_count as usize);
+        for key in ["regevPkDigests", "recipients"] {
+            let entries = value[key].as_array_mut().unwrap();
+            let filler = entries[0].clone();
+            entries.resize(declared, filler);
+        }
+        let decode = || serde_json::from_value::<BalanceState>(value.clone());
+        assert!(with_decode_slot_limit(active, decode).is_err());
+        // The limit is scoped: an inner scope restores the outer one, and none outlives its
+        // closure.
+        with_decode_slot_limit(active, || {
+            assert!(with_decode_slot_limit(declared, decode).is_ok());
+            assert!(decode().is_err());
+        });
+        assert_eq!(decode().unwrap().enc_balances.len(), declared);
     }
 
     /// The new H1 is the CANONICAL `PoseidonHashOut → Bytes32` encoding of the header hash —
