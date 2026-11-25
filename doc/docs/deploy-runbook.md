@@ -317,11 +317,19 @@ A failed `deploy-settlement` is safe to re-run: while the broadcaster's nonce ha
 the PREPARED write it restarts at the same nonce; once anything was sent it resumes only the
 validated broadcast artifact.
 
+publicnode load-balances over backends that lag the head, so forge's first state read (its fork, at
+the head) can come back `block not found` before anything is sent: on the 2026-11-25 Sepolia rebuild
+7 of 9 forge runs failed that way. `rebuild-public-rollup.sh` (`forge_broadcast`, up to
+`FORGE_BROADCAST_ATTEMPTS`, default 12) and the bootstrap's `deploy-settlement` loop (up to 12) retry
+it after 30 s: afresh while the run has sent nothing, with `--resume` once it has. The same loops
+resume a broadcast whose gas estimate hit a node that had not imported the previous transaction.
+
 **Rehearse first, every time.** `hosting/wallet/test/public-chain-rehearsal.sh` runs this whole
 procedure on a local anvil with a non-devnet chain id (`REHEARSAL_CHAIN_ID`, default 31338: every
 chain-id-gated branch takes its production path, and a wallet on the same machine never mistakes
-the anvil for Sepolia), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, and
-finality that advances an epoch at a time). Its first step builds the binaries exactly as the deploy
+the anvil for Sepolia), behind `rpc-limits-proxy.js` (publicnode's eth_getLogs range cap, finality
+that advances an epoch at a time, and backends that answer a state read at one of the newest blocks
+with `block not found`, `RPC_LAGGING_BLOCK_RATE`, 0.5 in the rehearsal). Its first step builds the binaries exactly as the deploy
 does: a rehearsal of a stale local build rehearses something that will not be deployed.
 `hosting/wallet/test/wallet-public-chain-e2e.js` then drives the production topology through
 `wallet-relay.js`: the relay offering deposits only on its verified rollup, users joining

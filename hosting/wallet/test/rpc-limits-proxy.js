@@ -17,9 +17,16 @@
 //     cap) is refused at submission as mainnet's nodes refuse it ("gas limit too high"). Anvil, even
 //     with --hardfork osaka, mines such transactions, which hid a finalize sent at twice its
 //     simulated gas (Sepolia does not enforce the cap either).
+//   * a load-balanced endpoint answers a state read at a block its backend has not imported yet
+//     with -32001 "block not found" (publicnode, 2026-11-25: forge's first fork read, at the head,
+//     failed on 7 of 9 deploy steps of the testnet rebuild). With RPC_LAGGING_BLOCK_RATE > 0 each
+//     block is, with that probability (decided once per block), still missing on the answering
+//     backend while it is among the newest RPC_LAGGING_BLOCKS (default 2): a state read naming it
+//     by number is refused. Tags (latest, finalized, ...) are always answered.
 // Anvil itself is started with the public chain's id and gas limit (see the rehearsal script).
 //
 // Usage: node rpc-limits-proxy.js <listen port> <upstream url>
+const crypto = require('crypto');
 const http = require('http');
 
 const [listenPort, upstream] = process.argv.slice(2);
@@ -70,6 +77,15 @@ async function resolveTag(tag, head) {
 const RETENTION = Number(process.env.RPC_STATE_RETENTION || 10000);
 const STATE_TAG_INDEX = { eth_call: 1, eth_getBalance: 1, eth_getCode: 1, eth_getTransactionCount: 1, eth_getStorageAt: 2, eth_getProof: 2 };
 const TX_GAS_LIMIT_CAP = BigInt(process.env.RPC_TX_GAS_LIMIT_CAP ?? 2 ** 24);
+const LAGGING_RATE = Number(process.env.RPC_LAGGING_BLOCK_RATE || 0);
+const LAGGING_BLOCKS = Number(process.env.RPC_LAGGING_BLOCKS || 2);
+
+// Whether `block` is one the answering backend has not imported yet: fixed per block, so a retry
+// against a later head is independent while repeated reads of one block agree.
+function blockLags(block) {
+  const digest = crypto.createHash('sha256').update(`lagging-block:${block}`).digest();
+  return digest.readUInt32BE(0) / 2 ** 32 < LAGGING_RATE;
+}
 
 // Minimal RLP: the item at `offset` as { value: Buffer | item[], end }.
 function rlpItem(bytes, offset) {
@@ -129,7 +145,12 @@ async function refusal(call) {
     const tag = (call.params || [])[tagIndex];
     if (typeof tag === 'string' && /^0x[0-9a-f]+$/i.test(tag)) {
       const block = Number(BigInt(tag));
-      if (block < (await blockNumber()) - RETENTION) return { code: -32603, message: `state at block #${block} is pruned` };
+      const head = await blockNumber();
+      if (block < head - RETENTION) return { code: -32603, message: `state at block #${block} is pruned` };
+      if (LAGGING_RATE > 0 && block > head - LAGGING_BLOCKS && blockLags(block)) {
+        console.log(`refused ${call.method} at lagging block ${block} (head ${head})`);
+        return { code: -32001, message: `block not found: 0x${block.toString(16)}` };
+      }
     }
     return null;
   }
@@ -169,4 +190,4 @@ http.createServer((req, res) => {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: String(error.message || error) } }));
     }
   });
-}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE}, tx gas limit <= ${TX_GAS_LIMIT_CAP || 'unlimited'})`));
+}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE}, tx gas limit <= ${TX_GAS_LIMIT_CAP || 'unlimited'}, lagging blocks ${LAGGING_RATE ? `${LAGGING_RATE} x newest ${LAGGING_BLOCKS}` : 'off'})`));
