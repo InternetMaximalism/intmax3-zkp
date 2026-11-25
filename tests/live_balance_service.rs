@@ -1342,3 +1342,228 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         Err(LiveBalanceServiceError::Snapshot(message)) if message.contains("checksum")
     ));
 }
+
+/// Post-close refunds of L1 deposits (G23) through every cursor the materializer can hold:
+/// - a close that falls back across a send (here a burn whose block never reached L1) leaves the
+///   cursor at the pre-send generation, which `retained_prior` keeps;
+/// - a deposit imported locally but never signed (a co-signer went offline) is refunded from its
+///   retained pre-receive generation;
+/// - a second stranded deposit, never received here, is refunded from the first refund's
+///   confirmed continuation, which survives a restart.
+#[cfg(feature = "authenticated-tail-receive")]
+#[test]
+fn late_deposits_chain_after_close_from_retained_and_continued_cursors() {
+    std::thread::Builder::new()
+        .name("late-deposit-chain".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_late_deposit_chain)
+        .expect("spawn large-stack prover thread")
+        .join()
+        .expect("late deposit chain thread");
+}
+
+#[cfg(feature = "authenticated-tail-receive")]
+fn run_late_deposit_chain() {
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField,
+        plonk::{config::PoseidonGoldilocksConfig, proof::ProofWithPublicInputs},
+    };
+    let directory = TestDirectory::new();
+    let balance_path = directory.balance();
+    let channel_id = ChannelId::new(CHANNEL as u64).expect("channel id");
+    let deposit_salt = Salt(
+        intmax3_zkp::utils::poseidon_hash_out::PoseidonHashOut::from_u64_slice(&[11, 12, 13, 14])
+            .expect("salt"),
+    );
+    let mut producer = BlockProducerService::open(&directory.producer(), &[2]).expect("producer");
+    let mut live = LiveBalanceService::initialize(&balance_path, channel_id, Salt::default())
+        .expect("initialize live balance");
+
+    // Three L1 deposits to the channel's recipient: #0 backs genesis, #1 and #2 are stranded.
+    let depositor = Address::from_u32_slice(&[0, 0, 0, 0, 0xD3]).expect("depositor");
+    let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
+    let mut chain = Bytes32::default();
+    let mut deposits = Vec::new();
+    let mut requests = Vec::new();
+    for (index, amount) in [(0u64, DEPOSIT_AMOUNT), (1, 30), (2, 20)] {
+        let deposit = Deposit {
+            deposit_index: U63::new(index).expect("index"),
+            depositor,
+            recipient,
+            token_index: 0,
+            amount: U256::from(amount),
+            block_number: BlockNumber::new(1).expect("block"),
+            aux_data: Bytes32::default(),
+        };
+        chain = deposit.hash_with_prev_hash(chain);
+        requests.push(ProductionDepositRequest {
+            deposit_index: index,
+            depositor,
+            recipient,
+            token_index: 0,
+            amount: U256::from(amount),
+            aux_data: Bytes32::default(),
+            expected_deposit_hash_chain: chain,
+        });
+        deposits.push(deposit);
+    }
+    let genesis_receipt = producer
+        .post_deposit("l1:deposit:0".into(), requests[0].clone())
+        .expect("durable L1 deposit block #0");
+
+    let mut rng = StdRng::seed_from_u64(0x1A7E_DE90);
+    let keys: Vec<MemberKeys> = (0..2).map(|_| MemberKeys::generate(&mut rng)).collect();
+    let members: Vec<MemberInfo> = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, keys)| member_info(slot, keys))
+        .collect();
+    let record = build_record(CHANNEL, &members, 0, 0).expect("record");
+    let (sender_ciphertext, _) =
+        encrypt_amount(&mut rng, &keys[0].regev_pk, DEPOSIT_AMOUNT).expect("encrypt sender");
+    let (other_ciphertext, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, 0).expect("encrypt other");
+    let regev_digests: Vec<Bytes32> = keys
+        .iter()
+        .map(|keys| Bytes32::from(keys.regev_pk.poseidon_digest()))
+        .collect();
+    let exits = [
+        Address::from_u32_slice(&[0, 0, 0, 0, 1]).expect("exit 1"),
+        Address::from_u32_slice(&[0, 0, 0, 0, 2]).expect("exit 2"),
+    ];
+    let genesis = assemble_genesis_state_backed(
+        &record,
+        &[sender_ciphertext, other_ciphertext],
+        &regev_digests,
+        &exits,
+        DEPOSIT_AMOUNT,
+        settled_tx_chain_push(Bytes32::default(), deposits[0].nullifier()),
+        genesis_receipt.extended_state_commitment,
+    )
+    .expect("backed genesis");
+    let genesis_snapshot = ChannelSnapshot {
+        record: record.clone(),
+        state: sign_all(genesis, &keys),
+        members: members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
+    };
+    live.receive_deposit_unbound(&producer, &genesis_receipt, &requests[0], deposit_salt)
+        .expect("genesis receive-deposit proof");
+    live.bind_signed_snapshot(&producer, &genesis_snapshot)
+        .expect("bind N-of-N genesis");
+    producer
+        .register("register:41".into(), genesis_snapshot.clone())
+        .expect("register genesis head");
+
+    let commitment_of = |live: &LiveBalanceService| -> Bytes32 {
+        let circuit = live.late_deposit_circuit();
+        let proof = ProofWithPublicInputs::<GoldilocksField, PoseidonGoldilocksConfig, 2>::from_bytes(
+            live.attestation().expect("attestation").balance_proof,
+            &circuit.balance_vd().common,
+        )
+        .expect("decode balance proof");
+        circuit.balance_commitment(&proof).expect("balance commitment")
+    };
+    let close_intent_digest = fresh_root(0xC105E);
+    let final_h1 = fresh_root(0xF1);
+    let genesis_commitment = commitment_of(&live);
+
+    // A burn the channel signed and settled locally. Its block is assumed never to reach L1, so
+    // the close falls back to the genesis head and the cursor is the pre-burn generation.
+    let mut burn = build_burn(&keys, &genesis_snapshot, 0, 10, 1, &mut rng);
+    burn.debit_payload.proposed_next_state =
+        sign_all(burn.debit_payload.proposed_next_state.clone(), &keys);
+    let burn_state = burn.debit_payload.proposed_next_state.clone();
+    let burn_receipt = producer
+        .post_inter_channel(
+            "burn:0".into(),
+            burn_state.clone(),
+            burn.debit_payload.clone(),
+            burn.transfer_descriptor.clone(),
+        )
+        .expect("durable burn block");
+    live.settle_inter_channel(&producer, &burn_receipt, &burn_state, &burn.debit_payload, &burn.transfer_descriptor)
+        .expect("settle burn");
+    let burned_commitment = commitment_of(&live);
+    assert_ne!(burned_commitment, genesis_commitment);
+    {
+        let circuit = live.late_deposit_circuit();
+        let fallen_back = live
+            .late_deposit_checkpoint(circuit, close_intent_digest, final_h1, genesis_commitment)
+            .expect("a close that fell back across the burn finds its pre-burn generation");
+        assert_eq!(fallen_back.checkpoint.commitment(), genesis_commitment);
+        assert!(fallen_back.retained_deposit.is_none());
+        assert!(
+            live.late_deposit_checkpoint(circuit, close_intent_digest, final_h1, fresh_root(0xBAD))
+                .is_err(),
+            "an unknown cursor is refused"
+        );
+    }
+
+    // Deposit #1 is imported locally (phase 1) but never signed; #2 cannot even be received.
+    let receipt_1 = producer
+        .post_deposit("l1:deposit:1".into(), requests[1].clone())
+        .expect("durable L1 deposit block #1");
+    live.receive_deposit_unbound(&producer, &receipt_1, &requests[1], deposit_salt)
+        .expect("phase-1 import of deposit #1");
+    let receipt_2 = producer
+        .post_deposit("l1:deposit:2".into(), requests[2].clone())
+        .expect("durable L1 deposit block #2");
+    assert!(
+        live.receive_deposit_unbound(&producer, &receipt_2, &requests[2], deposit_salt).is_err(),
+        "deposit #2 waits for #1's binding, which never comes"
+    );
+
+    // The channel closes on the burn head (the last signed one): the cursor is the generation
+    // deposit #1's import replaced, which also names that deposit.
+    let prepared_1 = {
+        let circuit = live.late_deposit_circuit();
+        let cursor = live
+            .late_deposit_checkpoint(circuit, close_intent_digest, final_h1, burned_commitment)
+            .expect("cursor at the pre-receive generation");
+        let kept = cursor.retained_deposit.clone().expect("the retained generation names deposit #1");
+        assert_eq!(kept.request, requests[1]);
+        live.prepare_late_deposit(&cursor.checkpoint, circuit, &producer, &kept.request, kept.deposit_salt)
+            .expect("late deposit #1 receipt")
+    };
+    assert_eq!(prepared_1.statement.previous_balance_commitment, burned_commitment);
+    assert_eq!(prepared_1.statement.depositor, depositor);
+    assert_eq!(prepared_1.statement.amount, U256::from(30u64));
+    // The nullifier covers the block the producer sealed the deposit in.
+    let sealed_in = |deposit: &Deposit, block: u64| Deposit {
+        block_number: BlockNumber::new(block).expect("block"),
+        ..deposit.clone()
+    };
+    assert_eq!(
+        prepared_1.statement.deposit_nullifier,
+        sealed_in(&deposits[1], receipt_1.block_number).nullifier()
+    );
+    let after_1 = prepared_1.statement.next_balance_commitment;
+    assert!(prepared_1.confirmed_checkpoint(fresh_root(0x5)).is_err(), "only the L1-confirmed cursor");
+    let next_1 = prepared_1.confirmed_checkpoint(after_1).expect("confirmed continuation");
+    live.adopt_late_continuation(next_1.clone()).expect("adopt continuation");
+    live.adopt_late_continuation(next_1).expect("adoption is idempotent");
+
+    // The continuation is durable: after a restart, deposit #2 (never received here) is refunded
+    // from it with the channel's recipient salt.
+    drop(live);
+    let live = LiveBalanceService::open(&balance_path, &producer).expect("restart");
+    assert!(live.retained_deposit_salt(&requests[2]).is_none());
+    assert_eq!(live.retained_deposit_salt(&requests[1]), Some(deposit_salt));
+    let prepared_2 = {
+        let circuit = live.late_deposit_circuit();
+        let cursor = live
+            .late_deposit_checkpoint(circuit, close_intent_digest, final_h1, after_1)
+            .expect("cursor at the confirmed continuation");
+        assert_eq!(cursor.checkpoint.commitment(), after_1);
+        assert!(cursor.retained_deposit.is_none());
+        live.prepare_late_deposit(&cursor.checkpoint, circuit, &producer, &requests[2], deposit_salt)
+            .expect("late deposit #2 receipt")
+    };
+    assert_eq!(prepared_2.statement.previous_balance_commitment, after_1);
+    assert_eq!(prepared_2.statement.amount, U256::from(20u64));
+    assert_eq!(
+        prepared_2.statement.deposit_nullifier,
+        sealed_in(&deposits[2], receipt_2.block_number).nullifier()
+    );
+    assert_ne!(prepared_2.statement.next_balance_commitment, after_1);
+}

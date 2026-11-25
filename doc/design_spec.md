@@ -157,11 +157,10 @@ citations are `path:line` in the tree named above; line numbers drift with later
   its last fully signed state. A proposal that a host's own check refuses is dropped at once.
 - **C14** Before any signature that moves assets is released, the signer must hold a prepared *exit
   kit* for exactly that successor (see G-lines): a head without an exit kit is "kit-pending" and
-  blocks further in-channel signatures until the kit is installed. A head whose kit is anchored at a
-  rollup state that is not yet finalized on Ethereum (a debit, burn or deposit import whose block has
-  not been posted, proved and finalized) is "post-pending" and likewise blocks in-channel
-  signatures: a payment signed on top of it would roll back with the head if the block never posts
-  (C25). The block producer publishes the pending validity candidate right after each such head.
+  blocks further in-channel signatures until the kit is installed. No signature waits for
+  Ethereum: a successor is final for the channel once the sig-cluster has signed it. The block
+  producer posts the block of every debit, burn or deposit import right away, so its head's backing
+  finalizes and a close can use it (G16).
 - **C15** *Inter-channel payment:* the sending channel debits the sender's ciphertext and its fund
   vector, builds one base-layer transfer to the destination channel, and signs a state whose H2 is
   the root of the one-transaction tree. Authorizing the payment and agreeing to the debit are one
@@ -805,13 +804,11 @@ fabricated (`resolve_close_head`, `choose_close_head`). Before the fix the selec
 fallback never triggered. The delegate does the same from its vaults before
 `requestCloseAsParticipant` and pins the chosen head (`node/delegate/branches/exit.js`) → G16, C25.
 
-**Backing finality before in-channel signatures** (2026-11-09): the H2=0 reuse path of
-`enforce_exit_kit_before_signature_release` additionally requires the durable head's kit root to be
-`isFinalizedStateRoot` on the rollup (`require_durable_head_backing_finalized`; the receipt caches
-the answer once true, finality being permanent); the refusal carries the marker
-`HEAD BACKING NOT FINALIZED`, which the signing member answers with a 409 while the block producer
-publishes the pending validity candidate (`wallet-l1.publishLater`, called after every deposit
-import, inter-channel debit and burn) → C14, C25.
+**No signature waits for Ethereum** (2026-11-25): `enforce_exit_kit_before_signature_release`
+consults no L1. The block producer publishes the pending validity candidate after every deposit
+import, inter-channel debit and burn (`wallet-l1.publishLater`) → C14. The 2026-11-09 gate that
+refused every successor of a head whose block was not finalized (`HEAD BACKING NOT FINALIZED`) is
+removed; see §2.12.
 
 ### 2.6 Settlement contracts: Manager and Materializer
 
@@ -1077,7 +1074,8 @@ was performed for these changes.
   receipt, so a deposit import, debit, burn, token registration or inter-channel credit cannot be
   stacked on an unfinalized head either (a deposit stacked on an unposted debit would otherwise be
   stranded at close like item A). Consequence, for the owner: in-channel sends pause after each
-  asset-moving head until its block is proved and finalized on L1 (not measured). Not covered: the
+  asset-moving head until its block is proved and finalized on L1 (not measured). **Removed on
+  2026-11-25 by owner decision (§2.12): no signature waits for L1.** Not covered: the
   browser signer (`wallet_cosign`, `src/wasm_wallet.rs`) consults no L1 and holds no kit, so a
   sig-cluster made only of browser signers has no gate — this is item E (below). A block producer
   without `producer/wallet-l1.json` cannot publish and its channels stay refused after the first
@@ -1205,6 +1203,47 @@ redeploy is acceptable.
   on `claude/bold-hertz-0f2708` (worktree funny-cannon); `main`'s publisher still sends
   `finalize`/`attestProofData` at twice the simulated gas (32.7M / 35.8M here), which a 2^24 cap
   refuses. Sepolia does not enforce the cap today; mainnet does.
+
+### 2.12 Changes of 2026-11-25 (no signature waits for Ethereum; late refunds chain)
+
+Owner decisions of 2026-11-25: a co-signed state is final for the channel when the sig-cluster
+signs it, and nothing waits for the block producer's post (a deposit only raises the channel's
+total; confirming it by a block post is not the channel's concern); the spec names only protocol
+roles (sig-cluster signers, delegates, the block producer, depositors, anyone).
+
+- **Signing gate removed** (`src/bin/channel_member.rs`). The 2026-11-09 gate of §2.10 item C
+  (`require_durable_head_backing_finalized`, its proposal-run twin and the
+  `HEAD BACKING NOT FINALIZED` marker) is gone; `SignerExitKitReceipt.backing_root_finalized` stays
+  only so receipts written in between parse. The wallet no longer waits for "L1 finality" before a
+  send, and the 409 `backingPending` answers, the deposit queue's wait and the burn's staged-block
+  release that served the gate are removed. The block producer still publishes after every deposit
+  import, debit and burn (`wallet-l1.publishLater`), so the newest head's backing finalizes and a
+  close can use it (G16); a strictly newer head may replace a pending close during the challenge
+  window (`ChannelSettlementManager.submitCloseIntent`, floor 86,400 s).
+- **Late cursors from any fallen-back head** (`src/live_balance_service.rs`, snapshot v6). The
+  materializer's late cursor is the Balance commitment of the head the channel closed on. Besides
+  the current generation and the deposit-import archive (`retained_pre_receive`), the service now
+  keeps the generation every send (debit, burn) and inter-channel receive replaces
+  (`retained_prior`, newest 64), so a close that falls back across such a transition still finds its
+  cursor (`late_cursor`, shared by the late-deposit and late-incoming lanes).
+- **Late refunds chain** (G23). A claim moves the materializer's cursor to the receipt's next
+  commitment. That next cursor (`Prepared*::confirmed_checkpoint`) had no consumer, so a second
+  stranded deposit could not be proved. The daemon command `liveAdoptLateDeposit` adopts it once
+  the claim is final (`late_continuations`, newest 8; idempotent), the prepare route reads the
+  cursor at the `finalized` block and adopts the matching claimed receipt first, and a deposit
+  received here can be claimed from any cursor with its retained salt (`retained_deposit_salt`).
+- **Measured** (this change, release builds with `authenticated-tail-receive`):
+  `late_deposits_chain_after_close_from_retained_and_continued_cursors` (real Balance and
+  late-deposit proofs, `tests/live_balance_service.rs`) passed in 217 s at 16.9 GB peak RSS: the
+  pre-burn cursor is found after a burn, deposit #1 (imported, never signed) is proved from its
+  pre-receive generation, its continuation is adopted and survives a restart, and deposit #2 (never
+  received) is proved from that continuation. `retained_pre_receive_tests` 2/2 (v5 → v6 migration,
+  bounds), `live_balance_service::` lib tests 12/12, `channel_member` 103 passed / 1 ignored
+  (pre-existing), `block_producer_service` 3/3, Node 804 tests: 796 pass, 0 fail, 8 skipped.
+- **Not verified**: a claim of `claimLateDeposit` on a chain with a real proof (the forge test uses a
+  mock verifier); the prepare route's adoption against a chain; any public-chain or browser run of
+  the removed wait. A late refund still needs a finalized block after the deposit, so it depends on
+  the block producer posting (unchanged by this change).
 
 ### Appendix A — Code comments known to be stale at `039e9e63`
 

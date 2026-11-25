@@ -40,17 +40,17 @@ const file = name => path.join(directory, name + '.json');
 const read = name => JSON.parse(fs.readFileSync(file(name)));
 function save(name, value) { const dest = file(name), temp = dest + '.tmp'; fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(temp, dest); return value; }
 async function once(name, fn) { return fs.existsSync(file(name)) ? read(name) : save(name, await fn()); }
-// C25/G16 (2026-11-09): after an asset-moving head (deposit import, debit, burn) the co-signers
-// refuse the channel's next signature until that head's block is finalized on L1; the relay answers
-// 409 with `backingPending` and publishes meanwhile. On a public chain that is minutes: wait, retry.
-const BACKING_PENDING = /HEAD BACKING NOT FINALIZED|backingPending|kitPending/;
+// A destination head whose inter-channel credit still waits for its exit kit answers 409
+// `kitPending`: wait and retry. No signature waits for L1 finality (the 2026-11-09 wait was removed
+// on 2026-11-25), so any other refusal fails the run.
+const BACKING_PENDING = /kitPending/;
 async function untilBacked(fn, what, limitMs = 40 * 60 * 1000) {
   const t0 = Date.now();
   for (;;) {
     try { return await fn(); }
     catch (e) {
       if (!BACKING_PENDING.test(String(e.message || e)) || Date.now() - t0 > limitMs) throw e;
-      log(`${what}: waiting for the channel head's block to finalize on L1 (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
+      log(`${what}: waiting for the credited head's exit kit (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
       await sleep(10000);
     }
   }
@@ -120,9 +120,8 @@ async function deposit(user, amount, tag) {
     for (;;) {
       try { return await api(u.ch, '/api/import-deposit', { recipientSlot: report.slot, txHash: tx.transactionHash }); }
       catch (e) {
-        // Waits, not failures: the chain's confirmation depth, and the previous import's block
-        // not yet finalized on L1 (the relay answers 409 and publishes it meanwhile).
-        if (!/confirmation|HEAD BACKING NOT FINALIZED|queued behind/i.test(e.message)) throw e;
+        // Waits, not failures: the chain's confirmation depth and the deposit queue.
+        if (!/confirmation|queued behind/i.test(e.message)) throw e;
         if (Date.now() - t0 > 40 * 60 * 1000) throw e;
         await sleep(3000);
       }

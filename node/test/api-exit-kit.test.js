@@ -39,10 +39,6 @@ cliModule.cli = (ch, args, env) => {
     });
     return '';
   }
-  if (refuseSigning === 'backing') {
-    throw Object.assign(new Error('Command failed: channel_member ' + args[0]), {
-      stderr: "error: HEAD BACKING NOT FINALIZED: refusing BurnDebit because channel 8's durable head ... has not finalized yet" });
-  }
   if (refuseSigning) throw new Error('SIGNER-INDEPENDENT EXIT REQUIRED: injected refusal');
   return 'signed';
 };
@@ -178,21 +174,3 @@ test('an exact pre-upgrade pending inter transfer resumes its original argv with
 // burn signature exists. The staged block is released: left staged, it is the target of every next
 // validity proof (FalconAggCircuit: 0 active signers), and the very block the gate waits for could
 // never be proved. The next attempt re-proposes from scratch.
-test('a burn refused by the backing gate releases its staged block; the retry re-proposes', async () => {
-  const ch = 11;
-  write(ch, 'p.json', { proposedNextState: { digest: 'next' } });
-  write(ch, 'd.json', { txHash: 'burn' });
-  events.length = 0;
-  refuseSigning = 'backing';
-  try {
-    await assert.rejects(exitKit.cliWithPreparedExitKit(ch, ['cosign-burn-send', 'p.json', 'd.json', 'o.json'], null, { requestId: 'burn:77' }),
-      e => /HEAD BACKING NOT FINALIZED/.test(e.stderr));
-  } finally {
-    refuseSigning = false;
-  }
-  assert.deepEqual(events.filter(e => e.abandon).map(e => e.abandon), ['burn:77:exit-kit']);
-  assert.ok(!fs.existsSync(path.join(work, `ch${ch}`, exitKit.OPERATION_FILE)), 'no pre-sign operation is left to resume');
-  events.length = 0;
-  assert.equal(await exitKit.cliWithPreparedExitKit(ch, ['cosign-burn-send', 'p.json', 'd.json', 'o.json'], null, { requestId: 'burn:77' }), 'signed');
-  assert.ok(events[0].proposing && events[1].prepare, 'the retry proposes and stages again');
-});

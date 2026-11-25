@@ -184,8 +184,7 @@ async function flushPublishedHead(ch) {
   // after this bind, closing the crash window where the public producer could outrun backing.
   if (isZeroH2Tag(snapshot.state && snapshot.state.h2Tag)) {
     // A live balance that already consumed an L1 deposit (import phase 1) whose signing run was
-    // then refused — the co-signers wait for the durable head's backing to finalize (C25/G16) —
-    // is one step AHEAD of every signed head: binding the current head to it is refused by the
+    // then refused (a co-signer refused or went offline) is one step AHEAD of every signed head: binding the current head to it is refused by the
     // daemon ("signed snapshot settle chain differs from the pending live balance proof", measured
     // 2026-11-11). Only that import's own signed state binds it; leave the bind to the import.
     const live = await producer.liveStatus(ch);

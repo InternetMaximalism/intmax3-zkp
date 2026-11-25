@@ -206,14 +206,6 @@ async function credit(ch, entry, withLock) {
       return { index: entry.index, channel: ch, slot, custody };
     } catch (error) {
       const text = String((error && (error.stderr || error.message || error.stdout)) || error);
-      // The co-signers wait for the durable head's backing to finalize on L1 (C25/G16). Nobody else
-      // publishes while a channel's imports are all refused this way (the import that would have
-      // kicked the publisher never completes), so kick it here; the deposit stays pending and the
-      // next pass retries it.
-      if (/HEAD BACKING NOT FINALIZED/.test(text)) {
-        require('./wallet-l1').publishLater(ch, `the import of deposit #${entry.index}`);
-        throw error; // a wait, never a recorded refusal: the deposit stays pending and is retried
-      }
       if (!(await consumed(entry.index))) {
         if (!DETERMINISTIC_REFUSAL.test(text)) throw error;
       } else {

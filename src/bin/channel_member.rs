@@ -441,9 +441,8 @@ struct SignerExitKitReceipt {
     backing_root: Bytes32,
     #[serde(default)]
     backing_anchor_block_number: u64,
-    /// Sticky L1 observation: `isFinalizedStateRoot(backing_root)` answered true once. Finality
-    /// is permanent (N13), so the check is never repeated for this receipt. Never set by the
-    /// envelope verifier; only by the L1 read in `require_durable_head_backing_finalized`.
+    /// Written by the 2026-11-09 signing gate, removed 2026-11-25 (no signature waits for L1).
+    /// Never read; kept so receipts written in between still parse.
     #[serde(default)]
     backing_root_finalized: bool,
 }
@@ -700,22 +699,12 @@ fn enforce_exit_kit_before_signature_release(
     successor: &ChannelState,
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
-    // C25/G16 (2026-11-09): whatever the successor does — an in-channel send, a debit, a burn, a
-    // deposit import, a token registration or an inter-channel credit — it is stacked on the
-    // durable head, and if that head's own block never reaches L1 the successor rolls back with
-    // it at close (a deposit import stacked on an unposted debit strands the deposit exactly like
-    // review item A). So the durable head's installed kit must already be backable on L1 before
-    // ANY asset-bearing successor is signed on top of it. Genesis has no predecessor; a delegate
-    // join only adds an empty row. A head without a receipt (kit-pending) is handled by the
-    // purpose-specific gates below, which either refuse or carry a prepared kit.
-    if !matches!(
-        purpose,
-        StateSigningPurpose::Genesis | StateSigningPurpose::DelegateJoin
-    ) && cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
-        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
-    }) {
-        require_durable_head_backing_finalized(cli, purpose)?;
-    }
+    // No signature waits for L1 (owner decision 2026-11-25). The 2026-11-09 gate that refused
+    // every successor of a head whose block was not yet finalized ("HEAD BACKING NOT FINALIZED")
+    // is removed: a co-signed successor is final when the sig-cluster signs it. The block producer
+    // posts the head's block (wallet-l1 `publishLater`), the close picks the newest head whose
+    // backing L1 finalized (G16) and a strictly newer one may replace it during the challenge
+    // window; a deposit no closed head imported is refunded to its depositor (G23).
 
     if purpose.requires_prepared_exit_kit() {
         if purpose.is_terminal() {
@@ -794,121 +783,6 @@ fn enforce_exit_kit_before_signature_release(
     Ok(())
 }
 
-/// Stable stderr marker for the one refusal the relay resolves by publishing the pending validity
-/// candidate and retrying (see `hosting/wallet/wallet-relay.js`).
-const HEAD_BACKING_NOT_FINALIZED: &str = "HEAD BACKING NOT FINALIZED";
-
-/// The RPC the signing paths read L1 finality from (same default as every other CLI route).
-fn finality_rpc() -> String {
-    std::env::var("RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string())
-}
-
-/// In-channel successors are only as exitable as the kit they reuse (C25, G16). A debit or
-/// deposit-import head is N-of-N signed BEFORE its small block is posted: its kit's backing root
-/// is the rollup state AFTER that block, which is finalized on L1 only once the block is posted,
-/// proved and finalized. Until then every H2=0 successor signed on top of it shares the same
-/// unbackable statement, and if the block never posts (producer stall, or the sender freezing the
-/// channel right after its debit), `close` falls back to the pre-debit head and EVERY in-channel
-/// payment made since rolls back — the payees delivered against signatures that were never
-/// closable. So: before releasing an in-channel signature, require the durable head's kit root to
-/// be `isFinalizedStateRoot` on the rollup. The answer is cached in the receipt once true (finality
-/// is permanent), so a channel whose head is backed pays one `cast call` per asset-moving head,
-/// not per send.
-/// The proposal-only run (`--propose-exit-kit`) must refuse exactly where the signing run would:
-/// the API performs phase-1 work between the two (a deposit import consumes the L1 leaf into the
-/// live balance before the co-signers sign), so a refusal first raised in the signing run leaves
-/// the live balance ahead of every signed head ("signed snapshot settle chain differs from the
-/// pending live balance proof", measured 2026-11-11 on the rehearsal). Same gate as
-/// `enforce_exit_kit_before_signature_release`, evaluated before the proposal is emitted.
-fn refuse_proposal_on_unfinalized_head_backing(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-) {
-    if cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
-        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
-    }) {
-        require_durable_head_backing_finalized(cli, purpose).unwrap_or_else(|e| die(e));
-    }
-}
-
-fn require_durable_head_backing_finalized(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-) -> Result<(), String> {
-    require_durable_head_backing_finalized_with(cli, purpose, |rollup, root, anchor| {
-        let rpc = finality_rpc();
-        let rollup = rollup.to_string();
-        // `isFinalizedStateRoot` is set only for the root a validity candidate ENDS at (and
-        // genesis); a head whose block sits inside a candidate never gets its root marked, although
-        // its block is just as final. The gate's question is whether the head's BLOCK reached L1,
-        // so the finalized block number answers it too (measured 2026-11-11 on the rehearsal:
-        // candidates 0->3 and 3->8 left channel 8's block-4 head refused forever).
-        read_finalized_state_root(&rpc, &rollup, root)
-            || read_latest_finalized_block_number(&rpc, &rollup).is_some_and(|final_block| anchor <= final_block)
-    })
-}
-
-/// `finalized(rollup, root)` answers `IntmaxRollup.isFinalizedStateRoot(root)`. The sticky flag
-/// is written into the receipt here and persisted by the caller's `save_state` (every signing
-/// path saves after a released signature); a refusal changes nothing.
-fn require_durable_head_backing_finalized_with(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-    finalized: impl Fn(&Address, &Bytes32, u64) -> bool,
-) -> Result<(), String> {
-    let already = cli
-        .signer_exit_kit_receipt
-        .as_ref()
-        .map(|receipt| receipt.backing_root_finalized)
-        .ok_or_else(|| "SIGNER-INDEPENDENT EXIT REQUIRED: no signer exit-kit receipt".to_string())?;
-    if already {
-        return Ok(());
-    }
-    // The receipt's rollup was pinned against the settlement binding when the kit was installed
-    // (`signer_exit_kit_context`); it is this signer's own durable record, not a caller input.
-    let (rollup, recorded) = cli
-        .signer_exit_kit_receipt
-        .as_ref()
-        .map(|receipt| {
-            (
-                receipt.rollup,
-                (receipt.backing_root, receipt.backing_anchor_block_number),
-            )
-        })
-        .expect("checked above");
-    let (root, anchor) = if recorded.0 == Bytes32::default() {
-        // A receipt written before the backing root was recorded: read it from the envelope.
-        durable_head_kit_backing_root(cli, Path::new(".")).ok_or_else(|| {
-            "SIGNER-INDEPENDENT EXIT REQUIRED: the durable head's exit-kit envelope is not \
-             retained, so its backing root cannot be checked on L1 (run install-exit-kit)"
-                .to_string()
-        })?
-    } else {
-        recorded
-    };
-    if !finalized(&rollup, &root, anchor) {
-        let head = &cli.snapshot.state;
-        return Err(format!(
-            "{HEAD_BACKING_NOT_FINALIZED}: refusing {purpose:?} because channel {}'s durable head {} \
-             (epoch {}, state version {}) is backed by an exit kit anchored at rollup block {anchor} \
-             (root {root}) that rollup {rollup} has not finalized yet (neither the root nor block {anchor}). The head's own \
-             block (a debit, burn or deposit import) must be posted, proved and finalized on L1 before \
-             any in-channel payment is signed on top of it; otherwise, if that block never posts, \
-             every such payment rolls back at close (C25/G16). Publish the pending validity \
-             candidate and retry.",
-            head.channel_id.as_u64(),
-            head.digest,
-            head.epoch,
-            head.balance_state.state_version,
-        ));
-    }
-    if let Some(receipt) = cli.signer_exit_kit_receipt.as_mut() {
-        receipt.backing_root = root;
-        receipt.backing_anchor_block_number = anchor;
-        receipt.backing_root_finalized = true;
-    }
-    Ok(())
-}
 
 /// One crash-safe anti-equivocation decision. The map key repeats the first three fields in a
 /// canonical printable form so malformed/renamed state cannot alias two signing decisions.
@@ -4236,9 +4110,8 @@ fn verify_persisted_signer_exit_kit_at(cli: &CliState, directory: &Path) -> Resu
 }
 
 /// A durable receipt agrees with its re-verified envelope when every statement field is equal.
-/// The L1 finality flag is this signer's own observation (never in the envelope), and a receipt
-/// written before the backing root was recorded carries a zero root; both are tolerated here and
-/// filled in by `require_durable_head_backing_finalized`.
+/// The retired L1 finality flag is never in the envelope, and a receipt written before the backing
+/// root was recorded carries a zero root; both are tolerated here.
 fn receipt_matches_reverified(stored: &SignerExitKitReceipt, recomputed: &SignerExitKitReceipt) -> bool {
     let mut normalized = stored.clone();
     normalized.backing_root_finalized = false;
@@ -5475,12 +5348,6 @@ fn choose_close_head(
         missing_archive_for: None,
         examined: depth,
     }
-}
-
-/// `IntmaxRollup.latestFinalizedBlockNumber()`, or None when the call fails.
-fn read_latest_finalized_block_number(rpc: &str, rollup: &str) -> Option<u64> {
-    let out = cast(&["call", rollup, "latestFinalizedBlockNumber()(uint64)", "--rpc-url", rpc]);
-    out.trim().split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
 }
 
 fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
@@ -10783,9 +10650,8 @@ fn build_reg_record() -> serde_json::Value {
 /// Design rule (item E, 2026-11-10): every sig-cluster holds at least one DAEMON signer — a
 /// cosigner slot (`< member_count`) whose key this `channel_member` derives itself. Browser
 /// sessions sign nothing but their own join contribution (they sit at delegate slots and
-/// `wallet_cosign` refuses delegate slots), hold no exit kit and consult no L1, so a cluster of
-/// browsers alone would have no backing-finality gate (`require_durable_head_backing_finalized`)
-/// and no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always seats
+/// `wallet_cosign` refuses delegate slots) and hold no exit kit, so a cluster of browsers alone
+/// would have no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always seats
 /// the CLI's cosigners at `0..cli_cosigner_count()`; this makes the rule explicit and refuses a
 /// hand-built state (empty `controlled`, foreign `member_pk_gs`) before any signature or the
 /// immutable L1 member set is produced. Ownership evidence is the same the signing primitive
@@ -12711,11 +12577,6 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::InterChannelDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13043,11 +12904,6 @@ fn cmd_cosign_burn_send(args: &[String]) {
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::BurnDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13256,11 +13112,6 @@ fn cmd_register_token(args: &[String]) {
         build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
             .unwrap_or_else(|e| die(format!("build token register: {e}")));
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::TokenRegister);
         verify_token_register_state_transition(
             &state.snapshot.state,
             &state.snapshot.record,
@@ -19003,7 +18854,6 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|error| die(error));
 
     if propose_exit_kit_requested(args) {
-        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::L1DepositImport);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "l1DepositImport",
             "record": state.snapshot.record,
@@ -21365,53 +21215,27 @@ mod signing_ledger_tests {
     }
 
     #[test]
-    fn in_channel_signing_waits_for_the_reused_kit_root_to_finalize_on_l1() {
-        // C25/G16: the durable head's kit root is not finalized → no in-channel signature, with the
-        // relay-visible marker; once L1 reports it finalized the receipt remembers that for good.
+    fn in_channel_signing_never_waits_for_l1_finality() {
+        // Owner decision 2026-11-25: a co-signed in-channel send is final when the sig-cluster
+        // signs it. The 2026-11-09 gate refused it ("HEAD BACKING NOT FINALIZED") until the durable
+        // head's block was posted, proved and finalized on L1; nothing consults L1 now.
         let mut cli = fixture();
-        let receipt = cli.signer_exit_kit_receipt.as_mut().unwrap();
-        receipt.backing_root_finalized = false;
-        let root = receipt.backing_root;
-
-        let refused = require_durable_head_backing_finalized_with(
+        cli.signer_exit_kit_receipt.as_mut().unwrap().backing_root_finalized = false;
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let successor = child_of(&cli.snapshot.state, 1);
+        ledgered_state_signature_with(
             &mut cli,
+            &record,
+            &controlled,
+            &successor,
             StateSigningPurpose::InChannelSend,
-            |_, _, _| false,
+            None,
+            None,
+            |keys| sign_state(keys, controlled.slot as u8, &successor).map_err(|e| e.to_string()),
         )
-        .expect_err("unfinalized backing root must refuse");
-        assert!(refused.contains(HEAD_BACKING_NOT_FINALIZED), "{refused}");
-        assert!(!cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
-        // The gate is purpose-independent: a deposit import stacked on the same unfinalized head
-        // is refused before its own prepared-kit check runs (item A by stacking).
-        let stacked = require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::L1DepositImport,
-            |_, _, _| false,
-        )
-        .expect_err("asset-moving successor on an unfinalized head must refuse");
-        assert!(stacked.contains("L1DepositImport"), "{stacked}");
-        let asked = std::cell::RefCell::new(Vec::new());
-        require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::InChannelSend,
-            |rollup, asked_root, _anchor| {
-                asked.borrow_mut().push((*rollup, *asked_root));
-                true
-            },
-        )
-        .expect("finalized backing root releases the gate");
-        assert_eq!(
-            asked.into_inner(),
-            vec![(cli.signer_exit_kit_receipt.as_ref().unwrap().rollup, root)]
-        );
-        assert!(cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
-        // Sticky: a second check never consults L1 again.
-        require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::InChannelSend,
-            |_, _, _| panic!("finality is permanent; L1 must not be asked twice"),
-        )
-        .unwrap();
+        .expect("an unfinalized backing root does not hold an in-channel signature");
+        assert_eq!(cli.state_signing_ledger.len(), 1);
     }
 
     #[test]

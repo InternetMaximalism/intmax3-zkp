@@ -97,8 +97,8 @@ async function flushLastProducerBlock(ch, lockedDestination) {
   // anything else, or accept a later credit as a destination). Archive the live service's kit for
   // the current source head, exactly as the destination does below.
   await installHeadExitKit(ch);
-  // The debit head's kit is anchored after the debit block: publish it, or A cannot sign another
-  // in-channel send ("HEAD BACKING NOT FINALIZED", C25/G16).
+  // The block producer posts the debit block now, so the debit head's backing finalizes and a
+  // close can use it (G16). No signature waits for this.
   require('./wallet-l1').publishLater(ch, 'inter-channel debit');
   // The destination side is touched ONLY under the destination's lock. A previous transfer to a
   // THIRD channel D is not replayed here (the caller holds A and B, not D): D finishes its own
