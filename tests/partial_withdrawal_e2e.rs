@@ -1476,6 +1476,7 @@ fn partial_withdrawal_e2e_anvil() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
             "--code-size-limit",
             "50000",
         ])

@@ -170,6 +170,7 @@ fn unified_inter_channel_transfer_e2e() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
         ]),
         "deploy",
     );

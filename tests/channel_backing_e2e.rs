@@ -121,6 +121,7 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow", // one tx per receipt: a burst can overfill an automine block and stall
         ]),
         "forge deploy",
     );
