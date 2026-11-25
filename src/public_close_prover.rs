@@ -35,7 +35,7 @@ use crate::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32},
     live_balance_service::{
-        LiveChannelBackingArtifact, LIVE_BALANCE_SNAPSHOT_VERSION,
+        LiveChannelBackingArtifact, LIVE_BASE_HEAD_ARTIFACT_VERSION,
         SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
     },
     utils::{
@@ -243,10 +243,10 @@ impl PublicBackingBindings {
     }
 
     fn validate(&self, expected_channel: ChannelId) -> PublicCloseResult<()> {
-        if self.snapshot_version != LIVE_BALANCE_SNAPSHOT_VERSION {
+        if self.snapshot_version != LIVE_BASE_HEAD_ARTIFACT_VERSION {
             return Err(PublicCloseError::Backing(format!(
                 "live snapshot version {} is not supported version {}",
-                self.snapshot_version, LIVE_BALANCE_SNAPSHOT_VERSION
+                self.snapshot_version, LIVE_BASE_HEAD_ARTIFACT_VERSION
             )));
         }
         if self.awaiting_channel_binding {
@@ -1088,7 +1088,7 @@ mod tests {
 
     fn bindings() -> PublicBackingBindings {
         PublicBackingBindings {
-            snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
+            snapshot_version: LIVE_BASE_HEAD_ARTIFACT_VERSION,
             base_channel_id: channel(7),
             record_channel_id: channel(7),
             state_channel_id: channel(7),

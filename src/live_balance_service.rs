@@ -104,6 +104,11 @@ const SNAPSHOT_MAGIC: &[u8; 16] = b"IMLIVEBALANCE001";
 // `late_continuations` keeps the next cursor of every post-close receipt L1 finalized, so the next
 // late claim (deposit or incoming) starts where the materializer's cursor moved.
 pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 6;
+/// Version stamped on the base-head artifact the live service exports (`LiveBaseHeadArtifact`,
+/// archived inside every exit-kit envelope and checked by `public_close_prover`). It is the wire
+/// format of that artifact, not of the snapshot file: v6 only added archive fields to the file, so
+/// the artifact stays at 5 and envelopes archived before v6 still close.
+pub const LIVE_BASE_HEAD_ARTIFACT_VERSION: u32 = 5;
 /// Snapshots at or below this version were persisted without a v4 exit kit and are upgraded
 /// through the proof-generating legacy path in `open`; v4 is a pure field-add migration.
 const LAST_KITLESS_SNAPSHOT_VERSION: u32 = 3;
@@ -1166,7 +1171,7 @@ impl LiveBalanceService {
         let proof = decode_balance_proof(disk, &self.circuits.balance)?;
         let pis = balance_public_inputs(&proof, &self.circuits.balance)?;
         Ok(LiveBaseHeadArtifact {
-            snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
+            snapshot_version: LIVE_BASE_HEAD_ARTIFACT_VERSION,
             channel_id: disk.channel_id,
             balance_generation: disk.balance_generation,
             base_nonce: disk.base_nonce,
@@ -1529,7 +1534,7 @@ impl LiveBalanceService {
             producer_receipt: entry.producer_receipt.clone(),
             source_backing: LiveChannelBackingArtifact {
                 base_head: LiveBaseHeadArtifact {
-                    snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
+                    snapshot_version: LIVE_BASE_HEAD_ARTIFACT_VERSION,
                     channel_id: pis.channel_id,
                     balance_generation: entry.result.balance_generation,
                     base_nonce: entry.result.base_nonce,
