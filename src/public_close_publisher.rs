@@ -7855,21 +7855,34 @@ impl ClosePublisherBackend for CastCloseBackend {
         target: &str,
         calldata: &str,
     ) -> Result<SignedTransaction> {
-        let mut command = Command::new("cast");
-        command.args([
-            "mktx",
-            target,
-            calldata,
-            "--rpc-url",
+        // An attestation carries its proof in calldata (~260,000 hex characters), over Linux's
+        // 131,071-byte argument limit: `cast mktx <target> <calldata>` cannot start there. The
+        // transaction is built and checked in `l1_raw_transaction`; cast signs only its digest.
+        let data = decode_hex(calldata, None, "close calldata")
+            .map_err(PublicClosePublisherError::Evidence)?;
+        let signed = crate::l1_raw_transaction::sign_call(
             &self.rpc_url,
-            "--account",
-            account,
-            "--json",
-        ]);
-        let raw = checked_output(command, "sign close transaction", MAX_RAW_TRANSACTION_CHARS)?
-            .trim()
-            .to_string();
-        self.inspect_signed_transaction(&raw, chain_id, signer, target, calldata)
+            &crate::l1_raw_transaction::CallTransaction {
+                chain_id,
+                from: signer,
+                to: target,
+                value: 0,
+                data: &data,
+                nonce: None,
+            },
+            &|command| {
+                command.args(["--account", account]);
+            },
+        )
+        .map_err(|error| {
+            PublicClosePublisherError::Command(format!("sign close transaction: {error}"))
+        })?;
+        if signed.raw.len() > MAX_RAW_TRANSACTION_CHARS {
+            return Err(PublicClosePublisherError::Command(format!(
+                "signed close transaction exceeds {MAX_RAW_TRANSACTION_CHARS} characters"
+            )));
+        }
+        self.inspect_signed_transaction(&signed.raw, chain_id, signer, target, calldata)
     }
 
     fn inspect_signed_transaction(

@@ -7966,6 +7966,105 @@ fn rpc_knows_transaction(rpc: &str, tx_hash: &str) -> bool {
             .is_ok_and(|value| !value.is_null())
 }
 
+/// Sign a call of `calldata` on `to` at `nonce` and broadcast it, the calldata never on a command
+/// line: a proof-carrying call is over Linux's 131,071-byte argument limit, where `cast send <to>
+/// <calldata>` fails with E2BIG. The signed bytes are checked against every requested field and
+/// the signer before they are sent. Returns the transaction hash.
+#[allow(clippy::too_many_arguments)]
+fn send_signed_call(
+    rpc: &str,
+    signer: &L1Signer,
+    chain_id: u64,
+    from: &str,
+    to: &str,
+    calldata: &str,
+    value: u128,
+    nonce: u64,
+    what: &str,
+) -> String {
+    use intmax3_zkp::l1_raw_transaction::{
+        CallTransaction, decode_hex, send_raw_transaction, sign_call,
+    };
+    let data = decode_hex(calldata).unwrap_or_else(|e| die(format!("{what} calldata: {e}")));
+    let signed = sign_call(
+        rpc,
+        &CallTransaction {
+            chain_id,
+            from,
+            to,
+            value,
+            data: &data,
+            nonce: Some(nonce),
+        },
+        &|command| signer.append_to_command(command),
+    )
+    .unwrap_or_else(|e| die(format!("sign {what} transaction: {e}")));
+    match send_raw_transaction(rpc, &signed.raw) {
+        Ok(published) if published.eq_ignore_ascii_case(&signed.hash) => {}
+        Ok(published) => die(format!(
+            "RPC reported {what} transaction {published}; signed {}",
+            signed.hash
+        )),
+        // A node may accept the transaction and then fail to answer.
+        Err(error) if rpc_knows_transaction(rpc, &signed.hash) => {
+            eprintln!("{what}: the RPC knows {} after: {error}", signed.hash);
+        }
+        Err(error) => die(format!("publish {what} transaction: {error}")),
+    }
+    signed.hash
+}
+
+/// `l1-call <rpc_url> <to>`: sign one call with the configured L1 signer, its calldata (hex) read
+/// from stdin, send it, wait for its receipt and print the receipt as `cast receipt --json` does.
+/// For proof-carrying calls made by the wallet server (a late-deposit claim): their calldata is
+/// over Linux's 131,071-byte argument limit, so `cast send <to> <calldata>` cannot start there.
+fn cmd_l1_call(args: &[String]) {
+    use std::io::Read as _;
+    let usage = "l1-call needs <rpc_url> <to>, with the calldata (hex) on stdin";
+    let rpc = args.get(1).unwrap_or_else(|| die(usage));
+    let to = args.get(2).unwrap_or_else(|| die(usage));
+    let mut calldata = String::new();
+    std::io::stdin()
+        .read_to_string(&mut calldata)
+        .unwrap_or_else(|e| die(format!("l1-call: read calldata from stdin: {e}")));
+    let calldata = calldata.trim();
+    if calldata.len() < 10 {
+        die("l1-call: stdin holds no calldata (0x + selector + arguments)");
+    }
+    let chain_id = rpc_chain_id(rpc);
+    let signer = L1Signer::for_chain_id(chain_id);
+    let from = signer.address();
+    let nonce = read_account_nonce(rpc, &from, "latest");
+    let tx_hash = send_signed_call(
+        rpc, &signer, chain_id, &from, to, calldata, 0, nonce, "l1-call",
+    );
+    wait_for_l1_receipt(rpc, &tx_hash, "l1-call");
+    println!(
+        "{}",
+        cast(&["receipt", &tx_hash, "--json", "--async", "--rpc-url", rpc]).trim()
+    );
+}
+
+/// Wait until the RPC has a receipt for `tx_hash` (as `cast send` does before it returns).
+fn wait_for_l1_receipt(rpc: &str, tx_hash: &str, what: &str) {
+    for _ in 0..300 {
+        let output = Command::new("cast")
+            .args(["receipt", tx_hash, "--json", "--async", "--rpc-url", rpc])
+            .output()
+            .unwrap_or_else(|e| die(format!("cast receipt failed to start: {e}")));
+        if output.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .is_ok_and(|value| value.is_object())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    die(format!(
+        "{what} transaction {tx_hash} has no receipt after 15 minutes; a retry reconciles it"
+    ));
+}
+
 fn full_withdrawal_intent_tx_hash_in_block(
     block: &serde_json::Value,
     intent: &FullWithdrawalCallIntent,
@@ -8198,32 +8297,21 @@ fn publish_full_withdrawal_call(
     signer: &L1Signer,
     intent: &FullWithdrawalCallIntent,
 ) -> String {
-    let nonce = intent.caller_nonce.to_string();
-    let value = intent.value.to_string();
-    let mut command = Command::new("cast");
-    command.args([
-        "send",
+    // A withdrawal or attestation step carries its proof in calldata, over Linux's 131,071-byte
+    // argument limit: `cast send <target> <calldata>` cannot start there. Sign here and send the
+    // raw transaction on stdin (without waiting for the receipt, as `cast send --async`).
+    let rpc_chain = rpc_chain_id(rpc);
+    let hash = send_signed_call(
+        rpc,
+        signer,
+        rpc_chain,
+        &intent.caller,
         &intent.target,
         &intent.calldata,
-        "--value",
-        &value,
-        "--nonce",
-        &nonce,
-        "--async",
-        "--rpc-url",
-        rpc,
-    ]);
-    signer.append_to_command(&mut command);
-    let output = command
-        .output()
-        .unwrap_or_else(|error| die(format!("broadcast full-withdrawal call: {error}")));
-    if !output.status.success() {
-        die(format!(
-            "full-withdrawal broadcast returned an error after its intent was safely journaled: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        u128::from(intent.value),
+        intent.caller_nonce,
+        "full-withdrawal call",
+    );
     if hex_body(&hash, 64, "full-withdrawal transaction hash").len() != 64 {
         unreachable!("hex_body either validates or terminates")
     }
@@ -10768,7 +10856,8 @@ fn main() {
     // only their own receipt and journal files (each journal under its own lock), and never read
     // or write `cli_state.json`. They wait minutes on L1 finality while the channel keeps
     // advancing, so they take neither the channel state lock nor run its state recovery.
-    let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize");
+    // `l1-call` signs and sends one L1 call and touches no channel file at all.
+    let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize" | "l1-call");
     // Read-only projections of a published snapshot file: never queue behind a writer, never
     // run recoveries.
     let read_only_view = matches!(cmd, "slot-view" | "member-info");
@@ -10797,6 +10886,7 @@ fn main() {
         // delegate SENDING
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
+        "l1-call" => cmd_l1_call(&args),
         "install-exit-kit" => cmd_install_exit_kit(&args),
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
@@ -19586,19 +19676,27 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
                 (receipt, hash, intent)
             } else {
                 require_nonce_free_for_exact_rebroadcast(rpc, &caller_hex, intent.caller_nonce);
-                let nonce_arg = intent.caller_nonce.to_string();
-                let send_out = cast_signed(
+                // The calldata carries the withdrawal proof (261,130 hex characters measured), over
+                // Linux's 131,071-byte argument limit: `cast send <rollup> <calldata>` cannot start
+                // there. Sign here and send the raw transaction on stdin.
+                let tx_hash = send_signed_call(
                     rpc,
                     l1_signer.get(),
-                    &["send", rollup, &calldata, "--nonce", &nonce_arg, "--json"],
+                    chain_id,
+                    &caller_hex,
+                    rollup,
+                    &calldata,
+                    0,
+                    intent.caller_nonce,
+                    "payout",
                 );
-                let tx_hash = extract_tx_hash(&send_out);
                 let tx_hash_b32 = tx_hash
                     .parse::<Bytes32>()
                     .unwrap_or_else(|e| die(format!("parse payout tx hash: {e}")));
                 store
                     .record_payout_tx_hash(candidate_id, tx_hash_b32)
                     .unwrap_or_else(|e| die(format!("persist payout tx hash: {e}")));
+                wait_for_l1_receipt(rpc, &tx_hash, "payout");
                 (read_l1_receipt(rpc, &tx_hash, payout_kind), tx_hash, intent)
             }
         };
@@ -19682,8 +19780,8 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
         ])
     };
     let pull_calldata = pull_calldata_owned.trim();
-    let calldata_hash = cast(&["keccak", pull_calldata])
-        .trim()
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(pull_calldata)
+        .unwrap_or_else(|e| die(format!("pull calldata: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak pull calldata: {e}")));
     let intent = if let Some(intent) = candidate.pull_broadcast.clone() {
@@ -19877,8 +19975,10 @@ fn build_partial_withdrawal_payout_calldata(
             "payout dry-run targets {dry_to}, expected the rollup {rollup}"
         ));
     }
-    let calldata_hash = cast(&["keccak", &calldata])
-        .trim()
+    // Hashed here: `cast keccak <calldata>` cannot start on Linux (the calldata is over the
+    // 131,071-byte argument limit).
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(&calldata)
+        .unwrap_or_else(|e| die(format!("payout calldata: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak payout calldata: {e}")));
     (calldata, calldata_hash)
@@ -20439,8 +20539,9 @@ fn parse_l1_receipt(
         .as_str()
         .unwrap_or_else(|| die("tx missing input"))
         .to_string();
-    let calldata_hash = cast(&["keccak", &input])
-        .trim()
+    // A payout's input is over Linux's argument limit, so it is hashed here, not by `cast keccak`.
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(&input)
+        .unwrap_or_else(|e| die(format!("tx input: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak tx input: {e}")));
     let chain_id = if t["chainId"].is_null() {

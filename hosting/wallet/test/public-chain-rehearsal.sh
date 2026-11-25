@@ -72,17 +72,20 @@ chmod 700 "$R"
 if [ "${REHEARSAL_ARGV_GUARD:-1}" = 1 ]; then
   GUARD_DIR="$R/argv-guard"
   mkdir -p "$GUARD_DIR"
+  # Each refusal is also logged to a file: callers fold the guard's message into errors of their
+  # own that the relay log truncates.
+  export LINUX_ARGV_GUARD_LOG="$R/argv-guard-refusals.log"
+  WITHOUT_GUARD=$(printf %s ":$PATH:" | sed "s#:$GUARD_DIR:#:#g; s#^:##; s#:\$##")
   for tool in cast forge; do
-    [ -x "$GUARD_DIR/$tool" ] && continue
-    real=$(command -v "$tool")
-    printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$REPO/hosting/wallet/test/linux-argv-guard.sh" "$real" \
-      > "$GUARD_DIR/$tool"
-    chmod +x "$GUARD_DIR/$tool"
+    real=$(PATH="$WITHOUT_GUARD" command -v "$tool")
+    printf '#!/usr/bin/env bash\nexport LINUX_ARGV_GUARD_LOG=%q\nexec %q %q "$@"\n' "$LINUX_ARGV_GUARD_LOG" \
+      "$REPO/hosting/wallet/test/linux-argv-guard.sh" "$real" > "$GUARD_DIR/.$tool.new"
+    chmod +x "$GUARD_DIR/.$tool.new"
+    mv -f "$GUARD_DIR/.$tool.new" "$GUARD_DIR/$tool" # a running relay may be starting it
   done
   # First on PATH even when re-entered (the rebuild's `sudo systemctl start` runs the relay step
   # under the rebuild script's PATH, which puts Foundry's own directory first).
-  PATH=$(printf %s ":$PATH:" | sed "s#:$GUARD_DIR:#:#g; s#^:##; s#:\$##")
-  export PATH="$GUARD_DIR:$PATH"
+  export PATH="$GUARD_DIR:$WITHOUT_GUARD"
   export REHEARSAL_ARGV_GUARD_DIR="$GUARD_DIR"
 fi
 BIN="$REPO/target/release"

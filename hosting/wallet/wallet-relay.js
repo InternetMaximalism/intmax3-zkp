@@ -1733,6 +1733,14 @@ function lateDepositSettlement(ch) {
   if (!s.manager || !materializer) throw new Error('settlement.json lacks manager / close_funding_materializer');
   return { manager: s.manager, materializer };
 }
+// The ABI encoding of `(address, bytes)` arguments, without the selector, as hex without 0x.
+function abiEncodeAddressBytes(address, bytes) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error(`not an address: ${address}`);
+  const word = (hex) => hex.padStart(64, '0');
+  const data = bytes.toString('hex');
+  return word(address.slice(2).toLowerCase()) + word((64).toString(16)) + word(bytes.length.toString(16))
+    + data + '0'.repeat((64 - (data.length % 64)) % 64);
+}
 app.post('/api/late-deposit/prepare', (req, res) => {
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
@@ -1781,10 +1789,14 @@ app.post('/api/late-deposit/claim', (req, res) => {
     const prepared = JSON.parse(fs.readFileSync(file, 'utf8'));
     const { manager, materializer } = lateDepositSettlement(ch);
     if (prepared.manager !== manager || prepared.materializer !== materializer) throw new Error('prepared late deposit names another settlement');
-    const proof = '0x' + Buffer.from(prepared.prepared.compactProof).toString('hex');
     const helper = require('../../api/lib/cli');
-    const out = helper.sh('cast', ['send', materializer, 'claimLateDeposit(address,bytes)', manager, proof,
-      ...helper.l1SignerArgs(), '--rpc-url', RPC, '--json'], { stdio: 'pipe' });
+    // The proof is ~130 KB (~260,000 hex characters), over Linux's 131,071-byte argument limit:
+    // `cast send <materializer> claimLateDeposit(address,bytes) <manager> <proof>` cannot start on
+    // the host (E2BIG). channel_member signs the call with the same L1 signer and reads the
+    // calldata from stdin.
+    const calldata = helper.sh('cast', ['sig', 'claimLateDeposit(address,bytes)'], { stdio: 'pipe' }).trim()
+      + abiEncodeAddressBytes(manager, Buffer.from(prepared.prepared.compactProof));
+    const out = helper.sh(helper.CLI, ['l1-call', RPC, materializer], { input: calldata, stdio: 'pipe' });
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
     const status = (out.match(/"status"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
     fs.writeFileSync(file, JSON.stringify({ ...prepared, claim: { txHash, status, sentAt: Date.now() } }), { mode: 0o600 });

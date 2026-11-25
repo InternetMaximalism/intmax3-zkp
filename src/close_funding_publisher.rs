@@ -3545,23 +3545,32 @@ fn sign_transaction(
     spec: &ActionSpec,
     preflight: &ChainSnapshot,
 ) -> Result<RawTransactionStep> {
-    let mut command = Command::new("cast");
-    command.args([
-        "mktx",
-        &spec.target,
-        &spec.calldata,
-        "--rpc-url",
+    // A payout lane carries its proof in calldata (~260,000 hex characters), over Linux's
+    // 131,071-byte argument limit: `cast mktx <target> <calldata>` cannot start there. The
+    // transaction is built and checked in `l1_raw_transaction`; cast signs only its digest.
+    let data = decode_hex(&spec.calldata, None, "close-funding calldata")
+        .map_err(CloseFundingPublisherError::Evidence)?;
+    let signed = crate::l1_raw_transaction::sign_call(
         &config.rpc_url,
-        "--json",
-    ]);
-    signer.append(&mut command);
-    let raw = checked_output(
-        command,
-        "sign close-funding raw transaction",
-        MAX_RAW_TRANSACTION_CHARS,
-    )?
-    .trim()
-    .to_string();
+        &crate::l1_raw_transaction::CallTransaction {
+            chain_id: config_chain_id(config, preflight),
+            from: signer_address,
+            to: &spec.target,
+            value: 0,
+            data: &data,
+            nonce: None,
+        },
+        &|command| signer.append(command),
+    )
+    .map_err(|error| {
+        CloseFundingPublisherError::Command(format!("sign close-funding raw transaction: {error}"))
+    })?;
+    if signed.raw.len() > MAX_RAW_TRANSACTION_CHARS {
+        return Err(CloseFundingPublisherError::Command(format!(
+            "signed close-funding transaction exceeds {MAX_RAW_TRANSACTION_CHARS} characters"
+        )));
+    }
+    let raw = signed.raw;
     let decoded = decode_signed_transaction(&raw)?;
     let (transaction_hash, nonce) = validate_decoded_transaction(
         &decoded,
