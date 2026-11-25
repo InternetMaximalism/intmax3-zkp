@@ -222,6 +222,24 @@ test('a step waiting for L1 finality is retried a poll later and is not reported
   assert.equal(h.tickets[7].status, 'claim_pending');
 });
 
+// publicnode answers forge's first state read at the head from a backend that lags it ("block not
+// found", nothing sent): a poll later the head has aged past it. Not a failure, not the 5-min retry.
+test('a payout whose forge read hit a lagging RPC backend is retried a poll later, not as a failure', async () => {
+  let seen = null;
+  const LAGGING = Object.assign(new Error('exit status 1'), { stderr:
+    'Error: failed to get account for 0x1804c8AB1F12E6bbf3894d4083f33e07309d1f38: server returned an error response: error code -32001: block not found: 0x1e53' });
+  const h = harness({ ticket: { status: 'settle_pending', steps: { settle: { phase: 'paying' } } }, savedArtifacts: true,
+    pay: [LAGGING, null], onSleep: t => { seen = { ...t.steps.settle }; } });
+  await h.settlement.start(7);
+  assert.deepEqual(h.sleeps, [60000], 'retried after a poll, not the failure retry interval');
+  assert.equal(seen.waiting, 'the L1 RPC to reach the head');
+  assert.equal(seen.error, null);
+  assert.equal(seen.phase, 'paying');
+  assert.deepEqual(h.errors, []);
+  assert.equal(h.kinds().filter(k => k === 'payout').length, 2);
+  assert.equal(h.tickets[7].status, 'claim_pending');
+});
+
 test('a failed step is recorded on the ticket and retried after the retry interval, never dropped', async () => {
   let seen = null;
   const h = harness({ stage: [new Error('rpc unavailable'), null], onSleep: t => { seen = { ...t.steps.settle }; } });

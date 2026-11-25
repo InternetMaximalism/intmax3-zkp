@@ -27,6 +27,10 @@ const AWAITING_FINALITY = /not finalized yet|retry after the finalized head adva
 const CANDIDATE_PENDING = /validity candidate pending L1 acknowledgement/;
 // ...or for the seconds a co-signed head is staged and not yet committed: retry a poll later.
 const HEAD_STAGED = /staged producer block/;
+// ...or for the RPC to reach the head: a load-balanced endpoint (publicnode) answers forge's first
+// state read at the head from a backend that has not imported it, "block not found" before
+// anything is sent (rehearsal rh-bnf, 2026-11-25: the payout failed so and waited the full retry).
+const LAGGING_BACKEND = /block not found/;
 const RESUMABLE = new Set(['burn_done', 'settle_pending']);
 const PHASES = new Set(['proving', 'publishing', 'paying']);
 
@@ -119,8 +123,10 @@ function createPwSettlement({
         }
       } catch (e) {
         const detail = detailOf(e);
-        if (AWAITING_FINALITY.test(detail) || HEAD_STAGED.test(detail)) {
-          record(ch, ticket, { waiting: HEAD_STAGED.test(detail) ? 'the channel head to commit' : 'L1 finality', error: null });
+        if (AWAITING_FINALITY.test(detail) || HEAD_STAGED.test(detail) || LAGGING_BACKEND.test(detail)) {
+          const waiting = HEAD_STAGED.test(detail) ? 'the channel head to commit'
+            : AWAITING_FINALITY.test(detail) ? 'L1 finality' : 'the L1 RPC to reach the head';
+          record(ch, ticket, { waiting, error: null });
           await sleep(pollMs);
           continue;
         }
