@@ -45,10 +45,10 @@ pub(crate) use transfer_stark::{
     prove_channel_tx, prove_channel_update, verify_channel_tx, verify_channel_update,
 };
 
-use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _};
+use crate::ethereum_types::bytes32::Bytes32;
 
 /// Keccak over a u32-word stream, same convention as `src/common/channel.rs` digests
-/// (`solidity_keccak256` packs each word big-endian, matching `abi.encodePacked` on-chain).
+/// (each word big-endian, matching `abi.encodePacked` on-chain).
 pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
-    crate::common::channel::keccak_words(words, &[], 0, &[])
+    crate::common::channel::hash_words(words)
 }

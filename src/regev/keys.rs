@@ -232,22 +232,16 @@ pub fn regev_pk_root(pks: &[RegevPk]) -> Bytes32 {
     hash_words(&words)
 }
 
-/// The channel's Regev key root: [`regev_pk_root`] over all `MAX_CHANNEL_MEMBERS` balance slots,
-/// the slots past `active` holding [`RegevPk::padding`]. Computed from the active keys alone (the
-/// padding key's digest is a constant), so it never materializes the padded key array.
+/// The channel's Regev key root: [`regev_pk_root`] over the ACTIVE slots' keys
+/// (`member_count + delegate_count`, slot order). The preimage carries the key count, so the root
+/// binds the active set exactly; the padding slots past it are not hashed, and the cost is linear
+/// in the active participants, not in `MAX_CHANNEL_MEMBERS`.
 pub fn channel_regev_pk_root(active: &[RegevPk]) -> Bytes32 {
-    use crate::constants::MAX_CHANNEL_MEMBERS;
-    assert!(active.len() <= MAX_CHANNEL_MEMBERS, "more keys than balance slots");
-    static PADDING_DIGEST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
-    let padding = PADDING_DIGEST.get_or_init(|| RegevPk::padding().digest().to_u32_vec());
-    let mut words = Vec::with_capacity(2 + 8 * active.len());
-    words.push(REGEV_PK_ROOT_DOMAIN);
-    words.push(MAX_CHANNEL_MEMBERS as u32);
-    for pk in active {
-        words.extend(pk.digest().to_u32_vec());
-    }
-    // The padding tail is streamed into the hash, never built as a word vector.
-    crate::common::channel::keccak_words(&words, padding, MAX_CHANNEL_MEMBERS - active.len(), &[])
+    assert!(
+        active.len() <= crate::constants::MAX_CHANNEL_MEMBERS,
+        "more keys than balance slots"
+    );
+    regev_pk_root(active)
 }
 
 #[cfg(test)]
@@ -256,26 +250,25 @@ mod tests {
 
     use super::*;
 
-    /// The streamed padding tail gives exactly `regev_pk_root` over the full MAX_CHANNEL_MEMBERS
-    /// key array (the padding keys' digests materialized as words).
+    /// The channel root is `regev_pk_root` over the active keys alone: `[IMRR, len, digests...]`
+    /// with `len` = the active count and no padding keys.
     #[test]
-    fn channel_root_equals_the_full_width_word_preimage() {
-        use crate::constants::MAX_CHANNEL_MEMBERS;
+    fn channel_root_hashes_only_the_active_keys() {
         let mut rng = SmallRng::seed_from_u64(9);
         let active: Vec<RegevPk> = (0..3).map(|_| channel_keygen(&mut rng).0).collect();
-        let mut words = vec![REGEV_PK_ROOT_DOMAIN, MAX_CHANNEL_MEMBERS as u32];
+        let mut words = vec![REGEV_PK_ROOT_DOMAIN, active.len() as u32];
         for pk in &active {
             words.extend(pk.digest().to_u32_vec());
-        }
-        let padding = RegevPk::padding().digest().to_u32_vec();
-        for _ in active.len()..MAX_CHANNEL_MEMBERS {
-            words.extend_from_slice(&padding);
         }
         let expected = Bytes32::from_u32_slice(
             &plonky2_keccak::utils::solidity_keccak256(&words),
         )
         .unwrap();
         assert_eq!(channel_regev_pk_root(&active), expected);
+        // The count is in the preimage: one more (padding) key is a different root.
+        let mut extended = active.clone();
+        extended.push(RegevPk::padding());
+        assert_ne!(channel_regev_pk_root(&extended), expected);
     }
 
     #[test]

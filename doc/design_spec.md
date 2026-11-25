@@ -575,9 +575,12 @@ balance-slot trees of height 20 (raised from 1024 / height 10 on 2026-11-24); `M
 **`ChannelRecord`** (`src/common/channel.rs`): `member_count: u8` in `2..=MAX_SIG_CLUSTER`
 (`:291-296`), `delegate_count: u32`, total ≤ 2^20 (`:310-319`); slots `0..member_count` are
 cosigners, `member_count..member_count+delegate_count` are delegates (`:216-232`) → N03, C21.
-Its native digest **IMCR** commits `close_freeze_nonce`, `set_version`, both counts, all 2^20
-`pk_g` (zero past the active slots) and `regev_pk_root` (`:361-387`). Only the active `pk_g` are
-stored; the zero tail is appended when the digest is computed.
+Its native digest **IMCR** commits `close_freeze_nonce`, `set_version`, both counts, the active
+`pk_g` (exactly `member_count + delegate_count` of them; padding slots are neither stored nor
+hashed) and `regev_pk_root` (`:393-436`). Every other field is fixed-width, so the preimage
+length fixes the identity count. `regev_pk_root` is `keccak([IMRR, active, digest(pk_0)…])` over
+the active slots' Regev keys (`src/regev/keys.rs`). Both digests are native-only (no circuit or
+Solidity twin) and cost O(active), not O(2^20).
 
 **`BalanceState`** (`src/common/balance_state.rs:238-345`): `enc_balances` (one row of 10 Regev
 ciphertexts per ACTIVE slot; padding slots are not stored), `regev_pk_digests`, `recipients` (per-row

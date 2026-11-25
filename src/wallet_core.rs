@@ -825,8 +825,8 @@ impl From<&SlimSendPayload> for BatchTxApply {
 
 /// The Regev pk of every ACTIVE slot, indexed by slot (`len` = one past the highest member slot;
 /// a slot with no member — never the case for a validated member list — holds
-/// `RegevPk::padding()`). Padding slots past the active region are not materialized; the channel
-/// key root folds them in as a constant ([`crate::regev::channel_regev_pk_root`]).
+/// `RegevPk::padding()`). Padding slots past the active region are not materialized, and the
+/// channel key root ([`crate::regev::channel_regev_pk_root`]) hashes the active keys only.
 pub fn regev_pks_array(members: &[MemberInfo]) -> Vec<RegevPk> {
     let len = members
         .iter()

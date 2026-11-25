@@ -347,11 +347,18 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut v2: ChannelState = v1.clone();
     v2.prev_digest = v2.digest;
     v2.balance_state.delegate_count = 2;
-    v2.balance_state.enc_balances[4][0] = c4;
-    v2.balance_state.pending_adds[4][0] = 0;
+    // The state stores only active slots: the joiner's row is APPENDED at the old boundary
+    // (its pk digest keeps the padding value this hand-built join always left there).
+    let mut row4 = intmax3_zkp::common::balance_state::zero_token_row();
+    row4[0] = c4;
+    v2.balance_state.enc_balances.push(row4);
+    v2.balance_state
+        .pending_adds
+        .push([0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS]);
+    v2.balance_state.regev_pk_digests.push(Bytes32::default());
     // B-1b: a join MUST bind the new delegate's L1 exit address into its slot leaf (mirrors
     // channel_member::join_delegate; validate() fail-closes on a zero active recipient).
-    v2.balance_state.recipients[4] = test_recipients_b1b(5)[4];
+    v2.balance_state.recipients.push(test_recipients_b1b(5)[4]);
     v2.balance_state.state_version += 1;
     v2.member_signatures.clear();
     let mut v2 = v2.with_computed_digest();
