@@ -25,6 +25,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 REPO=$PWD
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
+# The rehearsal runs cast and forge through its Linux argument-limit guard; keep it ahead of the
+# Foundry directory above (public-chain-rehearsal.sh, linux-argv-guard.sh).
+if [ -n "${REHEARSAL_ARGV_GUARD_DIR:-}" ]; then export PATH="$REHEARSAL_ARGV_GUARD_DIR:$PATH"; fi
 RELAY_HOME="${RELAY_HOME:-$HOME/relay}"
 RELAY_SERVICE="${RELAY_SERVICE:-intmax-wallet-relay}"
 RELAY_HEALTH_URL="${RELAY_HEALTH_URL:-https://localhost/api/health}"

@@ -7929,12 +7929,12 @@ impl ClosePublisherBackend for CastCloseBackend {
     }
 
     fn publish_raw(&mut self, raw: &str) -> Result<String> {
-        self.output(
-            &["publish", raw, "--async", "--rpc-url", &self.rpc_url],
-            "publish exact raw close transaction",
-            4096,
-        )
-        .map(|value| value.trim().to_string())
+        // On stdin, not argv: Linux refuses any single argument over 131,071 bytes.
+        crate::l1_raw_transaction::send_raw_transaction(&self.rpc_url, raw).map_err(|error| {
+            PublicClosePublisherError::Command(format!(
+                "publish exact raw close transaction: {error}"
+            ))
+        })
     }
 
     fn receipt(&mut self, transaction_hash: &str) -> Result<Option<Value>> {

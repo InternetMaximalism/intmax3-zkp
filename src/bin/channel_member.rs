@@ -9004,26 +9004,19 @@ fn publish_blob_transaction(rpc: &str, raw_transaction: &str, expected_hash: &st
         );
         return;
     }
-    let output = Command::new("cast")
-        .args(["publish", raw_transaction, "--async", "--rpc-url", rpc])
-        .output()
-        .unwrap_or_else(|error| {
-            die(format!(
-                "cast publish blob transaction failed to start: {error}"
-            ))
-        });
-    if !output.status.success() {
-        // The RPC may have accepted the transaction but disconnected before answering.  Adopt it
-        // only when an independent hash lookup sees the exact signed hash.
-        if rpc_knows_transaction(rpc, expected_hash) {
-            return;
-        }
-        die(format!(
-            "cast publish blob transaction failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let published = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // On stdin, not argv: a blob transaction is far over Linux's 131,071-byte argument limit.
+    let published =
+        match intmax3_zkp::l1_raw_transaction::send_raw_transaction(rpc, raw_transaction) {
+            Ok(published) => published,
+            Err(error) => {
+                // The RPC may have accepted the transaction but disconnected before answering.
+                // Adopt it only when an independent hash lookup sees the exact signed hash.
+                if rpc_knows_transaction(rpc, expected_hash) {
+                    return;
+                }
+                die(format!("publish blob transaction: {error}"));
+            }
+        };
     if !same_hex_value(&published, expected_hash) {
         die(format!(
             "RPC published blob transaction {published}, but signed transaction hash is {expected_hash}"

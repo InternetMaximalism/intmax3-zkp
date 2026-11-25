@@ -3776,28 +3776,19 @@ fn publish_exact_raw(rpc: &str, signer: &str, step: &RawTransactionStep) -> Resu
             step.nonce
         )));
     }
-    let output = Command::new("cast")
-        .args([
-            "publish",
-            &step.raw_signed_transaction,
-            "--async",
-            "--rpc-url",
-            rpc,
-        ])
-        .output()
-        .map_err(|error| {
-            CloseFundingPublisherError::Command(format!("start raw transaction publish: {error}"))
-        })?;
-    if !output.status.success() {
-        if transaction_known(rpc, &step.transaction_hash)? {
-            return Ok(());
-        }
-        return Err(CloseFundingPublisherError::Command(format!(
-            "exact raw transaction publish failed after WAL fsync: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let published = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // On stdin, not argv: Linux refuses any single argument over 131,071 bytes.
+    let published =
+        match crate::l1_raw_transaction::send_raw_transaction(rpc, &step.raw_signed_transaction) {
+            Ok(published) => published,
+            Err(error) => {
+                if transaction_known(rpc, &step.transaction_hash)? {
+                    return Ok(());
+                }
+                return Err(CloseFundingPublisherError::Command(format!(
+                    "exact raw transaction publish failed after WAL fsync: {error}"
+                )));
+            }
+        };
     if !same_hex(&published, &step.transaction_hash) {
         return Err(CloseFundingPublisherError::Evidence(format!(
             "RPC returned transaction {published}, expected {}",

@@ -2902,27 +2902,19 @@ fn publish_exact_raw(rpc: &str, signer: &str, step: &RawTransactionStep) -> Resu
     if !exact_publish_needed(transaction_is_known, current_nonce, step)? {
         return Ok(());
     }
-    let mut command = Command::new("cast");
-    command.args([
-        "publish",
-        &step.raw_signed_transaction,
-        "--async",
-        "--rpc-url",
-        rpc,
-    ]);
-    let output = command.output().map_err(|error| {
-        PublicValidityPublisherError::Command(format!("start raw transaction publish: {error}"))
-    })?;
-    if !output.status.success() {
-        if transaction_known(rpc, &step.transaction_hash)? {
-            return Ok(());
-        }
-        return Err(PublicValidityPublisherError::Command(format!(
-            "publish exact raw transaction failed after durable journaling: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let published = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // On stdin, not argv: a blob transaction is far over Linux's 131,071-byte argument limit.
+    let published =
+        match crate::l1_raw_transaction::send_raw_transaction(rpc, &step.raw_signed_transaction) {
+            Ok(published) => published,
+            Err(error) => {
+                if transaction_known(rpc, &step.transaction_hash)? {
+                    return Ok(());
+                }
+                return Err(PublicValidityPublisherError::Command(format!(
+                    "publish exact raw transaction failed after durable journaling: {error}"
+                )));
+            }
+        };
     if !same_hex(&published, &step.transaction_hash) {
         return Err(PublicValidityPublisherError::Evidence(format!(
             "RPC reported transaction {published}, expected {}",
