@@ -6,7 +6,8 @@
 //! the limit:
 //!
 //! - A validity post carries its proof in blobs: two blobs make a raw transaction of about 526,000
-//!   hex characters, so `cast publish <raw>` failed on every post from the Linux host.
+//!   hex characters (about 550,000 in the EIP-7594 form sent after Osaka, see
+//!   [`send_raw_transaction`]), so `cast publish <raw>` failed on every post from the Linux host.
 //! - A withdrawal payout, a close attestation, a close-funding payout and a late-deposit claim
 //!   carry a proof in calldata: about 260,000 hex characters (a measured payout: 261,130), so `cast
 //!   send <to> <calldata>`, `cast mktx <to> <calldata>` and `cast keccak <calldata>` fail.
@@ -32,9 +33,46 @@ use serde_json::{Value, json};
 /// Send `eth_sendRawTransaction` for `raw_transaction` with the transaction on stdin, and return
 /// the transaction hash the RPC answered.
 ///
+/// A blob transaction in the EIP-4844 form (one proof per blob, as `cast mktx --blob` builds it)
+/// is sent in the EIP-7594 form instead (128 cell proofs per blob), which is the only form a node
+/// takes after Osaka. A node that cannot decode that form (Anvil 1.5.1) is then sent the original
+/// bytes. Both forms carry the same signed transaction, so the hash is the same.
+///
 /// The caller compares that hash with the one it signed, and on an error checks whether the RPC
 /// already knows the signed hash (a node may accept the transaction and then fail to answer).
 pub fn send_raw_transaction(rpc: &str, raw_transaction: &str) -> Result<String, String> {
+    let raw_transaction = raw_transaction.trim();
+    if raw_transaction.starts_with("0x03") {
+        let raw = decode_hex(raw_transaction)?;
+        if crate::blob_sidecar::sidecar_version(&raw)? == crate::blob_sidecar::SidecarVersion::V0 {
+            let v1 = crate::blob_sidecar::to_v1(&raw, crate::blob_sidecar::settings())?;
+            match send_one_raw_transaction(rpc, &format!("0x{}", hex::encode(v1))) {
+                Ok(hash) => {
+                    eprintln!(
+                        "blob transaction {hash} sent with the EIP-7594 (cell proof) sidecar"
+                    );
+                    return Ok(hash);
+                }
+                Err(v1_error) if v1_error.to_ascii_lowercase().contains("decode") => {
+                    return send_one_raw_transaction(rpc, raw_transaction)
+                        .inspect(|hash| {
+                            eprintln!(
+                                "blob transaction {hash} sent with the EIP-4844 sidecar: the \
+                                 node could not decode the EIP-7594 form ({v1_error})"
+                            )
+                        })
+                        .map_err(|v0_error| {
+                            format!("EIP-7594 form: {v1_error}; EIP-4844 form: {v0_error}")
+                        });
+                }
+                Err(v1_error) => return Err(v1_error),
+            }
+        }
+    }
+    send_one_raw_transaction(rpc, raw_transaction)
+}
+
+fn send_one_raw_transaction(rpc: &str, raw_transaction: &str) -> Result<String, String> {
     let answer = rpc_call(rpc, "eth_sendRawTransaction", &json!([raw_transaction]))?;
     answer
         .as_str()
