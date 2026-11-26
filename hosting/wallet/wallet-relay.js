@@ -1859,7 +1859,7 @@ app.post('/api/pw-finalize', (req, res) => {
 // The receiver pulls the credited amount through MetaMask; verify that exact mined call.
 app.post('/api/pw-claim-confirm', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     const hash = String(req.body && req.body.txHash || '');
     // A successful confirmation can lose its response. A retry must return that same completion,
@@ -1872,8 +1872,16 @@ app.post('/api/pw-claim-confirm', (req, res) => {
     if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error('invalid payout transaction hash');
     const { sh } = require('../../api/lib/cli');
     const rpc = (method, arg) => JSON.parse(sh('cast', ['rpc', method, arg, '--rpc-url', RPC]));
-    const tx = rpc('eth_getTransactionByHash', hash), receipt = rpc('eth_getTransactionReceipt', hash);
+    // The wallet reports the pull mined from ITS node; this relay's load-balanced RPC can answer from
+    // a backend a block or two behind (Sepolia, 2026-11-26: the confirm came back "not mined yet"
+    // for a pull already in block 12218788). Wait for this RPC to see it before refusing.
+    let receipt = rpc('eth_getTransactionReceipt', hash);
+    for (let attempt = 0; !receipt && attempt < 12; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      receipt = rpc('eth_getTransactionReceipt', hash);
+    }
     if (!receipt) throw new Error('wallet payout is not mined yet');
+    const tx = rpc('eth_getTransactionByHash', hash);
     const block = JSON.parse(sh('cast', ['rpc', 'eth_getBlockByNumber', receipt.blockNumber, 'false', '--rpc-url', RPC]));
     require('../../node/common/partial-withdrawal-pull').verifyPull(ticket.params.claim, tx, receipt, block);
     ticket.status = 'settle_done'; ticket.steps.claim = { completedAt: Date.now(), txHash: hash }; upsertTicket(ch, ticket);
