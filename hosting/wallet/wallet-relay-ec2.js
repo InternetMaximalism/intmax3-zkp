@@ -783,7 +783,7 @@ app.get('/api/tokens', (req, res) => {
 // render "confirming (n/12)" instead of an error while a fresh deposit matures.
 // Keep in sync with wallet-relay.js.
 function minConfirmationsForDisplay(chainId) {
-  return chainId === 31337 ? 0 : 12;
+  return chainId === 31337 ? 0 : chainId === 11155111 ? 3 : 12;
 }
 
 // `rollup` is both the deposit target and the ERC-20 approve spender the browser must use.

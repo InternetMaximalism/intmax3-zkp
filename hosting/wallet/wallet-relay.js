@@ -1463,14 +1463,14 @@ app.post('/api/claim', (req, res) => {
 // The reorg depth `cosign-l1-deposit-import` will require for a deposit on `chainId`.
 //
 // SECURITY: DISPLAY ONLY, and deliberately a MIRROR rather than a control. The enforcing check is
-// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, floor 1 and
-// default 12 elsewhere), which reads the chain itself. This relay never passes a
+// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, default 3 on
+// Sepolia, floor 1 and default 12 elsewhere), which reads the chain itself. This relay never passes a
 // `min_confirmations` argument to the CLI, and the CLI clamps any explicit value UP to the floor —
 // so nothing served here can lower the depth actually enforced. It exists only so the wallet can
 // render "confirming (n/12)" instead of an error while a fresh deposit matures.
 // Keep in sync with wallet-relay-ec2.js.
 function minConfirmationsForDisplay(chainId) {
-  return chainId === 31337 ? 0 : 12;
+  return chainId === 31337 ? 0 : chainId === 11155111 ? 3 : 12;
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS,

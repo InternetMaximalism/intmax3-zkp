@@ -18250,9 +18250,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
 /// (fail-closed) — the faucet E2E's real ERC-20 deposit is the live proof that it is right.
 const DEPOSITED_TOPIC0: &str = "0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe";
 
-/// Reorg-safety default for a real (non-dev) chain, and the floor an explicit argument is clamped
-/// up to. Chain id 31337 (anvil) uses floor 0 — see `min_confirmations_for`.
+/// Reorg-safety default for a real (non-dev) chain. Chain id 31337 (anvil) uses 0 and Sepolia
+/// (11155111) uses [`SEPOLIA_MIN_CONFIRMATIONS`] — see `min_confirmations_for`.
 const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+/// Sepolia's depth: the owner asked for 3 confirmations on the testnet (2026-11-26) instead of
+/// waiting 12 blocks (~2.5 min) per deposit. Mainnet and every other chain keep 12.
+const SEPOLIA_MIN_CONFIRMATIONS: u64 = 3;
 
 /// ONE `Deposited` log, read back from L1. Every economically meaningful field of the imported
 /// `Deposit` comes from HERE — none of it is caller-supplied any more (threat model §1, A9).
@@ -18301,13 +18304,28 @@ fn min_confirmations_for(chain_id: u64, explicit: Option<u64>) -> u64 {
     let floor = if chain_id == 31337 { 0 } else { 1 };
     match explicit {
         Some(v) => v.max(floor),
-        None => {
-            if chain_id == 31337 {
-                0
-            } else {
-                DEFAULT_MIN_CONFIRMATIONS
-            }
-        }
+        None => match chain_id {
+            31337 => 0,
+            11155111 => SEPOLIA_MIN_CONFIRMATIONS,
+            _ => DEFAULT_MIN_CONFIRMATIONS,
+        },
+    }
+}
+
+#[cfg(test)]
+mod min_confirmations_tests {
+    use super::*;
+
+    #[test]
+    fn sepolia_defaults_to_three_and_every_other_public_chain_to_twelve() {
+        assert_eq!(min_confirmations_for(31337, None), 0);
+        assert_eq!(min_confirmations_for(11155111, None), 3);
+        assert_eq!(min_confirmations_for(1, None), 12);
+        assert_eq!(min_confirmations_for(31338, None), 12);
+        // An explicit value is honored but never below the public-chain floor of 1.
+        assert_eq!(min_confirmations_for(11155111, Some(0)), 1);
+        assert_eq!(min_confirmations_for(1, Some(0)), 1);
+        assert_eq!(min_confirmations_for(31337, Some(0)), 0);
     }
 }
 
