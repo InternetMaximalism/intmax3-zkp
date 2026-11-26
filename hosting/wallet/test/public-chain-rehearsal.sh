@@ -64,6 +64,30 @@ export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
 
 mkdir -p "$R"
 chmod 700 "$R"
+# The relay host is Linux, which refuses to start a program with any argument over 131,071 bytes
+# (E2BIG). Every validity post failed there that way while this rehearsal passed on macOS, which
+# has no such limit (2026-11-25). Every cast and forge run by this script, the rebuild script and
+# the relay it starts goes through linux-argv-guard.sh, which refuses those calls as Linux does.
+# REHEARSAL_ARGV_GUARD=0 turns it off.
+if [ "${REHEARSAL_ARGV_GUARD:-1}" = 1 ]; then
+  GUARD_DIR="$R/argv-guard"
+  mkdir -p "$GUARD_DIR"
+  # Each refusal is also logged to a file: callers fold the guard's message into errors of their
+  # own that the relay log truncates.
+  export LINUX_ARGV_GUARD_LOG="$R/argv-guard-refusals.log"
+  WITHOUT_GUARD=$(printf %s ":$PATH:" | sed "s#:$GUARD_DIR:#:#g; s#^:##; s#:\$##")
+  for tool in cast forge; do
+    real=$(PATH="$WITHOUT_GUARD" command -v "$tool")
+    printf '#!/usr/bin/env bash\nexport LINUX_ARGV_GUARD_LOG=%q\nexec %q %q "$@"\n' "$LINUX_ARGV_GUARD_LOG" \
+      "$REPO/hosting/wallet/test/linux-argv-guard.sh" "$real" > "$GUARD_DIR/.$tool.new"
+    chmod +x "$GUARD_DIR/.$tool.new"
+    mv -f "$GUARD_DIR/.$tool.new" "$GUARD_DIR/$tool" # a running relay may be starting it
+  done
+  # First on PATH even when re-entered (the rebuild's `sudo systemctl start` runs the relay step
+  # under the rebuild script's PATH, which puts Foundry's own directory first).
+  export PATH="$GUARD_DIR:$WITHOUT_GUARD"
+  export REHEARSAL_ARGV_GUARD_DIR="$GUARD_DIR"
+fi
 BIN="$REPO/target/release"
 CONTRACTS="$R/contracts-tail"
 WORK="$R/work"

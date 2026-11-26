@@ -167,6 +167,8 @@ getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"]
 # browser wasm opts into all parallel provers through `wasm-threads`, while the CommonJS Node
 # build deliberately stays sequential.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# EIP-7594 cell proofs for blob posts: after Osaka a node takes only the v1 blob sidecar.
+c-kzg = "2.1.8"
 regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", features = ["parallel"] }
 plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
 starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = ["parallel", "std"] }

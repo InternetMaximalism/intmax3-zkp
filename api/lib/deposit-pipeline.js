@@ -246,8 +246,8 @@ async function importL1Deposit(ch, recipientSlot, txHash, {
   // bound the kit on the live balance service above; archive it into cli_state.json now so a
   // subsequent refresh/send can spend the credited balance.
   await installHeadExitKit(ch);
-  // The import head's kit is anchored after the deposit block: publish it so the CLI's backing
-  // finality gate lets the channel sign in-channel sends again (C25/G16).
+  // The block producer posts the deposit block now, so the import head's backing finalizes and a
+  // close can use it (G16). No signature waits for this.
   require('./wallet-l1').publishLater(ch, 'L1 deposit import');
   // The import advanced the private base state: every cluster host keeps a standby copy.
   require('./live-replica').replicate(ch, 'L1 deposit import');

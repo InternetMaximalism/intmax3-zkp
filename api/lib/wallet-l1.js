@@ -198,12 +198,12 @@ async function publishCandidate(ch, prove) {
     await acknowledge(receipt.candidateId, receipt.transactionHash);
 }
 
-// C25/G16 (2026-11-09): a deposit import, inter-channel debit or burn advances a channel's head to
-// a state whose exit kit is anchored AFTER a block that is not on L1 yet. The CLI refuses every
-// in-channel signature on top of such a head until that root is finalized ("HEAD BACKING NOT
-// FINALIZED"), so the relay publishes (posts, proves, finalizes) the pending validity candidate
-// right after each such head instead of waiting for the next burn. Serialized by `publish`'s own
-// queue; one in flight per channel; failures are logged and the next hook or cosign retries.
+// The block producer's duty after a deposit import, inter-channel debit or burn: such a head's exit
+// kit is anchored AFTER a block that is not on L1 yet, so post, prove and finalize the pending
+// validity candidate right away instead of waiting for the next burn, and a close can use the
+// newest head (G16). No signature waits for it (the 2026-11-09 signing gate was removed on
+// 2026-11-25). Serialized by `publish`'s own queue; one in flight per channel; failures are logged
+// and the next hook retries.
 const configured = () => fs.existsSync(path.join(cli.WORK, 'producer', 'wallet-l1.json'));
 const publishing = new Map();
 function publishLater(ch, why) {
