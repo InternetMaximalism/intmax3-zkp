@@ -67,7 +67,10 @@ const RETRYABLE_FINALITY = /not finalized yet|retry after the finalized head adv
 // load-balanced RPC can answer from a node that has not imported that block yet, and the estimate
 // of a call into the contract just created reverts. The CLI then resumes the same run (its nonce
 // moved), once the node has caught up.
-const RETRYABLE_ESTIMATE = /Failed to estimate gas for tx/;
+// The same lag shows as a stale account nonce after forge's own send (2026-11-26, Sepolia: "provider
+// nonce (234) is still behind expected nonce (235)" after 6 of 15 settlement transactions); the
+// sent ones are in the artifact, so the retry resumes from the next.
+const RETRYABLE_ESTIMATE = /Failed to estimate gas for tx|provider nonce \(\d+\) is still behind expected nonce/;
 const ESTIMATE_RETRIES = 5;
 // The same load balancing answers forge's first state read (its fork, at the head) from a node that
 // has not imported the head yet: "block not found" before anything is broadcast. The CLI keeps its
@@ -158,7 +161,7 @@ async function settlement(ch, bundleDir) {
       } catch (e) {
         const text = String((e && (e.stderr || e.message)) || e);
         if (RETRYABLE_ESTIMATE.test(text) && ++estimateFailures <= ESTIMATE_RETRIES) {
-          step(ch, 'settlement', `a gas estimate failed; resuming the broadcast (attempt ${estimateFailures})`);
+          step(ch, 'settlement', `the RPC lagged behind forge (gas estimate or nonce); resuming the broadcast (attempt ${estimateFailures})`);
           await sleep(FINALITY_RETRY_MS);
           continue;
         }
