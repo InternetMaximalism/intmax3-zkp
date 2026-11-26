@@ -192,56 +192,56 @@ const PRODUCTION_RESOURCE_PROFILES: &[(&str, usize, usize, usize, usize, &str)] 
         8,
         5,
         3,
-        133_612,
-        "0xaa6bbe608a91653b95715f7555eec2306131078c999788911a0bd6a61327c4c3",
+        126_092,
+        "0xbedb8b31522394530eb37f888385dd9d48676e42b9ba2cacd10eebdb3a793aa4",
     ),
     (
         "withdrawal_mle_config.json",
         17,
         5,
         3,
-        133_684,
-        "0x1696fa601bd337acf25fe330034ee06356615ab4105ffc0d1f01e0f37cf8d1fb",
+        126_164,
+        "0x1a8353044b77d4f0e906b8ee8fce56656d31037185941177803b79143a5d575d",
     ),
     (
         "close_intent_mle_config.json",
         103,
         5,
         3,
-        134_372,
-        "0x5a3b3fb9cb0582c16b4f5b1ecb2b9833b87c9d5c1357766b0ebcc88386d1ebd1",
+        126_852,
+        "0x67cf9c2be5b09a418ef52dd7a5f2e238dc952407addfc4f8f6a47ea44c227c0f",
     ),
     (
         "withdrawal_claim_mle_config.json",
         50,
         6,
         4,
-        133_996,
-        "0x7c8e8980632d9295f6d0ec6eb1e5d6da9ebbf7fd63522519d0f48d544c8d40c7",
+        126_476,
+        "0x0f853a131eecbc1abdcf6a123ce6a11b5cf8251c6d3c087c9a2ef2fc915f3b2a",
     ),
     (
         "post_close_claim_mle_config.json",
         58,
         6,
         4,
-        134_060,
-        "0x6a98a0b6a881bf9499e5f15bd92d8bcd6301121a77993382f273c6b94586357d",
+        126_540,
+        "0xd4242dbe4691e19c851c5fd3526682e9ae9337f1af11fbdfa2ebedfb6c4133e4",
     ),
     (
         "cancel_close_mle_config.json",
         29,
         5,
         3,
-        133_780,
-        "0xa455e9b6c5e782779c23db6a61948bd91660e4ff12a4b571779a5362390a317f",
+        126_260,
+        "0xca6f039e2b7c1702346e376ab3a8d3e770f549986c150c797fcc3e72903e6301",
     ),
     (
         "close_asset_backing_mle_config.json",
         35,
         5,
         3,
-        133_828,
-        "0x6a0da56bb23e4265931fdac0818e950e475d4b5cd8cfd24289fb2dbf8ebff574",
+        126_308,
+        "0xd51ca55e04de65ee98eb32f8c1df2b175abc656aca9770c69c56a469a106e96e",
     ),
 ];
 
@@ -2427,4 +2427,85 @@ fn max_resource_fixture_has_one_strict_canonical_compact_proof() {
     let compact = validate_mle_v2_full_against_config_json(&full, &config)
         .unwrap_or_else(|e| panic!("{} failed compact/config integrity: {e}", path.display()));
     assert!(!compact.is_empty());
+}
+
+/// geth (`core/txpool/legacypool` `txMaxSize = 4 * txSlotSize`) and reth
+/// (`DEFAULT_MAX_TX_INPUT_BYTES`) refuse a non-blob transaction whose signed encoding exceeds
+/// 128 KiB. It is a txpool rule, not consensus, but it is what every public RPC applies: Sepolia
+/// (publicnode, reth v2.11.0) answered the PoW-22 validity attest and finalize, 131,387 bytes each,
+/// with "oversized data: transaction size 131387, limit 131072" on 2026-11-26.
+const TXPOOL_MAX_TX_BYTES: usize = 131_072;
+/// Upper bound of an EIP-1559 envelope around its calldata: type byte, list header (4), chain id
+/// (9), nonce (9), both fees (17 each), gas (9), `to` (21), value (33), calldata header (4), empty
+/// access list (1), y parity (1), r and s (33 each).
+const EIP1559_ENVELOPE_MAX_BYTES: usize = 1 + 4 + 9 + 9 + 17 + 17 + 9 + 21 + 33 + 4 + 1 + 1 + 33 + 33;
+/// `BlobKZGVerifierExt.ONE_BLOB_CAPACITY`: a compact proof up to this length is one blob.
+const ONE_BLOB_PROOF_CAPACITY: usize = (4096 - 1) * 31;
+
+fn padded_abi_bytes(length: usize) -> usize {
+    length.div_ceil(32) * 32
+}
+
+/// The calldata, without the padded proof bytes, of every transaction that carries a proof of the
+/// statement `config`, as (entry point, bytes). Static structs are counted word by word from
+/// `contracts/src`; a withdrawal set is counted with one leaf (each further leaf adds 160 bytes).
+fn proof_call_heads(config: &str, compact_bytes: usize) -> Vec<(&'static str, usize)> {
+    let word = 32;
+    let bytes_head = 2 * word; // offset + length of the `bytes` argument
+    if config == "mle_fixture_config.json" || config.ends_with("lifecycle_validity_mle_config.json")
+    {
+        let blobs = if compact_bytes <= ONE_BLOB_PROOF_CAPACITY { 1 } else { 2 };
+        vec![
+            // attestProofData(uint256, bytes proof, bytes sidecars): 96 sidecar bytes per blob.
+            ("attestProofData", 4 + word + bytes_head + bytes_head + 96 * blobs),
+            // finalize / fraudProof(uint256, bytes32, ValidityPublicInputs (7 words), bytes).
+            ("finalize", 4 + word + word + 7 * word + bytes_head),
+        ]
+    } else if config.ends_with("withdrawal_mle_config.json") {
+        // withdrawNative / withdrawERC20(Withdrawal[] (5 words a leaf), address, bytes).
+        vec![("withdrawNative", 4 + word + word + bytes_head + word + 5 * word)]
+    } else if config == "close_intent_mle_config.json" {
+        vec![("submitCloseIntent", 4 + 34 * word + bytes_head)]
+    } else if config == "withdrawal_claim_mle_config.json" {
+        vec![("submitWithdrawalClaim", 4 + 8 * word + bytes_head)]
+    } else if config == "post_close_claim_mle_config.json" {
+        vec![("submitPostCloseClaim", 4 + 6 * word + bytes_head)]
+    } else if config == "cancel_close_mle_config.json" {
+        vec![("cancelClose", 4 + 3 * word + bytes_head)]
+    } else if config == "close_asset_backing_mle_config.json" {
+        vec![("attestSignedHeadBacking", 4 + word + bytes_head)]
+    } else {
+        panic!("{config}: no proof-carrying entry point is known for this statement")
+    }
+}
+
+#[test]
+fn every_proof_carrying_transaction_fits_the_txpool_size_cap() {
+    let mut tightest = (String::new(), usize::MAX);
+    for name in LIVE_CONFIG_COHORT {
+        let config = parse_config(name);
+        let compact = config.size_upper_bound.max_compact_bytes;
+        for (entry, head) in proof_call_heads(name, compact) {
+            let tx = EIP1559_ENVELOPE_MAX_BYTES + head + padded_abi_bytes(compact);
+            assert!(
+                tx <= TXPOOL_MAX_TX_BYTES,
+                "{name}: {entry} with a worst-case {compact}-byte proof is a {tx}-byte transaction, \
+                 over the {TXPOOL_MAX_TX_BYTES}-byte txpool cap"
+            );
+            let margin = TXPOOL_MAX_TX_BYTES - tx;
+            if margin < tightest.1 {
+                tightest = (format!("{name} {entry} ({tx} bytes)"), margin);
+            }
+        }
+        // A validity proof is also posted as proof-DA blobs: keep it to one blob (a second blob
+        // still verifies, it doubles the post's blob gas). Other statements are calldata only.
+        if name == &"mle_fixture_config.json" || name.ends_with("lifecycle_validity_mle_config.json")
+        {
+            assert!(
+                compact <= ONE_BLOB_PROOF_CAPACITY,
+                "{name}: a worst-case {compact}-byte validity proof needs a second blob"
+            );
+        }
+    }
+    eprintln!("tightest txpool margin: {} -> {} bytes", tightest.0, tightest.1);
 }

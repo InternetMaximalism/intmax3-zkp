@@ -2,7 +2,7 @@
 
 > **NO-GO / DO NOT EXECUTE (2026-09-03).** Every command, selector, proof size, gas estimate,
 > runtime size and address below belongs to a retired V1 rehearsal. The MLE/WHIR V2 implementation
-> uses strict `plonky2-mle-v3-solidity` schema/protocol version 3, WHIR PoW 22 artifacts and one
+> uses strict `plonky2-mle-v3-solidity` schema/protocol version 3, WHIR PoW 28 artifacts and one
 > exact `MLEWHIR3` `.compactProof.bytes` stream for calldata,
 > proof DA, attestation, finalization and fraud classification. Publication must go through
 > `public_validity_publisher` with deployment-manifest schema 2 and immutable adapter/core pins;

@@ -52,7 +52,7 @@ journal rather than crossing back into the keyless API.
    final root, predicted on-chain block hash chain, and the exact eight MLE public-input limbs must
    all agree. The VPI hash uses the contract's exact 164-byte `abi.encodePacked` layout.
 2. `validityMleJson` must be the exact canonical full fixture schema
-   `plonky2-mle-v3-solidity`, schema/protocol version 3 and WHIR PoW 22. The publisher cross-checks the proof,
+   `plonky2-mle-v3-solidity`, schema/protocol version 3 and WHIR PoW 28. The publisher cross-checks the proof,
    verification key, immutable adapter view, Solidity ABI redundancy, encoded configuration,
    compact shape, resource statistics and generated upper bound. It strictly decodes and
    canonically re-encodes `.compactProof.bytes`, requires `MLEWHIR3`, and then discards every

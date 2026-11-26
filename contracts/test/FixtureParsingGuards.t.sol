@@ -13,7 +13,8 @@ import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {
     COMPACT_LAYOUT_HASH_V2,
     MLE_PROOF_ABI_SIGNATURE_V2,
-    MLE_PROOF_LAYOUT_HASH_V2
+    MLE_PROOF_LAYOUT_HASH_V2,
+    WHIR_POW_BITS_V2
 } from "@mle/generated/MleWhirV2.sol";
 
 contract FixtureParsingHarness {
@@ -307,7 +308,9 @@ contract FixtureParsingGuardsTest is Test {
                 vm.toString(MLE_PROOF_LAYOUT_HASH_V2),
                 '","compactLayoutHash":"',
                 vm.toString(COMPACT_LAYOUT_HASH_V2),
-                '","compactProofEncoding":"MLEWHIR3","whirPowBits":22,',
+                '","compactProofEncoding":"MLEWHIR3","whirPowBits":',
+                vm.toString(WHIR_POW_BITS_V2),
+                ",",
                 '"verificationKey":{"protocolVersion":3},',
                 '"pinnedVerifier":{"verificationConfigDigest":"',
                 vm.toString(configHash),

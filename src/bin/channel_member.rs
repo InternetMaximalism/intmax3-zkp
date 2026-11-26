@@ -15008,11 +15008,12 @@ fn parse_settlement_mle_v2_config_pin(
     if settlement_config_string(value, "/schema", &what)? != "plonky2-mle-v3-solidity-config"
         || settlement_config_u64(value, "/schemaVersion", &what)? != 3
         || settlement_config_u64(value, "/protocolVersion", &what)? != 3
-        || settlement_config_u64(value, "/whirPowBits", &what)? != 22
+        || settlement_config_u64(value, "/whirPowBits", &what)?
+            != plonky2_mle::protocol_schema_v2::WHIR_POW_BITS_V2 as u64
         || settlement_config_string(value, "/compactProofEncoding", &what)? != "MLEWHIR3"
     {
         return Err(format!(
-            "{what} is not the canonical PoW-22 protocol-v3 config schema"
+            "{what} is not the canonical current-PoW protocol-v3 config schema"
         ));
     }
 

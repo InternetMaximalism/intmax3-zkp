@@ -17,6 +17,12 @@
 //     cap) is refused at submission as mainnet's nodes refuse it ("gas limit too high"). Anvil, even
 //     with --hardfork osaka, mines such transactions, which hid a finalize sent at twice its
 //     simulated gas (Sepolia does not enforce the cap either).
+//   * a transaction larger than RPC_TX_SIZE_CAP (default 131 072 = 128 KiB, 0 = no cap) is refused
+//     at submission as geth's and reth's txpools refuse it: a non-blob transaction by its whole
+//     signed encoding, a blob transaction by its calldata plus encoded access list (reth v2.11
+//     `validate/eth.rs`; the sidecar is not counted). Sepolia (publicnode, reth) answered the
+//     validity attest/finalize, 131 387 bytes, with -32000 "oversized data: transaction size
+//     131387, limit 131072" (2026-11-26); anvil accepts any size.
 //   * a load-balanced endpoint answers a state read at a block its backend has not imported yet
 //     with -32001 "block not found" (publicnode, 2026-11-25: forge's first fork read, at the head,
 //     failed on 7 of 9 deploy steps of the testnet rebuild). With RPC_LAGGING_BLOCK_RATE > 0 each
@@ -77,6 +83,7 @@ async function resolveTag(tag, head) {
 const RETENTION = Number(process.env.RPC_STATE_RETENTION || 10000);
 const STATE_TAG_INDEX = { eth_call: 1, eth_getBalance: 1, eth_getCode: 1, eth_getTransactionCount: 1, eth_getStorageAt: 2, eth_getProof: 2 };
 const TX_GAS_LIMIT_CAP = BigInt(process.env.RPC_TX_GAS_LIMIT_CAP ?? 2 ** 24);
+const TX_SIZE_CAP = Number(process.env.RPC_TX_SIZE_CAP ?? 131072);
 const LAGGING_RATE = Number(process.env.RPC_LAGGING_BLOCK_RATE || 0);
 const LAGGING_BLOCKS = Number(process.env.RPC_LAGGING_BLOCKS || 2);
 
@@ -120,6 +127,42 @@ function rawTransactionGas(raw) {
   return fields[bytes[0] === 0x01 ? 3 : 4];
 }
 
+// The children of the RLP list at `offset`, each with its encoded span.
+function rlpListSpans(bytes, offset) {
+  const prefix = bytes[offset];
+  let start = offset + 1, length = prefix - 0xc0;
+  if (length > 55) {
+    const lengthOfLength = length - 55;
+    length = Number(BigInt('0x' + bytes.subarray(start, start + lengthOfLength).toString('hex')));
+    start += lengthOfLength;
+  }
+  const spans = [];
+  for (let cursor = start; cursor < start + length;) {
+    const item = rlpItem(bytes, cursor);
+    spans.push({ start: cursor, end: item.end, value: item.value });
+    cursor = item.end;
+  }
+  return spans;
+}
+
+// The size a geth/reth txpool compares with its 128 KiB cap (see the header).
+function rawTransactionPoolSize(raw) {
+  const bytes = Buffer.from(raw.replace(/^0x/, ''), 'hex');
+  if (bytes[0] !== 0x03) return bytes.length;
+  let fields = rlpListSpans(bytes, 1);
+  if (Array.isArray(fields[0].value)) fields = rlpListSpans(bytes, fields[0].start);
+  // EIP-4844: chainId, nonce, tip, maxFee, gas, to, value, data, accessList, ...
+  return fields[7].value.length + (fields[8].end - fields[8].start);
+}
+
+function txSizeRefusal(call) {
+  if (!TX_SIZE_CAP || call.method !== 'eth_sendRawTransaction') return null;
+  const size = rawTransactionPoolSize(call.params[0]);
+  if (size <= TX_SIZE_CAP) return null;
+  console.log(`refused a transaction of ${size} bytes > ${TX_SIZE_CAP}`);
+  return { code: -32000, message: `oversized data: transaction size ${size}, limit ${TX_SIZE_CAP}` };
+}
+
 function gasLimitRefusal(call) {
   if (TX_GAS_LIMIT_CAP === 0n) return null;
   let gas;
@@ -138,7 +181,7 @@ function gasLimitRefusal(call) {
 
 // Returns an error object to answer with, or null to forward.
 async function refusal(call) {
-  const gasRefusal = gasLimitRefusal(call);
+  const gasRefusal = gasLimitRefusal(call) || txSizeRefusal(call);
   if (gasRefusal) return gasRefusal;
   const tagIndex = STATE_TAG_INDEX[call.method];
   if (tagIndex !== undefined) {
@@ -190,4 +233,4 @@ http.createServer((req, res) => {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: String(error.message || error) } }));
     }
   });
-}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE}, tx gas limit <= ${TX_GAS_LIMIT_CAP || 'unlimited'}, lagging blocks ${LAGGING_RATE ? `${LAGGING_RATE} x newest ${LAGGING_BLOCKS}` : 'off'})`));
+}).listen(Number(listenPort), '127.0.0.1', () => console.log(`rpc-limits-proxy :${listenPort} -> ${upstream} (logs range <= ${MAX_RANGE}, tx gas limit <= ${TX_GAS_LIMIT_CAP || 'unlimited'}, tx size <= ${TX_SIZE_CAP || 'unlimited'}, lagging blocks ${LAGGING_RATE ? `${LAGGING_RATE} x newest ${LAGGING_BLOCKS}` : 'off'})`));
