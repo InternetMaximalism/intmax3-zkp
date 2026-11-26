@@ -22,7 +22,7 @@ contract ProofDaCodecTest is Test {
         codec.blobCountForLength(253_922);
     }
 
-    function test_realFixture_isCanonicalCompactV2AndNeedsTwoBlobs() public view {
+    function test_realFixture_isCanonicalCompactV2AndFitsOneBlob() public view {
         string memory json = vm.readFile(
             string.concat(
                 vm.projectRoot(),
@@ -33,8 +33,11 @@ contract ProofDaCodecTest is Test {
         bytes memory payload = codec.canonicalProofBytes(proof);
 
         assertEq(keccak256(payload), keccak256(proof));
-        assertEq(payload.length, 129_284);
-        assertEq(codec.blobCountForLength(payload.length), 2);
+        // PoW 28 (2026-11-26): the maximum-resource proof fits one blob; PoW 22's 129,284 needed two.
+        assertEq(payload.length, 122_052);
+        assertEq(codec.blobCountForLength(payload.length), 1);
+        assertEq(codec.blobCountForLength((4096 - 1) * 31), 1);
+        assertEq(codec.blobCountForLength((4096 - 1) * 31 + 1), 2);
     }
 
     function test_emptyPayload_rejected() public {

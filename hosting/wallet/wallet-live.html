@@ -1868,7 +1868,7 @@ async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDeposi
 
 // ---- Deposit import, confirmation-aware -----------------------------------------------------
 // `cosign-l1-deposit-import` requires the deposit to be REORG-SAFE before it credits anything:
-// 12 confirmations on a real chain (0 on anvil, which has no reorg model). A mined-but-young
+// 12 confirmations on a real chain (3 on Sepolia, 0 on anvil, which has no reorg model). A mined-but-young
 // deposit therefore gets REFUSED, which is correct — and used to surface as "deposit failed".
 //
 // SECURITY: this waits; it does NOT relax anything. The page never passes a `min_confirmations`

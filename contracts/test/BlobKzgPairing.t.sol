@@ -96,7 +96,7 @@ contract BlobKzgPairingTest is Test {
         assertEq(count, 1);
     }
 
-    function test_currentV2ProductionArtifact_twoBlobCapacityAndCanonicalBytes() public view {
+    function test_currentV2ProductionArtifact_blobCapacityAndCanonicalBytes() public view {
         // Consume the exact constructor-pinned V2 compact stream. The historical Sepolia KZG
         // sidecar below was tied to a removed V1 ABI encoding and cannot authenticate V2 bytes.
         // The independent four-byte golden above still exercises the real 0x0a precompile.
@@ -107,12 +107,14 @@ contract BlobKzgPairingTest is Test {
             )
         );
         bytes memory payload = FixtureLib.parseCompactProofV2(json);
-        assertEq(payload.length, 129_284);
+        assertEq(payload.length, 122_052);
         assertEq(
             keccak256(payload),
-            0x9bb89a1e4ca4bf9dca4d140eedb8836cbd41982922f2a212cf99861dc9715175
+            0xfd9a3c0a74d8445f1dc3ff9442cb1f208fff99d9ffbc6df00890f7104f4cef06
         );
-        assertEq(verifier.count(payload.length), 2);
+        // One blob since PoW 28; one byte past the one-blob capacity takes the second blob.
+        assertEq(verifier.count(payload.length), 1);
+        assertEq(verifier.count((4096 - 1) * 31 + 1), 2);
     }
 
     function test_independentChallengeAndBarycentricVector() public view {

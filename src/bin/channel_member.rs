@@ -13920,7 +13920,9 @@ struct SettlementBroadcastAddresses {
     materializer: String,
     mle_v2_cores: [String; 4],
     mle_v2_adapters: [String; 4],
-    registration_tx_hash: Bytes32,
+    /// `None` while Foundry has not sent the final registration yet (its artifact entry carries
+    /// `"hash": null`): a run whose estimate failed mid-sequence must still be resumable.
+    registration_tx_hash: Option<Bytes32>,
     registration_calldata_hash: Bytes32,
     registration_nonce: u64,
 }
@@ -15008,11 +15010,12 @@ fn parse_settlement_mle_v2_config_pin(
     if settlement_config_string(value, "/schema", &what)? != "plonky2-mle-v3-solidity-config"
         || settlement_config_u64(value, "/schemaVersion", &what)? != 3
         || settlement_config_u64(value, "/protocolVersion", &what)? != 3
-        || settlement_config_u64(value, "/whirPowBits", &what)? != 22
+        || settlement_config_u64(value, "/whirPowBits", &what)?
+            != plonky2_mle::protocol_schema_v2::WHIR_POW_BITS_V2 as u64
         || settlement_config_string(value, "/compactProofEncoding", &what)? != "MLEWHIR3"
     {
         return Err(format!(
-            "{what} is not the canonical PoW-22 protocol-v3 config schema"
+            "{what} is not the canonical current-PoW protocol-v3 config schema"
         ));
     }
 
@@ -15849,13 +15852,22 @@ fn validate_settlement_broadcast_value(
     }
     validate_settlement_call_input(register_manager, "registerSettlementManager")?;
 
-    let registration_tx_hash =
-        settlement_artifact_string(register_manager, "hash", "registerSettlementManager")?
-            .parse::<Bytes32>()
-            .map_err(|error| format!("registerSettlementManager transaction hash: {error}"))?;
-    if registration_tx_hash == Bytes32::default() {
-        return Err("registerSettlementManager transaction hash is zero".to_string());
-    }
+    // Foundry writes the whole planned sequence before sending and fills each `hash` as it sends;
+    // an unsent final registration is `null` (Sepolia, 2026-11-26: an estimate reverted
+    // mid-sequence because the backend did not see the previous CREATE yet). That is exactly the
+    // state `--resume` exists for, so only a present hash is parsed; completion still requires one.
+    let registration_tx_hash = match register_manager.get("hash") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(_) => {
+            let hash = settlement_artifact_string(register_manager, "hash", "registerSettlementManager")?
+                .parse::<Bytes32>()
+                .map_err(|error| format!("registerSettlementManager transaction hash: {error}"))?;
+            if hash == Bytes32::default() {
+                return Err("registerSettlementManager transaction hash is zero".to_string());
+            }
+            Some(hash)
+        }
+    };
     let registration_transaction = register_manager
         .get("transaction")
         .ok_or_else(|| "registerSettlementManager has no transaction object".to_string())?;
@@ -15944,7 +15956,7 @@ fn settlement_registration_receipt(
 
     let receipt = try_read_l1_receipt(
         rpc,
-        &addresses.registration_tx_hash.to_string(),
+        &addresses.registration_tx_hash?.to_string(),
         L1CallKind::RegisterSettlementManager,
     )?;
     let expected_from = Address::from_hex(&intent.broadcaster)
@@ -16649,8 +16661,34 @@ mod settlement_broadcast_recovery_tests {
             MLE_ADAPTERS.map(ToOwned::to_owned)
         );
         assert_eq!(addresses.registration_nonce, START_NONCE + 14);
-        assert_ne!(addresses.registration_tx_hash, Bytes32::default());
+        assert!(addresses
+            .registration_tx_hash
+            .is_some_and(|hash| hash != Bytes32::default()));
         assert_ne!(addresses.registration_calldata_hash, Bytes32::default());
+
+        // A run whose estimate failed before the final registration was sent stays resumable:
+        // Foundry leaves `"hash": null` on the unsent entry. Every other binding is still checked.
+        let last = artifact["transactions"].as_array().unwrap().len() - 1;
+        let mut unsent_registration = artifact.clone();
+        unsent_registration["transactions"][last]["hash"] = serde_json::Value::Null;
+        let unsent = validate_settlement_broadcast_value(
+            &unsent_registration,
+            &intent(),
+            &reg,
+            ROLLUP,
+            &pins,
+            &backing,
+            None,
+        )
+        .expect("an unsent final registration must not block --resume");
+        assert_eq!(unsent.registration_tx_hash, None);
+        assert_eq!(strip0x(&unsent.manager), strip0x(MANAGER));
+        let mut malformed_hash = artifact.clone();
+        malformed_hash["transactions"][last]["hash"] = serde_json::json!("0xnot-a-hash");
+        assert!(
+            validate_settlement_broadcast_value(&malformed_hash, &intent(), &reg, ROLLUP, &pins, &backing, None)
+                .is_err()
+        );
 
         let mut backing_adapter_bound_to_other_core = artifact.clone();
         backing_adapter_bound_to_other_core["transactions"][1]["arguments"][0] =
@@ -17833,6 +17871,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         reused.as_ref(),
     )
     .unwrap_or_else(|e| die(format!("post-broadcast artifact validation failed: {e}")));
+    if addresses.registration_tx_hash.is_none() {
+        die(
+            "post-broadcast artifact validation failed: Foundry reported success but the final \
+             registerSettlementManager entry has no transaction hash; cli_state remains PREPARED",
+        );
+    }
     let rollup = backing_rollup_hex;
     let registration_receipt = settlement_registration_receipt(
         rpc,
@@ -18206,9 +18250,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
 /// (fail-closed) — the faucet E2E's real ERC-20 deposit is the live proof that it is right.
 const DEPOSITED_TOPIC0: &str = "0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe";
 
-/// Reorg-safety default for a real (non-dev) chain, and the floor an explicit argument is clamped
-/// up to. Chain id 31337 (anvil) uses floor 0 — see `min_confirmations_for`.
+/// Reorg-safety default for a real (non-dev) chain. Chain id 31337 (anvil) uses 0 and Sepolia
+/// (11155111) uses [`SEPOLIA_MIN_CONFIRMATIONS`] — see `min_confirmations_for`.
 const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+/// Sepolia's depth: the owner asked for 3 confirmations on the testnet (2026-11-26) instead of
+/// waiting 12 blocks (~2.5 min) per deposit. Mainnet and every other chain keep 12.
+const SEPOLIA_MIN_CONFIRMATIONS: u64 = 3;
 
 /// ONE `Deposited` log, read back from L1. Every economically meaningful field of the imported
 /// `Deposit` comes from HERE — none of it is caller-supplied any more (threat model §1, A9).
@@ -18257,13 +18304,28 @@ fn min_confirmations_for(chain_id: u64, explicit: Option<u64>) -> u64 {
     let floor = if chain_id == 31337 { 0 } else { 1 };
     match explicit {
         Some(v) => v.max(floor),
-        None => {
-            if chain_id == 31337 {
-                0
-            } else {
-                DEFAULT_MIN_CONFIRMATIONS
-            }
-        }
+        None => match chain_id {
+            31337 => 0,
+            11155111 => SEPOLIA_MIN_CONFIRMATIONS,
+            _ => DEFAULT_MIN_CONFIRMATIONS,
+        },
+    }
+}
+
+#[cfg(test)]
+mod min_confirmations_tests {
+    use super::*;
+
+    #[test]
+    fn sepolia_defaults_to_three_and_every_other_public_chain_to_twelve() {
+        assert_eq!(min_confirmations_for(31337, None), 0);
+        assert_eq!(min_confirmations_for(11155111, None), 3);
+        assert_eq!(min_confirmations_for(1, None), 12);
+        assert_eq!(min_confirmations_for(31338, None), 12);
+        // An explicit value is honored but never below the public-chain floor of 1.
+        assert_eq!(min_confirmations_for(11155111, Some(0)), 1);
+        assert_eq!(min_confirmations_for(1, Some(0)), 1);
+        assert_eq!(min_confirmations_for(31337, Some(0)), 0);
     }
 }
 

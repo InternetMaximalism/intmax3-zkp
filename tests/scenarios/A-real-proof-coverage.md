@@ -14,7 +14,7 @@ real-verifier tests establish cryptographic acceptance separately. Do not combin
 into a claim that one test already proves the entire close-to-claim value path.
 
 All live artifacts use the V2 implementation with strict `plonky2-mle-v3-solidity`
-schema/protocol version 3, WHIR PoW 22, and canonical `MLEWHIR3` compact bytes. Proof-free
+schema/protocol version 3, WHIR PoW 28, and canonical `MLEWHIR3` compact bytes. Proof-free
 deployment artifacts use the distinct `plonky2-mle-v3-solidity-config` schema. The release gates reject missing/stale V1 or wire-v2 fixtures instead
 of allowing individual E2Es' compatibility skips to turn the suite green.
 

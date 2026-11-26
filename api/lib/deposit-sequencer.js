@@ -27,8 +27,9 @@ const producer = require('./block-producer');
 const { importL1Deposit } = require('./deposit-pipeline');
 
 const DEPOSITED_TOPIC0 = '0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe';
-// The CLI's reorg-safety depth off the local devnet (`DEFAULT_MIN_CONFIRMATIONS`).
-const MIN_CONFIRMATIONS = 12;
+// The CLI's reorg-safety depth (`min_confirmations_for` in channel_member): 3 on Sepolia, 12 on
+// every other public chain. The CLI enforces it again on import; this only decides when to try.
+const minConfirmations = () => (Number(cli.chainId()) === 11155111 ? 3 : 12);
 const LOG_WINDOW = Number(process.env.L1_LOG_WINDOW_BLOCKS || 50000);
 const RANGE_REFUSAL = /block range|range.*(exceed|too (large|wide|big))|exceed.*range|too many (blocks|results)|more than \d+ results|response size|limit exceeded/i;
 
@@ -121,7 +122,7 @@ function rollupAddress() {
 
 // Record every reorg-safe Deposited log from the cursor on, paging within the RPC's range cap.
 function scan(state, head) {
-  const safeHead = head - (MIN_CONFIRMATIONS - 1);
+  const safeHead = head - (minConfirmations() - 1);
   let window = LOG_WINDOW;
   while (state.scanFrom <= safeHead) {
     const to = Math.min(safeHead, state.scanFrom + window - 1);
@@ -270,8 +271,8 @@ async function importThrough(ch, txHash, withLock) {
   if (receipt.status !== '0x1') throw new Error(`deposit tx ${txHash} did not succeed (status ${receipt.status})`);
   const head = num(rpc('eth_blockNumber', []));
   const confirmations = head - num(receipt.blockNumber) + 1;
-  if (confirmations < MIN_CONFIRMATIONS) {
-    throw new Error(`deposit tx ${txHash} has ${confirmations} confirmation(s), need ${MIN_CONFIRMATIONS} on chain ${cli.chainId()} (reorg safety) — refusing`);
+  if (confirmations < minConfirmations()) {
+    throw new Error(`deposit tx ${txHash} has ${confirmations} confirmation(s), need ${minConfirmations()} on chain ${cli.chainId()} (reorg safety) — refusing`);
   }
   const state = await run(withLock);
   const outcome = state.outcomes[key];
@@ -304,4 +305,4 @@ function start(withLock, periodMs = Number(process.env.DEPOSIT_SEQUENCER_MS || 2
   return setInterval(tick, periodMs).unref();
 }
 
-module.exports = { run, importThrough, start, boundSlots, MIN_CONFIRMATIONS };
+module.exports = { run, importThrough, start, boundSlots, minConfirmations };
