@@ -173,10 +173,24 @@ test('an import that failed after the channel received the deposit is resumed, n
 });
 
 test('the browser is told to keep waiting while its deposit is not reorg-safe', async () => {
+  // Sepolia (the chain id this file mocks) credits after 3 confirmations.
   reset();
-  deposit(0, { recipient: RECIPIENT[7], depositor: ALICE, block: 4995 });
-  await assert.rejects(sequencer.importThrough(7, chain.deposits[0].txHash, withLock), /has 6 confirmation\(s\), need 12/);
+  deposit(0, { recipient: RECIPIENT[7], depositor: ALICE, block: 4999 });
+  await assert.rejects(sequencer.importThrough(7, chain.deposits[0].txHash, withLock), /has 2 confirmation\(s\), need 3/);
   assert.equal(nextIndex, 0);
+});
+
+test('every public chain other than Sepolia still waits for 12 confirmations', async () => {
+  const sepolia = cli.chainId;
+  cli.chainId = () => 1;
+  try {
+    reset();
+    deposit(0, { recipient: RECIPIENT[7], depositor: ALICE, block: 4995 });
+    await assert.rejects(sequencer.importThrough(7, chain.deposits[0].txHash, withLock), /has 6 confirmation\(s\), need 12/);
+    assert.equal(nextIndex, 0);
+  } finally {
+    cli.chainId = sepolia;
+  }
 });
 
 test('the log scan pages within any RPC range cap', async () => {

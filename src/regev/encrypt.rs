@@ -184,9 +184,18 @@ impl core::fmt::Debug for AmountWitness {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AmountWitness")
             .field("amount", &format_args!("<redacted>"))
-            .field("r", &format_args!("<{} secret entries>", self.witness.r.len()))
-            .field("e1", &format_args!("<{} secret entries>", self.witness.e1u.len()))
-            .field("e2", &format_args!("<{} secret entries>", self.witness.e2u.len()))
+            .field(
+                "r",
+                &format_args!("<{} secret entries>", self.witness.r.len()),
+            )
+            .field(
+                "e1",
+                &format_args!("<{} secret entries>", self.witness.e1u.len()),
+            )
+            .field(
+                "e2",
+                &format_args!("<{} secret entries>", self.witness.e2u.len()),
+            )
             .field("m", &format_args!("<{} secret bits>", self.witness.m.len()))
             .finish()
     }

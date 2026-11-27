@@ -162,7 +162,14 @@ fn deploy_settlement(cwd: &std::path::Path, rpc: &str, envs: &[(&str, &str)]) ->
         .env_remove("INTMAX_L1_ACCOUNT")
         .env_remove("ETH_PASSWORD")
         .env_remove("INTMAX_COSIGNER_KEYFILE")
-        .env_remove("INTMAX_INSECURE_DETERMINISTIC_KEYS");
+        .env_remove("INTMAX_INSECURE_DETERMINISTIC_KEYS")
+        // Off the devnet the run first requires the producer's exported validity config
+        // (c3dc4c46). Supply one so each test reaches the precondition it is about; a test that
+        // wants it absent passes WALLET_VALIDITY_CONFIG="" (the CLI treats empty as unset).
+        .env(
+            "WALLET_VALIDITY_CONFIG",
+            repo_root().join("contracts/test/data/mle_fixture_config.json"),
+        );
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -190,7 +197,9 @@ fn assert_no_mock_anywhere(out: &str, chain_id: u64) {
 /// output.
 ///
 /// MUTATION SENSITIVITY: reintroducing the hardcoded `DeployWalletSettlement.s.sol` fails this
-/// test three times over — the announcement, the mock-name ban, and the FRAUD_TREASURY message.
+/// test three times over — the announcement, the mock-name ban, and the named precondition.
+/// (`FRAUD_TREASURY` was the named precondition until 5ba4e3e4 removed it from the CLI together
+/// with own-rollup deployment; the producer's validity config, c3dc4c46, is checked first now.)
 #[test]
 fn a_real_chain_id_selects_the_real_deployer_and_names_its_preconditions() {
     if !tool_present("cast") {
@@ -199,14 +208,31 @@ fn a_real_chain_id_selects_the_real_deployer_and_names_its_preconditions() {
     }
     let rpc = spawn_rpc(Rpc::Chain(11155111));
     let w = work_dir("sepolia");
-    let (ok, out) = deploy_settlement(&w.0, &rpc.url, &[]);
-    assert!(!ok, "a deploy with no FRAUD_TREASURY must fail:\n{out}");
+
+    // First precondition: the producer's own validity config, never the test fixture by default.
+    let (ok, out) = deploy_settlement(&w.0, &rpc.url, &[("WALLET_VALIDITY_CONFIG", "")]);
     assert!(
-        out.contains("chain id 11155111 → plan: real-chain (script/DeployCloseCli.s.sol)"),
+        !ok,
+        "a real-chain deploy with no WALLET_VALIDITY_CONFIG must fail:\n{out}"
+    );
+    assert!(
+        out.contains("WALLET_VALIDITY_CONFIG") && out.contains("required off the local devnet"),
+        "the refusal must name the missing validity config:\n{out}"
+    );
+    assert_no_mock_anywhere(&out, 11155111);
+
+    // With the config supplied, the run announces the real-chain plan and stops on the next named
+    // precondition (the keystore signer; see `the_real_chain_path_refuses_an_absent_deploy_key`).
+    let (ok, out) = deploy_settlement(&w.0, &rpc.url, &[]);
+    assert!(!ok, "a deploy with no signer must fail:\n{out}");
+    assert!(
+        out.contains(
+            "chain id 11155111 → plan: real-chain-pinned-v2 (script/DeployCloseCli.s.sol)"
+        ),
         "the run must announce the real-chain plan it chose:\n{out}"
     );
     assert!(
-        out.contains("FRAUD_TREASURY"),
+        out.contains("INTMAX_L1_ACCOUNT is not set"),
         "the refusal must name the missing variable:\n{out}"
     );
     assert_no_mock_anywhere(&out, 11155111);
@@ -254,7 +280,9 @@ fn the_devnet_chain_id_still_selects_the_devnet_deployer() {
     );
     assert!(!ok, "there is no channel state in this dir:\n{out}");
     assert!(
-        out.contains("chain id 31337 → plan: devnet-mock (script/DeployWalletSettlement.s.sol)"),
+        out.contains(
+            "chain id 31337 → plan: devnet-pinned-v2 (script/DeployWalletSettlement.s.sol)"
+        ),
         "anvil must keep the devnet stack:\n{out}"
     );
     // It proceeded into the ORIGINAL devnet body (which loads channel state first) — i.e. the
@@ -280,7 +308,7 @@ fn an_unreadable_chain_id_is_refused_rather_than_guessed() {
     let (ok, out) = deploy_settlement(&w.0, &rpc.url, &[]);
     assert!(!ok, "an unreadable chain id must abort:\n{out}");
     assert!(
-        !out.contains("plan: devnet-mock") && !out.contains("DeployWalletSettlement"),
+        !out.contains("plan: devnet") && !out.contains("DeployWalletSettlement"),
         "an unreadable chain id must never select the mock stack:\n{out}"
     );
 }
@@ -360,41 +388,33 @@ fn the_real_chain_path_refuses_publicly_derivable_cosigner_keys() {
     assert_no_mock_anywhere(&out, 11155111);
 }
 
-/// `DeployCloseCli.s.sol` deploys its OWN rollup. Running it for a channel that is already backed
-/// would leave the deposit on the old rollup and the registration + manager + exit path on the new
-/// one — a break the user would only discover at `withdraw`, after paying for the proofs.
+/// The hazard this test guarded — `DeployCloseCli.s.sol` deploying its OWN rollup for a channel
+/// whose deposit already sits on another one, so the money and the exit path end up on different
+/// rollups — was designed out in 5ba4e3e4: off the devnet the script can only ATTACH to the
+/// channel's existing backing rollup, and the CLI's real-chain path reads that rollup from
+/// `channel_backing.json` instead of deploying one. Pin both halves so the own-rollup branch cannot
+/// come back unnoticed.
 #[test]
-fn the_real_chain_path_refuses_to_orphan_an_existing_backing() {
-    if !tool_present("cast") {
-        eprintln!("[skip] foundry `cast` not found");
-        return;
-    }
-    let rpc = spawn_rpc(Rpc::Chain(11155111));
-    let w = work_dir("backed");
-    std::fs::write(
-        w.0.join("channel_backing.json"),
-        r#"{"rollup":"0x000000000000000000000000000000000000b0b0"}"#,
-    )
-    .expect("write backing");
-    let (ok, out) = deploy_settlement(
-        &w.0,
-        &rpc.url,
-        &[
-            ("FRAUD_TREASURY", TREASURY),
-            ("INTMAX_L1_ACCOUNT", "test-orphan-guard"),
-        ],
-    );
-    assert!(!ok, "a backed channel must not get a second rollup:\n{out}");
+fn the_real_chain_path_can_only_attach_to_the_existing_backing_rollup() {
+    let script = std::fs::read_to_string(repo_root().join("contracts/script/DeployCloseCli.s.sol"))
+        .expect("read DeployCloseCli.s.sol");
     assert!(
-        out.contains("already backed")
-            && out.contains("0x000000000000000000000000000000000000b0b0"),
-        "the refusal must name the rollup that holds the money:\n{out}"
+        script.contains(
+            "require(existingRollup != address(0) || block.chainid == 31337, \"public settlement requires existing rollup\");"
+        ),
+        "DeployCloseCli.s.sol must refuse to deploy a fresh rollup on any public chain"
     );
+    let cli = std::fs::read_to_string(repo_root().join("src/bin/channel_member.rs"))
+        .expect("read channel_member.rs");
+    let real = cli
+        .split("fn deploy_settlement_real(")
+        .nth(1)
+        .and_then(|body| body.split("\nfn ").next())
+        .expect("deploy_settlement_real body");
     assert!(
-        out.contains("setup-backing"),
-        "the refusal must state the correct ordering:\n{out}"
+        real.contains("load_backing()") && real.contains("EXISTING_ROLLUP"),
+        "the real-chain deploy must read the channel's backing rollup and pass it as EXISTING_ROLLUP"
     );
-    assert_no_mock_anywhere(&out, 11155111);
 }
 
 /// A stack already recorded for this channel must not be silently replaced: a second real-chain

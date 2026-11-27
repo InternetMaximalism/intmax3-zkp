@@ -185,7 +185,9 @@ pub struct RegevSk {
 
 impl core::fmt::Debug for RegevSk {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RegevSk").field("s", &format_args!("<{} secret coefficients>", self.s.len())).finish()
+        f.debug_struct("RegevSk")
+            .field("s", &format_args!("<{} secret coefficients>", self.s.len()))
+            .finish()
     }
 }
 
@@ -260,10 +262,8 @@ mod tests {
         for pk in &active {
             words.extend(pk.digest().to_u32_vec());
         }
-        let expected = Bytes32::from_u32_slice(
-            &plonky2_keccak::utils::solidity_keccak256(&words),
-        )
-        .unwrap();
+        let expected =
+            Bytes32::from_u32_slice(&plonky2_keccak::utils::solidity_keccak256(&words)).unwrap();
         assert_eq!(channel_regev_pk_root(&active), expected);
         // The count is in the preimage: one more (padding) key is a different root.
         let mut extended = active.clone();

@@ -156,7 +156,10 @@ impl<V: Leafable> MerkleProof<V> {
     /// an out-of-range index, because the path consumes only `height` bits and would otherwise
     /// alias `index` with `index mod 2^height` (UTILS-02).
     pub fn get_root(&self, leaf_data: &V, index: u64) -> HashOut<V> {
-        debug_assert!(index_in_domain(index, self.height()), "Merkle index out of domain");
+        debug_assert!(
+            index_in_domain(index, self.height()),
+            "Merkle index out of domain"
+        );
         let mut path = BitPath::new(self.height() as u32, index);
         let mut state = leaf_data.hash();
         for sibling in self.siblings.iter() {

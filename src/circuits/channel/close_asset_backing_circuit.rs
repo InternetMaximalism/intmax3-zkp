@@ -407,7 +407,9 @@ where
             finalized_extended_state_commitment: self.extended_public_state.commitment(),
             anchor_block_number: self.extended_public_state.inner.block_number,
             processed_send_block_number: balance_full_pis.pis.block_r,
-            balance_state_commitment: Bytes32::from(balance_full_pis.commitment(&balance_vd.common.config)),
+            balance_state_commitment: Bytes32::from(
+                balance_full_pis.commitment(&balance_vd.common.config),
+            ),
         })
     }
 }
@@ -494,8 +496,10 @@ where
             &final_balance_proof.public_inputs,
             &balance_vd.common.config,
         );
-        let balance_commitment = balance_full_pis.commitment(&mut builder, &balance_vd.common.config);
-        let balance_state_commitment = Bytes32Target::from_hash_out(&mut builder, balance_commitment);
+        let balance_commitment =
+            balance_full_pis.commitment(&mut builder, &balance_vd.common.config);
+        let balance_state_commitment =
+            Bytes32Target::from_hash_out(&mut builder, balance_commitment);
         let balance_pis = balance_full_pis.pis;
 
         let private_state = PrivateStateTarget::new(&mut builder);
@@ -1038,7 +1042,10 @@ mod tests {
     /// anchor (`public_state.block_number`) clears the L1 rule `anchor >= lastPostedBlock`.
     /// The statement therefore exposes `block_r` as `processed_send_block_number`, the field the
     /// materializer compares with `lastPostedBlock` (CloseFundingMaterializer, 2026-10-15).
-    #[cfg_attr(debug_assertions, ignore = "run with --release (NullifierTree::init asserts canonical field elements)")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "run with --release (NullifierTree::init asserts canonical field elements)"
+    )]
     #[test]
     fn pre_burn_head_reproved_past_the_burn_block_exposes_its_processed_send_boundary() {
         use crate::{
@@ -1132,7 +1139,9 @@ mod tests {
         let prev_private_state = full_private_state.to_private_state();
         let asset_merkle_proof = full_private_state.asset_tree.prove(0);
         let mut nullifier_tree = NullifierTree::init();
-        let nullifier_proof = nullifier_tree.prove_and_insert(deposit.nullifier()).unwrap();
+        let nullifier_proof = nullifier_tree
+            .prove_and_insert(deposit.nullifier())
+            .unwrap();
         let update_private_state = UpdatePrivateState::new(
             0,
             deposit.amount,
@@ -1175,7 +1184,9 @@ mod tests {
                 pis: pis.clone(),
                 vd: balance_vd.verifier_only.clone(),
             };
-            let fields = full.to_u64_vec(&balance_vd.common.config).to_field_vec::<F>();
+            let fields = full
+                .to_u64_vec(&balance_vd.common.config)
+                .to_field_vec::<F>();
             balance_circuit.prove(Some(&fields), None).unwrap()
         };
 
@@ -1191,9 +1202,15 @@ mod tests {
         };
         let reproved = receive.to_public_inputs(&balance_vd.common).unwrap().pis;
         assert_eq!(reproved.block_r, new_block_r);
-        assert!(reproved.block_r < burn_block, "the burn send is NOT processed");
+        assert!(
+            reproved.block_r < burn_block,
+            "the burn send is NOT processed"
+        );
         assert_eq!(reproved.public_state.block_number, anchor_block);
-        assert!(reproved.public_state.block_number > burn_block, "anchored past the burn");
+        assert!(
+            reproved.public_state.block_number > burn_block,
+            "anchored past the burn"
+        );
         assert_ne!(reproved.settled_tx_chain, Bytes32::default());
 
         // 2. The backing constructor accepts that Balance proof: the statement's anchor is the
@@ -1257,12 +1274,15 @@ mod tests {
         let statement = witness.public_inputs(&balance_vd).unwrap();
         assert_eq!(statement.settled_tx_chain, reproved.settled_tx_chain);
         assert_eq!(statement.anchor_block_number, anchor_block);
-        assert!(statement.anchor_block_number >= burn_block, "anchor >= lastPostedBlock");
+        assert!(
+            statement.anchor_block_number >= burn_block,
+            "anchor >= lastPostedBlock"
+        );
 
         // 3. The fix: the statement carries the processed-send boundary (`block_r`), and it is
-        //    below the burn block. `CloseFundingMaterializer` compares THIS field, not the
-        //    anchor, with `lastPostedBlock`, so this attestation can never back a close once the
-        //    burn block is posted.
+        //    below the burn block. `CloseFundingMaterializer` compares THIS field, not the anchor,
+        //    with `lastPostedBlock`, so this attestation can never back a close once the burn block
+        //    is posted.
         assert_eq!(statement.processed_send_block_number, new_block_r);
         assert!(statement.processed_send_block_number < burn_block);
         let limbs = statement.to_u64_vec();
@@ -1319,7 +1339,6 @@ mod tests {
         ));
     }
 
-
     // LAYER M: MECHANICAL FAITHFULNESS EVIDENCE
     // ---------------------------------------------------------------------------------------
     //
@@ -1359,7 +1378,9 @@ mod tests {
 
         // --- recursive verification and its decoded statement ---------------------------------
         table.check(
-            "assertBalancePiShape", "close_asset_backing_circuit.rs:442-446", "public-inputs",
+            "assertBalancePiShape",
+            "close_asset_backing_circuit.rs:442-446",
+            "public-inputs",
             c.final_balance_proof.public_inputs.len()
                 == BALANCE_PUBLIC_INPUTS_LEN + vd_vec_len(&fx.balance_vd.common.config)
                 && BALANCE_PUBLIC_INPUTS_LEN == 29,
@@ -1367,13 +1388,17 @@ mod tests {
              consumed proof is the canonical cyclic shape (29 + vd tail)",
         );
         table.check(
-            "startStandardRecursionZk", "close_asset_backing_circuit.rs:447-448", "config",
+            "startStandardRecursionZk",
+            "close_asset_backing_circuit.rs:447-448",
+            "config",
             c.data.common.config == CircuitConfig::standard_recursion_zk_config(),
             "holds = True (config selection emits no gate); checked the docstring claim: the \
              built circuit carries standard_recursion_zk_config",
         );
         table.note(
-            "allocateProofAndVerifyPinnedCyclic", "close_asset_backing_circuit.rs:450", "gadget",
+            "allocateProofAndVerifyPinnedCyclic",
+            "close_asset_backing_circuit.rs:450",
+            "gadget",
             NOT_STATIC,
             "holds: recursive.circuitAccepts balanceProofWire — add_proof_target_and_verify_cyclic \
              bakes balance_vd in as constants and binds the self-VD; a FRI verifier, not a copy \
@@ -1385,7 +1410,9 @@ mod tests {
         );
         let balance_pis = balance_full.pis;
         table.check(
-            "decodeBalanceTargetPis", "close_asset_backing_circuit.rs:451-455", "aliasing",
+            "decodeBalanceTargetPis",
+            "close_asset_backing_circuit.rs:451-455",
+            "aliasing",
             balance_pis.to_vec().len() == BALANCE_PUBLIC_INPUTS_LEN
                 && balance_pis.to_vec()
                     == c.final_balance_proof.public_inputs[..BALANCE_PUBLIC_INPUTS_LEN].to_vec(),
@@ -1396,20 +1423,27 @@ mod tests {
 
         // --- private state and its Poseidon opening -------------------------------------------
         table.check(
-            "allocatePrivateUnchecked", "close_asset_backing_circuit.rs:457", "range",
+            "allocatePrivateUnchecked",
+            "close_asset_backing_circuit.rs:457",
+            "range",
             c.private_state.to_vec().len() == 21
                 && view.none_range_checked(&c.private_state.to_vec()),
             "holds = True; checked the docstring claim: PrivateStateTarget::new range-checks none \
              of its 21 wires (four Poseidon roots, nonce, salt)",
         );
         table.note(
-            "computePrivatePoseidon", "close_asset_backing_circuit.rs:458", "gadget", NOT_STATIC,
+            "computePrivatePoseidon",
+            "close_asset_backing_circuit.rs:458",
+            "gadget",
+            NOT_STATIC,
             "holds: hash.privateCommitment privateStateWire.words = openedPrivateCommitmentWire — \
              PoseidonHashOutTarget::hash_inputs over the 21-word to_vec(); the permutation is a \
              PoseidonGate relation, not a copy constraint",
         );
         table.check(
-            "connectPrivateCommitment", "close_asset_backing_circuit.rs:461", "connect",
+            "connectPrivateCommitment",
+            "close_asset_backing_circuit.rs:461",
+            "connect",
             view.same_slices(
                 &p.opened_private_commitment.elements,
                 &balance_pis.private_commitment.elements,
@@ -1421,7 +1455,9 @@ mod tests {
         // --- extended public state -------------------------------------------------------------
         let ext = &c.extended_public_state;
         table.check(
-            "allocateExtendedChecked", "close_asset_backing_circuit.rs:463", "range",
+            "allocateExtendedChecked",
+            "close_asset_backing_circuit.rs:463",
+            "range",
             view.range_bits(ext.inner.block_number.value).contains(&63)
                 && view.all_range_checked(&ext.inner.timestamp.to_vec(), 32)
                 && ext.inner.timestamp.to_vec().len() == 2
@@ -1438,14 +1474,18 @@ mod tests {
              the three inner Poseidon roots stay range-unconstrained as the docstring says",
         );
         table.check(
-            "connectInnerPublicState", "close_asset_backing_circuit.rs:464-466", "connect",
+            "connectInnerPublicState",
+            "close_asset_backing_circuit.rs:464-466",
+            "connect",
             balance_pis.public_state.to_vec().len() == 15
                 && view.same_slices(&balance_pis.public_state.to_vec(), &ext.inner.to_vec()),
             "holds: balanceProofWire.statement.publicState = extendedStateWire.inner — all 15 \
              inner wires (block number, 2 timestamp limbs, 3 Poseidon roots) are connected",
         );
         table.check(
-            "enforceCursorAtOrBelowAnchor", "close_asset_backing_circuit.rs:467-476", "range",
+            "enforceCursorAtOrBelowAnchor",
+            "close_asset_backing_circuit.rs:467-476",
+            "range",
             view.range_bits(p.cursor_slack).contains(&63),
             "holds: (extendedStateWire.inner.blockNumber - balanceProofWire.statement.blockR) is \
              range-checked to 63 bits — the processed-send boundary never exceeds the anchor \
@@ -1454,20 +1494,30 @@ mod tests {
 
         // --- token vector allocation -----------------------------------------------------------
         table.note(
-            "allocateCount", "close_asset_backing_circuit.rs:468", "no-gate", TRIVIAL,
+            "allocateCount",
+            "close_asset_backing_circuit.rs:468",
+            "no-gate",
+            TRIVIAL,
             "holds = True — add_virtual_target() emits no constraint",
         );
         table.check(
-            "rangeCount32", "close_asset_backing_circuit.rs:469", "range",
+            "rangeCount32",
+            "close_asset_backing_circuit.rs:469",
+            "range",
             view.range_bits(c.token_count).contains(&32),
             "holds: tokenCountWire < 2^32 — range_check(token_count, 32)",
         );
         table.note(
-            "allocateRegistry [0..10)", "close_asset_backing_circuit.rs:470-471", "no-gate",
-            TRIVIAL, "holds = True — the raw registry allocation emits no constraint",
+            "allocateRegistry [0..10)",
+            "close_asset_backing_circuit.rs:470-471",
+            "no-gate",
+            TRIVIAL,
+            "holds = True — the raw registry allocation emits no constraint",
         );
         table.check(
-            "rangeRegistry32 [0..10)", "close_asset_backing_circuit.rs:472", "range",
+            "rangeRegistry32 [0..10)",
+            "close_asset_backing_circuit.rs:472",
+            "range",
             c.token_registry.len() == MAX_CHANNEL_TOKENS
                 && view.all_range_checked(&c.token_registry, 32),
             "holds: registryWire row < 2^32 — range_check(registry[t], 32) for every one of the \
@@ -1475,19 +1525,25 @@ mod tests {
         );
         let fund_limbs: Vec<Target> = c.fund_amounts.iter().flat_map(|a| a.to_vec()).collect();
         table.check(
-            "allocateCheckedU256 [0..10)", "close_asset_backing_circuit.rs:475", "range",
+            "allocateCheckedU256 [0..10)",
+            "close_asset_backing_circuit.rs:475",
+            "range",
             fund_limbs.len() == MAX_CHANNEL_TOKENS * 8 && view.all_range_checked(&fund_limbs, 32),
             "holds: (amountWire row).Checked — U256Target::new(_, true) u32-checks all eight \
              limbs of every token slot",
         );
         table.note(
-            "allocateSafeBoolean [0..10)", "close_asset_backing_circuit.rs:476", "arith",
+            "allocateSafeBoolean [0..10)",
+            "close_asset_backing_circuit.rs:476",
+            "arith",
             NOT_STATIC,
             "holds: activityWire row = 0 ∨ activityWire row = 1 — add_virtual_bool_target_safe is \
              mul_sub(b,b,b) asserted zero through an ArithmeticGate output, not a copy constraint",
         );
         table.check(
-            "allocatePath [0..10)", "close_asset_backing_circuit.rs:477-478", "width",
+            "allocatePath [0..10)",
+            "close_asset_backing_circuit.rs:477-478",
+            "width",
             c.asset_construction_proofs.len() == MAX_CHANNEL_TOKENS
                 && MAX_CHANNEL_TOKENS == 10
                 && ASSET_TREE_HEIGHT == 32
@@ -1500,32 +1556,42 @@ mod tests {
 
         // --- constants ---------------------------------------------------------------------------
         table.check(
-            "constantZero", "close_asset_backing_circuit.rs:480", "constant",
+            "constantZero",
+            "close_asset_backing_circuit.rs:480",
+            "constant",
             view.is_zero(p.zero) && view.same(p.active_sum_seed, p.zero),
             "holds: zeroWire = 0 ∧ activitySumWire 0 = zeroWire — builder.zero() is pinned by a \
              gate constant AND is the seed of the activity accumulator",
         );
         table.check(
-            "constantOne", "close_asset_backing_circuit.rs:481", "constant",
+            "constantOne",
+            "close_asset_backing_circuit.rs:481",
+            "constant",
             view.is_one(p.one),
             "holds: oneWire = 1 — builder.one() is wired to its ConstantGate value",
         );
 
         // --- no-rise (padding-suffix) loop -------------------------------------------------------
         table.note(
-            "subtractActivityFromOne [0..9)", "close_asset_backing_circuit.rs:485", "arith",
+            "subtractActivityFromOne [0..9)",
+            "close_asset_backing_circuit.rs:485",
+            "arith",
             NOT_STATIC,
             "holds: oneMinusActivityWire row = oneWire - activityWire row — builder.sub output is \
              an ArithmeticGate relation",
         );
         table.note(
-            "multiplyNextActivity [0..9)", "close_asset_backing_circuit.rs:486", "arith",
+            "multiplyNextActivity [0..9)",
+            "close_asset_backing_circuit.rs:486",
+            "arith",
             NOT_STATIC,
             "holds: riseProductWire row = activityWire (row+1) * oneMinusActivityWire row — \
              builder.mul output is an ArithmeticGate relation",
         );
         table.check(
-            "connectNoRiseZero [0..9)", "close_asset_backing_circuit.rs:489", "connect",
+            "connectNoRiseZero [0..9)",
+            "close_asset_backing_circuit.rs:489",
+            "connect",
             p.rise_products.len() == MAX_CHANNEL_TOKENS - 1 && view.all_zero(&p.rise_products),
             "holds: riseProductWire row = zeroWire — each of the nine rise products is connected \
              to the zero constant",
@@ -1533,111 +1599,147 @@ mod tests {
 
         // --- activity count ----------------------------------------------------------------------
         table.note(
-            "addActivityToSum [0..10)", "close_asset_backing_circuit.rs:491-496", "arith",
+            "addActivityToSum [0..10)",
+            "close_asset_backing_circuit.rs:491-496",
+            "arith",
             NOT_STATIC,
             "holds: activitySumWire (row+1) = activitySumWire row + activityWire row — the ten \
              builder.add outputs are ArithmeticGate relations",
         );
         table.check(
-            "connectSumToCount", "close_asset_backing_circuit.rs:497", "connect",
+            "connectSumToCount",
+            "close_asset_backing_circuit.rs:497",
+            "connect",
             view.same(p.active_sum, c.token_count),
             "holds: activitySumWire 10 = tokenCountWire — the final accumulator wire is connected \
              to the token_count wire",
         );
         table.check(
-            "assertFirstActive", "close_asset_backing_circuit.rs:498", "constant",
+            "assertFirstActive",
+            "close_asset_backing_circuit.rs:498",
+            "constant",
             view.is_one(c.token_active_bits[0].target),
             "holds: activityWire 0 = 1 — assert_one(token_active_bits[0])",
         );
 
         // --- padding zeroing ---------------------------------------------------------------------
         table.note(
-            "notActivity [0..10)", "close_asset_backing_circuit.rs:505", "arith", NOT_STATIC,
+            "notActivity [0..10)",
+            "close_asset_backing_circuit.rs:505",
+            "arith",
+            NOT_STATIC,
             "holds: inactiveWire row = 1 - activityWire row — builder.not is a sub, an \
              ArithmeticGate relation",
         );
         table.note(
-            "multiplyInactiveRegistry [0..10)", "close_asset_backing_circuit.rs:506", "arith",
+            "multiplyInactiveRegistry [0..10)",
+            "close_asset_backing_circuit.rs:506",
+            "arith",
             NOT_STATIC,
             "holds: dirtyRegistryWire row = inactiveWire row * registryWire row — builder.mul \
              output is an ArithmeticGate relation",
         );
         table.check(
-            "connectInactiveRegistryZero [0..10)", "close_asset_backing_circuit.rs:509", "connect",
+            "connectInactiveRegistryZero [0..10)",
+            "close_asset_backing_circuit.rs:509",
+            "connect",
             p.dirty_registry.len() == MAX_CHANNEL_TOKENS && view.all_zero(&p.dirty_registry),
             "holds: dirtyRegistryWire row = zeroWire — each of the ten inactive*registry products \
              is connected to the zero constant",
         );
         table.note(
-            "multiplyInactiveAmount [0..10)x[0..8)", "close_asset_backing_circuit.rs:510-511",
-            "arith", NOT_STATIC,
+            "multiplyInactiveAmount [0..10)x[0..8)",
+            "close_asset_backing_circuit.rs:510-511",
+            "arith",
+            NOT_STATIC,
             "holds: dirtyAmountWire row limb = inactiveWire row * (amountWire row).words[limb] — \
              the eighty builder.mul outputs are ArithmeticGate relations",
         );
         table.check(
-            "connectInactiveAmountZero [0..10)x[0..8)", "close_asset_backing_circuit.rs:514",
+            "connectInactiveAmountZero [0..10)x[0..8)",
+            "close_asset_backing_circuit.rs:514",
             "connect",
             p.dirty_amounts.len() == MAX_CHANNEL_TOKENS * 8 && view.all_zero(&p.dirty_amounts),
             "holds: dirtyAmountWire row limb = zeroWire — all eighty inactive*limb products are \
              connected to the zero constant",
         );
 
-        // --- duplicate-registry exclusion ---------------------------------------------------------
+        // --- duplicate-registry exclusion
+        // ---------------------------------------------------------
         table.note(
-            "equalRegistry [45 pairs]", "close_asset_backing_circuit.rs:521", "arith", NOT_STATIC,
+            "equalRegistry [45 pairs]",
+            "close_asset_backing_circuit.rs:521",
+            "arith",
+            NOT_STATIC,
             "holds: registryEqualWire i j = (if registryWire i = registryWire j then 1 else 0) — \
              builder.is_equal is an inverse-witness gadget, not a copy constraint",
         );
         table.note(
-            "andEqualWithLaterActive [45 pairs]", "close_asset_backing_circuit.rs:522", "arith",
+            "andEqualWithLaterActive [45 pairs]",
+            "close_asset_backing_circuit.rs:522",
+            "arith",
             NOT_STATIC,
             "holds: duplicateActiveWire i j = registryEqualWire i j * activityWire j — builder.and \
              is a mul, an ArithmeticGate relation",
         );
         table.check(
-            "connectDuplicateZero [45 pairs]", "close_asset_backing_circuit.rs:525", "connect",
-            p.duplicate_active.len()
-                == MAX_CHANNEL_TOKENS * (MAX_CHANNEL_TOKENS - 1) / 2
+            "connectDuplicateZero [45 pairs]",
+            "close_asset_backing_circuit.rs:525",
+            "connect",
+            p.duplicate_active.len() == MAX_CHANNEL_TOKENS * (MAX_CHANNEL_TOKENS - 1) / 2
                 && view.all_zero(&p.duplicate_active),
             "holds: duplicateActiveWire i j = zeroWire — all 45 ordered-pair duplicate flags are \
              connected to the zero constant",
         );
 
-        // --- asset-tree reconstruction -------------------------------------------------------------
+        // --- asset-tree reconstruction
+        // -------------------------------------------------------------
         table.check(
-            "constantZeroLeaf", "close_asset_backing_circuit.rs:532", "constant",
+            "constantZeroLeaf",
+            "close_asset_backing_circuit.rs:532",
+            "constant",
             view.all_zero(&p.empty_leaf.to_vec()) && p.empty_leaf.to_vec().len() == 8,
             "holds: zeroLeafWire = Words8.zero — U256Target::constant(builder, U256::default()) is \
              eight wires pinned to the zero constant",
         );
         let empty_root = AssetTree::init().get_root();
         table.check(
-            "constantEmptyRoot", "close_asset_backing_circuit.rs:533-534", "constant",
+            "constantEmptyRoot",
+            "close_asset_backing_circuit.rs:533-534",
+            "constant",
             (0..4).all(|i| view.is_const(p.empty_asset_root.elements[i], empty_root.elements[i])),
             "holds: rootWire 0 = merkle.emptyRoot — the reconstruction starts at four wires pinned \
              to the canonical empty AssetTree root (which also discharges CanonicalEmptyRoot)",
         );
         table.note(
-            "conditionalVerifyZeroPath [0..10)", "close_asset_backing_circuit.rs:538-544",
-            "gadget", NOT_STATIC,
+            "conditionalVerifyZeroPath [0..10)",
+            "close_asset_backing_circuit.rs:538-544",
+            "gadget",
+            NOT_STATIC,
             "holds: activityWire row = 1 → merkle.pathRoot (pathWire row) zeroLeaf (registryWire \
              row) = rootWire row — a 32-level Poseidon Merkle opening under a select, not a copy \
              constraint",
         );
         table.note(
-            "computeInsertedRoot [0..10)", "close_asset_backing_circuit.rs:545-549", "gadget",
+            "computeInsertedRoot [0..10)",
+            "close_asset_backing_circuit.rs:545-549",
+            "gadget",
             NOT_STATIC,
             "holds: insertedRootWire row = merkle.pathRoot (pathWire row) (amountWire row) \
              (registryWire row) — a 32-level Poseidon Merkle recomputation",
         );
         table.note(
-            "selectUpdatedRoot [0..10)", "close_asset_backing_circuit.rs:550-555", "arith",
+            "selectUpdatedRoot [0..10)",
+            "close_asset_backing_circuit.rs:550-555",
+            "arith",
             NOT_STATIC,
             "holds: rootWire (row+1) = if activityWire row = 1 then insertedRootWire row else \
              rootWire row — PoseidonHashOutTarget::select is four ArithmeticGate selects",
         );
         table.check(
-            "connectFinalAssetRoot", "close_asset_backing_circuit.rs:557", "connect",
+            "connectFinalAssetRoot",
+            "close_asset_backing_circuit.rs:557",
+            "connect",
             view.same_slices(
                 &p.reconstructed_root.elements,
                 &c.private_state.asset_tree_root.elements,
@@ -1648,14 +1750,18 @@ mod tests {
 
         // --- token-funds digest preimage ---------------------------------------------------------
         table.check(
-            "constantTokenFundsDomain", "close_asset_backing_circuit.rs:559", "constant",
+            "constantTokenFundsDomain",
+            "close_asset_backing_circuit.rs:559",
+            "constant",
             u64::from(TOKEN_FUNDS_DIGEST_DOMAIN) == 0x494d_5446
                 && view.is_const(p.digest_preimage[0], u64::from(TOKEN_FUNDS_DIGEST_DOMAIN)),
             "holds: tokenFundsDomainWire = 0x494d5446 — the first preimage wire is pinned to the \
              'IMTF' domain constant the Lean model names",
         );
         table.check(
-            "flattenAmountLimbs", "close_asset_backing_circuit.rs:560-563", "aliasing",
+            "flattenAmountLimbs",
+            "close_asset_backing_circuit.rs:560-563",
+            "aliasing",
             fund_limbs.len() == MAX_CHANNEL_TOKENS * 8
                 && (0..MAX_CHANNEL_TOKENS)
                     .all(|t| c.fund_amounts[t].to_vec() == fund_limbs[8 * t..8 * t + 8].to_vec()),
@@ -1663,7 +1769,9 @@ mod tests {
              ten checked U256 slots flattened in row-major order, on the SAME wires",
         );
         table.check(
-            "concatenateDigestPreimage", "close_asset_backing_circuit.rs:564-570", "preimage",
+            "concatenateDigestPreimage",
+            "close_asset_backing_circuit.rs:564-570",
+            "preimage",
             p.digest_preimage.len() == 1 + MAX_CHANNEL_TOKENS + 1 + MAX_CHANNEL_TOKENS * 8
                 && p.digest_preimage[1..1 + MAX_CHANNEL_TOKENS] == c.token_registry[..]
                 && p.digest_preimage[1 + MAX_CHANNEL_TOKENS] == c.token_count
@@ -1677,19 +1785,24 @@ mod tests {
              the same targets the rest of the circuit constrains",
         );
         table.note(
-            "computeKeccakTokenFunds", "close_asset_backing_circuit.rs:571-572", "gadget",
+            "computeKeccakTokenFunds",
+            "close_asset_backing_circuit.rs:571-572",
+            "gadget",
             NOT_STATIC,
             "holds: tokenFundsDigestWire = hash.tokenFundsHash digestPreimageWire — the keccak \
              relation is the HashFunctions dependency",
         );
         table.note(
-            "computeExtendedPoseidonBytes", "close_asset_backing_circuit.rs:573", "gadget",
+            "computeExtendedPoseidonBytes",
+            "close_asset_backing_circuit.rs:573",
+            "gadget",
             NOT_STATIC,
             "holds: extendedCommitmentWire = hash.extendedCommitment extendedStateWire.words — \
              extended_public_state.commitment is a Poseidon/keccak gadget call",
         );
 
-        // --- public inputs -------------------------------------------------------------------------
+        // --- public inputs
+        // -------------------------------------------------------------------------
         let expected_pi_order: Vec<Target> = [
             vec![balance_pis.channel_id.value],
             balance_pis.settled_tx_chain.to_vec(),
@@ -1701,7 +1814,9 @@ mod tests {
         ]
         .concat();
         table.check(
-            "assembleComputedPublicInputs", "close_asset_backing_circuit.rs:574-580", "aliasing",
+            "assembleComputedPublicInputs",
+            "close_asset_backing_circuit.rs:574-580",
+            "aliasing",
             pi.channel_id.value == balance_pis.channel_id.value
                 && pi.settled_tx_chain.to_vec() == balance_pis.settled_tx_chain.to_vec()
                 && pi.anchor_block_number.value == ext.inner.block_number.value
@@ -1725,7 +1840,10 @@ mod tests {
              wires are exactly the 7 fields of CloseAssetBackingPublicInputsTarget, in to_vec order",
         );
         table.note(
-            "buildCircuit", "close_asset_backing_circuit.rs:600", "no-gate", TRIVIAL,
+            "buildCircuit",
+            "close_asset_backing_circuit.rs:600",
+            "no-gate",
+            TRIVIAL,
             "holds = True — builder.build emits no constraint",
         );
 

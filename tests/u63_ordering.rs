@@ -83,6 +83,8 @@ fn u63_comparisons_match_integer_order_and_disabled_checks_are_vacuous() {
                 rejected += 1;
             }
         }
-        println!("{{\"operation\":\"{kind}\",\"cases\":{count},\"correctly_rejected\":{rejected},\"all_match_native\":true}}");
+        println!(
+            "{{\"operation\":\"{kind}\",\"cases\":{count},\"correctly_rejected\":{rejected},\"all_match_native\":true}}"
+        );
     }
 }

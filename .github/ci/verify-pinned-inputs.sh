@@ -119,4 +119,10 @@ dirty="$(git status --porcelain -uno)"
 [ -z "$dirty" ] || { printf '%s\n' "$dirty" >&2; fail "tracked files are modified in the checkout"; }
 ok "no tracked file is modified"
 
+# ── 5. the Forge-readable pin manifest and foundry.lock describe the same commit ───────────────
+# Forge cannot read git, so contracts/plonky2-pin.json is what its pin check compares the
+# submodule checkout against. A bump that forgot to regenerate it would make that check refuse
+# the correct checkout (or accept the old one).
+"$(dirname "$0")/plonky2-pin.sh" check
+
 echo "[pinned-inputs] PASS"

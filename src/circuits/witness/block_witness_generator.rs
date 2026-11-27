@@ -578,12 +578,12 @@ pub struct BlockWitnessGenerator {
     pub next_channel_cosign: Option<ChannelCosignBundle>,
     /// Exit-kit staging. When true, the staged `next_channel_cosign` bundle's signatures are
     /// ignored and the block is folded as the registered N-of-N signer set in slot order without
-    /// any signature gadget witness. Every value that reaches the producer head snapshot — block hash chain,
-    /// account/deposit roots and the `bp_sig_chain` statement `(IMSB digest, signer pk list)` —
-    /// is then byte-identical to what the same block produces once the real member cosignatures
-    /// arrive, so a co-signer can be handed an exit kit anchored on this exact block BEFORE it
-    /// releases its signature. A generator that folded an unsigned event can never prove a
-    /// validity span: `build_agg_sig_list_proof` refuses it.
+    /// any signature gadget witness. Every value that reaches the producer head snapshot — block
+    /// hash chain, account/deposit roots and the `bp_sig_chain` statement `(IMSB digest,
+    /// signer pk list)` — is then byte-identical to what the same block produces once the real
+    /// member cosignatures arrive, so a co-signer can be handed an exit kit anchored on this
+    /// exact block BEFORE it releases its signature. A generator that folded an unsigned event
+    /// can never prove a validity span: `build_agg_sig_list_proof` refuses it.
     pub unsigned_staging: bool,
 }
 

@@ -102,6 +102,28 @@ sequenceDiagram
 
 ---
 
+## Setup
+
+The MLE/WHIR prover and the on-chain verifier come from the `contracts/lib/polygon-plonky2`
+submodule, pinned to one commit by this repository. **`git pull` and `git checkout` move that pin
+but not the files inside the submodule**, so update both together, every time:
+
+```bash
+git clone --recurse-submodules https://github.com/InternetMaximalism/intmax3-zkp.git
+cd intmax3-zkp
+git config submodule.recurse true            # optional: make pull/checkout update submodules too
+
+# after every pull / checkout of another commit:
+git submodule update --init --recursive
+.github/ci/verify-pinned-inputs.sh           # checks submodules are at the pinned commits, unmodified
+```
+
+A checkout that does not match the pin is refused with that command in the message: `cargo`
+stops in `build.rs`, and `forge` stops in `contracts/script/Plonky2Pin.sol` (Plonky2PinTest and
+every real-proof verifier deployment) against `contracts/plonky2-pin.json`. Toolchains:
+Foundry v1.5.1 and the Rust nightly in `rust-toolchain.toml`. Bumping the submodule: stage the new
+gitlink, then `.github/ci/plonky2-pin.sh write` and update `contracts/foundry.lock`.
+
 ## Usage
 
 ```bash
@@ -111,8 +133,8 @@ cargo test --release                          # full suite
 cargo test --test inter_channel_live --release -- --nocapture   # inter-channel send, no facade
 cargo test --test e2e --release               # end-to-end rollup flow
 
-# Solidity contracts (from contracts/)
-cd contracts && forge install && forge test -vvv
+# Solidity contracts (from contracts/; submodules initialised as in Setup)
+cd contracts && forge test -vvv
 
 # Browser wallet (only the Regev STARKs are proved in the browser; plonky2/MLE proving is server-side,
 # see doc/docs/proving-boundaries.md)

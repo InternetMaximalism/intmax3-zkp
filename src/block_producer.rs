@@ -217,7 +217,10 @@ pub struct ProductionChannelHead {
 /// the appended identities must be nonzero and distinct from every other slot; nothing may
 /// follow them. This is `live_balance_service::is_single_delegate_add` for several joins at once
 /// (a producer may adopt a head that is more than one join ahead of its registered record).
-pub(crate) fn verify_delegates_appended(old: &ChannelRecord, new: &ChannelRecord) -> Result<(), String> {
+pub(crate) fn verify_delegates_appended(
+    old: &ChannelRecord,
+    new: &ChannelRecord,
+) -> Result<(), String> {
     if new.channel_id != old.channel_id {
         return Err("delegate join: channel id changed".into());
     }
@@ -236,19 +239,26 @@ pub(crate) fn verify_delegates_appended(old: &ChannelRecord, new: &ChannelRecord
         return Err("delegate join: more participants than the channel holds".into());
     }
     if old.member_pk_gs.len() != old_boundary || new.member_pk_gs.len() != new_boundary {
-        return Err("delegate join: the identity list does not match the participant counts".into());
+        return Err(
+            "delegate join: the identity list does not match the participant counts".into(),
+        );
     }
     if new.member_pk_gs[..old_boundary] != old.member_pk_gs[..] {
         return Err("delegate join: an existing slot changed".into());
     }
-    let mut seen: std::collections::HashSet<Bytes32> = new.member_pk_gs[..old_boundary].iter().copied().collect();
+    let mut seen: std::collections::HashSet<Bytes32> =
+        new.member_pk_gs[..old_boundary].iter().copied().collect();
     for slot in old_boundary..new_boundary {
         let is = new.member_pk_gs[slot];
         if is == Bytes32::default() {
-            return Err(format!("delegate join: slot {slot} is not a new nonzero identity"));
+            return Err(format!(
+                "delegate join: slot {slot} is not a new nonzero identity"
+            ));
         }
         if !seen.insert(is) {
-            return Err(format!("delegate join: slot {slot} duplicates another identity"));
+            return Err(format!(
+                "delegate join: slot {slot} duplicates another identity"
+            ));
         }
     }
     Ok(())
@@ -274,7 +284,6 @@ pub struct ProductionDepositRequest {
 }
 
 impl ProductionBlockProducer {
-
     /// The deposit index this producer will assign to the NEXT deposit it journals. A caller that
     /// must prove the same deposit instance the producer records (the genesis backing deposit is
     /// proved by `setup-backing`, journaled here) needs this and `block_number + 1` BEFORE the
@@ -1210,14 +1219,20 @@ impl ProductionBlockProducer {
         let auth = |m: String| ProductionBlockProducerError::WalletAuthorization(m);
         let channel = new_record.channel_id;
         let old = self.channel_records.get(&channel).ok_or_else(|| {
-            auth(format!("channel {} is not registered in this producer", channel.as_u64()))
+            auth(format!(
+                "channel {} is not registered in this producer",
+                channel.as_u64()
+            ))
         })?;
         if old.signing_digest() == new_record.signing_digest() {
             return Ok(());
         }
         verify_delegates_appended(old, new_record).map_err(auth)?;
         let head = self.channel_heads.get(&channel).ok_or_else(|| {
-            auth(format!("channel {} has no committed head", channel.as_u64()))
+            auth(format!(
+                "channel {} has no committed head",
+                channel.as_u64()
+            ))
         })?;
         if signed_state.channel_id != channel || signed_state.digest != head.digest {
             return Err(auth(
@@ -1228,11 +1243,15 @@ impl ProductionBlockProducer {
             || signed_state.balance_state.delegate_count != new_record.delegate_count
         {
             return Err(auth(
-                "the committed head does not carry the joined record's participant counts".to_string(),
+                "the committed head does not carry the joined record's participant counts"
+                    .to_string(),
             ));
         }
-        verify_all_signatures(new_record, &[], signed_state)
-            .map_err(|e| auth(format!("committed head is not N-of-N signed under the joined record: {e}")))?;
+        verify_all_signatures(new_record, &[], signed_state).map_err(|e| {
+            auth(format!(
+                "committed head is not N-of-N signed under the joined record: {e}"
+            ))
+        })?;
         self.channel_records.insert(channel, new_record.clone());
         Ok(())
     }
@@ -1340,8 +1359,9 @@ mod delegate_join_adoption_tests {
     }
 
     fn record(members: u8, delegates: u32) -> ChannelRecord {
-        let member_pk_gs: Vec<Bytes32> =
-            (0..members as usize + delegates as usize).map(identity).collect();
+        let member_pk_gs: Vec<Bytes32> = (0..members as usize + delegates as usize)
+            .map(identity)
+            .collect();
         ChannelRecord {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: members,

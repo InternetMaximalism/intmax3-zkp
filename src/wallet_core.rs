@@ -880,13 +880,16 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 /// carry a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and
 /// withdraw at close, distinguished from members ONLY by slot index. With `delegate_count = 0`
 /// this is byte-for-byte the legacy `0..member_count` loop.
-/// SECURITY (soundness review 2026-10-18): `member_pubkeys_root` hashes `record.member_pk_gs[slot]`,
-/// never `members[i].pk_g`, so a peer-supplied member list anchored by both roots may still carry
-/// ANOTHER participant's Falcon identity at a slot. `verify_inter_channel_tx_sender_hash_sig`
-/// resolves the sender through that field (A11), so every gate that anchors a member list to a
-/// record must also bind each entry's `pk_g` to the registered one. Callers have already made the
-/// slots bijective over the active region.
-fn require_member_pk_gs_match_record(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<()> {
+/// SECURITY (soundness review 2026-10-18): `member_pubkeys_root` hashes
+/// `record.member_pk_gs[slot]`, never `members[i].pk_g`, so a peer-supplied member list anchored by
+/// both roots may still carry ANOTHER participant's Falcon identity at a slot.
+/// `verify_inter_channel_tx_sender_hash_sig` resolves the sender through that field (A11), so every
+/// gate that anchors a member list to a record must also bind each entry's `pk_g` to the registered
+/// one. Callers have already made the slots bijective over the active region.
+fn require_member_pk_gs_match_record(
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+) -> WResult<()> {
     for m in members {
         let slot = m.slot as usize;
         if record.member_pk_gs.get(slot) != Some(&m.pk_g) {
@@ -1399,7 +1402,10 @@ pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
     // ordinary error instead of a panic (native release aborts; WASM traps).
     for m in &snapshot.members {
         m.regev_pk.validate().map_err(|e| {
-            WalletError(format!("members[slot {}].regev_pk is not a valid Regev key: {e}", m.slot))
+            WalletError(format!(
+                "members[slot {}].regev_pk is not a valid Regev key: {e}",
+                m.slot
+            ))
         })?;
     }
     // regev_pk_root binding (F9-A).
@@ -1557,7 +1563,8 @@ pub struct BuiltSend {
 /// transfer) is spent directly, and the fresh `after` resets its digits and noise exactly as a
 /// refresh would. Produces the decrypted-send proof (`RegevProofPurpose::ChannelTxDecrypted`,
 /// the ONLY E-1 purpose co-signers accept — see `verify_decrypted_transfer_proof`), the signed
-/// `ChannelTx`, and the proposed next state carrying only the sender's signature.
+/// `ChannelTx`, and the proposed next state with NO state signature (co-signers, the sender
+/// included, sign it at the host's checked co-signing boundary).
 #[allow(clippy::too_many_arguments)]
 pub fn build_send_token_decrypted(
     keys: &MemberKeys,
@@ -1814,7 +1821,10 @@ pub fn verify_send_transition(
         // SECURITY (review C04): peer-supplied keys are hashed by `member_pubkeys_root` below;
         // the digest asserts canonicality, so validate first and fail with an error.
         m.regev_pk.validate().map_err(|e| {
-            WalletError(format!("payload members[slot {}].regev_pk is invalid: {e}", m.slot))
+            WalletError(format!(
+                "payload members[slot {}].regev_pk is invalid: {e}",
+                m.slot
+            ))
         })?;
     }
     let recomputed_root = member_pubkeys_root(&payload.record, &payload.members)?;
@@ -1947,7 +1957,16 @@ pub fn verify_slim_send_tx_as_recipient(
     level: RegevSecurityLevel,
     recipient_sk: &RegevSk,
 ) -> WResult<u64> {
-    verify_slim_send_tx(prev, trusted_record, own_members, regev_pks, slim, level, None, None)?;
+    verify_slim_send_tx(
+        prev,
+        trusted_record,
+        own_members,
+        regev_pks,
+        slim,
+        level,
+        None,
+        None,
+    )?;
     decrypt_amount(recipient_sk, &slim.channel_tx.enc_amount).map_err(we)
 }
 
@@ -3923,7 +3942,8 @@ pub mod deprecated_member_set_update {
             let _ = active;
             // Insert the joiner's row at the co-signer boundary (the delegate region shifts up by
             // one): canonical zero (adds no balance), own digest + recipient.
-            bs.enc_balances.insert(mc, crate::common::balance_state::zero_token_row());
+            bs.enc_balances
+                .insert(mc, crate::common::balance_state::zero_token_row());
             bs.pending_adds.insert(mc, Default::default());
             bs.regev_pk_digests.insert(mc, digest);
             bs.recipients.insert(mc, *recipient);
@@ -4773,7 +4793,9 @@ pub fn verify_inter_channel_credit_transition(
     let b_recipient_key_digest =
         b_prev.balance_state.regev_pk_digests[descriptor.recipient_slot as usize];
     if receiver_delta.receiver_regev_pk_digest != b_recipient_key_digest {
-        return bail("invariant 3b: receiver_delta key digest != B's committed key at recipient_slot");
+        return bail(
+            "invariant 3b: receiver_delta key digest != B's committed key at recipient_slot",
+        );
     }
     if Bytes32::from(descriptor.receiver_pk.poseidon_digest()) != b_recipient_key_digest {
         return bail("invariant 3b: descriptor receiver_pk != B's committed key at recipient_slot");
@@ -6257,28 +6279,30 @@ impl WithdrawalClaimProver {
         })?;
         let close_intent_digest = close_intent.signing_digest();
         let recipient = view.row.recipient;
-        let public_inputs = crate::circuits::channel::withdrawal_claim_pis::WithdrawalClaimPublicInputs {
-            close_intent_digest,
-            channel_id: close_intent.channel_id,
-            final_balance_state_h1: close_intent.final_balance_state_h1,
-            member_pk_g,
-            recipient,
-            user_amount_digest: ct.digest(),
-            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+        let public_inputs =
+            crate::circuits::channel::withdrawal_claim_pis::WithdrawalClaimPublicInputs {
                 close_intent_digest,
-                slot_regev_pk_digest,
+                channel_id: close_intent.channel_id,
+                final_balance_state_h1: close_intent.final_balance_state_h1,
+                member_pk_g,
+                recipient,
+                user_amount_digest: ct.digest(),
+                withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                    close_intent_digest,
+                    slot_regev_pk_digest,
+                    token_slot,
+                ),
+                amount,
                 token_slot,
-            ),
-            amount,
-            token_slot,
-            token_index: header.token_registry[token_slot as usize],
-        };
+                token_index: header.token_registry[token_slot as usize],
+            };
         Ok(WithdrawalClaimFullWitness {
             public_inputs,
             slot_tree_root: header.slot_tree_root,
-            slot_inclusion: crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::from_siblings(
-                view.slot_siblings.clone(),
-            ),
+            slot_inclusion:
+                crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::from_siblings(
+                    view.slot_siblings.clone(),
+                ),
             slot_ct_digests: BalanceState::token_ct_digests(&view.row.enc_balances),
             slot_pending_adds: view.row.pending_adds,
             token_count: header.token_count,
@@ -6550,7 +6574,10 @@ impl PostCloseClaimProver {
 
     /// Compose this proof with LateIncomingCircuit; it alone does not authorize a payout.
     pub fn new_late_binding() -> Self {
-        Self { late_binding: true, circuit: PostCloseClaimCircuit::<F, C, D>::new_late_binding() }
+        Self {
+            late_binding: true,
+            circuit: PostCloseClaimCircuit::<F, C, D>::new_late_binding(),
+        }
     }
 
     /// Build the post-close-claim full witness. `source_tx` is the inter-channel transfer that
@@ -6624,20 +6651,28 @@ impl PostCloseClaimProver {
                 "post-close claim: public-input build failed: {e:?}"
             ))
         })?;
-        if !self.late_binding && (accumulator.height() != SETTLED_TX_ACCUMULATOR_HEIGHT
-            || incoming_tx_index >= accumulator.len() as u64
-            || accumulator.get_leaf(incoming_tx_index)
-                != crate::common::balance_state::unapplied_incoming_leaf(tx_hash)
-            || Bytes32::from(accumulator.get_root())
-                != final_balance_state.settled_tx_accumulator_root
-        ) {
+        if !self.late_binding
+            && (accumulator.height() != SETTLED_TX_ACCUMULATOR_HEIGHT
+                || incoming_tx_index >= accumulator.len() as u64
+                || accumulator.get_leaf(incoming_tx_index)
+                    != crate::common::balance_state::unapplied_incoming_leaf(tx_hash)
+                || Bytes32::from(accumulator.get_root())
+                    != final_balance_state.settled_tx_accumulator_root)
+        {
             return bail(
                 "post-close claim requires an unapplied incoming leaf in the final signed state",
             );
         }
         let (incoming_tx_inclusion, incoming_tx_index) = if self.late_binding {
-            (crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::dummy(SETTLED_TX_ACCUMULATOR_HEIGHT), 0)
-        } else { (accumulator.prove(incoming_tx_index), incoming_tx_index) };
+            (
+                crate::utils::trees::incremental_merkle_tree::IncrementalMerkleProof::dummy(
+                    SETTLED_TX_ACCUMULATOR_HEIGHT,
+                ),
+                0,
+            )
+        } else {
+            (accumulator.prove(incoming_tx_index), incoming_tx_index)
+        };
         // H1 Poseidon-root form: the slot tree + the receiver's inclusion proof.
         let slot_tree = final_balance_state.slot_tree();
 
@@ -8085,8 +8120,9 @@ mod delegate_send_tests {
             own.to_string().contains("regev_pk_digests"),
             "own-slot rejection must name the digest: {own}"
         );
-        let structural = verify_snapshot(&bad, None)
-            .expect_err("any verifier must refuse a member list whose key differs from the committed digest");
+        let structural = verify_snapshot(&bad, None).expect_err(
+            "any verifier must refuse a member list whose key differs from the committed digest",
+        );
         assert!(
             structural.to_string().contains("regev_pk_digests"),
             "structural rejection must name the digest: {structural}"
@@ -8126,7 +8162,8 @@ mod delegate_send_tests {
     fn verify_send_transition_returns_an_error_for_a_non_canonical_enc_amount() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
         let mut rng = StdRng::seed_from_u64(0xC0_4B);
-        let (record, keys, members, genesis, _w) = setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
+        let (record, keys, members, genesis, _w) =
+            setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
             state: genesis,
@@ -8382,7 +8419,8 @@ mod delegate_send_tests {
     #[test]
     fn recipient_verification_authenticates_before_decrypting() {
         let mut rng = StdRng::seed_from_u64(0xC0_2A);
-        let (record, keys, members, genesis, _w) = setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
+        let (record, keys, members, genesis, _w) =
+            setup_delegate_channel(&mut rng, 11, [50, 30, 20]);
         let snapshot = ChannelSnapshot {
             record: record.clone(),
             state: genesis,
@@ -8422,8 +8460,14 @@ mod delegate_send_tests {
         )
         .expect_err("an unauthenticated payload must be refused");
         let text = err.to_string();
-        assert!(text.contains("hash-sig"), "rejected on the sender signature: {text}");
-        assert!(!text.contains("decrypt"), "no decryption may run first: {text}");
+        assert!(
+            text.contains("hash-sig"),
+            "rejected on the sender signature: {text}"
+        );
+        assert!(
+            !text.contains("decrypt"),
+            "no decryption may run first: {text}"
+        );
     }
 
     #[test]
@@ -9835,7 +9879,9 @@ mod delegate_send_tests {
         let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
         // The fund import absorbs the IMUI-tagged UNAPPLIED leaf, not the raw tx_hash; a residual
         // claim opens exactly that entry (the raw hash is what a bundle apply swaps in).
-        accumulator.push(crate::common::balance_state::unapplied_incoming_leaf(tx_hash));
+        accumulator.push(crate::common::balance_state::unapplied_incoming_leaf(
+            tx_hash,
+        ));
         accumulator.push(Bytes32::from_u32_slice(&[77, 0, 0, 0, 0, 0, 0, 0]).unwrap());
         let incoming_tx_index = 0u64;
         let accumulator_root = Bytes32::from(accumulator.get_root());
@@ -10870,7 +10916,10 @@ mod delegate_send_tests {
         leg.balance_state.pending_adds[1][1] = MAX_HOMO_ADDS_BEFORE_REFRESH - 1;
         let head = l1_deposit_import_head(&prev, &leg, 1, 1, &delta, amount)
             .expect("the 64th credit is within the budget");
-        assert_eq!(head.balance_state.pending_adds[1][1], MAX_HOMO_ADDS_BEFORE_REFRESH);
+        assert_eq!(
+            head.balance_state.pending_adds[1][1],
+            MAX_HOMO_ADDS_BEFORE_REFRESH
+        );
 
         leg.balance_state.pending_adds[1][1] = MAX_HOMO_ADDS_BEFORE_REFRESH;
         let err = l1_deposit_import_head(&prev, &leg, 1, 1, &delta, amount)
@@ -10973,13 +11022,14 @@ mod delegate_send_tests {
     /// a DIFFERENT slot, (c) a doctored amount (double credit). A distributed co-signer
     /// therefore never signs a proposer-crafted cross-token/cross-slot credit.
     /// Stranded-funds reproduction (2026-10-15 review): the L1 deposit import used to sign TWO
-    /// N-of-N heads. The first (fund import) grows `channel_fund` + `unallocated_confirmed_incoming`
-    /// and pushes the RAW deposit nullifier; the second (bundle apply) credits the ciphertext
-    /// and leaves `settled_tx_chain` / the fund vector untouched. Both therefore share the
-    /// CloseAssetBacking statement key `(channel_id, settled_tx_chain, token_funds_digest)`, so
-    /// the one attested backing proof closes EITHER head — and a close on the fund-import head
-    /// pays nobody for the deposit: no ciphertext carries it, no IMUI leaf authorizes a
-    /// post-close residual claim, and the late-incoming lane is ReceiveTransfer-only.
+    /// N-of-N heads. The first (fund import) grows `channel_fund` +
+    /// `unallocated_confirmed_incoming` and pushes the RAW deposit nullifier; the second
+    /// (bundle apply) credits the ciphertext and leaves `settled_tx_chain` / the fund vector
+    /// untouched. Both therefore share the CloseAssetBacking statement key `(channel_id,
+    /// settled_tx_chain, token_funds_digest)`, so the one attested backing proof closes EITHER
+    /// head — and a close on the fund-import head pays nobody for the deposit: no ciphertext
+    /// carries it, no IMUI leaf authorizes a post-close residual claim, and the late-incoming
+    /// lane is ReceiveTransfer-only.
     ///
     /// The fix removes the intermediate head: one deposit import is ONE signed head whose
     /// predecessor is the pre-deposit snapshot head. The fund leg survives only as an
@@ -11026,7 +11076,11 @@ mod delegate_send_tests {
         // The unsigned fund leg is NOT distinguishable from a head by the close statement: it
         // shares the backing key with the real head and `CloseIntent::new` accepts it. That is
         // exactly why it must never become a signed head.
-        assert_eq!(backing_key(&fund_leg), backing_key(&head), "fund leg and head share the key");
+        assert_eq!(
+            backing_key(&fund_leg),
+            backing_key(&head),
+            "fund leg and head share the key"
+        );
         assert_eq!(
             fund_leg.unallocated_confirmed_incoming,
             snapshot.state.unallocated_confirmed_incoming + U256::from(amount),
@@ -11048,10 +11102,19 @@ mod delegate_send_tests {
 
         // The ONE signed head links straight to the predecessor: no intermediate N-of-N head
         // exists for anyone to close on.
-        assert_eq!(head.prev_digest, snapshot.state.digest, "head links to the pre-deposit snapshot");
+        assert_eq!(
+            head.prev_digest, snapshot.state.digest,
+            "head links to the pre-deposit snapshot"
+        );
         assert_eq!(head.epoch, snapshot.state.epoch + 1);
-        assert_eq!(head.small_block_number, snapshot.state.small_block_number + 1);
-        assert_eq!(head.balance_state.state_version, snapshot.state.balance_state.state_version + 1);
+        assert_eq!(
+            head.small_block_number,
+            snapshot.state.small_block_number + 1
+        );
+        assert_eq!(
+            head.balance_state.state_version,
+            snapshot.state.balance_state.state_version + 1
+        );
         assert_eq!(
             head.unallocated_confirmed_incoming, snapshot.state.unallocated_confirmed_incoming,
             "a deposit never leaves an unallocated residue on a signed head"
@@ -11185,11 +11248,8 @@ mod delegate_send_tests {
 
         // (c) Doctored amount: the delta credited TWICE (double credit at the right position).
         let mut double_credit = built.import_state.clone();
-        double_credit.balance_state.enc_balances[1][1] = add_ciphertexts(
-            &built.import_state.balance_state.enc_balances[1][1],
-            &delta,
-        )
-        .unwrap();
+        double_credit.balance_state.enc_balances[1][1] =
+            add_ciphertexts(&built.import_state.balance_state.enc_balances[1][1], &delta).unwrap();
         let double_credit = double_credit.with_computed_digest();
         assert!(
             gate(&double_credit).is_err(),
@@ -11199,7 +11259,8 @@ mod delegate_send_tests {
         // (d) A head that keeps the deposit as an unallocated residue (the retired fund-import
         //     head shape with the credit applied on top) is refused.
         let mut residue = built.import_state.clone();
-        residue.unallocated_confirmed_incoming = built.fund_import_leg.unallocated_confirmed_incoming;
+        residue.unallocated_confirmed_incoming =
+            built.fund_import_leg.unallocated_confirmed_incoming;
         let residue = residue.with_computed_digest();
         assert!(
             gate(&residue).is_err(),
@@ -12087,8 +12148,9 @@ mod delegate_send_tests {
             members: relabeled_members,
             settled_tx_accumulator: default_settled_tx_accumulator(),
         };
-        let err = verify_snapshot(&forged, None)
-            .expect_err("a record whose counts differ from the signed BalanceState must be refused");
+        let err = verify_snapshot(&forged, None).expect_err(
+            "a record whose counts differ from the signed BalanceState must be refused",
+        );
         assert!(
             err.to_string().contains("member_count"),
             "rejection must name the count mismatch: {err}"
@@ -12117,7 +12179,10 @@ mod delegate_send_tests {
         relabeled.members[2].pk_g = snapshot.members[0].pk_g;
         let err = verify_snapshot(&relabeled, None)
             .expect_err("members[slot].pk_g must equal record.member_pk_gs[slot]");
-        assert!(err.to_string().contains("pk_g"), "rejection must name pk_g: {err}");
+        assert!(
+            err.to_string().contains("pk_g"),
+            "rejection must name pk_g: {err}"
+        );
     }
 
     /// Peer-supplied snapshot JSON: `IncrementalMerkleTree` deserialization must return an error
@@ -12143,7 +12208,11 @@ mod delegate_send_tests {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             serde_json::from_str::<IncrementalMerkleTree<Bytes32>>(&huge).is_err()
         }));
-        assert_eq!(outcome.ok(), Some(true), "an absurd height must be a deserialization error");
+        assert_eq!(
+            outcome.ok(),
+            Some(true),
+            "an absurd height must be a deserialization error"
+        );
 
         // The structural gate pins height and root: a lagging / foreign tree is refused.
         let mut rng = StdRng::seed_from_u64(0x2026_1018_03);
@@ -12225,7 +12294,10 @@ mod delegate_send_tests {
             &delta,
         )
         .expect_err("a proposal whose accumulator root is not the nullifier push must be refused");
-        assert!(err.to_string().contains("accumulator"), "rejection must name the accumulator: {err}");
+        assert!(
+            err.to_string().contains("accumulator"),
+            "rejection must name the accumulator: {err}"
+        );
     }
 }
 
@@ -12485,7 +12557,11 @@ mod slot_capacity_tests {
         smaller.pending_adds.pop();
         smaller.recipients.pop();
         assert_eq!(padded_last.slot_tree_root(), smaller.slot_tree_root());
-        assert_ne!(padded_last.h1(), smaller.h1(), "delegate_count must be committed in H1");
+        assert_ne!(
+            padded_last.h1(),
+            smaller.h1(),
+            "delegate_count must be committed in H1"
+        );
     }
 }
 
@@ -12851,7 +12927,9 @@ mod member_set_update_tests {
                 channel_id: record.channel_id,
                 member_count: 3,
                 delegate_count: 1,
-                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 4]),
+                enc_balances: BalanceState::pad_enc_balances_token0(
+                    &vec![crate::common::balance_state::zero_ciphertext().clone(); 4],
+                ),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 4]),
                 recipients: BalanceState::pad_recipients(&[Address::default(); 4]),
                 settled_tx_chain: Bytes32::default(),

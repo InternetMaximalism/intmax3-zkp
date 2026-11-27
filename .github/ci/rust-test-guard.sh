@@ -47,7 +47,7 @@ case " $* " in
     *) fail "refusing to run without --locked: the git dependencies are pinned by Cargo.lock only." ;;
 esac
 
-log="$(mktemp -t rust-test-guard)"
+log="$(mktemp "${TMPDIR:-/tmp}/rust-test-guard.XXXXXX")"
 trap 'rm -f "$log"' EXIT
 
 # ── Force `--nocapture`. THIS IS LOAD-BEARING, NOT COSMETIC. ───────────────────────────────────

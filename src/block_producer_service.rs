@@ -333,7 +333,11 @@ pub struct RegisteredRecordStatus {
 // failed to deserialize, and the untagged `ServiceCommand` wrapper reported only a generic "did
 // not match any variant". That silently disabled the whole producer command surface (every
 // variant here carries a `request_id`), which is why no deposit could ever be journaled.
-#[serde(tag = "command", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "command",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 // Payloads that carry a `ChannelState`/`ChannelSnapshot` travel as `serde_json::Value` and are
 // materialized inside `execute` with `serde_json::from_value`. This is deliberate, not laziness:
 // an internally-tagged enum deserializes its fields through serde's buffered `Content` tree, whose
@@ -479,25 +483,26 @@ impl BlockProducerService {
                 .producer
                 .registered_record_counts()
                 .into_iter()
-                .map(|(channel, member_count, delegate_count)| RegisteredRecordStatus {
-                    channel_id: channel.as_u64(),
-                    member_count,
-                    delegate_count,
-                })
+                .map(
+                    |(channel, member_count, delegate_count)| RegisteredRecordStatus {
+                        channel_id: channel.as_u64(),
+                        member_count,
+                        delegate_count,
+                    },
+                )
                 .collect(),
         })
     }
 
-
-/// Materialize a command payload that traveled as `serde_json::Value` (see the note on
-/// [`BlockProducerCommand`] for why the tagged enum cannot hold these types directly).
-fn command_payload<T: serde::de::DeserializeOwned>(
-    what: &'static str,
-    value: serde_json::Value,
-) -> Result<T, BlockProducerServiceError> {
-    serde_json::from_value(value)
-        .map_err(|e| BlockProducerServiceError::InvalidRequest(format!("invalid {what}: {e}")))
-}
+    /// Materialize a command payload that traveled as `serde_json::Value` (see the note on
+    /// [`BlockProducerCommand`] for why the tagged enum cannot hold these types directly).
+    fn command_payload<T: serde::de::DeserializeOwned>(
+        what: &'static str,
+        value: serde_json::Value,
+    ) -> Result<T, BlockProducerServiceError> {
+        serde_json::from_value(value)
+            .map_err(|e| BlockProducerServiceError::InvalidRequest(format!("invalid {what}: {e}")))
+    }
 
     pub fn execute(
         &mut self,
@@ -509,7 +514,8 @@ fn command_payload<T: serde::de::DeserializeOwned>(
                 request_id,
                 snapshot,
             } => {
-                let snapshot: ChannelSnapshot = Self::command_payload("register snapshot", snapshot)?;
+                let snapshot: ChannelSnapshot =
+                    Self::command_payload("register snapshot", snapshot)?;
                 Ok(BlockProducerCommandResult::Receipt(
                     self.register(request_id, snapshot)?,
                 ))
@@ -671,8 +677,7 @@ fn command_payload<T: serde::de::DeserializeOwned>(
                 descriptor,
                 timestamp: staged_timestamp,
             };
-            let (candidate, entry) =
-                self.build_candidate_entry(request_id, fingerprint, action)?;
+            let (candidate, entry) = self.build_candidate_entry(request_id, fingerprint, action)?;
             if entry.result != prepared.result {
                 return Err(BlockProducerServiceError::Conflict(
                     "the N-of-N block does not reproduce the staged exit-kit head; abandon the \
@@ -1096,7 +1101,9 @@ fn command_payload<T: serde::de::DeserializeOwned>(
             return Ok(receipt);
         }
         // Check on a scratch copy first, so a refused join never reaches the journal.
-        self.producer.clone().adopt_delegate_join(&record, &signed_state)?;
+        self.producer
+            .clone()
+            .adopt_delegate_join(&record, &signed_state)?;
         let timestamp = self.next_timestamp()?;
         self.apply_and_persist(
             request_id,
@@ -1429,7 +1436,8 @@ fn command_payload<T: serde::de::DeserializeOwned>(
         // A proposal may carry the proposer's own partial signatures; the staged block is
         // identified by the state digest, so every fingerprint is taken over the
         // signature-stripped proposal (the same normalisation `post_inter_channel` applies).
-        let fingerprint = staged_exit_kit_fingerprint(&proposed_state, &debit_payload, &descriptor)?;
+        let fingerprint =
+            staged_exit_kit_fingerprint(&proposed_state, &debit_payload, &descriptor)?;
         if let Some(prepared) = &self.disk.prepared {
             if prepared.request_id == request_id && prepared.request_fingerprint == fingerprint {
                 return Ok(BlockProducerReceipt::from_entry(prepared));
@@ -1753,7 +1761,10 @@ fn staged_exit_kit_fingerprint(
     let mut stripped_state = state.clone();
     stripped_state.member_signatures.clear();
     let mut stripped_payload = debit_payload.clone();
-    stripped_payload.proposed_next_state.member_signatures.clear();
+    stripped_payload
+        .proposed_next_state
+        .member_signatures
+        .clear();
     request_fingerprint(
         STAGED_INTER_CHANNEL_EXIT_KIT_DOMAIN,
         &PostFingerprint {
@@ -2395,12 +2406,15 @@ impl Drop for JournalLock {
 #[cfg(test)]
 mod journal_roundtrip_tests {
     use super::*;
-    use crate::common::balance_state::BalanceState;
-    use crate::common::channel::{ChannelFund, ChannelState};
-    use crate::common::channel_id::ChannelId;
-    use crate::ethereum_types::u256::U256;
-    use crate::regev::encrypt::RegevCiphertext;
-    use crate::regev::{REGEV_N, REGEV_Q};
+    use crate::{
+        common::{
+            balance_state::BalanceState,
+            channel::{ChannelFund, ChannelState},
+            channel_id::ChannelId,
+        },
+        ethereum_types::u256::U256,
+        regev::{REGEV_N, REGEV_Q, encrypt::RegevCiphertext},
+    };
 
     fn nonzero_ciphertext() -> RegevCiphertext {
         // A canonical, distinctly non-padding ring element, so its sparse row carries a real
@@ -2417,8 +2431,9 @@ mod journal_roundtrip_tests {
     /// reread failed with `invalid type: string "0", expected u8` — a restart could not parse the
     /// daemon's own journal, taking the producer and every channel it serves permanently offline.
     /// This pins the JSON round-trip on a state that actually has a non-empty sparse row, the case
-    /// the pre-existing deposit-only restart test never exercised (a bare `ProductionDepositRequest`
-    /// has no `u8` maps, and a genesis state's rows are all padding).
+    /// the pre-existing deposit-only restart test never exercised (a bare
+    /// `ProductionDepositRequest` has no `u8` maps, and a genesis state's rows are all
+    /// padding).
     #[test]
     fn journal_action_round_trips_with_a_non_empty_sparse_row() {
         let state = ChannelState {
@@ -2437,7 +2452,9 @@ mod journal_roundtrip_tests {
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&[nonzero_ciphertext()]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default()]),
-                recipients: BalanceState::pad_recipients(&[crate::ethereum_types::address::Address::default()]),
+                recipients: BalanceState::pad_recipients(&[
+                    crate::ethereum_types::address::Address::default(),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 1,
@@ -2454,15 +2471,18 @@ mod journal_roundtrip_tests {
         };
         // Sanity: the fixture must actually carry a non-empty sparse row, or it proves nothing.
         let raw = serde_json::to_string(&state.balance_state).unwrap();
-        assert!(raw.contains("\"0\""), "fixture must have a sparse u8 key to exercise the bug");
+        assert!(
+            raw.contains("\"0\""),
+            "fixture must have a sparse u8 key to exercise the bug"
+        );
 
         let action = ProductionJournalAction::SyncOffchainHeads {
             signed_states: vec![state],
             timestamp: 42,
         };
         let json = serde_json::to_string(&action).expect("serialize journal action");
-        let back: ProductionJournalAction = serde_json::from_str(&json)
-            .expect("the journal must re-read across a daemon restart");
+        let back: ProductionJournalAction =
+            serde_json::from_str(&json).expect("the journal must re-read across a daemon restart");
         assert_eq!(format!("{action:?}"), format!("{back:?}"));
     }
 }

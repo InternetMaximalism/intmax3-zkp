@@ -61,6 +61,8 @@ MIN_SUITES=37
 #   V2FixtureCompleteness
 #                     — non-skipping manifest for every live full MLE/WHIR V2 artifact, including
 #                       exact compact-proof hash/length bindings in Proof-DA companion files.
+#   Plonky2Pin        — the polygon-plonky2 checkout is the pinned commit (contracts/plonky2-pin.json);
+#                       a stale submodule otherwise fails dozens of suites with unrelated messages.
 #   ManagerCloseGas   — executes the real 103-PI partial-withdrawal proof through the Manager with
 #                       a cold-account execution budget derived from the production 20M tx limit.
 #
@@ -79,9 +81,10 @@ test/MleE2E.t.sol:MleE2ETest	6
 test/MleFinalizeE2E.t.sol:MleFinalizeE2ETest	2
 test/ManagerCloseGas.t.sol:ManagerCloseGasTest	1
 test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17
-test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	16"
+test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	16
+test/Plonky2Pin.t.sol:Plonky2PinTest	1"
 
-out="$(mktemp -t forge-test-json)"
+out="$(mktemp "${TMPDIR:-/tmp}/forge-test-json.XXXXXX")"
 trap 'rm -f "$out"' EXIT
 
 echo "[forge-guard] forge test ${FORGE_TEST_ARGS:-}"

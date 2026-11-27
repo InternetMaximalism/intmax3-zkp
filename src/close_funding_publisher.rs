@@ -4060,9 +4060,10 @@ fn materialization_lane(action: &PublicationAction) -> std::result::Result<(bool
 ///
 /// `withdrawalSetDigest` is deliberately diagnostic: the Manager's per-token close-funding gate
 /// authenticated the complete terminal economics but not a proof-private nullifier or withdrawal
-/// order (that cooperative route is now deprecated on L1: `authorizeCloseFunding` reverts). A different valid proof may
-/// therefore win the permissionless race safely. Manager/lane/IMCF are exact indexed authority;
-/// the receipt-block complete-lane state below proves the resulting credits.
+/// order (that cooperative route is now deprecated on L1: `authorizeCloseFunding` reverts). A
+/// different valid proof may therefore win the permissionless race safely. Manager/lane/IMCF are
+/// exact indexed authority; the receipt-block complete-lane state below proves the resulting
+/// credits.
 fn validate_materialization_event(
     receipt: &Value,
     prepared: &PreparedPayout,
@@ -5729,8 +5730,7 @@ mod tests {
         )
         .unwrap();
         map[0] ^= 1;
-        fixture.verification_config.public_input_wire_map =
-            format!("0x{}", hex::encode(map));
+        fixture.verification_config.public_input_wire_map = format!("0x{}", hex::encode(map));
         let mutated_fixture = fixture.to_canonical_json().unwrap();
         split_pi_map["artifacts"]["lanes"][0]["withdrawalMleJson"] =
             Value::String(mutated_fixture.clone());

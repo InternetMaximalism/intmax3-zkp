@@ -178,8 +178,8 @@ struct FinalizeArtifact {
 #[derive(Clone, Debug)]
 struct PreparedEnvelope {
     envelope: ValidityEnvelope,
-    /// The post's `msg.value`: the bond top-up it needs (`rollup_bond_top_up`), or the value of the
-    /// post already journaled. Zero until the journal is loaded.
+    /// The post's `msg.value`: the bond top-up it needs (`rollup_bond_top_up`), or the value of
+    /// the post already journaled. Zero until the journal is loaded.
     post_value_wei: u64,
     candidate_id: String,
     initial_block_number: u64,
@@ -1670,10 +1670,13 @@ fn checked_output(mut command: Command, what: &str, limit: usize) -> Result<Stri
 fn rollup_bond_top_up(rpc: &str, rollup: &str, producer: &str) -> Result<u64> {
     let call = |sig: &str, args: &[&str]| -> Result<String> {
         let mut command = Command::new("cast");
-        command.args(["call", rollup, sig]).args(args).args(["--rpc-url", rpc]);
-        let output = command
-            .output()
-            .map_err(|error| PublicValidityPublisherError::Command(format!("start {sig}: {error}")))?;
+        command
+            .args(["call", rollup, sig])
+            .args(args)
+            .args(["--rpc-url", rpc]);
+        let output = command.output().map_err(|error| {
+            PublicValidityPublisherError::Command(format!("start {sig}: {error}"))
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if sig.starts_with("baseStake") && stderr.contains("revert") {
@@ -1695,19 +1698,28 @@ fn rollup_bond_top_up(rpc: &str, rollup: &str, producer: &str) -> Result<u64> {
                 line.split_whitespace()
                     .next()
                     .and_then(|value| value.parse::<u128>().ok())
-                    .ok_or_else(|| PublicValidityPublisherError::Command(format!("{sig} returned {text:?}")))
+                    .ok_or_else(|| {
+                        PublicValidityPublisherError::Command(format!("{sig} returned {text:?}"))
+                    })
             })
             .collect()
     };
     let base = words(&call("baseStake()(uint256)", &[])?, "baseStake")?;
     let per_post = words(&call("postStake()(uint256)", &[])?, "postStake")?;
-    let bond = words(&call("bonds(address)(uint96,uint48,uint48)", &[producer])?, "bonds")?;
-    let ([base], [per_post], [balance, posted, released]) = (&base[..], &per_post[..], &bond[..]) else {
-        return Err(PublicValidityPublisherError::Command("bond views returned an unexpected shape".into()));
+    let bond = words(
+        &call("bonds(address)(uint96,uint48,uint48)", &[producer])?,
+        "bonds",
+    )?;
+    let ([base], [per_post], [balance, posted, released]) = (&base[..], &per_post[..], &bond[..])
+    else {
+        return Err(PublicValidityPublisherError::Command(
+            "bond views returned an unexpected shape".into(),
+        ));
     };
     let required = base + (posted + 1 - released) * per_post;
-    u64::try_from(required.saturating_sub(*balance))
-        .map_err(|_| PublicValidityPublisherError::Command("the bond top-up does not fit a u64".into()))
+    u64::try_from(required.saturating_sub(*balance)).map_err(|_| {
+        PublicValidityPublisherError::Command("the bond top-up does not fit a u64".into())
+    })
 }
 
 fn cast_output(args: &[&str], what: &str, limit: usize) -> Result<String> {

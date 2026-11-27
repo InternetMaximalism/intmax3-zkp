@@ -1,13 +1,13 @@
 'use strict';
 
-// Needs express (resolved like the relays do, e.g. NODE_PATH=<repo>/api/node_modules).
+// Needs express from api/ (`npm ci` in api/; CI installs it), the same copy the relays run on.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const express = require('express');
+const express = require('../../api/node_modules/express');
 const { pkgAssets, createPkgVersion, IMMUTABLE } = require('../../hosting/wallet/pkg-assets');
 
 const HELPER = 'snippets/wasm-bindgen-rayon-0/src/workerHelpers.no-bundler.js';

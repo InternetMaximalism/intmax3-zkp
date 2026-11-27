@@ -331,7 +331,6 @@ enum BoundedLine {
     TooLarge,
 }
 
-
 /// Materialize a live-command payload that traveled as `serde_json::Value`. The daemon accepts
 /// these payloads as `Value` and deserializes them HERE, with `serde_json::from_value`, because an
 /// internally-tagged enum buffers its fields through serde's `Content` tree — whose map-key
@@ -961,7 +960,12 @@ fn execute_command(
                 // `signed_state`/`plan` travel as `serde_json::Value` (see `BlockProducerCommand`);
                 // materialize them with serde_json's own key coercion before the typed calls.
                 let signed_state: ChannelState = serde_json::from_value(signed_state.clone())
-                    .map_err(|e| ("invalid_json", format!("invalid close-funding signed state: {e}")))?;
+                    .map_err(|e| {
+                        (
+                            "invalid_json",
+                            format!("invalid close-funding signed state: {e}"),
+                        )
+                    })?;
                 let plan: CloseFundingPlan = serde_json::from_value(plan.clone())
                     .map_err(|e| ("invalid_json", format!("invalid close-funding plan: {e}")))?;
                 let committed = producer

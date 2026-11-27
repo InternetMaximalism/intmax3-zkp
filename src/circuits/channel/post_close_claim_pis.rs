@@ -315,7 +315,10 @@ mod tests {
         let amount = 21u64;
         // A key-independent delta (r = 0) decrypts under the claimant's key too.
         let delta_ct = crate::circuits::channel::post_close_claim_circuit::test_fixture::key_independent_ciphertext(amount);
-        assert_eq!(crate::regev::decrypt_amount(&claimant_sk, &delta_ct).unwrap(), amount);
+        assert_eq!(
+            crate::regev::decrypt_amount(&claimant_sk, &delta_ct).unwrap(),
+            amount
+        );
         let receiver_pk_g = pubkey_hash(11);
         let mut source_tx = sample_source_tx(
             receiver_pk_g,

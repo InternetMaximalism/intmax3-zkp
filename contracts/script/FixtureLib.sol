@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
 import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
+import {Plonky2Pin} from "./Plonky2Pin.sol";
 import {
     COMPACT_LAYOUT_HASH_V2,
     COMPACT_MAGIC_V2,
@@ -94,6 +95,9 @@ library FixtureLib {
         internal
         returns (MleVerifierV2 core, PinnedMleVerifierV2 adapter)
     {
+        // Before any fixture is compared with the compiled verifier: a stale submodule checkout
+        // otherwise surfaces as an unrelated fixture/config mismatch (see Plonky2Pin).
+        Plonky2Pin.requirePinned();
         bytes32 schemaHash = keccak256(bytes(vm.parseJsonString(json, ".schema")));
         bool configOnly = schemaHash == CONFIG_V2_FIXTURE_SCHEMA_HASH;
         require(schemaHash == FULL_V2_FIXTURE_SCHEMA_HASH || configOnly, "fixture: v2 schema");

@@ -919,7 +919,8 @@ pub fn wallet_refresh(token_slot: Option<u8>) -> Result<String, JsValue> {
         .map_err(js_err)?;
         let mut rng = rand010::rng();
         let (payload, new_witness) =
-            build_view_refresh(&session.keys, &view, token_slot, LEVEL, &mut rng).map_err(js_err)?;
+            build_view_refresh(&session.keys, &view, token_slot, LEVEL, &mut rng)
+                .map_err(js_err)?;
         session.pending = Some(PendingDebit {
             token_slot,
             expected_ct: payload.new_ct.clone(),
@@ -938,9 +939,10 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let payload: SendPayload = serde_json::from_str(&payload_json).map_err(js_err)?;
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
-        let snapshot = session.cosigner_snapshot.as_ref().ok_or_else(|| {
-            js_err("only a co-signer session (full snapshot import) can co-sign")
-        })?;
+        let snapshot = session
+            .cosigner_snapshot
+            .as_ref()
+            .ok_or_else(|| js_err("only a co-signer session (full snapshot import) can co-sign"))?;
         // Must extend our current head.
         if payload.proposed_next_state.prev_digest != snapshot.state.digest {
             return Err(js_err("payload does not extend the wallet's current head"));
@@ -1016,12 +1018,16 @@ pub fn wallet_finalize(view_json: String) -> Result<String, JsValue> {
         let view: SlotView = serde_json::from_str(&view_json).map_err(js_err)?;
         let current = current_view(session)?;
         if view.state.balance_state.state_version <= current.state.balance_state.state_version {
-            return Err(js_err("finalized view does not advance the wallet's current head"));
+            return Err(js_err(
+                "finalized view does not advance the wallet's current head",
+            ));
         }
         if view.state.balance_state.state_version == current.state.balance_state.state_version + 1
             && view.state.prev_digest != current.state.digest
         {
-            return Err(js_err("finalized view does not extend the wallet's current head"));
+            return Err(js_err(
+                "finalized view does not extend the wallet's current head",
+            ));
         }
         let report = adopt_view(session, view)?;
         serde_json::to_string(&report).map_err(js_err)
@@ -1038,7 +1044,9 @@ pub fn wallet_finalize_state(state_json: String) -> Result<String, JsValue> {
             js_err("only a co-signer session holds the full state; delegates finalize a view")
         })?;
         if next_state.prev_digest != snapshot.state.digest {
-            return Err(js_err("finalized state does not extend the wallet's current head"));
+            return Err(js_err(
+                "finalized state does not extend the wallet's current head",
+            ));
         }
         if next_state.balance_state.state_version != snapshot.state.balance_state.state_version + 1
         {

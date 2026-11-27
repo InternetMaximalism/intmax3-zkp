@@ -64,7 +64,14 @@ impl LateIncomingCheckpoint {
             "rebuild all verifier keys with authenticated-tail-receive"
         );
         let commitment = circuit.balance_commitment(proof)?;
-        Self::from_commitment(commitment, proof, private_state, close_intent_digest, final_balance_state_h1, expected)
+        Self::from_commitment(
+            commitment,
+            proof,
+            private_state,
+            close_intent_digest,
+            final_balance_state_h1,
+            expected,
+        )
     }
 
     /// Same checkpoint as `new`, bound by the Balance verifier data alone. The late-deposit lane
@@ -82,7 +89,14 @@ impl LateIncomingCheckpoint {
             "rebuild all verifier keys with authenticated-tail-receive"
         );
         let commitment = balance_commitment_with_vd(balance_vd, proof)?;
-        Self::from_commitment(commitment, proof, private_state, close_intent_digest, final_balance_state_h1, expected)
+        Self::from_commitment(
+            commitment,
+            proof,
+            private_state,
+            close_intent_digest,
+            final_balance_state_h1,
+            expected,
+        )
     }
 
     fn from_commitment(

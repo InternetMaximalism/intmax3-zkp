@@ -1830,8 +1830,9 @@ mod tests {
     // cover the arithmetic/gadget conjuncts by proving a witness that violates exactly one
     // claim and asserting rejection.
 
-    use crate::faithfulness::{EvidenceTable, MUTATION, NOT_INJECTABLE, NOT_STATIC, RepView,
-        TRIVIAL};
+    use crate::faithfulness::{
+        EvidenceTable, MUTATION, NOT_INJECTABLE, NOT_STATIC, RepView, TRIVIAL,
+    };
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -1845,29 +1846,45 @@ mod tests {
         let mut table = EvidenceTable::new("FalconGadgetProgram");
 
         table.note(
-            "twiddleTables", "gadget.rs:655", "no-gate", TRIVIAL,
+            "twiddleTables",
+            "gadget.rs:655",
+            "no-gate",
+            TRIVIAL,
             "build-time table assertions only; Lean holds = True",
         );
         table.check(
-            "allocPkG", "gadget.rs:659", "range",
+            "allocPkG",
+            "gadget.rs:659",
+            "range",
             pk.len() == 8 && view.all_range_checked(&pk, 32),
             "Bytes32Target::new(_, true): 8 limbs, range_check(limb, 32) each",
         );
         table.check(
-            "allocMessageDigest", "gadget.rs:660", "range",
+            "allocMessageDigest",
+            "gadget.rs:660",
+            "range",
             msg.len() == 8 && view.all_range_checked(&msg, 32),
             "Bytes32Target::new(_, true): 8 limbs, range_check(limb, 32) each",
         );
         table.check(
-            "witnessSalt", "gadget.rs:663", "width", t.salt.len() == 8,
+            "witnessSalt",
+            "gadget.rs:663",
+            "width",
+            t.salt.len() == 8,
             "[Target; 8] fixes the salt vector length",
         );
         table.check(
-            "witnessH", "gadget.rs:664", "width", t.h.len() == N,
+            "witnessH",
+            "gadget.rs:664",
+            "width",
+            t.h.len() == N,
             "(0..N).map(add_virtual_target) fixes |h| = 512",
         );
         table.check(
-            "witnessS2", "gadget.rs:665", "width", t.s2.len() == N,
+            "witnessS2",
+            "gadget.rs:665",
+            "width",
+            t.s2.len() == N,
             "(0..N).map(add_virtual_target) fixes |s2| = 512",
         );
         // canonicalCoeffGates v = (v < 2^14) AND (fieldSub (q-1) v < 2^14): the first conjunct
@@ -1876,7 +1893,9 @@ mod tests {
         // `sub` output that the gadget never returns, so only the first is structural.
         let coeffs: Vec<Target> = t.h.iter().chain(t.s2.iter()).copied().collect();
         table.check(
-            "canonicalCoeffs", "gadget.rs:670-672", "range",
+            "canonicalCoeffs",
+            "gadget.rs:670-672",
+            "range",
             view.all_range_checked(&coeffs, 14),
             "assert_canonical_coeff: range_check(v, 14) on every h and s2 coefficient",
         );
@@ -1885,16 +1904,23 @@ mod tests {
             "complement (q-1-v) 14-bit check: faithfulness_falcon_gadget_mutation_canonical_coeffs_*",
         );
         table.note(
-            "pkDigest", "gadget.rs:675", "gadget", NOT_STATIC,
+            "pkDigest",
+            "gadget.rs:675",
+            "gadget",
+            NOT_STATIC,
             "Poseidon sponge semantics (Environment.falconPkDigest), not a copy constraint",
         );
         table.check(
-            "connectPkG", "gadget.rs:676", "connect",
+            "connectPkG",
+            "gadget.rs:676",
+            "connect",
             view.same_slices(&pk, &p.pk_computed.to_vec()),
             "pk_g.connect(builder, pk_computed): all 8 limbs share a representative",
         );
         table.check(
-            "hashToPoint", "gadget.rs:679 / :360-362", "range",
+            "hashToPoint",
+            "gadget.rs:679 / :360-362",
+            "range",
             view.all_range_checked(&t.salt, 40) && p.c.len() == N,
             "h2p_circuit range_checks every salt element to 40 bits and returns 512 coefficients",
         );
@@ -1903,70 +1929,115 @@ mod tests {
             "c = H2P(salt, digest) sponge semantics: faithfulness_falcon_gadget_mutation_hash_to_point",
         );
         table.check(
-            "nttFwdH", "gadget.rs:684", "width", p.h_ntt.len() == N,
+            "nttFwdH",
+            "gadget.rs:684",
+            "width",
+            p.h_ntt.len() == N,
             "ntt_forward returns 512 wires",
         );
         table.check(
-            "nttFwdS2", "gadget.rs:685", "width", p.s2_ntt.len() == N,
+            "nttFwdS2",
+            "gadget.rs:685",
+            "width",
+            p.s2_ntt.len() == N,
             "ntt_forward returns 512 wires",
         );
         table.note(
-            "nttFwdH", "gadget.rs:434-472", "arith", NOT_STATIC,
+            "nttFwdH",
+            "gadget.rs:434-472",
+            "arith",
+            NOT_STATIC,
             "4608 reduce_mod_q butterflies with 14-bit quotients: arithmetic, not copy constraints",
         );
         table.note(
-            "nttFwdS2", "gadget.rs:434-472", "arith", NOT_STATIC,
+            "nttFwdS2",
+            "gadget.rs:434-472",
+            "arith",
+            NOT_STATIC,
             "4608 reduce_mod_q butterflies with 14-bit quotients: arithmetic, not copy constraints",
         );
         table.check(
-            "pointwiseMul", "gadget.rs:686", "width", p.prod_ntt.len() == N,
+            "pointwiseMul",
+            "gadget.rs:686",
+            "width",
+            p.prod_ntt.len() == N,
             "pointwise_mul returns 512 wires",
         );
         table.check(
-            "nttInv", "gadget.rs:687", "width", p.prod.len() == N,
+            "nttInv",
+            "gadget.rs:687",
+            "width",
+            p.prod.len() == N,
             "ntt_inverse returns 512 wires",
         );
         table.check(
-            "s1Reduce", "gadget.rs:689-698", "width", p.s1.len() == N,
+            "s1Reduce",
+            "gadget.rs:689-698",
+            "width",
+            p.s1.len() == N,
             "the s1 = reduce_mod_q(c + q - prod, 1) loop returns 512 wires",
         );
         table.note(
-            "s1Reduce", "gadget.rs:689-698", "arith", MUTATION,
+            "s1Reduce",
+            "gadget.rs:689-698",
+            "arith",
+            MUTATION,
             "1-bit quotient pin: covered by mod_q_quotient_cheating_rejected in this file",
         );
         table.note(
-            "centeredSquaresS1", "gadget.rs:702-706", "arith", MUTATION,
+            "centeredSquaresS1",
+            "gadget.rs:702-706",
+            "arith",
+            MUTATION,
             "centering bit is an internal witness: centering_bit_lie_can_only_inflate_the_norm",
         );
         table.note(
-            "centeredSquaresS2", "gadget.rs:702-706", "arith", MUTATION,
+            "centeredSquaresS2",
+            "gadget.rs:702-706",
+            "arith",
+            MUTATION,
             "centering bit is an internal witness: centering_bit_lie_can_only_inflate_the_norm",
         );
         table.note(
-            "normSum", "gadget.rs:707", "arith", NOT_STATIC,
+            "normSum",
+            "gadget.rs:707",
+            "arith",
+            NOT_STATIC,
             "add_many(&squares) is an arithmetic chain, not a copy constraint",
         );
         table.check(
-            "betaConstant", "gadget.rs:716-718", "constant",
+            "betaConstant",
+            "gadget.rs:716-718",
+            "constant",
             view.is_const(p.beta_sq, FALCON_SIG_L2_BOUND),
             "builder.constant(FALCON_SIG_L2_BOUND) is wired to that ConstantGate value",
         );
         table.note(
-            "slackSub", "gadget.rs:719", "arith", NOT_STATIC,
+            "slackSub",
+            "gadget.rs:719",
+            "arith",
+            NOT_STATIC,
             "builder.sub(beta_sq, norm) is an arithmetic gate output",
         );
         table.check(
-            "selectVerify", "gadget.rs:720-726", "connect",
+            "selectVerify",
+            "gadget.rs:720-726",
+            "connect",
             p.verify.is_none() && view.same(p.checked_slack, p.slack),
             "unconditional gadget: checked_slack IS slack (no select wire allocated)",
         );
         table.check(
-            "slackRange", "gadget.rs:727", "range",
+            "slackRange",
+            "gadget.rs:727",
+            "range",
             view.range_bits(p.checked_slack).contains(&26),
             "range_check(checked_slack, 26)",
         );
         table.note(
-            "buildTarget", "gadget.rs:729-735", "no-gate", TRIVIAL,
+            "buildTarget",
+            "gadget.rs:729-735",
+            "no-gate",
+            TRIVIAL,
             "struct literal emits no constraint; Lean holds = True",
         );
         // Not a `GadgetOp`: the measurement harness around the gadget. Recorded because the
@@ -1974,7 +2045,9 @@ mod tests {
         let mut expected_pis = pk.clone();
         expected_pis.extend(msg.iter().copied());
         table.check(
-            "harnessRegisterPublicInputs", "gadget.rs:897-901", "public-inputs",
+            "harnessRegisterPublicInputs",
+            "gadget.rs:897-901",
+            "public-inputs",
             view.public_inputs_are(&expected_pis),
             "FalconSigCircuit::new registers pk_g(8) then message_digest(8), in that order",
         );
@@ -1991,7 +2064,10 @@ mod tests {
         let mut w = honest_witness(0x51);
         w.s2[7] = Q;
         assert_rejected(&N1_CIRCUIT, w, "canonicalCoeffs must reject s2[7] = q");
-        println!("[faithfulness] canonicalCoeffs/s2 mutation: {:?}", t0.elapsed());
+        println!(
+            "[faithfulness] canonicalCoeffs/s2 mutation: {:?}",
+            t0.elapsed()
+        );
     }
 
     /// `GadgetOp.canonicalCoeffs` (FalconGadgetProgram.lean:541), h half.

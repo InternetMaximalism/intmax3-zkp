@@ -129,10 +129,14 @@ where
         verifier_data_public_inputs: &plonky2::plonk::circuit_data::VerifierOnlyCircuitData<C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
         let mut pw = PartialWitness::<F>::new();
-        pw.set_verifier_data_target(&self.verifier_data_target, verifier_data_public_inputs);
-        pw.set_proof_with_pis_target(&self.inner_proof, inner_proof);
-        pw.set_bool_target(self.is_first_step, false);
-        pw.set_proof_with_pis_target(&self.prev_proof, prev_proof);
+        pw.set_verifier_data_target(&self.verifier_data_target, verifier_data_public_inputs)
+            .expect("forgery helper: verifier-data witness");
+        pw.set_proof_with_pis_target(&self.inner_proof, inner_proof)
+            .expect("forgery helper: inner-proof witness");
+        pw.set_bool_target(self.is_first_step, false)
+            .expect("forgery helper: is_first_step witness");
+        pw.set_proof_with_pis_target(&self.prev_proof, prev_proof)
+            .expect("forgery helper: prev-proof witness");
         self.data.prove(pw).map_err(|e| {
             crate::utils::error::UtilsError::from(super::error::HashChainError::CyclicProofError(
                 e.to_string(),

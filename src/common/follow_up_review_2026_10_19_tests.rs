@@ -25,8 +25,8 @@ use crate::{
     },
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
-        u256::U256,
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
+        u256::U256,
     },
     utils::{
         hash_chain::chain_end_circuit::ChainEndProofPublicInputs,
@@ -47,12 +47,25 @@ const D: usize = 2;
 /// COMMON-02: deserialization goes through `U63::new`.
 #[test]
 fn u63_json_rejects_values_the_constructor_rejects() {
-    assert!(serde_json::from_str::<U63>("9223372036854775807").is_ok(), "2^63 - 1 is a U63");
-    assert!(serde_json::from_str::<U63>("9223372036854775808").is_err(), "2^63 is not a U63");
-    assert!(serde_json::from_str::<U63>("18446744073709551615").is_err(), "u64::MAX is not a U63");
+    assert!(
+        serde_json::from_str::<U63>("9223372036854775807").is_ok(),
+        "2^63 - 1 is a U63"
+    );
+    assert!(
+        serde_json::from_str::<U63>("9223372036854775808").is_err(),
+        "2^63 is not a U63"
+    );
+    assert!(
+        serde_json::from_str::<U63>("18446744073709551615").is_err(),
+        "u64::MAX is not a U63"
+    );
     let max = U63::new((1u64 << 63) - 1).unwrap();
     let json = serde_json::to_string(&max).unwrap();
-    assert_eq!(serde_json::from_str::<U63>(&json).unwrap(), max, "wire format unchanged");
+    assert_eq!(
+        serde_json::from_str::<U63>(&json).unwrap(),
+        max,
+        "wire format unchanged"
+    );
 }
 
 /// COMMON-03: no `as u32` aliasing of `2^32` in the Tx / TxV2 / ChannelAction decoders.
@@ -61,15 +74,24 @@ fn tx_numeric_decoders_reject_words_above_u32() {
     let mut tx = Tx::default().to_u64_vec();
     assert!(Tx::from_u64_slice(&tx).is_ok());
     tx[4] = 1u64 << 32;
-    assert!(Tx::from_u64_slice(&tx).is_err(), "nonce 2^32 must not decode as 0");
+    assert!(
+        Tx::from_u64_slice(&tx).is_err(),
+        "nonce 2^32 must not decode as 0"
+    );
 
     let mut v2 = TxV2::default().to_u64_vec();
     assert!(TxV2::from_u64_slice(&v2).is_ok());
     v2[0] = 1u64 << 32;
-    assert!(TxV2::from_u64_slice(&v2).is_err(), "class 2^32 must not decode as UserTransfer");
+    assert!(
+        TxV2::from_u64_slice(&v2).is_err(),
+        "class 2^32 must not decode as UserTransfer"
+    );
     let mut v2 = TxV2::default().to_u64_vec();
     v2[5] = 1u64 << 32;
-    assert!(TxV2::from_u64_slice(&v2).is_err(), "nonce 2^32 must not decode as 0");
+    assert!(
+        TxV2::from_u64_slice(&v2).is_err(),
+        "nonce 2^32 must not decode as 0"
+    );
 
     let mut action = ChannelAction {
         kind: ChannelActionKind::InterChannelSend,
@@ -128,13 +150,23 @@ fn public_state_padded_tree_roots_agree_between_native_and_circuit() {
         .map(|l| PublicStateTarget::constant(&mut builder, l))
         .collect();
     let root_t = get_merkle_root_from_leaves_circuit::<F, C, D, PublicStateTarget>(
-        &mut builder, 2, &targets,
+        &mut builder,
+        2,
+        &targets,
     );
     builder.register_public_inputs(&root_t.elements);
     let data = builder.build::<C>();
     let proof = data.prove(PartialWitness::new()).unwrap();
-    let circuit_root: Vec<u64> = proof.public_inputs.iter().map(|x| x.to_canonical_u64()).collect();
-    assert_eq!(circuit_root, native.to_u64_vec(), "circuit padding must use the native empty leaf");
+    let circuit_root: Vec<u64> = proof
+        .public_inputs
+        .iter()
+        .map(|x| x.to_canonical_u64())
+        .collect();
+    assert_eq!(
+        circuit_root,
+        native.to_u64_vec(),
+        "circuit padding must use the native empty leaf"
+    );
 }
 
 /// COMMON-06: the Result-returning decoder returns an error instead of asserting.
@@ -161,7 +193,9 @@ fn full_public_state_add_block_err_is_atomic() {
         state.public_state_tree.get_root(),
     );
     assert!(
-        state.add_block_with_channel(0, &[1], 0, Bytes32::default()).is_err(),
+        state
+            .add_block_with_channel(0, &[1], 0, Bytes32::default())
+            .is_err(),
         "channel 0 with a nonzero key id must be refused"
     );
     let after = (
@@ -178,7 +212,8 @@ fn full_public_state_add_block_err_is_atomic() {
 fn indexed_merkle_tree_json_without_the_sentinel_is_rejected() {
     let fresh = IndexedMerkleTree::new(2);
     let json = serde_json::to_string(&fresh).unwrap();
-    let decoded: IndexedMerkleTree = serde_json::from_str(&json).expect("constructor output decodes");
+    let decoded: IndexedMerkleTree =
+        serde_json::from_str(&json).expect("constructor output decodes");
     assert_eq!(decoded.get_root(), fresh.get_root());
     assert!(
         serde_json::from_str::<IndexedMerkleTree>(r#"{"height":2,"leaves":[]}"#).is_err(),
@@ -207,9 +242,11 @@ fn indexed_merkle_tree_with_insertions_round_trips_through_both_codecs() {
     let from_json: IndexedMerkleTree = serde_json::from_str(&json).expect("JSON round-trip");
     assert_eq!(from_json.get_root(), tree.get_root());
     let bytes = bincode::serde::encode_to_vec(&tree, bincode::config::standard()).unwrap();
-    let (from_bincode, consumed) =
-        bincode::serde::decode_from_slice::<IndexedMerkleTree, _>(&bytes, bincode::config::standard())
-            .expect("bincode round-trip");
+    let (from_bincode, consumed) = bincode::serde::decode_from_slice::<IndexedMerkleTree, _>(
+        &bytes,
+        bincode::config::standard(),
+    )
+    .expect("bincode round-trip");
     assert_eq!(consumed, bytes.len());
     assert_eq!(from_bincode.get_root(), tree.get_root());
 }
@@ -222,8 +259,13 @@ fn merkle_proof_rejects_an_index_outside_the_tree_domain() {
     tree.push(leaf);
     let root = tree.get_root();
     let proof = tree.prove(0);
-    proof.verify(&leaf, 0, root).expect("in-domain index verifies");
-    assert!(proof.verify(&leaf, 4, root).is_err(), "index 4 aliases index 0 in a height-2 tree");
+    proof
+        .verify(&leaf, 0, root)
+        .expect("in-domain index verifies");
+    assert!(
+        proof.verify(&leaf, 4, root).is_err(),
+        "index 4 aliases index 0 in a height-2 tree"
+    );
 }
 
 /// UTILS-03: the numeric constructor requires canonical Goldilocks limbs.

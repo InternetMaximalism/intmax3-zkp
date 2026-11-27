@@ -999,7 +999,11 @@ fn validate_companion_schema(name: &str, value: &serde_json::Value) -> Result<()
             ] {
                 let content = read(file);
                 if let Some(bytes) = bytes {
-                    require_equal(&content.len(), &bytes, &format!("{name}: {file} byte length"))?;
+                    require_equal(
+                        &content.len(),
+                        &bytes,
+                        &format!("{name}: {file} byte length"),
+                    )?;
                 }
                 let digest = format!("0x{}", hex::encode(Sha256::digest(content.as_bytes())));
                 require_equal(&digest, sha, &format!("{name}: {file} sha256"))?;
@@ -1400,6 +1404,7 @@ fn release_driver_keeps_foundry_skip_success_fail_closed() {
     for required in [
         "cache-dependency-path: node/package-lock.json",
         "run: npm ci --ignore-scripts",
+        "working-directory: api",
         "run: npm test",
     ] {
         assert!(
@@ -1503,7 +1508,9 @@ fn validate_lifecycle_pair(
         // therefore fixes `deposit - withdrawal == withdrawal` (6 / 3); a different pair is a
         // stale or hand-edited close family.
         if withdrawal.amount == U256::default() {
-            return Err(format!("{payout_name}: the close family needs a nonzero withdrawal"));
+            return Err(format!(
+                "{payout_name}: the close family needs a nonzero withdrawal"
+            ));
         }
         require_equal(
             &(lifecycle.deposit.amount - withdrawal.amount),
@@ -2438,7 +2445,8 @@ const TXPOOL_MAX_TX_BYTES: usize = 131_072;
 /// Upper bound of an EIP-1559 envelope around its calldata: type byte, list header (4), chain id
 /// (9), nonce (9), both fees (17 each), gas (9), `to` (21), value (33), calldata header (4), empty
 /// access list (1), y parity (1), r and s (33 each).
-const EIP1559_ENVELOPE_MAX_BYTES: usize = 1 + 4 + 9 + 9 + 17 + 17 + 9 + 21 + 33 + 4 + 1 + 1 + 33 + 33;
+const EIP1559_ENVELOPE_MAX_BYTES: usize =
+    1 + 4 + 9 + 9 + 17 + 17 + 9 + 21 + 33 + 4 + 1 + 1 + 33 + 33;
 /// `BlobKZGVerifierExt.ONE_BLOB_CAPACITY`: a compact proof up to this length is one blob.
 const ONE_BLOB_PROOF_CAPACITY: usize = (4096 - 1) * 31;
 
@@ -2454,16 +2462,26 @@ fn proof_call_heads(config: &str, compact_bytes: usize) -> Vec<(&'static str, us
     let bytes_head = 2 * word; // offset + length of the `bytes` argument
     if config == "mle_fixture_config.json" || config.ends_with("lifecycle_validity_mle_config.json")
     {
-        let blobs = if compact_bytes <= ONE_BLOB_PROOF_CAPACITY { 1 } else { 2 };
+        let blobs = if compact_bytes <= ONE_BLOB_PROOF_CAPACITY {
+            1
+        } else {
+            2
+        };
         vec![
             // attestProofData(uint256, bytes proof, bytes sidecars): 96 sidecar bytes per blob.
-            ("attestProofData", 4 + word + bytes_head + bytes_head + 96 * blobs),
+            (
+                "attestProofData",
+                4 + word + bytes_head + bytes_head + 96 * blobs,
+            ),
             // finalize / fraudProof(uint256, bytes32, ValidityPublicInputs (7 words), bytes).
             ("finalize", 4 + word + word + 7 * word + bytes_head),
         ]
     } else if config.ends_with("withdrawal_mle_config.json") {
         // withdrawNative / withdrawERC20(Withdrawal[] (5 words a leaf), address, bytes).
-        vec![("withdrawNative", 4 + word + word + bytes_head + word + 5 * word)]
+        vec![(
+            "withdrawNative",
+            4 + word + word + bytes_head + word + 5 * word,
+        )]
     } else if config == "close_intent_mle_config.json" {
         vec![("submitCloseIntent", 4 + 34 * word + bytes_head)]
     } else if config == "withdrawal_claim_mle_config.json" {
@@ -2499,7 +2517,8 @@ fn every_proof_carrying_transaction_fits_the_txpool_size_cap() {
         }
         // A validity proof is also posted as proof-DA blobs: keep it to one blob (a second blob
         // still verifies, it doubles the post's blob gas). Other statements are calldata only.
-        if name == &"mle_fixture_config.json" || name.ends_with("lifecycle_validity_mle_config.json")
+        if name == &"mle_fixture_config.json"
+            || name.ends_with("lifecycle_validity_mle_config.json")
         {
             assert!(
                 compact <= ONE_BLOB_PROOF_CAPACITY,
@@ -2507,5 +2526,8 @@ fn every_proof_carrying_transaction_fits_the_txpool_size_cap() {
             );
         }
     }
-    eprintln!("tightest txpool margin: {} -> {} bytes", tightest.0, tightest.1);
+    eprintln!(
+        "tightest txpool margin: {} -> {} bytes",
+        tightest.0, tightest.1
+    );
 }

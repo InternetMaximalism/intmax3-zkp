@@ -29,7 +29,9 @@ use crate::{
     },
     circuits::{
         balance::{
-            balance_pis::{BalanceFullPublicInputs, BalancePublicInputs, BALANCE_PUBLIC_INPUTS_LEN},
+            balance_pis::{
+                BALANCE_PUBLIC_INPUTS_LEN, BalanceFullPublicInputs, BalancePublicInputs,
+            },
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id,
             spend_circuit::{SpendCircuit, SpendPublicInputs},
@@ -82,8 +84,7 @@ use crate::{
         C, ChannelBalanceAttestation, ChannelSnapshot, D, F, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, canonical_inter_channel_base_transfer,
         inter_channel_tx_v2, verify_all_signatures, verify_inter_channel_credit_states,
-        verify_inter_channel_descriptor_matches_debit, verify_snapshot,
-        verify_snapshot_structure,
+        verify_inter_channel_descriptor_matches_debit, verify_snapshot, verify_snapshot_structure,
     },
 };
 
@@ -173,17 +174,22 @@ fn ensure_receive_window_open(
         LiveBalanceServiceError::Transition(format!("{what}: balance public inputs: {e}"))
     })?;
     let bwg = generator.block_witness_generator.borrow();
-    let status = bwg.get_send_status(channel_id, prev.block_r).map_err(|e| {
-        LiveBalanceServiceError::Transition(format!("{what}: send status: {e}"))
-    })?;
-    let (head_block, account) = bwg.get_account_state(channel_id, prev.block_r).map_err(|e| {
-        LiveBalanceServiceError::Transition(format!("{what}: account state: {e}"))
-    })?;
-    if crate::circuits::balance::common::receive_window::requires_send_interval(account.channel_leaf.prev, prev.block_r) && status.next_send_block.is_none() {
+    let status = bwg
+        .get_send_status(channel_id, prev.block_r)
+        .map_err(|e| LiveBalanceServiceError::Transition(format!("{what}: send status: {e}")))?;
+    let (head_block, account) = bwg
+        .get_account_state(channel_id, prev.block_r)
+        .map_err(|e| LiveBalanceServiceError::Transition(format!("{what}: account state: {e}")))?;
+    if crate::circuits::balance::common::receive_window::requires_send_interval(
+        account.channel_leaf.prev,
+        prev.block_r,
+    ) && status.next_send_block.is_none()
+    {
         if cfg!(feature = "authenticated-tail-receive") {
             return Err(LiveBalanceServiceError::Transition(format!(
                 "{what}: authenticated outgoing history for channel {} has no interval after cursor {}; retain the credit and reconcile producer history",
-                channel_id.as_u64(), prev.block_r.as_u64(),
+                channel_id.as_u64(),
+                prev.block_r.as_u64(),
             )));
         }
         return Err(LiveBalanceServiceError::Transition(format!(
@@ -448,7 +454,8 @@ struct LiveBalanceSnapshot {
     /// balance/channel mutation is refused; only proof export and the ordinary close flow remain.
     terminal_close_funding: Option<StoredCloseFundingMaterial>,
     /// Required whenever a fully-bound signed head is present. This proof is committed atomically
-    /// with adoption of H, so an unavailable cosigner cannot make that already-signed H unexitable.
+    /// with adoption of H, so an unavailable cosigner cannot make that already-signed H
+    /// unexitable.
     signed_head_exit_kit: Option<SignedHeadExitKit>,
     /// Pre-deposit generations archived by `receive_deposit_unbound`, oldest first, bounded by
     /// `MAX_RETAINED_PRE_RECEIVE_GENERATIONS`. Only the post-close late lanes read them.
@@ -690,7 +697,8 @@ struct LiveCircuits {
     /// Built on first use: only a head with a signer-independent exit kit needs it.
     close_asset_backing: OnceLock<CloseAssetBackingCircuit<F, C, D>>,
     /// Built on first use: only a post-close late-deposit refund needs it.
-    late_deposit: OnceLock<crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D>>,
+    late_deposit:
+        OnceLock<crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D>>,
 }
 
 impl LiveCircuits {
@@ -709,9 +717,13 @@ impl LiveCircuits {
             .get_or_init(|| CloseAssetBackingCircuit::new(&self.balance.balance_vd()))
     }
 
-    fn late_deposit(&self) -> &crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D> {
+    fn late_deposit(
+        &self,
+    ) -> &crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D> {
         self.late_deposit.get_or_init(|| {
-            crate::circuits::channel::late_deposit_circuit::LateDepositCircuit::new(&self.balance.balance_vd())
+            crate::circuits::channel::late_deposit_circuit::LateDepositCircuit::new(
+                &self.balance.balance_vd(),
+            )
         })
     }
 }
@@ -720,12 +732,16 @@ impl LiveCircuits {
 /// callers block on the one build instead of each building their own.
 fn live_circuits() -> Arc<LiveCircuits> {
     static CIRCUITS: OnceLock<Arc<LiveCircuits>> = OnceLock::new();
-    CIRCUITS.get_or_init(|| Arc::new(LiveCircuits::build())).clone()
+    CIRCUITS
+        .get_or_init(|| Arc::new(LiveCircuits::build()))
+        .clone()
 }
 
 impl LiveBalanceService {
     /// The process-wide late-deposit circuit over this build's Balance VD (built on first use).
-    pub fn late_deposit_circuit(&self) -> &crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D> {
+    pub fn late_deposit_circuit(
+        &self,
+    ) -> &crate::circuits::channel::late_deposit_circuit::LateDepositCircuit<F, C, D> {
         self.circuits.late_deposit()
     }
 
@@ -733,12 +749,17 @@ impl LiveBalanceService {
     /// Balance commitment (see `late_cursor`). The ordinary live signed-head snapshot remains
     /// unchanged.
     pub fn late_incoming_checkpoint(
-        &self, circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F,C,D>,
-        close_intent_digest: Bytes32, final_balance_state_h1: Bytes32, confirmed_commitment: Bytes32,
+        &self,
+        circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F, C, D>,
+        close_intent_digest: Bytes32,
+        final_balance_state_h1: Bytes32,
+        confirmed_commitment: Bytes32,
     ) -> anyhow::Result<crate::late_incoming::LateIncomingCheckpoint> {
         let cursor = self.late_cursor(
             |proof| circuit.balance_commitment(proof),
-            close_intent_digest, final_balance_state_h1, confirmed_commitment,
+            close_intent_digest,
+            final_balance_state_h1,
+            confirmed_commitment,
         )?;
         Ok(cursor.checkpoint)
     }
@@ -756,19 +777,30 @@ impl LiveBalanceService {
         confirmed_commitment: Bytes32,
     ) -> anyhow::Result<LateDepositCheckpoint> {
         let balance_vd = self.circuits.balance.balance_vd();
-        let at = |proof_bytes: &[u8], private_state: &FullPrivateState|
-            -> anyhow::Result<Option<crate::late_incoming::LateIncomingCheckpoint>> {
-            let proof = ProofWithPublicInputs::from_bytes(proof_bytes.to_vec(), &balance_vd.common)?;
+        let at = |proof_bytes: &[u8],
+                  private_state: &FullPrivateState|
+         -> anyhow::Result<Option<crate::late_incoming::LateIncomingCheckpoint>> {
+            let proof =
+                ProofWithPublicInputs::from_bytes(proof_bytes.to_vec(), &balance_vd.common)?;
             if commitment_of(&proof)? != confirmed_commitment {
                 return Ok(None);
             }
-            Ok(Some(crate::late_incoming::LateIncomingCheckpoint::with_balance_vd(
-                &balance_vd, &proof, private_state.clone(),
-                close_intent_digest, final_balance_state_h1, confirmed_commitment,
-            )?))
+            Ok(Some(
+                crate::late_incoming::LateIncomingCheckpoint::with_balance_vd(
+                    &balance_vd,
+                    &proof,
+                    private_state.clone(),
+                    close_intent_digest,
+                    final_balance_state_h1,
+                    confirmed_commitment,
+                )?,
+            ))
         };
         if let Some(checkpoint) = at(&self.disk.balance_proof, &self.disk.full_private_state)? {
-            return Ok(LateDepositCheckpoint { checkpoint, retained_deposit: None });
+            return Ok(LateDepositCheckpoint {
+                checkpoint,
+                retained_deposit: None,
+            });
         }
         for next in self.disk.late_continuations.iter().rev() {
             if next.commitment() != confirmed_commitment {
@@ -779,7 +811,10 @@ impl LiveBalanceService {
                     && next.final_balance_state_h1() == final_balance_state_h1,
                 "the confirmed continuation {confirmed_commitment} belongs to another close"
             );
-            return Ok(LateDepositCheckpoint { checkpoint: next.clone(), retained_deposit: None });
+            return Ok(LateDepositCheckpoint {
+                checkpoint: next.clone(),
+                retained_deposit: None,
+            });
         }
         for retained in self.disk.retained_pre_receive.iter().rev() {
             if let Some(checkpoint) = at(&retained.balance_proof, &retained.full_private_state)? {
@@ -794,7 +829,10 @@ impl LiveBalanceService {
         }
         for prior in self.disk.retained_prior.iter().rev() {
             if let Some(checkpoint) = at(&prior.balance_proof, &prior.full_private_state)? {
-                return Ok(LateDepositCheckpoint { checkpoint, retained_deposit: None });
+                return Ok(LateDepositCheckpoint {
+                    checkpoint,
+                    retained_deposit: None,
+                });
             }
         }
         anyhow::bail!(
@@ -821,15 +859,31 @@ impl LiveBalanceService {
             ));
         }
         let balance_vd = self.circuits.balance.balance_vd();
-        let proof = ProofWithPublicInputs::from_bytes(next.balance_proof_bytes().to_vec(), &balance_vd.common)
-            .map_err(|e| LiveBalanceServiceError::InvalidRequest(format!("late continuation proof: {e}")))?;
+        let proof = ProofWithPublicInputs::from_bytes(
+            next.balance_proof_bytes().to_vec(),
+            &balance_vd.common,
+        )
+        .map_err(|e| {
+            LiveBalanceServiceError::InvalidRequest(format!("late continuation proof: {e}"))
+        })?;
         // Re-derive the cursor from its own proof: the commitment and the private state must open.
         crate::late_incoming::LateIncomingCheckpoint::with_balance_vd(
-            &balance_vd, &proof, next.private_state().clone(),
-            next.close_intent_digest(), next.final_balance_state_h1(), next.commitment(),
+            &balance_vd,
+            &proof,
+            next.private_state().clone(),
+            next.close_intent_digest(),
+            next.final_balance_state_h1(),
+            next.commitment(),
         )
-        .map_err(|e| LiveBalanceServiceError::InvalidRequest(format!("late continuation: {e:#}")))?;
-        if self.disk.late_continuations.iter().any(|kept| kept.commitment() == next.commitment()) {
+        .map_err(|e| {
+            LiveBalanceServiceError::InvalidRequest(format!("late continuation: {e:#}"))
+        })?;
+        if self
+            .disk
+            .late_continuations
+            .iter()
+            .any(|kept| kept.commitment() == next.commitment())
+        {
             return Ok(());
         }
         let mut candidate = self.disk.clone();
@@ -858,37 +912,81 @@ impl LiveBalanceService {
     pub fn prepare_late_inter_channel(
         &self,
         checkpoint: &crate::late_incoming::LateIncomingCheckpoint,
-        circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F,C,D>,
+        circuit: &crate::circuits::channel::late_incoming_circuit::LateIncomingCircuit<F, C, D>,
         producer: &BlockProducerService,
         descriptor: &InterChannelTransferDescriptor,
         source: &LiveInterChannelSendArtifact,
-        recipient_binding: &ProofWithPublicInputs<F,C,D>,
+        recipient_binding: &ProofWithPublicInputs<F, C, D>,
     ) -> anyhow::Result<crate::late_incoming::PreparedLateIncoming> {
-        let transfer = canonical_inter_channel_base_transfer(&descriptor.inter_channel_tx, descriptor.amount)?;
-        let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(descriptor.source_channel_id, &transfer, descriptor.inter_channel_tx.base_nonce);
-        anyhow::ensure!(tx_v2 == descriptor.tx_v2 && Bytes32::from(tx_v2_tree.get_root()) == descriptor.tx_tree_root,
-            "noncanonical late incoming descriptor");
-        let sender_proof = ProofWithPublicInputs::from_bytes(source.source_backing.balance_attestation.balance_proof.clone(), &self.circuits.balance.balance_vd().common)?;
-        let spend_proof = ProofWithPublicInputs::from_bytes(source.spend_proof.clone(), &self.circuits.spend.data.common)?;
-        self.circuits.balance.balance_vd().verify(sender_proof.clone())?;
+        let transfer =
+            canonical_inter_channel_base_transfer(&descriptor.inter_channel_tx, descriptor.amount)?;
+        let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(
+            descriptor.source_channel_id,
+            &transfer,
+            descriptor.inter_channel_tx.base_nonce,
+        );
+        anyhow::ensure!(
+            tx_v2 == descriptor.tx_v2
+                && Bytes32::from(tx_v2_tree.get_root()) == descriptor.tx_tree_root,
+            "noncanonical late incoming descriptor"
+        );
+        let sender_proof = ProofWithPublicInputs::from_bytes(
+            source
+                .source_backing
+                .balance_attestation
+                .balance_proof
+                .clone(),
+            &self.circuits.balance.balance_vd().common,
+        )?;
+        let spend_proof = ProofWithPublicInputs::from_bytes(
+            source.spend_proof.clone(),
+            &self.circuits.spend.data.common,
+        )?;
+        self.circuits
+            .balance
+            .balance_vd()
+            .verify(sender_proof.clone())?;
         self.circuits.spend.data.verify(spend_proof.clone())?;
-        let sender_pis = BalancePublicInputs::from_u64(&sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN])?;
-        anyhow::ensure!(sender_pis.channel_id == descriptor.source_channel_id, "late source channel mismatch");
-        let mut transfers = TransferTree::init(); transfers.push(transfer.clone());
-        let tx = Tx {transfer_tree_root: transfers.get_root(), nonce: descriptor.inter_channel_tx.base_nonce};
-        let mut legacy = TxTree::init(); legacy.update(descriptor.source_channel_id.as_u64(), tx);
+        let sender_pis = BalancePublicInputs::from_u64(
+            &sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN],
+        )?;
+        anyhow::ensure!(
+            sender_pis.channel_id == descriptor.source_channel_id,
+            "late source channel mismatch"
+        );
+        let mut transfers = TransferTree::init();
+        transfers.push(transfer.clone());
+        let tx = Tx {
+            transfer_tree_root: transfers.get_root(),
+            nonce: descriptor.inter_channel_tx.base_nonce,
+        };
+        let mut legacy = TxTree::init();
+        legacy.update(descriptor.source_channel_id.as_u64(), tx);
         let incoming = ReceiveTransferData {
-            to: self.disk.channel_id, transfer, sender_proof, spend_proof,
-            tx_tree_root: descriptor.tx_tree_root, tx,
+            to: self.disk.channel_id,
+            transfer,
+            sender_proof,
+            spend_proof,
+            tx_tree_root: descriptor.tx_tree_root,
+            tx,
             tx_merkle_proof: legacy.prove(descriptor.source_channel_id.as_u64()),
-            tx_v2: Some(descriptor.tx_v2), tx_v2_merkle_proof: Some(descriptor.tx_v2_merkle_proof.clone()),
-            transfer_index: 0, transfer_merkle_proof: transfers.prove(0),
+            tx_v2: Some(descriptor.tx_v2),
+            tx_v2_merkle_proof: Some(descriptor.tx_v2_merkle_proof.clone()),
+            transfer_index: 0,
+            transfer_merkle_proof: transfers.prove(0),
             transfer_salt: descriptor.destination_base_transfer_salt,
         };
         let blocks = producer.producer()?.witness_handle()?;
         let inner = blocks.borrow().current_extended_public_state().inner;
         let extended = producer.extended_public_state_matching(&inner)?;
-        checkpoint.prepare(&self.circuits.balance, circuit, blocks, &incoming, recipient_binding, &extended)
+        checkpoint.prepare(
+            &self.circuits.balance,
+            circuit,
+            blocks,
+            &incoming,
+            recipient_binding,
+            &extended,
+        )
     }
 
     /// Select the private late cursor for a post-close deposit claim, bound to the materializer's
@@ -903,14 +1001,16 @@ impl LiveBalanceService {
     ) -> anyhow::Result<LateDepositCheckpoint> {
         self.late_cursor(
             |proof| circuit.balance_commitment(proof),
-            close_intent_digest, final_balance_state_h1, confirmed_commitment,
+            close_intent_digest,
+            final_balance_state_h1,
+            confirmed_commitment,
         )
     }
 
     /// Prepare a post-close deposit receipt for one exact L1 `Deposited` leaf. The leaf is
-    /// reconciled against the producer's journaled deposit tree exactly as `receive_deposit_unbound`
-    /// does. Persist the result in a private pending artifact before broadcasting. This deliberately
-    /// does not update or re-sign the final channel snapshot.
+    /// reconciled against the producer's journaled deposit tree exactly as
+    /// `receive_deposit_unbound` does. Persist the result in a private pending artifact before
+    /// broadcasting. This deliberately does not update or re-sign the final channel snapshot.
     pub fn prepare_late_deposit(
         &self,
         checkpoint: &crate::late_incoming::LateIncomingCheckpoint,
@@ -919,15 +1019,22 @@ impl LiveBalanceService {
         request: &ProductionDepositRequest,
         deposit_salt: Salt,
     ) -> anyhow::Result<crate::late_deposit::PreparedLateDeposit> {
-        anyhow::ensure!(checkpoint.channel_id() == self.disk.channel_id, "checkpoint belongs to another channel");
-        let expected_receiver = calculate_recipient_from_user_id(checkpoint.channel_id(), deposit_salt);
+        anyhow::ensure!(
+            checkpoint.channel_id() == self.disk.channel_id,
+            "checkpoint belongs to another channel"
+        );
+        let expected_receiver =
+            calculate_recipient_from_user_id(checkpoint.channel_id(), deposit_salt);
         anyhow::ensure!(
             request.recipient == expected_receiver,
             "L1 deposit recipient {} is not channel {} with the supplied deposit salt",
-            request.recipient, checkpoint.channel_id().as_u64()
+            request.recipient,
+            checkpoint.channel_id().as_u64()
         );
         let blocks = producer.producer()?.witness_handle()?;
-        let (deposit, _) = blocks.borrow().get_deposit_merkle_proof_at_index(request.deposit_index, expected_receiver)?;
+        let (deposit, _) = blocks
+            .borrow()
+            .get_deposit_merkle_proof_at_index(request.deposit_index, expected_receiver)?;
         anyhow::ensure!(
             deposit.deposit_index.as_u64() == request.deposit_index
                 && deposit.depositor == request.depositor
@@ -941,7 +1048,9 @@ impl LiveBalanceService {
             channel_id: checkpoint.channel_id(),
             salt: checkpoint.private_state().salt,
             balance_proof: ProofWithPublicInputs::from_bytes(
-                checkpoint.balance_proof_bytes().to_vec(), &self.circuits.balance.balance_vd().common)?,
+                checkpoint.balance_proof_bytes().to_vec(),
+                &self.circuits.balance.balance_vd().common,
+            )?,
             full_private_state: checkpoint.private_state().clone(),
             block_witness_generator: blocks.clone(),
         };
@@ -950,9 +1059,17 @@ impl LiveBalanceService {
         let inner = blocks.borrow().current_extended_public_state().inner;
         let extended = producer.extended_public_state_matching(&inner)?;
         crate::late_deposit::prepare_deposit(
-            checkpoint, &self.circuits.balance, circuit, blocks,
-            &ReceiveDepositData { receiver: expected_receiver, deposit_salt },
-            request.deposit_index, &extended)
+            checkpoint,
+            &self.circuits.balance,
+            circuit,
+            blocks,
+            &ReceiveDepositData {
+                receiver: expected_receiver,
+                deposit_salt,
+            },
+            request.deposit_index,
+            &extended,
+        )
     }
 
     /// Create a fresh base account. This does not require channel registration: the intended
@@ -1029,7 +1146,15 @@ impl LiveBalanceService {
             retained_prior: Vec::new(),
             late_continuations: Vec::new(),
         };
-        verify_snapshot_semantics(&disk, &circuits.spend, &circuits.balance, None, None, true, true)?;
+        verify_snapshot_semantics(
+            &disk,
+            &circuits.spend,
+            &circuits.balance,
+            None,
+            None,
+            true,
+            true,
+        )?;
         persist_snapshot(&snapshot_path, &disk)?;
         Ok(Self {
             snapshot_path,
@@ -1224,13 +1349,12 @@ impl LiveBalanceService {
             balance_attestation: ChannelBalanceAttestation {
                 balance_proof: disk.balance_proof.clone(),
             },
-            balance_verifier_data: serialize_verifier_data(&self.circuits.balance.balance_vd()).map_err(
-                |error| {
+            balance_verifier_data: serialize_verifier_data(&self.circuits.balance.balance_vd())
+                .map_err(|error| {
                     LiveBalanceServiceError::Snapshot(format!(
                         "serialize resident balance verifier data: {error}"
                     ))
-                },
-            )?,
+                })?,
             channel_record: record,
             signed_head,
             signed_head_exit_kit: Some(signed_head_exit_kit),
@@ -1267,17 +1391,20 @@ impl LiveBalanceService {
                 if successor.prev_digest != previous.digest
                     || successor.h2_tag != Bytes32::default()
                     || successor.close_freeze_nonce != previous.close_freeze_nonce
-                    || successor.epoch != previous.epoch.checked_add(1).ok_or_else(|| {
-                        LiveBalanceServiceError::InvalidRequest("channel epoch overflow".into())
-                    })?
+                    || successor.epoch
+                        != previous.epoch.checked_add(1).ok_or_else(|| {
+                            LiveBalanceServiceError::InvalidRequest("channel epoch overflow".into())
+                        })?
                     || successor.balance_state.state_version
-                        != previous.balance_state.state_version.checked_add(1).ok_or_else(
-                            || {
+                        != previous
+                            .balance_state
+                            .state_version
+                            .checked_add(1)
+                            .ok_or_else(|| {
                                 LiveBalanceServiceError::InvalidRequest(
                                     "balance-state version overflow".into(),
                                 )
-                            },
-                        )?
+                            })?
                     || successor.small_block_number != previous.small_block_number
                     || successor.channel_fund != previous.channel_fund
                     || successor.shared_native_nullifier_root
@@ -1507,7 +1634,8 @@ impl LiveBalanceService {
         let stored_spend_pis =
             SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
                 .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend pis: {e}")))?;
-        self.circuits.spend
+        self.circuits
+            .spend
             .data
             .verify(spend_proof)
             .map_err(|e| LiveBalanceServiceError::Snapshot(format!("verify stored spend: {e}")))?;
@@ -1641,9 +1769,13 @@ impl LiveBalanceService {
                 "deposit witness leaf differs from the exact journaled L1 request".to_string(),
             ));
         }
-        let new_proof = self.circuits.balance.prove_receive_deposit(&witness).map_err(|e| {
-            LiveBalanceServiceError::Transition(format!("receive deposit proof: {e}"))
-        })?;
+        let new_proof = self
+            .circuits
+            .balance
+            .prove_receive_deposit(&witness)
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("receive deposit proof: {e}"))
+            })?;
         generator
             .commit_receive_deposit(&new_proof, &witness)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("commit deposit: {e}")))?;
@@ -1652,15 +1784,18 @@ impl LiveBalanceService {
         // Archive the generation this import replaces, in the same atomic write. If the channel
         // closes on a head that never imported this deposit, the late-deposit lane re-proves the
         // import from exactly this generation against the materializer's cursor.
-        candidate.retained_pre_receive.push(RetainedPreReceiveGeneration {
-            balance_generation: self.disk.balance_generation,
-            balance_proof: self.disk.balance_proof.clone(),
-            full_private_state: self.disk.full_private_state.clone(),
-            deposit_salt,
-            request: request.clone(),
-        });
+        candidate
+            .retained_pre_receive
+            .push(RetainedPreReceiveGeneration {
+                balance_generation: self.disk.balance_generation,
+                balance_proof: self.disk.balance_proof.clone(),
+                full_private_state: self.disk.full_private_state.clone(),
+                deposit_salt,
+                request: request.clone(),
+            });
         if candidate.retained_pre_receive.len() > MAX_RETAINED_PRE_RECEIVE_GENERATIONS {
-            let excess = candidate.retained_pre_receive.len() - MAX_RETAINED_PRE_RECEIVE_GENERATIONS;
+            let excess =
+                candidate.retained_pre_receive.len() - MAX_RETAINED_PRE_RECEIVE_GENERATIONS;
             candidate.retained_pre_receive.drain(..excess);
         }
         candidate.balance_generation =
@@ -2197,11 +2332,10 @@ impl LiveBalanceService {
                 "close spend witness nonce diverged from durable base cursor".into(),
             ));
         }
-        let spend_proof = self
-            .circuits
-            .spend
-            .prove(&spend_witness)
-            .map_err(|e| LiveBalanceServiceError::Transition(format!("close spend proof: {e}")))?;
+        let spend_proof =
+            self.circuits.spend.prove(&spend_witness).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("close spend proof: {e}"))
+            })?;
         let tx = Tx {
             transfer_tree_root: transfer_tree.get_root(),
             nonce: self.disk.base_nonce,
@@ -2221,9 +2355,13 @@ impl LiveBalanceService {
         let send_witness = generator
             .send_tx_witness(&send_data)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("close send witness: {e}")))?;
-        let new_proof = self.circuits.balance.prove_send_tx(&send_witness).map_err(|e| {
-            LiveBalanceServiceError::Transition(format!("close send balance proof: {e}"))
-        })?;
+        let new_proof = self
+            .circuits
+            .balance
+            .prove_send_tx(&send_witness)
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("close send balance proof: {e}"))
+            })?;
         generator
             .commit_send_tx(&new_proof, &send_witness, &spend_witness)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("commit close send: {e}")))?;
@@ -2384,9 +2522,13 @@ impl LiveBalanceService {
         .map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!("decode source spend proof: {e}"))
         })?;
-        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
-            LiveBalanceServiceError::InvalidRequest(format!("verify source spend proof: {e}"))
-        })?;
+        self.circuits
+            .spend
+            .data
+            .verify(spend_proof.clone())
+            .map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!("verify source spend proof: {e}"))
+            })?;
 
         verify_snapshot(destination_snapshot, None).map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!(
@@ -2605,9 +2747,13 @@ impl LiveBalanceService {
         .map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("decode journaled burn spend proof: {e}"))
         })?;
-        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
-            LiveBalanceServiceError::Snapshot(format!("verify journaled burn spend proof: {e}"))
-        })?;
+        self.circuits
+            .spend
+            .data
+            .verify(spend_proof.clone())
+            .map_err(|e| {
+                LiveBalanceServiceError::Snapshot(format!("verify journaled burn spend proof: {e}"))
+            })?;
         let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
             .map_err(|e| {
                 LiveBalanceServiceError::Snapshot(format!("journaled burn spend pis: {e}"))
@@ -2887,9 +3033,13 @@ impl LiveBalanceService {
         .map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("decode terminal close spend proof: {e}"))
         })?;
-        self.circuits.spend.data.verify(spend_proof.clone()).map_err(|e| {
-            LiveBalanceServiceError::Snapshot(format!("verify terminal close spend proof: {e}"))
-        })?;
+        self.circuits
+            .spend
+            .data
+            .verify(spend_proof.clone())
+            .map_err(|e| {
+                LiveBalanceServiceError::Snapshot(format!("verify terminal close spend proof: {e}"))
+            })?;
         let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
             .map_err(|e| {
                 LiveBalanceServiceError::Snapshot(format!("terminal close spend PIs: {e}"))
@@ -2929,7 +3079,8 @@ impl LiveBalanceService {
         };
         let proof_producer = producer.producer_at_anchor(&producer_anchor)?;
         let generator = self.generator_from_producer(&proof_producer)?;
-        let single_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.circuits.balance.balance_vd());
+        let single_circuit =
+            SingleWithdawalCircuit::<F, C, D>::new(&self.circuits.balance.balance_vd());
         let single_vd = single_circuit.data.verifier_data();
         let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_vd);
         let wrapper = WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
@@ -3236,8 +3387,7 @@ impl LiveBalanceService {
         if candidate.signed_head_exit_kit.as_ref().is_some_and(|kit| {
             kit.schema_version == SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION
                 && kit.backing_public_inputs.channel_id == head.channel_id
-                && kit.backing_public_inputs.settled_tx_chain
-                    == head.balance_state.settled_tx_chain
+                && kit.backing_public_inputs.settled_tx_chain == head.balance_state.settled_tx_chain
                 && kit.backing_public_inputs.token_funds_digest == expected_token_funds_digest
         }) {
             return Ok(());
@@ -3277,18 +3427,16 @@ impl LiveBalanceService {
         })?;
         let backing_public_inputs = CloseAssetBackingPublicInputs::from_pis(&proof.public_inputs)
             .map_err(|error| {
-                LiveBalanceServiceError::Transition(format!(
-                    "decode signer-independent close backing public inputs: {error}"
-                ))
-            })?;
+            LiveBalanceServiceError::Transition(format!(
+                "decode signer-independent close backing public inputs: {error}"
+            ))
+        })?;
         if backing_public_inputs.channel_id != head.channel_id
-            || backing_public_inputs.settled_tx_chain
-                != head.balance_state.settled_tx_chain
+            || backing_public_inputs.settled_tx_chain != head.balance_state.settled_tx_chain
             || backing_public_inputs.token_funds_digest != expected_token_funds_digest
         {
             return Err(LiveBalanceServiceError::Transition(
-                "self-verified close backing does not compose with the complete signed head"
-                    .into(),
+                "self-verified close backing does not compose with the complete signed head".into(),
             ));
         }
         candidate.signed_head_exit_kit = Some(SignedHeadExitKit {
@@ -3615,15 +3763,18 @@ fn is_single_delegate_add(
     if new_record.set_version != old_record.set_version {
         return reject("delegate add: set_version changed (co-signer updates are retired here)");
     }
-    if new_record.status != old_record.status || new_record.bp_member_slot != old_record.bp_member_slot
+    if new_record.status != old_record.status
+        || new_record.bp_member_slot != old_record.bp_member_slot
     {
         return reject("delegate add: record status/bp slot changed");
     }
     // delegate_count grows by exactly one, staying within the slot array.
     let old_delegates = old_record.delegate_count;
-    if new_record.delegate_count != old_delegates.checked_add(1).ok_or_else(|| {
-        LiveBalanceServiceError::InvalidRequest("delegate add: delegate_count overflow".into())
-    })? {
+    if new_record.delegate_count
+        != old_delegates.checked_add(1).ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest("delegate add: delegate_count overflow".into())
+        })?
+    {
         return reject("delegate add: delegate_count did not grow by exactly one");
     }
     let boundary = old_record.member_count as usize + old_delegates as usize;
@@ -3816,13 +3967,12 @@ fn verify_snapshot_semantics(
                 "verify signed-head exit backing proof: {error:?}"
             ))
         })?;
-        let proved = CloseAssetBackingPublicInputs::from_pis(&proof.public_inputs).map_err(
-            |error| {
+        let proved =
+            CloseAssetBackingPublicInputs::from_pis(&proof.public_inputs).map_err(|error| {
                 LiveBalanceServiceError::Snapshot(format!(
                     "decode signed-head exit backing public inputs: {error}"
                 ))
-            },
-        )?;
+            })?;
         if proved != kit.backing_public_inputs {
             return Err(LiveBalanceServiceError::Snapshot(
                 "stored signed-head exit backing metadata differs from its proof".into(),
@@ -3839,8 +3989,7 @@ fn verify_snapshot_semantics(
                 )
         {
             return Err(LiveBalanceServiceError::Snapshot(
-                "signed-head exit backing proof does not bind the complete current H vector"
-                    .into(),
+                "signed-head exit backing proof does not bind the complete current H vector".into(),
             ));
         }
     } else if require_exit_kit {
@@ -4132,7 +4281,12 @@ fn read_snapshot(path: &Path) -> Result<(LiveBalanceSnapshot, u32), LiveBalanceS
         ));
     }
     let version = u32::from_le_bytes(bytes[16..20].try_into().expect("fixed header"));
-    if version != 2 && version != 3 && version != 4 && version != 5 && version != LIVE_BALANCE_SNAPSHOT_VERSION {
+    if version != 2
+        && version != 3
+        && version != 4
+        && version != 5
+        && version != LIVE_BALANCE_SNAPSHOT_VERSION
+    {
         return Err(LiveBalanceServiceError::Snapshot(format!(
             "unsupported snapshot version {version}"
         )));
@@ -4379,7 +4533,10 @@ mod shared_circuit_tests {
     fn live_balances_share_one_deterministic_circuit_set() {
         let first = live_circuits();
         let second = live_circuits();
-        assert!(Arc::ptr_eq(&first, &second), "a second live balance must not build its own circuits");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a second live balance must not build its own circuits"
+        );
 
         let independent = LiveCircuits::build();
         assert_eq!(
@@ -4584,13 +4741,14 @@ mod retained_pre_receive_tests {
         assert!(read_snapshot(&v5_mislabeled).is_err());
 
         let mut disk = migrated.clone();
-        disk.retained_pre_receive.push(RetainedPreReceiveGeneration {
-            balance_generation: 0,
-            balance_proof: vec![1, 2, 3],
-            full_private_state: FullPrivateState::new(Salt::default()),
-            deposit_salt: Salt::default(),
-            request: request(),
-        });
+        disk.retained_pre_receive
+            .push(RetainedPreReceiveGeneration {
+                balance_generation: 0,
+                balance_proof: vec![1, 2, 3],
+                full_private_state: FullPrivateState::new(Salt::default()),
+                deposit_salt: Salt::default(),
+                request: request(),
+            });
         disk.balance_generation = 1;
         disk.balance_proof = vec![4, 5, 6];
         let v5_path = dir.join("v5.bin");
@@ -4684,25 +4842,39 @@ mod retained_pre_receive_tests {
             retain_prior_generation(&mut disk, &prior);
         }
         assert_eq!(disk.retained_prior.len(), MAX_RETAINED_PRIOR_GENERATIONS);
-        assert_eq!(disk.retained_prior.first().unwrap().balance_generation, 4, "oldest dropped first");
+        assert_eq!(
+            disk.retained_prior.first().unwrap().balance_generation,
+            4,
+            "oldest dropped first"
+        );
         assert_eq!(
             disk.retained_prior.last().unwrap().balance_generation,
             MAX_RETAINED_PRIOR_GENERATIONS as u64 + 3
         );
-        assert_eq!(disk.retained_pre_receive.len(), 1, "the deposit archive is bounded separately");
+        assert_eq!(
+            disk.retained_pre_receive.len(),
+            1,
+            "the deposit archive is bounded separately"
+        );
         disk.late_continuations.push(checkpoint_json(11));
         let v6_path = dir.join("v6.bin");
         persist_snapshot(&v6_path, &disk).unwrap();
         let (restored, version) = read_snapshot(&v6_path).unwrap();
         assert_eq!(version, LIVE_BALANCE_SNAPSHOT_VERSION);
-        assert_eq!(restored.retained_prior.len(), MAX_RETAINED_PRIOR_GENERATIONS);
+        assert_eq!(
+            restored.retained_prior.len(),
+            MAX_RETAINED_PRIOR_GENERATIONS
+        );
         assert_eq!(restored.retained_prior[0].balance_proof, vec![4]);
         assert_eq!(restored.late_continuations.len(), 1);
         assert_eq!(
             restored.late_continuations[0].commitment(),
             Bytes32::from_u32_slice(&[11; 8]).unwrap()
         );
-        assert_eq!(restored.late_continuations[0].balance_proof_bytes(), &[7, 8, 9]);
+        assert_eq!(
+            restored.late_continuations[0].balance_proof_bytes(),
+            &[7, 8, 9]
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

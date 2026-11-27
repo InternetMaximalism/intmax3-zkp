@@ -552,7 +552,9 @@ mod tests {
         assert!(validate_digest_chain(before, other, after, after).is_err());
         assert!(validate_digest_chain(before, before, after, other).is_err());
         assert!(validate_digest_chain(before, before, before, before).is_err());
-        assert!(validate_digest_chain(Bytes32::default(), Bytes32::default(), after, after).is_err());
+        assert!(
+            validate_digest_chain(Bytes32::default(), Bytes32::default(), after, after).is_err()
+        );
     }
 
     /// The retired two-head result shape is refused, not silently rolled forward.
@@ -564,6 +566,10 @@ mod tests {
         let error = result_state(&two_head).unwrap_err();
         assert!(error.contains("retired two-head import shape"), "{error}");
         let missing = serde_json::json!({ "txHash": "0x00" });
-        assert!(result_state(&missing).unwrap_err().contains("missing importState"));
+        assert!(
+            result_state(&missing)
+                .unwrap_err()
+                .contains("missing importState")
+        );
     }
 }

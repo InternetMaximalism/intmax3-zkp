@@ -1290,7 +1290,11 @@ mod tests {
         let circuit = circuit();
         use crate::common::balance_state::{BalanceState, SlotTree, slot_padding_ladder};
         let (mut witness, state) = build_full_witness_with_state();
-        assert_eq!(state.active_slots(), 3, "fixture: slot 5 must lie in the padding region");
+        assert_eq!(
+            state.active_slots(),
+            3,
+            "fixture: slot 5 must lie in the padding region"
+        );
         // Copy the claimant's slot-0 leaf into padding slot 5 (slots 3 and 4 keep the padding
         // leaf). The state stores only its active slots, so the doctored tree is built from the
         // leaf list directly — exactly the adversarial tree a prover would try.
@@ -1309,7 +1313,10 @@ mod tests {
         witness.member_index = 0;
         witness.slot_inclusion = tree.prove(0);
         let control = circuit.data.prove(circuit.fill_witness(&witness).unwrap());
-        assert!(control.is_ok(), "control: slot 0 must prove under the doctored tree");
+        assert!(
+            control.is_ok(),
+            "control: slot 0 must prove under the doctored tree"
+        );
         witness.member_index = 5;
         witness.slot_inclusion = tree.prove(5);
         witness.slot_ct_digests = BalanceState::token_ct_digests(&state.enc_balances[0]);
@@ -1535,7 +1542,9 @@ mod tests {
         let mut table = EvidenceTable::new("WithdrawalClaimCircuit");
 
         table.check(
-            "zeroKnowledgeConfig", "withdrawal_claim_circuit.rs:307-308", "config",
+            "zeroKnowledgeConfig",
+            "withdrawal_claim_circuit.rs:307-308",
+            "config",
             c.data.common.config == CircuitConfig::standard_recursion_zk_config(),
             "the built circuit carries standard_recursion_zk_config",
         );
@@ -1556,7 +1565,8 @@ mod tests {
         for (index, wires, width) in &groups {
             table.check(
                 &format!("allocateCheckedPublic {index}"),
-                "withdrawal_claim_circuit.rs:113-131", "range",
+                "withdrawal_claim_circuit.rs:113-131",
+                "range",
                 wires.len() == *width && view.all_range_checked(wires, 32),
                 "range_check(limb, 32) on every limb of the group",
             );
@@ -1569,7 +1579,9 @@ mod tests {
         header.extend(c.settled_tx_accumulator_root.to_vec());
         header.extend(c.state_version.to_vec());
         table.check(
-            "allocateCheckedHeader", "withdrawal_claim_circuit.rs:316-330", "range",
+            "allocateCheckedHeader",
+            "withdrawal_claim_circuit.rs:316-330",
+            "range",
             header.len() == 3 + MAX_CHANNEL_TOKENS + 8 + 8 + 2
                 && view.all_range_checked(&header, 32),
             "every H1 header scalar limb carries range_check(limb, 32)",
@@ -1579,7 +1591,9 @@ mod tests {
         let mut raw: Vec<Target> = c.slot_tree_root.elements.to_vec();
         raw.push(c.member_index);
         table.check(
-            "allocateRawRootAndMemberIndex", "withdrawal_claim_circuit.rs:325-333", "range",
+            "allocateRawRootAndMemberIndex",
+            "withdrawal_claim_circuit.rs:325-333",
+            "range",
             view.none_range_checked(&c.slot_tree_root.elements),
             "the 4 slot-root elements carry no range check (PoseidonHashOutTarget::new)",
         );
@@ -1589,77 +1603,117 @@ mod tests {
             "member_index's only bound is split_le(index, BALANCE_SLOT_TREE_HEIGHT) in the inclusion verify",
         );
         // .allocateTenCheckedCiphertextsAndCounters — src:337-340
-        let mut slot_row: Vec<Target> =
-            c.slot_ct_digests.iter().flat_map(|d| d.to_vec()).collect();
+        let mut slot_row: Vec<Target> = c.slot_ct_digests.iter().flat_map(|d| d.to_vec()).collect();
         slot_row.extend(c.slot_pending_adds.iter().copied());
         table.check(
-            "allocateTenCheckedCiphertextsAndCounters", "withdrawal_claim_circuit.rs:337-340",
+            "allocateTenCheckedCiphertextsAndCounters",
+            "withdrawal_claim_circuit.rs:337-340",
             "range",
             slot_row.len() == MAX_CHANNEL_TOKENS * 8 + MAX_CHANNEL_TOKENS
                 && view.all_range_checked(&slot_row, 32),
             "80 ciphertext-digest limbs + 10 counters, all 32-bit range-checked",
         );
 
-        for op in ["observeInputs", "observeHeaderSelectors", "observeDigests",
-                   "observeInclusion", "observeDecryption", "observeNullifier",
-                   "observeBeforePadding"] {
+        for op in [
+            "observeInputs",
+            "observeHeaderSelectors",
+            "observeDigests",
+            "observeInclusion",
+            "observeDecryption",
+            "observeNullifier",
+            "observeBeforePadding",
+        ] {
             table.note(
-                op, "withdrawal_claim_circuit.rs:341/436/462/494/510/539/548", "no-gate", TRIVIAL,
+                op,
+                "withdrawal_claim_circuit.rs:341/436/462/494/510/539/548",
+                "no-gate",
+                TRIVIAL,
                 "builder.num_gates() profiling read; Lean holds = True",
             );
         }
 
         table.note(
-            "recomputeH1", "withdrawal_claim_circuit.rs:344-355", "gadget", NOT_STATIC,
+            "recomputeH1",
+            "withdrawal_claim_circuit.rs:344-355",
+            "gadget",
+            NOT_STATIC,
             "the Poseidon IMB2 header relation is Environment.poseidonWords",
         );
         table.check(
-            "connectH1", "withdrawal_claim_circuit.rs:356", "connect",
-            view.same_slices(&p.recomputed_h1.to_vec(), &pi.final_balance_state_h1.to_vec()),
+            "connectH1",
+            "withdrawal_claim_circuit.rs:356",
+            "connect",
+            view.same_slices(
+                &p.recomputed_h1.to_vec(),
+                &pi.final_balance_state_h1.to_vec(),
+            ),
             "recomputed_h1.connect(final_balance_state_h1)",
         );
         // .activeSumAnd11Bits — src:377-379
         table.check(
-            "activeSumAnd11Bits", "withdrawal_claim_circuit.rs:377-379", "range",
-            view.range_bits(p.active).contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
+            "activeSumAnd11Bits",
+            "withdrawal_claim_circuit.rs:377-379",
+            "range",
+            view.range_bits(p.active)
+                .contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
             "range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)",
         );
         table.note(
-            "activeSumAnd11Bits", "withdrawal_claim_circuit.rs:378", "arith", NOT_STATIC,
+            "activeSumAnd11Bits",
+            "withdrawal_claim_circuit.rs:378",
+            "arith",
+            NOT_STATIC,
             "active = add(member_count, delegate_count) is an arithmetic gate output",
         );
         // .compareActive1025 / .compareMemberActive — src:380-385
         table.check(
-            "compareActive1025", "withdrawal_claim_circuit.rs:380-382", "constant",
+            "compareActive1025",
+            "withdrawal_claim_circuit.rs:380-382",
+            "constant",
             view.is_one(p.active_le_max),
             "assert_one(less_than_u32(active, MAX_CHANNEL_MEMBERS + 1))",
         );
         table.check(
-            "compareMemberActive", "withdrawal_claim_circuit.rs:384-385", "constant",
+            "compareMemberActive",
+            "withdrawal_claim_circuit.rs:384-385",
+            "constant",
             view.is_one(p.is_active) && view.same(p.is_active, p.one),
             "connect(less_than_u32(member_index, active), one)",
         );
         table.note(
-            "compareActive1025", "withdrawal_claim_circuit.rs:701-721", "arith", NOT_STATIC,
+            "compareActive1025",
+            "withdrawal_claim_circuit.rs:701-721",
+            "arith",
+            NOT_STATIC,
             "the 33-bit borrow decomposition inside less_than_u32 is arithmetic",
         );
         table.note(
-            "compareMemberActive", "withdrawal_claim_circuit.rs:701-721", "arith", NOT_STATIC,
+            "compareMemberActive",
+            "withdrawal_claim_circuit.rs:701-721",
+            "arith",
+            NOT_STATIC,
             "the 33-bit borrow decomposition inside less_than_u32 is arithmetic",
         );
         // .tenEqualityFlagsAndSumOne — src:396-404
         table.check(
-            "tenEqualityFlagsAndSumOne", "withdrawal_claim_circuit.rs:396-404", "constant",
+            "tenEqualityFlagsAndSumOne",
+            "withdrawal_claim_circuit.rs:396-404",
+            "constant",
             p.token_slot_flags.len() == MAX_CHANNEL_TOKENS && view.is_one(p.flags_sum),
             "10 is_equal flags whose sum is connected to one",
         );
         table.note(
-            "tenEqualityFlagsAndSumOne", "withdrawal_claim_circuit.rs:396-404", "arith", NOT_STATIC,
+            "tenEqualityFlagsAndSumOne",
+            "withdrawal_claim_circuit.rs:396-404",
+            "arith",
+            NOT_STATIC,
             "flag[t] = is_equal(token_slot, constant t) is arithmetic",
         );
         // .compareTokenCount — src:410-411
         table.check(
-            "compareTokenCount", "withdrawal_claim_circuit.rs:410-411", "constant",
+            "compareTokenCount",
+            "withdrawal_claim_circuit.rs:410-411",
+            "constant",
             view.is_one(p.token_slot_active),
             "connect(less_than_u32(token_slot, token_count), one)",
         );
@@ -1672,13 +1726,17 @@ mod tests {
         );
         // .selectBaseToken — src:430-435
         table.check(
-            "selectBaseToken", "withdrawal_claim_circuit.rs:430-435", "connect",
+            "selectBaseToken",
+            "withdrawal_claim_circuit.rs:430-435",
+            "connect",
             view.same(p.selected_index, pi.token_index[0]),
             "connect(selected registry limb, token_index PI)",
         );
         // .allocateFourPolynomials — src:451-454
         table.check(
-            "allocateFourPolynomials", "withdrawal_claim_circuit.rs:451-454", "width",
+            "allocateFourPolynomials",
+            "withdrawal_claim_circuit.rs:451-454",
+            "width",
             c.regev_a.len() == REGEV_N
                 && c.regev_b.len() == REGEV_N
                 && c.ct_c1.len() == REGEV_N
@@ -1687,46 +1745,69 @@ mod tests {
         );
         // .hashPkAndCiphertext / .connectCiphertext — src:457/460/461
         table.note(
-            "hashPkAndCiphertext", "withdrawal_claim_circuit.rs:457/460", "gadget", NOT_STATIC,
+            "hashPkAndCiphertext",
+            "withdrawal_claim_circuit.rs:457/460",
+            "gadget",
+            NOT_STATIC,
             "the Poseidon pk digest and the IMRC keccak are Environment callbacks",
         );
         table.check(
-            "connectCiphertext", "withdrawal_claim_circuit.rs:461", "connect",
+            "connectCiphertext",
+            "withdrawal_claim_circuit.rs:461",
+            "connect",
             view.same_slices(&p.ct_digest.to_vec(), &pi.user_amount_digest.to_vec()),
             "ct_digest.connect(user_amount_digest)",
         );
         // .hashFullSlotLeaf / .verifyInclusion — src:482-493
         table.note(
-            "hashFullSlotLeaf", "withdrawal_claim_circuit.rs:482-488", "gadget", NOT_STATIC,
+            "hashFullSlotLeaf",
+            "withdrawal_claim_circuit.rs:482-488",
+            "gadget",
+            NOT_STATIC,
             "the IMS2 Poseidon leaf relation is Environment.poseidonRoot",
         );
         table.check(
-            "verifyInclusion", "withdrawal_claim_circuit.rs:489-493", "width",
+            "verifyInclusion",
+            "withdrawal_claim_circuit.rs:489-493",
+            "width",
             c.slot_inclusion.0.siblings.len() == BALANCE_SLOT_TREE_HEIGHT,
             "IncrementalMerkleProofTarget::new(builder, BALANCE_SLOT_TREE_HEIGHT)",
         );
         table.note(
-            "verifyInclusion", "merkle_tree.rs:228-248", "gadget", NOT_STATIC,
+            "verifyInclusion",
+            "merkle_tree.rs:228-248",
+            "gadget",
+            NOT_STATIC,
             "the fold and the root equality live inside the audited inclusion gadget",
         );
         // .decryptExposeAmount / .connectAmountHighThenLow — src:503-509
         table.note(
-            "decryptExposeAmount", "withdrawal_claim_circuit.rs:503-505", "gadget", NOT_STATIC,
+            "decryptExposeAmount",
+            "withdrawal_claim_circuit.rs:503-505",
+            "gadget",
+            NOT_STATIC,
             "decryption_core is the named Environment.decryption dependency",
         );
         table.check(
-            "connectAmountHighThenLow", "withdrawal_claim_circuit.rs:507-509", "connect",
+            "connectAmountHighThenLow",
+            "withdrawal_claim_circuit.rs:507-509",
+            "connect",
             view.same(pi.amount.to_vec()[0], p.amount_hi)
                 && view.same(pi.amount.to_vec()[1], p.amount_lo),
             "amount PI to_vec is [hi, lo] and each limb is connected to the matching core output",
         );
         // .deriveIMW2 / .connectNullifier — src:528-538
         table.note(
-            "deriveIMW2", "withdrawal_claim_circuit.rs:528-537", "gadget", NOT_STATIC,
+            "deriveIMW2",
+            "withdrawal_claim_circuit.rs:528-537",
+            "gadget",
+            NOT_STATIC,
             "the IMW2 keccak relation is Environment.keccak",
         );
         table.check(
-            "connectNullifier", "withdrawal_claim_circuit.rs:538", "connect",
+            "connectNullifier",
+            "withdrawal_claim_circuit.rs:538",
+            "connect",
             view.same_slices(
                 &p.withdrawal_nullifier.to_vec(),
                 &pi.withdrawal_nullifier.to_vec(),
@@ -1737,21 +1818,28 @@ mod tests {
         let expected_pi_order: Vec<Target> =
             groups.iter().flat_map(|(_, w, _)| w.clone()).collect();
         table.check(
-            "registerPublic", "withdrawal_claim_circuit.rs:547 / :134-151", "public-inputs",
+            "registerPublic",
+            "withdrawal_claim_circuit.rs:547 / :134-151",
+            "public-inputs",
             expected_pi_order.len() == WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN
                 && view.public_inputs_are(&expected_pi_order)
                 && c.data.common.num_public_inputs == WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN,
             "the registered wires are exactly the ten range-checked groups, in to_vec order",
         );
         table.note(
-            "buildCircuit", "withdrawal_claim_circuit.rs:557", "no-gate", TRIVIAL,
+            "buildCircuit",
+            "withdrawal_claim_circuit.rs:557",
+            "no-gate",
+            TRIVIAL,
             "builder.build emits no constraint; Lean holds = True",
         );
 
         // Documented residue: `member_pk_g` is allocated and registered but no op constrains it
         // (the Lean docstring says so explicitly, :919-963).
         table.check(
-            "memberPkGIsInformational", "withdrawal_claim_circuit.rs:123/140", "aliasing",
+            "memberPkGIsInformational",
+            "withdrawal_claim_circuit.rs:123/140",
+            "aliasing",
             !view.same_slices(&pi.member_pk_g.to_vec(), &p.pk_digest.to_vec()),
             "member_pk_g is NOT connected to the leaf-bound Regev pk digest (informational PI)",
         );

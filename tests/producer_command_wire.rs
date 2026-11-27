@@ -4,12 +4,12 @@
 //! Two independent bugs lived here, both invisible until a daemon actually ran:
 //!   1. `rename_all_fields` was missing, so every field-bearing command (all carry `requestId`)
 //!      failed to deserialize and the untagged `ServiceCommand` wrapper flattened the reason to a
-//!      generic "did not match any variant" — the entire producer surface was unreachable from
-//!      the client and no deposit could ever be journaled.
-//!   2. The heavy payloads (`ChannelState`/`ChannelSnapshot`) were deserialized directly inside
-//!      the internally-tagged enum, whose buffered `Content` tree rejects the `u8` token keys of
-//!      the sparse `encBalances`/`pendingAdds` rows ("invalid type: string \"0\", expected u8").
-//!      They now travel as `serde_json::Value` and are materialized in `execute` with `from_value`.
+//!      generic "did not match any variant" — the entire producer surface was unreachable from the
+//!      client and no deposit could ever be journaled.
+//!   2. The heavy payloads (`ChannelState`/`ChannelSnapshot`) were deserialized directly inside the
+//!      internally-tagged enum, whose buffered `Content` tree rejects the `u8` token keys of the
+//!      sparse `encBalances`/`pendingAdds` rows ("invalid type: string \"0\", expected u8"). They
+//!      now travel as `serde_json::Value` and are materialized in `execute` with `from_value`.
 //!
 //! These tests reconstruct the EXACT camelCase JSON the client sends, including a non-empty sparse
 //! balance row, and assert both that the command parses and that its payload materializes back to
@@ -25,9 +25,9 @@ use intmax3_zkp::{
         channel_id::ChannelId,
     },
     ethereum_types::{
-        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
+        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
-    regev::{encrypt::RegevCiphertext, REGEV_N, REGEV_Q},
+    regev::{REGEV_N, REGEV_Q, encrypt::RegevCiphertext},
 };
 
 fn nonzero_ciphertext() -> RegevCiphertext {
@@ -94,10 +94,13 @@ fn sync_offchain_heads_parses_and_materializes_with_a_sparse_row() {
         "requestId": "sync-1",
         "signedStates": [state],
     });
-    let cmd: BlockProducerCommand =
-        serde_json::from_str(&wire.to_string()).expect("syncOffchainHeads must parse from the client wire");
+    let cmd: BlockProducerCommand = serde_json::from_str(&wire.to_string())
+        .expect("syncOffchainHeads must parse from the client wire");
     match cmd {
-        BlockProducerCommand::SyncOffchainHeads { request_id, signed_states } => {
+        BlockProducerCommand::SyncOffchainHeads {
+            request_id,
+            signed_states,
+        } => {
             assert_eq!(request_id, "sync-1");
             // The payload rides as Value; the daemon materializes it with from_value. Do the same
             // here and confirm the sparse u8 keys survive.
@@ -123,7 +126,10 @@ fn register_parses_and_materializes_a_snapshot_field() {
     let cmd: BlockProducerCommand =
         serde_json::from_str(&wire.to_string()).expect("register must parse from the client wire");
     match cmd {
-        BlockProducerCommand::Register { request_id, snapshot } => {
+        BlockProducerCommand::Register {
+            request_id,
+            snapshot,
+        } => {
             assert_eq!(request_id, "reg-1");
             // The snapshot rides as Value; its `state.balanceState` still carries the sparse keys.
             let bs = &snapshot["state"]["balanceState"];

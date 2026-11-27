@@ -176,7 +176,10 @@ where
         }
 
         // Same authenticated interval/tail rule as ReceiveTransfer.
-        if crate::circuits::balance::common::receive_window::requires_send_interval(self.account_state.channel_leaf.prev, prev_block_r) {
+        if crate::circuits::balance::common::receive_window::requires_send_interval(
+            self.account_state.channel_leaf.prev,
+            prev_block_r,
+        ) {
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveDepositError::BlockNumberError(format!(
                     "Not account_state.send_leaf.prev <= prev_balance_pis.block_r: {:?} <= {:?}",
@@ -312,9 +315,12 @@ impl<const D: usize> ReceiveDepositTarget<D> {
         new_block_r.enforce_ge(builder, &prev_block_r);
         public_state.block_number.enforce_ge(builder, &new_block_r);
 
-        let has_outgoing = crate::circuits::balance::common::receive_window::requires_send_interval_target(
-            builder, &account_state.channel_leaf.prev, &prev_block_r,
-        );
+        let has_outgoing =
+            crate::circuits::balance::common::receive_window::requires_send_interval_target(
+                builder,
+                &account_state.channel_leaf.prev,
+                &prev_block_r,
+            );
         prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing);
         account_state
             .send_leaf
@@ -611,14 +617,25 @@ mod tests {
         .expect("deposit witness should be valid");
 
         let mut send_tree = SendTree::new(SEND_TREE_HEIGHT);
-        let send_leaf = if tail { SendLeaf { cur: prev_block_r, ..SendLeaf::default() } } else { SendLeaf::default() };
+        let send_leaf = if tail {
+            SendLeaf {
+                cur: prev_block_r,
+                ..SendLeaf::default()
+            }
+        } else {
+            SendLeaf::default()
+        };
         send_tree.push(send_leaf.clone());
         let send_leaf_index = 0u32;
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
         let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
-            prev: if tail { prev_block_r } else { BlockNumber::new(0).unwrap() },
+            prev: if tail {
+                prev_block_r
+            } else {
+                BlockNumber::new(0).unwrap()
+            },
             send_tree_root: send_tree.get_root(),
             member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
@@ -746,11 +763,16 @@ mod tests {
             assert!(skipped.to_public_inputs(&balance_cd).is_err());
             let invalid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut pw = PartialWitness::<F>::new();
-                circuit.target.set_witness::<F, C, _>(&mut pw, &skipped, &expected);
+                circuit
+                    .target
+                    .set_witness::<F, C, _>(&mut pw, &skipped, &expected);
                 circuit.public_inputs.set_witness(&mut pw, &expected);
                 circuit.data.prove(pw)
             }));
-            assert!(invalid.is_err() || invalid.unwrap().is_err(), "cannot skip the last send");
+            assert!(
+                invalid.is_err() || invalid.unwrap().is_err(),
+                "cannot skip the last send"
+            );
 
             // The last-send claim itself is authenticated by the account Merkle root.
             let mut forged = witness.clone();

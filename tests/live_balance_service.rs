@@ -212,14 +212,23 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     let channel_id = ChannelId::new(CHANNEL as u64).expect("channel id");
     // A hard crash in v3 used a deterministic `(pid,generation)` temporary name. PID reuse must
     // not permanently block the v4 recovery write; new commits add an unpredictable nonce.
-    let legacy_producer_orphan = producer_path.parent().expect("producer parent").join(format!(
-        ".{}.tmp.{}.0",
-        producer_path.file_name().expect("producer filename").to_string_lossy(),
-        std::process::id(),
-    ));
+    let legacy_producer_orphan = producer_path
+        .parent()
+        .expect("producer parent")
+        .join(format!(
+            ".{}.tmp.{}.0",
+            producer_path
+                .file_name()
+                .expect("producer filename")
+                .to_string_lossy(),
+            std::process::id(),
+        ));
     let legacy_balance_orphan = balance_path.parent().expect("balance parent").join(format!(
         ".{}.tmp.{}.0",
-        balance_path.file_name().expect("balance filename").to_string_lossy(),
+        balance_path
+            .file_name()
+            .expect("balance filename")
+            .to_string_lossy(),
         std::process::id(),
     ));
     fs::write(&legacy_producer_orphan, b"orphaned-v3-journal-temp")
@@ -300,7 +309,10 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
         .clone()
         .expect("every accepted N-of-N H has an exit kit");
     assert_eq!(genesis_exit_kit.schema_version, 1);
-    assert_eq!(genesis_exit_kit.backing_public_inputs.channel_id, channel_id);
+    assert_eq!(
+        genesis_exit_kit.backing_public_inputs.channel_id,
+        channel_id
+    );
     assert_eq!(
         genesis_exit_kit.backing_public_inputs.settled_tx_chain,
         genesis_snapshot.state.balance_state.settled_tx_chain
@@ -520,8 +532,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
         .expect("persisted exit kit");
     assert_eq!(reopened_kit.backing_proof, child_exit_kit.backing_proof);
     assert_eq!(
-        reopened_kit.backing_public_inputs,
-        child_exit_kit.backing_public_inputs,
+        reopened_kit.backing_public_inputs, child_exit_kit.backing_public_inputs,
         "restart must retain the exact proof-bound composition fields"
     );
 }
@@ -540,9 +551,13 @@ fn real_deposit_send_restart_next_nonce_and_corruption_fences() {
 #[cfg(feature = "authenticated-tail-receive")]
 #[test]
 fn receive_after_send_roundtrip_has_durable_idle_exit_kit() {
-    std::thread::Builder::new().name("tail-roundtrip".into())
-        .stack_size(64 * 1024 * 1024).spawn(|| run_live_balance_e2e(true))
-        .unwrap().join().unwrap();
+    std::thread::Builder::new()
+        .name("tail-roundtrip".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| run_live_balance_e2e(true))
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 fn run_live_balance_e2e(tail_roundtrip: bool) {
@@ -773,10 +788,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         .prepare_exit_kit(&producer, &debit_proposal)
         .expect("prepare the debit exit kit before any signature");
     assert_eq!(prepared.signed_head.digest, proposed.digest);
-    let prepared_kit = prepared
-        .signed_head_exit_kit
-        .clone()
-        .expect("prepared kit");
+    let prepared_kit = prepared.signed_head_exit_kit.clone().expect("prepared kit");
     assert_eq!(
         prepared_kit.backing_public_inputs.settled_tx_chain,
         proposed.balance_state.settled_tx_chain
@@ -846,10 +858,7 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
     );
     assert_eq!(second_receipt.bp_sig_chain, staged.bp_sig_chain);
     assert!(
-        producer
-            .prepared_producer()
-            .expect("healthy")
-            .is_none(),
+        producer.prepared_producer().expect("healthy").is_none(),
         "promotion consumes the staged entry"
     );
     let second_settle = live
@@ -1238,37 +1247,138 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
         .is_err()
     );
     if tail_roundtrip {
-        producer.sync_offchain_heads("sync:42:credit".into(), vec![
-            credit.fund_import_state.clone(), destination_credit_snapshot.state.clone(),
-        ]).expect("publish destination credit before return send");
-        let mut back = intmax3_zkp::wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted(
-            &destination_keys[1], &destination_credit_snapshot, 1, channel_id, 0,
-            keys[0].regev_pk.clone(), keys[0].pk_g(), deposit_salt, 0, 0, 2,
-            fresh_root(30), LEVEL, &mut rng,
-        ).expect("spend recently received credit");
-        back.debit_payload.proposed_next_state=sign_all(back.debit_payload.proposed_next_state.clone(),&destination_keys);
-        attach_small_block_signatures(&destination_record,&back.debit_payload.proposed_next_state,&mut back.transfer_descriptor.inter_channel_tx).unwrap();
-        back.debit_payload.inter_channel_tx=back.transfer_descriptor.inter_channel_tx.clone();
-        let back_head=back.debit_payload.proposed_next_state.clone();
-        let receipt=producer.post_inter_channel("inter:42:41:0".into(),back_head.clone(),back.debit_payload.clone(),back.transfer_descriptor.clone()).unwrap();
-        destination_live.settle_inter_channel(&producer,&receipt,&back_head,&back.debit_payload,&back.transfer_descriptor).unwrap();
-        let artifact=destination_live.inter_channel_send_artifact("inter:42:41:0").unwrap();
-        let source_snapshot=ChannelSnapshot{record:record.clone(),members:members.clone(),state:inter_state.clone(),settled_tx_accumulator:inter.settled_tx_accumulator.clone()};
-        let mut incoming=build_inter_channel_credit(&keys[0],&source_snapshot,&back.transfer_descriptor,LEVEL,&mut rng).unwrap();
-        incoming.fund_import_state=sign_all(incoming.fund_import_state,&keys);
-        incoming.bundle_apply_state=sign_all(incoming.bundle_apply_state,&keys);
-        let incoming_snapshot=ChannelSnapshot{record:record.clone(),members:members.clone(),state:incoming.bundle_apply_state.clone(),settled_tx_accumulator:incoming.settled_tx_accumulator.clone()};
-        let received=live.receive_inter_channel(&producer,&receipt,&back.debit_payload,&back.transfer_descriptor,&artifact,&incoming.fund_import_state,&incoming_snapshot,LEVEL)
+        producer
+            .sync_offchain_heads(
+                "sync:42:credit".into(),
+                vec![
+                    credit.fund_import_state.clone(),
+                    destination_credit_snapshot.state.clone(),
+                ],
+            )
+            .expect("publish destination credit before return send");
+        let mut back =
+            intmax3_zkp::wallet_core::build_inter_channel_send_token_at_base_nonce_decrypted(
+                &destination_keys[1],
+                &destination_credit_snapshot,
+                1,
+                channel_id,
+                0,
+                keys[0].regev_pk.clone(),
+                keys[0].pk_g(),
+                deposit_salt,
+                0,
+                0,
+                2,
+                fresh_root(30),
+                LEVEL,
+                &mut rng,
+            )
+            .expect("spend recently received credit");
+        back.debit_payload.proposed_next_state = sign_all(
+            back.debit_payload.proposed_next_state.clone(),
+            &destination_keys,
+        );
+        attach_small_block_signatures(
+            &destination_record,
+            &back.debit_payload.proposed_next_state,
+            &mut back.transfer_descriptor.inter_channel_tx,
+        )
+        .unwrap();
+        back.debit_payload.inter_channel_tx = back.transfer_descriptor.inter_channel_tx.clone();
+        let back_head = back.debit_payload.proposed_next_state.clone();
+        let receipt = producer
+            .post_inter_channel(
+                "inter:42:41:0".into(),
+                back_head.clone(),
+                back.debit_payload.clone(),
+                back.transfer_descriptor.clone(),
+            )
+            .unwrap();
+        destination_live
+            .settle_inter_channel(
+                &producer,
+                &receipt,
+                &back_head,
+                &back.debit_payload,
+                &back.transfer_descriptor,
+            )
+            .unwrap();
+        let artifact = destination_live
+            .inter_channel_send_artifact("inter:42:41:0")
+            .unwrap();
+        let source_snapshot = ChannelSnapshot {
+            record: record.clone(),
+            members: members.clone(),
+            state: inter_state.clone(),
+            settled_tx_accumulator: inter.settled_tx_accumulator.clone(),
+        };
+        let mut incoming = build_inter_channel_credit(
+            &keys[0],
+            &source_snapshot,
+            &back.transfer_descriptor,
+            LEVEL,
+            &mut rng,
+        )
+        .unwrap();
+        incoming.fund_import_state = sign_all(incoming.fund_import_state, &keys);
+        incoming.bundle_apply_state = sign_all(incoming.bundle_apply_state, &keys);
+        let incoming_snapshot = ChannelSnapshot {
+            record: record.clone(),
+            members: members.clone(),
+            state: incoming.bundle_apply_state.clone(),
+            settled_tx_accumulator: incoming.settled_tx_accumulator.clone(),
+        };
+        let received = live
+            .receive_inter_channel(
+                &producer,
+                &receipt,
+                &back.debit_payload,
+                &back.transfer_descriptor,
+                &artifact,
+                &incoming.fund_import_state,
+                &incoming_snapshot,
+                LEVEL,
+            )
             .expect("A receives after sending, without a future A send");
-        assert_eq!(received.base_nonce,3);
-        let same=live.receive_inter_channel(&producer,&receipt,&back.debit_payload,&back.transfer_descriptor,&artifact,&incoming.fund_import_state,&incoming_snapshot,LEVEL).unwrap();
-        assert_eq!(same,received,"replay cannot credit twice");
-        let kit=live.channel_backing_artifact().unwrap().signed_head_exit_kit.expect("idle recipient exit kit");
-        assert_eq!(kit.backing_public_inputs.settled_tx_chain,incoming_snapshot.state.balance_state.settled_tx_chain);
+        assert_eq!(received.base_nonce, 3);
+        let same = live
+            .receive_inter_channel(
+                &producer,
+                &receipt,
+                &back.debit_payload,
+                &back.transfer_descriptor,
+                &artifact,
+                &incoming.fund_import_state,
+                &incoming_snapshot,
+                LEVEL,
+            )
+            .unwrap();
+        assert_eq!(same, received, "replay cannot credit twice");
+        let kit = live
+            .channel_backing_artifact()
+            .unwrap()
+            .signed_head_exit_kit
+            .expect("idle recipient exit kit");
+        assert_eq!(
+            kit.backing_public_inputs.settled_tx_chain,
+            incoming_snapshot.state.balance_state.settled_tx_chain
+        );
         drop(live);
-        let restored=LiveBalanceService::open(&balance_path,&producer).expect("restart tail recipient");
-        assert_eq!(restored.status().unwrap().signed_head_digest,Some(incoming_snapshot.state.digest));
-        assert_eq!(restored.channel_backing_artifact().unwrap().signed_head_exit_kit.unwrap().backing_public_inputs,kit.backing_public_inputs);
+        let restored =
+            LiveBalanceService::open(&balance_path, &producer).expect("restart tail recipient");
+        assert_eq!(
+            restored.status().unwrap().signed_head_digest,
+            Some(incoming_snapshot.state.digest)
+        );
+        assert_eq!(
+            restored
+                .channel_backing_artifact()
+                .unwrap()
+                .signed_head_exit_kit
+                .unwrap()
+                .backing_public_inputs,
+            kit.backing_public_inputs
+        );
         return;
     }
     drop(destination_live);
@@ -1348,8 +1458,8 @@ fn run_live_balance_e2e(tail_roundtrip: bool) {
 ///   cursor at the pre-send generation, which `retained_prior` keeps;
 /// - a deposit imported locally but never signed (a co-signer went offline) is refunded from its
 ///   retained pre-receive generation;
-/// - a second stranded deposit, never received here, is refunded from the first refund's
-///   confirmed continuation, which survives a restart.
+/// - a second stranded deposit, never received here, is refunded from the first refund's confirmed
+///   continuation, which survives a restart.
 #[cfg(feature = "authenticated-tail-receive")]
 #[test]
 fn late_deposits_chain_after_close_from_retained_and_continued_cursors() {
@@ -1421,7 +1531,8 @@ fn run_late_deposit_chain() {
     let record = build_record(CHANNEL, &members, 0, 0).expect("record");
     let (sender_ciphertext, _) =
         encrypt_amount(&mut rng, &keys[0].regev_pk, DEPOSIT_AMOUNT).expect("encrypt sender");
-    let (other_ciphertext, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, 0).expect("encrypt other");
+    let (other_ciphertext, _) =
+        encrypt_amount(&mut rng, &keys[1].regev_pk, 0).expect("encrypt other");
     let regev_digests: Vec<Bytes32> = keys
         .iter()
         .map(|keys| Bytes32::from(keys.regev_pk.poseidon_digest()))
@@ -1456,12 +1567,15 @@ fn run_late_deposit_chain() {
 
     let commitment_of = |live: &LiveBalanceService| -> Bytes32 {
         let circuit = live.late_deposit_circuit();
-        let proof = ProofWithPublicInputs::<GoldilocksField, PoseidonGoldilocksConfig, 2>::from_bytes(
-            live.attestation().expect("attestation").balance_proof,
-            &circuit.balance_vd().common,
-        )
-        .expect("decode balance proof");
-        circuit.balance_commitment(&proof).expect("balance commitment")
+        let proof =
+            ProofWithPublicInputs::<GoldilocksField, PoseidonGoldilocksConfig, 2>::from_bytes(
+                live.attestation().expect("attestation").balance_proof,
+                &circuit.balance_vd().common,
+            )
+            .expect("decode balance proof");
+        circuit
+            .balance_commitment(&proof)
+            .expect("balance commitment")
     };
     let close_intent_digest = fresh_root(0xC105E);
     let final_h1 = fresh_root(0xF1);
@@ -1481,8 +1595,14 @@ fn run_late_deposit_chain() {
             burn.transfer_descriptor.clone(),
         )
         .expect("durable burn block");
-    live.settle_inter_channel(&producer, &burn_receipt, &burn_state, &burn.debit_payload, &burn.transfer_descriptor)
-        .expect("settle burn");
+    live.settle_inter_channel(
+        &producer,
+        &burn_receipt,
+        &burn_state,
+        &burn.debit_payload,
+        &burn.transfer_descriptor,
+    )
+    .expect("settle burn");
     let burned_commitment = commitment_of(&live);
     assert_ne!(burned_commitment, genesis_commitment);
     {
@@ -1509,7 +1629,8 @@ fn run_late_deposit_chain() {
         .post_deposit("l1:deposit:2".into(), requests[2].clone())
         .expect("durable L1 deposit block #2");
     assert!(
-        live.receive_deposit_unbound(&producer, &receipt_2, &requests[2], deposit_salt).is_err(),
+        live.receive_deposit_unbound(&producer, &receipt_2, &requests[2], deposit_salt)
+            .is_err(),
         "deposit #2 waits for #1's binding, which never comes"
     );
 
@@ -1520,12 +1641,24 @@ fn run_late_deposit_chain() {
         let cursor = live
             .late_deposit_checkpoint(circuit, close_intent_digest, final_h1, burned_commitment)
             .expect("cursor at the pre-receive generation");
-        let kept = cursor.retained_deposit.clone().expect("the retained generation names deposit #1");
+        let kept = cursor
+            .retained_deposit
+            .clone()
+            .expect("the retained generation names deposit #1");
         assert_eq!(kept.request, requests[1]);
-        live.prepare_late_deposit(&cursor.checkpoint, circuit, &producer, &kept.request, kept.deposit_salt)
-            .expect("late deposit #1 receipt")
+        live.prepare_late_deposit(
+            &cursor.checkpoint,
+            circuit,
+            &producer,
+            &kept.request,
+            kept.deposit_salt,
+        )
+        .expect("late deposit #1 receipt")
     };
-    assert_eq!(prepared_1.statement.previous_balance_commitment, burned_commitment);
+    assert_eq!(
+        prepared_1.statement.previous_balance_commitment,
+        burned_commitment
+    );
     assert_eq!(prepared_1.statement.depositor, depositor);
     assert_eq!(prepared_1.statement.amount, U256::from(30u64));
     // The nullifier covers the block the producer sealed the deposit in.
@@ -1538,10 +1671,17 @@ fn run_late_deposit_chain() {
         sealed_in(&deposits[1], receipt_1.block_number).nullifier()
     );
     let after_1 = prepared_1.statement.next_balance_commitment;
-    assert!(prepared_1.confirmed_checkpoint(fresh_root(0x5)).is_err(), "only the L1-confirmed cursor");
-    let next_1 = prepared_1.confirmed_checkpoint(after_1).expect("confirmed continuation");
-    live.adopt_late_continuation(next_1.clone()).expect("adopt continuation");
-    live.adopt_late_continuation(next_1).expect("adoption is idempotent");
+    assert!(
+        prepared_1.confirmed_checkpoint(fresh_root(0x5)).is_err(),
+        "only the L1-confirmed cursor"
+    );
+    let next_1 = prepared_1
+        .confirmed_checkpoint(after_1)
+        .expect("confirmed continuation");
+    live.adopt_late_continuation(next_1.clone())
+        .expect("adopt continuation");
+    live.adopt_late_continuation(next_1)
+        .expect("adoption is idempotent");
 
     // The continuation is durable: after a restart, deposit #2 (never received here) is refunded
     // from it with the channel's recipient salt.
@@ -1556,8 +1696,14 @@ fn run_late_deposit_chain() {
             .expect("cursor at the confirmed continuation");
         assert_eq!(cursor.checkpoint.commitment(), after_1);
         assert!(cursor.retained_deposit.is_none());
-        live.prepare_late_deposit(&cursor.checkpoint, circuit, &producer, &requests[2], deposit_salt)
-            .expect("late deposit #2 receipt")
+        live.prepare_late_deposit(
+            &cursor.checkpoint,
+            circuit,
+            &producer,
+            &requests[2],
+            deposit_salt,
+        )
+        .expect("late deposit #2 receipt")
     };
     assert_eq!(prepared_2.statement.previous_balance_commitment, after_1);
     assert_eq!(prepared_2.statement.amount, U256::from(20u64));
