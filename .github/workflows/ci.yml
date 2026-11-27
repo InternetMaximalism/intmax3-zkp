@@ -414,6 +414,14 @@ jobs:
       # few minutes each on a 4-vCPU runner. `e2e` (129 s locally, the full balance/validity
       # pipeline with no on-chain leg) is deliberately NOT here — it is the longest of the three
       # and adds no on-chain binding that mle_onchain_e2e does not already cover. It runs nightly.
+      - name: Install the solc that contracts/foundry.toml pins (mle_onchain_e2e runs forge --offline)
+        # tests/mle_onchain_e2e.rs runs `forge test --offline`, which refuses to download a
+        # compiler ("can't install missing solc 0.8.29 in offline mode"). The contracts job installs
+        # solc on its own runner; this runner never had it. `forge build` reads the version from
+        # foundry.toml (no second copy of it here) and leaves the compile cache the test reuses.
+        working-directory: contracts
+        run: forge build
+
       - name: mle_onchain_e2e (fresh proof -> real on-chain MleVerifier)
         # The test proves afresh and REWRITES contracts/test/data/{mle,block}_fixture.json (proof
         # bytes are randomized per run) before verifying them under forge. Restore exactly those two
