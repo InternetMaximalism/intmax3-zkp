@@ -314,9 +314,7 @@ jobs:
             --test wallet_core_e2e \
             --test batch_cosign_e2e \
             --test wallet_delegate_demo \
-            --test mle_v2_fixture_release \
-            --test mle_onchain_e2e \
-            --test small_block_sig_validity
+            --test mle_v2_fixture_release
 
       # ── The declaration-vs-reality guards, in Rust ────────────────────────────────────────────
       #
@@ -351,33 +349,8 @@ jobs:
         # Uses OS-assigned ephemeral ports only, never 8549-8559 — safe anywhere.
         run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test anvil_port_guard
 
-      # LIB UNIT TESTS. Until 2026-09-09 this workflow ran only named `--test` integration targets
-      # and never `cargo test --lib`, so every unit test inside src/ was dead weight in CI. Three
-      # were failing unnoticed: `channel_registration`'s canonicality test (a real defect — the
-      # `TryFrom<Bytes32>` round-trip could not reject anything) and two `balance_state` tests left
-      # behind by fd467ea when the sig-cluster cap went 16 -> 8.
-      #
-      # Only modules that fit a 16 GB ubuntu-latest runner run here. The whole lib suite (711 tests)
-      # was executed once, serially and in chunks, on 2026-09-10 (see
-      # doc/audit/zkp/implementation-linewise-progress.md): every test passes, but the heavy
-      # modules cannot be a routine step — `wallet_core::` needs ~18 min and ~18 GB RSS,
-      # `circuits::` ~75 min in total with one 40-iteration property test alone taking 45 min at
-      # 30 GB, `falcon_sig::` ~6.5 min with multi-GB recursive-proof tests — and an unfiltered
-      # `--lib` run is OOM-killed even at --test-threads=1 (the SIGKILL reads as a test failure).
-      # Those paths are exercised by the dedicated `--test` targets below. `regev::` is pure
-      # arithmetic (6 s) and is included. If you add a unit test under common/, utils/,
-      # ethereum_types/ or regev/, bump the expected-passed count.
-      #
-      # Filter gotcha: libtest filters are substrings, so `foo::` does NOT match `foo_circuit::`.
-      # The module names below are top-level and safe; do not add trailing-`::` submodule filters
-      # without checking `-- --list`.
-      #
-      # YAML gotcha: a plain scalar may not contain ": ", so the filters (`common:: utils::`) must
-      # stay inside a block scalar. Written on one `run:` line (150bb195, 2026-09-09), they made this
-      # whole file invalid YAML until 2026-11-25, and GitHub ran NO job of this workflow meanwhile.
-      - name: lib unit tests (modules that fit the runner)
-        run: |
-          .github/ci/rust-test-guard.sh 240 0 -- cargo test --release --locked --lib -- --test-threads=1 common:: utils:: ethereum_types:: regev::
+      # LIB UNIT TESTS (common:: utils:: ethereum_types:: regev::) moved to nightly-heavy.yml on
+      # 2026-11-27: 8m41s on this runner (run 46009999139). See the comment on that step there.
 
       - name: nullifier and exclusivity soundness suites
         run: |
@@ -399,39 +372,15 @@ jobs:
         # lifecycle descriptors must commit to the exact canonical compact-proof bytes as well.
         run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test mle_v2_fixture_release
 
-      # ── The one per-PR check that proves a FRESHLY GENERATED proof still verifies on chain ────
+      # ── Proof-heavy suites live in nightly-heavy.yml, not here ───────────────────────────────
       #
-      # Everything above reads CHECKED-IN fixtures. That catches a fixture whose gate set the
-      # evaluator cannot handle, but not the case where today's circuits emit a gate set that no
-      # fixture records yet — which is exactly how gate 8 arrived (a Regev bit-width change pushed
-      # plonky2's recursive FRI verifier onto `exp_from_bits_const_base`, and the fixtures were
-      # regenerated to match). `mle_onchain_e2e` proves a validity proof end to end: prove ->
-      # 2x WrapperCircuit -> MLE -> export -> real `MleVerifier.verify` under forge. If a circuit
-      # change moves the gate set, degreeBits or the WHIR parameters outside what the deployed
-      # Solidity can evaluate, it fails HERE rather than on a real submission.
-      #
-      # Measured 41 s (mle_onchain_e2e) and 49 s (small_block_sig_validity) on 14 cores; budget a
-      # few minutes each on a 4-vCPU runner. `e2e` (129 s locally, the full balance/validity
-      # pipeline with no on-chain leg) is deliberately NOT here — it is the longest of the three
-      # and adds no on-chain binding that mle_onchain_e2e does not already cover. It runs nightly.
-      - name: Install the solc that contracts/foundry.toml pins (mle_onchain_e2e runs forge --offline)
-        # tests/mle_onchain_e2e.rs runs `forge test --offline`, which refuses to download a
-        # compiler ("can't install missing solc 0.8.29 in offline mode"). The contracts job installs
-        # solc on its own runner; this runner never had it. `forge build` reads the version from
-        # foundry.toml (no second copy of it here) and leaves the compile cache the test reuses.
-        working-directory: contracts
-        run: forge build
-
-      - name: mle_onchain_e2e (fresh proof -> real on-chain MleVerifier)
-        # The test proves afresh and REWRITES contracts/test/data/{mle,block}_fixture.json (proof
-        # bytes are randomized per run) before verifying them under forge. Restore exactly those two
-        # files so the tree-modification assertion below still catches every other write.
-        run: |
-          .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test mle_onchain_e2e
-          git checkout -- contracts/test/data/mle_fixture.json contracts/test/data/block_fixture.json
-
-      - name: small_block_sig_validity (BP signature bound by a real validity proof)
-        run: .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test small_block_sig_validity
+      # `mle_onchain_e2e` (fresh proof -> real on-chain MleVerifier) and `small_block_sig_validity`
+      # moved to .github/workflows/nightly-heavy.yml on 2026-11-27. Measured on this runner
+      # (run 46009999139): mle_onchain_e2e 13m07s plus a 6m14s solc compile it needs, and
+      # small_block_sig_validity 10m22s; with them the job hit its 60-minute limit. Run them before
+      # merging a circuit, WHIR-parameter or verifier change:
+      #   cargo test --release --locked --test mle_onchain_e2e
+      #   cargo test --release --locked --test small_block_sig_validity
 
       - name: Assert the build did not modify the tree
         run: git diff --exit-code && test -z "$(git status --porcelain)"
