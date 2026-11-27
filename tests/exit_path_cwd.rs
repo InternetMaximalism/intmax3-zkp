@@ -22,12 +22,25 @@
 //! named neither the cause nor the fact that the delegate has no working path at all.
 //! `claim_refuses_a_slot_whose_key_this_host_does_not_hold` pins the refusal and its wording.
 //!
+//! **Since 9f5d8209 (2026-09-02)** `close`, `claim`, `cancel-close` and `post-close-claim` first
+//! require the channel's durable ACTIVE settlement binding (`require_active_settlement_binding`),
+//! which reads `cli_state.json` and, on the devnet, only the chain id from L1. The runs below
+//! therefore carry a signed channel state with an ACTIVE devnet binding and talk to a stub RPC that
+//! reports chain id 31337, so each command gets past that gate to the checks these tests are about.
+//!
 //! WHY THESE TESTS ARE CHEAP: every assertion is about what happens BEFORE proving. That is not a
 //! shortcut — "the check runs before the proof" is exactly the property F4 and F8 are about, so a
 //! test that had to prove first could not express it.
 #![cfg(not(debug_assertions))]
 
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::{Read, Write},
+    net::TcpListener,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 use intmax3_zkp::{
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
@@ -82,10 +95,80 @@ fn run(cwd: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool, St
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("spawn channel_member");
-    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-    s.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.success(), s)
+    // Every run here must stop BEFORE proving; a run that is still going after this long has
+    // walked into a proof, which is itself the failure these tests exist to catch.
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn channel_member");
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stdout.read_to_end(&mut b);
+        b
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stderr.read_to_end(&mut b);
+        b
+    });
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait channel_member") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`channel_member {}` was still running after 120 s: it did not stop before \
+                 proving",
+                args.join(" ")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut s = String::from_utf8_lossy(&out_t.join().unwrap()).to_string();
+    s.push_str(&String::from_utf8_lossy(&err_t.join().unwrap()));
+    (status.success(), s)
+}
+
+/// A JSON-RPC endpoint that answers EVERY request with the anvil chain id (31337). On the devnet,
+/// the ACTIVE-settlement gate reads nothing else from L1, so this is all a run needs to get past
+/// it; any later chain read gets a value it cannot use and the command fails there.
+fn spawn_devnet_rpc() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub rpc");
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = [0u8; 8192];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let id = req
+                .split("\"id\":")
+                .nth(1)
+                .map(|r| {
+                    r.trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                })
+                .and_then(|d| d.parse::<u64>().ok())
+                .unwrap_or(0);
+            let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":\"0x7a69\"}}");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.flush();
+        }
+    });
+    url
 }
 
 /// Pull the path out of the `[cmd] contracts dir: <path> (via …)` diagnostic.
@@ -103,35 +186,39 @@ fn reported_contracts_dir(out: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// The five commands F4 broke, with the minimum arguments/env each needs to REACH the contracts
-/// resolution. Every one of them dies immediately after it (no state file in a foreign cwd, no
-/// ROLLUP for `withdraw`), so none of these runs proves anything.
-///
-/// `CLAIM_RECIPIENT` is required by the two claim commands before the resolution; it is a
-/// throwaway address here because these runs never get as far as using it.
-const RECIPIENT: &str = "0x7e5700007e5700007e5700007e5700007e570000";
+/// The manager every run names; the ACTIVE devnet binding in `write_delegate_channel_state`
+/// records the same address.
+const MANAGER: &str = "0x00000000000000000000000000000000000000aa";
 
-fn exit_commands() -> Vec<(
-    &'static str,
-    Vec<&'static str>,
-    Vec<(&'static str, &'static str)>,
-)> {
-    let mgr = "0x00000000000000000000000000000000000000aa";
+/// The five commands F4 broke, with the minimum arguments/env each needs to REACH the contracts
+/// resolution (the stub RPC goes where each takes its `[rpc_url]`).
+///
+/// `CLAIM_RECIPIENT` is required by the two claim commands before the resolution. It is NOT any
+/// slot's signed exit address, so a claim that gets past the contracts check stops at the
+/// recipient pre-check instead of proving.
+const WRONG_RECIPIENT: &str = "0x00000000000000000000000000000000000000bb";
+
+fn exit_commands(rpc: &str) -> Vec<(&'static str, Vec<String>, Vec<(&'static str, &'static str)>)> {
+    let v = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     vec![
-        ("close", vec!["close", mgr], vec![]),
+        ("close", v(&["close", MANAGER, rpc]), vec![]),
         (
             "claim",
-            vec!["claim", mgr, "0"],
-            vec![("CLAIM_RECIPIENT", RECIPIENT)],
+            v(&["claim", MANAGER, "0", rpc]),
+            vec![("CLAIM_RECIPIENT", WRONG_RECIPIENT)],
         ),
-        ("cancel-close", vec!["cancel-close", mgr], vec![]),
+        ("cancel-close", v(&["cancel-close", MANAGER, rpc]), vec![]),
         (
             "post-close-claim",
-            vec!["post-close-claim", mgr, "0", "0"],
-            vec![("CLAIM_RECIPIENT", RECIPIENT)],
+            v(&["post-close-claim", MANAGER, "0", "0", rpc]),
+            vec![("CLAIM_RECIPIENT", WRONG_RECIPIENT)],
         ),
-        ("withdraw", vec!["withdraw", mgr], vec![]),
+        ("withdraw", v(&["withdraw", MANAGER, rpc]), vec![]),
     ]
+}
+
+fn arg_refs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
 }
 
 /// **F4, THE MISSING TEST.** Run every exit command from a working directory that is not the repo
@@ -142,13 +229,15 @@ fn exit_commands() -> Vec<(
 /// resolution diagnostic disappears, or the run dies with a staging/`No such file` error.
 #[test]
 fn exit_commands_resolve_contracts_from_a_foreign_cwd() {
-    for (name, args, envs) in exit_commands() {
+    let rpc = spawn_devnet_rpc();
+    for (name, args, envs) in exit_commands(&rpc) {
         let d = foreign_cwd(name);
-        let (ok, out) = run(&d, &args, &envs);
+        write_delegate_channel_state(&d);
+        let (ok, out) = run(&d, &arg_refs(&args), &envs);
         assert!(
             !ok,
-            "`{name}` cannot SUCCEED here (no state, no chain) — the test is about HOW it \
-             fails:\n{out}"
+            "`{name}` cannot SUCCEED here (no close on chain, a stub RPC) — the test is about HOW \
+             it fails:\n{out}"
         );
 
         // 1. It resolved a checkout, and said which.
@@ -175,30 +264,32 @@ fn exit_commands_resolve_contracts_from_a_foreign_cwd() {
             "`{name}` failed on the CONTRACTS PATH from a foreign cwd — F4 is back:\n{out}"
         );
 
-        // 3. It failed on the next real precondition instead (which is what a healthy run in an
-        //    empty dir should do).
+        // 3. It failed on a later real precondition instead, still before the heavy proof.
         assert!(
-            out.contains("cli_state.json") || out.contains("set ROLLUP="),
-            "`{name}` should have got past the contracts check and died on its next real \
-             precondition:\n{out}"
+            !out.contains("HEAVY"),
+            "`{name}` got past the contracts check but must stop on a later precondition BEFORE \
+             proving:\n{out}"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
 }
 
-/// **F4, the "early and loudly" half.** A wrong `CONTRACTS_DIR` must be refused BEFORE the command
-/// touches any state — i.e. before it could possibly have started proving. If this ever regresses
-/// to a late failure, the run below would get as far as complaining about `cli_state.json`.
+/// **F4, the "early and loudly" half.** A wrong `CONTRACTS_DIR` must be refused before anything
+/// but the ACTIVE-settlement gate runs — in particular before the command could have started
+/// proving. The channel state is complete, so a regression to a late failure would show up as a
+/// later precondition (or the heavy proof) instead of this refusal.
 #[test]
 fn a_wrong_contracts_dir_is_refused_before_any_state_is_loaded() {
-    for (name, args, envs) in exit_commands() {
+    let rpc = spawn_devnet_rpc();
+    for (name, args, envs) in exit_commands(&rpc) {
         let d = foreign_cwd(&format!("bogus-{name}"));
+        write_delegate_channel_state(&d);
         let empty = d.join("not-a-contracts-checkout");
         std::fs::create_dir_all(&empty).unwrap();
         let mut envs = envs.clone();
         let empty_s = empty.to_string_lossy().to_string();
         envs.push(("CONTRACTS_DIR", empty_s.as_str()));
-        let (ok, out) = run(&d, &args, &envs);
+        let (ok, out) = run(&d, &arg_refs(&args), &envs);
         assert!(!ok, "`{name}` must refuse a bogus CONTRACTS_DIR:\n{out}");
         assert!(
             out.contains("is not a usable contracts checkout"),
@@ -209,10 +300,17 @@ fn a_wrong_contracts_dir_is_refused_before_any_state_is_loaded() {
             "`{name}`'s refusal must state that it is refusing before the proof — that ordering \
              IS the fix:\n{out}"
         );
+        // The ACTIVE-settlement gate legitimately loads the state first (its `[state]` notes may
+        // mention cli_state.json); the FAILURE must be the contracts refusal and nothing later.
+        let errors: Vec<&str> = out.lines().filter(|l| l.starts_with("error:")).collect();
         assert!(
-            !out.contains("cli_state.json") && !out.contains("set ROLLUP="),
+            errors.len() == 1 && errors[0].contains("is not a usable contracts checkout"),
+            "`{name}` failed on something other than the contracts check:\n{out}"
+        );
+        assert!(
+            !out.contains("set ROLLUP=") && !out.contains("HEAVY"),
             "`{name}` reached a LATER precondition than the contracts check; the check must be \
-             the first thing that runs:\n{out}"
+             the first thing after the ACTIVE-settlement gate:\n{out}"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -305,9 +403,48 @@ struct CliStateMirror {
     state_schema_version: u32,
     controlled: Vec<ControlledMemberMirror>,
     snapshot: ChannelSnapshot,
+    settlement_binding: serde_json::Value,
+    signer_exit_kit_receipt: Option<serde_json::Value>,
+    prepared_exit_kit_receipt: Option<serde_json::Value>,
     applied_tx_identities: HashSet<Bytes32>,
     spent_tx_identities: HashSet<Bytes32>,
     imported_deposits: HashSet<String>,
+    state_signing_ledger: BTreeMap<String, serde_json::Value>,
+}
+
+/// The binary's settlement participant root (`settlement_participant_root`): a keccak Merkle tree
+/// of depth log2(MAX_CHANNEL_MEMBERS) over `IMPR || slot || pk_g || recipient` leaves, empty
+/// subtrees hashed as `IMPN || zero || zero`.
+fn settlement_participant_root(pk_gs: &[Bytes32], recipients: &[Address]) -> Bytes32 {
+    let node = |l: &[u8; 32], r: &[u8; 32]| {
+        let mut pre = Vec::with_capacity(68);
+        pre.extend_from_slice(b"IMPN");
+        pre.extend_from_slice(l);
+        pre.extend_from_slice(r);
+        keccak_hash::keccak(pre).0
+    };
+    let mut nodes: Vec<[u8; 32]> = pk_gs
+        .iter()
+        .zip(recipients)
+        .enumerate()
+        .map(|(slot, (pk_g, recipient))| {
+            let mut pre = Vec::with_capacity(60);
+            pre.extend_from_slice(b"IMPR");
+            pre.extend_from_slice(&(slot as u32).to_be_bytes());
+            pre.extend_from_slice(&pk_g.to_bytes_be());
+            pre.extend_from_slice(&recipient.to_bytes_be());
+            keccak_hash::keccak(pre).0
+        })
+        .collect();
+    let mut zero = [0u8; 32];
+    for _ in 0..intmax3_zkp::constants::MAX_CHANNEL_MEMBERS.trailing_zeros() {
+        nodes = nodes
+            .chunks(2)
+            .map(|pair| node(&pair[0], pair.get(1).unwrap_or(&zero)))
+            .collect();
+        zero = node(&zero, &zero);
+    }
+    Bytes32::from_bytes_be(nodes.first().unwrap_or(&zero)).unwrap()
 }
 
 /// Write a `cli_state.json` for a channel of 3 CLI co-signers (slots 0-2, whose keys this host CAN
@@ -368,6 +505,22 @@ fn write_delegate_channel_state(cwd: &std::path::Path) {
         })
         .collect();
 
+    // The ACTIVE devnet settlement binding every exit command checks first: deployed with the three
+    // co-signers (the delegate joined after deployment, which the live set may extend), naming
+    // MANAGER, and carrying none of the production-only deployment authority.
+    let cosigner_pk_gs: Vec<Bytes32> = members[..3].iter().map(|m| m.pk_g).collect();
+    let settlement_binding = serde_json::json!({
+        "status": "active",
+        "channel_id": channel_id,
+        "snapshot_state_digest": genesis.digest,
+        "participant_root": settlement_participant_root(&cosigner_pk_gs, &recipients[..3]),
+        "participant_count": 3,
+        "rollup": "0x00000000000000000000000000000000000000cc",
+        "verifier": "0x00000000000000000000000000000000000000dd",
+        "manager": MANAGER,
+        "materializer": "0x00000000000000000000000000000000000000ee",
+    });
+
     let state = CliStateMirror {
         state_schema_version: 1,
         controlled,
@@ -377,9 +530,13 @@ fn write_delegate_channel_state(cwd: &std::path::Path) {
             members,
             settled_tx_accumulator: default_settled_tx_accumulator(),
         },
+        settlement_binding,
+        signer_exit_kit_receipt: None,
+        prepared_exit_kit_receipt: None,
         applied_tx_identities: HashSet::new(),
         spent_tx_identities: HashSet::new(),
         imported_deposits: HashSet::new(),
+        state_signing_ledger: BTreeMap::new(),
     };
     std::fs::write(
         cwd.join("cli_state.json"),
@@ -399,11 +556,11 @@ fn write_delegate_channel_state(cwd: &std::path::Path) {
 fn claim_refuses_a_slot_whose_key_this_host_does_not_hold() {
     let d = foreign_cwd("f8-delegate");
     write_delegate_channel_state(&d);
-    let mgr = "0x00000000000000000000000000000000000000aa";
+    let rpc = spawn_devnet_rpc();
     let delegate_recipient = recipient_for(3).to_hex();
     let (ok, out) = run(
         &d,
-        &["claim", mgr, "3"],
+        &["claim", MANAGER, "3", &rpc],
         &[("CLAIM_RECIPIENT", delegate_recipient.as_str())],
     );
     assert!(
@@ -415,14 +572,16 @@ fn claim_refuses_a_slot_whose_key_this_host_does_not_hold() {
         "the refusal must name the slot it cannot claim for:\n{out}"
     );
     assert!(
-        out.contains("BROWSER DELEGATE"),
+        out.contains("BROWSER/NODE DELEGATE"),
         "the refusal must name WHO CANNOT use this path — the browser delegate whose funds these \
          are — instead of leaving them to guess:\n{out}"
     );
+    // Since 5ba4e3e4 the delegate HAS a path (`wallet_withdrawal_claim` proves inside WASM); the
+    // refusal must name the structural cause (the key never leaves the WASM session) and that path.
     assert!(
-        out.contains("wallet_keygen") && out.contains("wasm_wallet.rs"),
-        "the refusal must point at the structural cause (the browser holds the key; there is no \
-         wasm claim entry point):\n{out}"
+        out.contains("wallet_keygen") && out.contains("wallet_withdrawal_claim"),
+        "the refusal must point at the structural cause (the browser holds the key) and at the \
+         WASM claim entry point the delegate must use instead:\n{out}"
     );
     // Refused BEFORE any proving: the claim prover announces itself with "(HEAVY)".
     assert!(
@@ -443,12 +602,11 @@ fn claim_refuses_a_slot_whose_key_this_host_does_not_hold() {
 fn claim_accepts_a_slot_this_host_does_own_and_then_checks_the_recipient() {
     let d = foreign_cwd("f8-cosigner");
     write_delegate_channel_state(&d);
-    let mgr = "0x00000000000000000000000000000000000000aa";
-    let wrong_recipient = "0x00000000000000000000000000000000000000bb";
+    let rpc = spawn_devnet_rpc();
     let (ok, out) = run(
         &d,
-        &["claim", mgr, "0"],
-        &[("CLAIM_RECIPIENT", wrong_recipient)],
+        &["claim", MANAGER, "0", &rpc],
+        &[("CLAIM_RECIPIENT", WRONG_RECIPIENT)],
     );
     assert!(!ok, "a mismatched CLAIM_RECIPIENT must be refused:\n{out}");
     assert!(
