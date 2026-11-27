@@ -174,10 +174,16 @@ jobs:
         with:
           node-version: "22.18.0"
           cache: npm
-          cache-dependency-path: node/package-lock.json
+          cache-dependency-path: |
+            node/package-lock.json
+            api/package-lock.json
 
       - name: Install exactly the locked dependency graph without lifecycle scripts
         working-directory: node
+        run: npm ci --ignore-scripts
+
+      - name: Install the relay's locked dependencies (the api/ and pkg-assets suites load its express)
+        working-directory: api
         run: npm ci --ignore-scripts
 
       - name: Run every Node proof/config/DA binding test

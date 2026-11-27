@@ -81,7 +81,7 @@ test/ManagerCloseGas.t.sol:ManagerCloseGasTest	1
 test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17
 test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	16"
 
-out="$(mktemp -t forge-test-json)"
+out="$(mktemp "${TMPDIR:-/tmp}/forge-test-json.XXXXXX")"
 trap 'rm -f "$out"' EXIT
 
 echo "[forge-guard] forge test ${FORGE_TEST_ARGS:-}"
