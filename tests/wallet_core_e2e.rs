@@ -104,7 +104,11 @@ fn wallet_core_in_channel_send_receive() {
     )
     .expect("recipient verify transition");
 
-    // Co-signing: member 1 adds its signature to complete the set.
+    // Co-signing. A send proposal authorizes only the transfer: since b5bafb75 the builder adds
+    // NO state signature (state signatures are released only at the host's checked co-signing
+    // boundary), so the sender co-signs the successor exactly like the recipient.
+    let m0_sig = sign_state(&m0, 0, &payload.proposed_next_state).expect("sign m0");
+    add_signature(&mut payload.proposed_next_state, m0_sig);
     let m1_sig = sign_state(&m1, 1, &payload.proposed_next_state).expect("sign m1");
     add_signature(&mut payload.proposed_next_state, m1_sig);
 

@@ -174,9 +174,7 @@ jobs:
         with:
           node-version: "22.18.0"
           cache: npm
-          cache-dependency-path: |
-            node/package-lock.json
-            api/package-lock.json
+          cache-dependency-path: node/package-lock.json
 
       - name: Install exactly the locked dependency graph without lifecycle scripts
         working-directory: node

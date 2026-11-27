@@ -40,6 +40,29 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The gate rows of an MLE proof or deployment-config fixture, or `None` for any other JSON.
+///
+/// Since the wire-v2/v3 cohort (2026-09-03) the rows live in `verificationConfig.gates`, mirrored
+/// by `verificationKey.gates`; the V1 top-level `gates` array this file was written against is
+/// gone. Until 2026-11-27 every scan below therefore found ZERO fixtures and failed its
+/// anti-vacuity floor — unnoticed only because CI never reached this step.
+fn fixture_gate_rows(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    let rows = value.pointer("/verificationConfig/gates")?.as_array()?;
+    if let Some(vk_rows) = value.pointer("/verificationKey/gates") {
+        assert_eq!(
+            vk_rows.as_array(),
+            Some(rows),
+            "verificationKey.gates and verificationConfig.gates describe different circuits"
+        );
+    }
+    Some(rows)
+}
+
+/// `check_fixture_json_gates` (the exporter's pure guard) reads a top-level `gates` array.
+fn guard_view(rows: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({ "gates": rows })
+}
+
 fn evaluator_sol_path() -> PathBuf {
     repo_root().join("contracts/lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluator.sol")
 }
@@ -194,9 +217,9 @@ fn checked_in_fixtures_only_use_on_chain_supported_gates() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue; // not a JSON object we care about
         };
-        // Every MLE proof fixture carries a top-level `gates` array; other fixtures (VK params,
-        // lifecycle descriptors, token lists) do not, and are skipped.
-        let Some(gates) = value.get("gates").and_then(|g| g.as_array()) else {
+        // Every MLE proof / deployment-config fixture carries gate rows; other fixtures
+        // (lifecycle descriptors, payouts, token lists) do not, and are skipped.
+        let Some(gates) = fixture_gate_rows(&value) else {
             continue;
         };
         checked_files += 1;
@@ -301,8 +324,11 @@ fn checked_in_fixtures_only_use_on_chain_supported_gates() {
 /// The expectation stands in for what `common_data` supplies in production.
 fn real_fixture_with_expectations() -> (serde_json::Value, Vec<ExpectedGateRow>) {
     let path = repo_root().join("contracts/test/data/withdrawal_claim_mle.json");
-    let value: serde_json::Value =
+    let fixture: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).expect("fixture unreadable")).unwrap();
+    let value = guard_view(
+        fixture_gate_rows(&fixture).expect("withdrawal_claim_mle.json has no gate rows"),
+    );
     let expected = value["gates"]
         .as_array()
         .unwrap()
@@ -421,6 +447,7 @@ use plonky2::{
 use plonky2_mle::{
     fixture::{GateParams, SUPPORTED_BASE_SUM_BASES, classify_gate, parse_gate_params_from_id},
     proof::NUM_SPLIT_COMMITMENTS,
+    protocol_schema_v2::NUM_PCS_GROUPS_V2,
 };
 
 type F = GoldilocksField;
@@ -603,10 +630,12 @@ fn every_checked_in_fixture_parameter_round_trips() {
     let mut checked_files = 0usize;
     let mut checked_rows = 0usize;
 
+    let mut named_rows = 0usize;
+
     for path in entries {
         let raw = fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let Some(gates) = value.get("gates").and_then(|g| g.as_array()) else {
+        let Some(gates) = fixture_gate_rows(&value) else {
             continue;
         };
         checked_files += 1;
@@ -614,9 +643,7 @@ fn every_checked_in_fixture_parameter_round_trips() {
 
         for (row, entry) in gates.iter().enumerate() {
             checked_rows += 1;
-            let name = entry["name"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{}: gate row {row} has no `name`", path.display()));
+            let name = entry["name"].as_str();
             let serialized = GateParams {
                 gate_id: entry["gateId"].as_u64().unwrap() as u8,
                 num_or_consts: entry["numOrConsts"].as_u64().unwrap() as u16,
@@ -626,26 +653,39 @@ fn every_checked_in_fixture_parameter_round_trips() {
 
             assert!(
                 supported.contains(&serialized.gate_id),
-                "{}: gate row {row} `{name}` uses unsupported gate id {}",
+                "{}: gate row {row} `{}` uses unsupported gate id {}",
                 path.display(),
+                name.unwrap_or("<unnamed>"),
                 serialized.gate_id
             );
 
-            let rederived = parse_gate_params_from_id(name).unwrap_or_else(|e| {
-                panic!(
-                    "{}: gate row {row} cannot be re-derived from its own recorded name — {e}",
-                    path.display()
-                )
-            });
-            assert_eq!(
-                rederived,
-                serialized,
-                "{}: gate row {row} `{name}` — the exported parameters disagree with the gate the \
-                 fixture says it is. numOrConsts/param2/param3 drive Plonky2GateEvaluator's \
-                 constraint count and wire layout, so this fixture would have the on-chain \
-                 verifier check constraints that are not the circuit's.",
-                path.display()
-            );
+            // V1 rows record the gate's `id()` string, so their parameters can be re-derived
+            // independently. Wire-v3 rows carry no name: the submodule exporter derives them from
+            // the circuit's own gate objects (`classify_gate`) and `check_v2_gate_rows` re-checks
+            // them at export, so here they go through the envelope guard below as serialized.
+            let rederived = match name {
+                Some(name) => {
+                    named_rows += 1;
+                    let rederived = parse_gate_params_from_id(name).unwrap_or_else(|e| {
+                        panic!(
+                            "{}: gate row {row} cannot be re-derived from its own recorded name — {e}",
+                            path.display()
+                        )
+                    });
+                    assert_eq!(
+                        rederived,
+                        serialized,
+                        "{}: gate row {row} `{name}` — the exported parameters disagree with the gate \
+                         the fixture says it is. numOrConsts/param2/param3 drive \
+                         Plonky2GateEvaluator's constraint count and wire layout, so this fixture \
+                         would have the on-chain verifier check constraints that are not the \
+                         circuit's.",
+                        path.display()
+                    );
+                    rederived
+                }
+                None => serialized,
+            };
 
             // Route every checked-in fixture through the exact guard used by the exporter. The
             // independent name re-derivation above supplies the gate parameters; the remaining
@@ -666,7 +706,7 @@ fn every_checked_in_fixture_parameter_round_trips() {
             });
         }
 
-        check_fixture_json_gates(&raw, &expected_rows).unwrap_or_else(|e| {
+        check_fixture_json_gates(&guard_view(gates).to_string(), &expected_rows).unwrap_or_else(|e| {
             panic!(
                 "{}: checked-in fixture is outside the deployed on-chain evaluator envelope: {e}",
                 path.display()
@@ -681,7 +721,8 @@ fn every_checked_in_fixture_parameter_round_trips() {
     );
     assert!(checked_rows > 0, "no gate rows were checked");
     eprintln!(
-        "[mle_gate_support] parameter round-trip: {checked_files} fixtures / {checked_rows} rows"
+        "[mle_gate_support] parameter round-trip: {checked_files} fixtures / {checked_rows} rows \
+         ({named_rows} re-derived from a recorded gate name)"
     );
 }
 
@@ -806,6 +847,22 @@ fn every_checked_in_fixture_declares_the_real_commitment_count() {
         else {
             continue;
         };
+        // Wire-v3 fixtures: the WHIR commitment count of the v2 verifier (preprocessed, witness,
+        // auxiliary) is pinned by the generated protocol schema.
+        if let Some(n) = value
+            .pointer("/verificationConfig/whir/numCommitments")
+            .and_then(|v| v.as_u64())
+        {
+            checked += 1;
+            assert_eq!(
+                n as usize,
+                NUM_PCS_GROUPS_V2,
+                "{}: verificationConfig.whir.numCommitments = {n}, but the v2 verifier commits \
+                 {NUM_PCS_GROUPS_V2} PCS groups",
+                path.display()
+            );
+            continue;
+        }
         let Some(n) = value
             .pointer("/whirParams/numCommitments")
             .and_then(|v| v.as_u64())

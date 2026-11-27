@@ -1404,6 +1404,7 @@ fn release_driver_keeps_foundry_skip_success_fail_closed() {
     for required in [
         "cache-dependency-path: node/package-lock.json",
         "run: npm ci --ignore-scripts",
+        "working-directory: api",
         "run: npm test",
     ] {
         assert!(

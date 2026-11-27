@@ -1563,7 +1563,8 @@ pub struct BuiltSend {
 /// transfer) is spent directly, and the fresh `after` resets its digits and noise exactly as a
 /// refresh would. Produces the decrypted-send proof (`RegevProofPurpose::ChannelTxDecrypted`,
 /// the ONLY E-1 purpose co-signers accept — see `verify_decrypted_transfer_proof`), the signed
-/// `ChannelTx`, and the proposed next state carrying only the sender's signature.
+/// `ChannelTx`, and the proposed next state with NO state signature (co-signers, the sender
+/// included, sign it at the host's checked co-signing boundary).
 #[allow(clippy::too_many_arguments)]
 pub fn build_send_token_decrypted(
     keys: &MemberKeys,
