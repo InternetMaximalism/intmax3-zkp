@@ -57,8 +57,14 @@ mod comparator_tests {
     fn enforce_ge_does_not_wrap_modulo_the_field() {
         assert!(enforce_ge_accepts(7, 5));
         assert!(enforce_ge_accepts(5, 5));
-        assert!(!enforce_ge_accepts(5, (1u64 << 63) - 1), "5 >= 2^63 - 1 must not prove");
-        assert!(!enforce_ge_accepts(0, 1u64 << 62), "0 >= 2^62 must not prove");
+        assert!(
+            !enforce_ge_accepts(5, (1u64 << 63) - 1),
+            "5 >= 2^63 - 1 must not prove"
+        );
+        assert!(
+            !enforce_ge_accepts(0, 1u64 << 62),
+            "0 >= 2^62 must not prove"
+        );
     }
 }
 const U63_LOW_BITS: usize = 32;
@@ -299,22 +305,29 @@ impl U63Target {
     }
 
     pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
-        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower: &Self,
     ) {
         let ge = Self::compare(builder, self.value, lower.value, false);
         builder.assert_one(ge.target);
     }
 
     pub fn enforce_gt<F: RichField + Extendable<D>, const D: usize>(
-        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower: &Self,
     ) {
         let gt = Self::compare(builder, self.value, lower.value, true);
         builder.assert_one(gt.target);
     }
 
     fn conditional_compare<F: RichField + Extendable<D>, const D: usize>(
-        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self,
-        condition: BoolTarget, strict: bool,
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower: &Self,
+        condition: BoolTarget,
+        strict: bool,
     ) {
         // Mask before decomposition: disabled comparisons must not add range
         // restrictions to operands supplied through unchecked targets.
@@ -328,13 +341,19 @@ impl U63Target {
     }
 
     pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
-        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower: &Self,
+        condition: BoolTarget,
     ) {
         self.conditional_compare(builder, lower, condition, false);
     }
 
     pub fn conditional_gt<F: RichField + Extendable<D>, const D: usize>(
-        &self, builder: &mut CircuitBuilder<F, D>, lower: &Self, condition: BoolTarget,
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower: &Self,
+        condition: BoolTarget,
     ) {
         self.conditional_compare(builder, lower, condition, true);
     }

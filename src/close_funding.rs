@@ -464,13 +464,28 @@ mod tests {
         let proposal =
             build_close_funding_proposal(&previous, 1, address(0x11), address(0x22), 5).unwrap();
         verify_close_funding_proposal(&previous, &proposal.proposed_state, &proposal.plan).unwrap();
-        assert_eq!(proposal.proposed_state.unallocated_confirmed_incoming, U256::from(7u32));
-        assert_eq!(proposal.proposed_state.balance_state.enc_balances, previous.balance_state.enc_balances);
-        assert_eq!(proposal.proposed_state.balance_state.settled_tx_accumulator_root,
-            previous.balance_state.settled_tx_accumulator_root);
+        assert_eq!(
+            proposal.proposed_state.unallocated_confirmed_incoming,
+            U256::from(7u32)
+        );
+        assert_eq!(
+            proposal.proposed_state.balance_state.enc_balances,
+            previous.balance_state.enc_balances
+        );
+        assert_eq!(
+            proposal
+                .proposed_state
+                .balance_state
+                .settled_tx_accumulator_root,
+            previous.balance_state.settled_tx_accumulator_root
+        );
         for transfer in &proposal.plan.transfers {
-            let slot = previous.balance_state.token_registry.iter()
-                .position(|&token| token == transfer.token_index).unwrap();
+            let slot = previous
+                .balance_state
+                .token_registry
+                .iter()
+                .position(|&token| token == transfer.token_index)
+                .unwrap();
             assert_eq!(transfer.amount, previous.channel_fund.amounts[slot]);
         }
     }

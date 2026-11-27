@@ -45,17 +45,17 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     circuits::channel::{
         close_asset_backing_circuit::{
-            CloseAssetBackingPublicInputs, CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN,
+            CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, CloseAssetBackingPublicInputs,
         },
-        close_pis::{ChannelClosePublicInputs, CHANNEL_CLOSE_PUBLIC_INPUTS_LEN},
+        close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
     },
     common::{
-        channel::{close_member_set_commitment, token_funds_digest, CloseIntent},
+        channel::{CloseIntent, close_member_set_commitment, token_funds_digest},
         channel_id::ChannelId,
     },
     constants::MAX_SIG_CLUSTER,
     ethereum_types::{bytes32::Bytes32, u256::U256},
-    l1_finality::{L1FinalitySource, L1FinalizedCheckpoint, ANVIL_CHAIN_ID},
+    l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource, L1FinalizedCheckpoint},
     l1_signer_reservation::{self, SignerReservation},
     public_close_prover::PublicCloseIntentDescriptor,
 };
@@ -68,9 +68,10 @@ const JOURNAL_VERSION: u32 = 6;
 const PUBLIC_CLOSE_MANIFEST_VERSION: u32 =
     crate::public_close_prover::PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION;
 /// Deployment manifest 4: the five constructor-pinned `PinnedMleVerifierV2` adapters (close,
-/// withdrawal-claim, post-close-claim, cancel-close on the settlement verifier and CloseAssetBacking
-/// on the materializer) with their core/config/WHIR pins, plus the signer-independent exit
-/// selectors and topics. There is no mutable VK latch and no single shared MLE verifier any more.
+/// withdrawal-claim, post-close-claim, cancel-close on the settlement verifier and
+/// CloseAssetBacking on the materializer) with their core/config/WHIR pins, plus the
+/// signer-independent exit selectors and topics. There is no mutable VK latch and no single shared
+/// MLE verifier any more.
 pub const DEPLOYMENT_MANIFEST_VERSION: u32 = 4;
 const PUBLICATION_VERSION: u32 = 3;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -1454,7 +1455,11 @@ fn validated_compact_mle_v2_fixture(
     fixture
         .config_fixture()
         .validate_self_consistency()
-        .map_err(|error| fail(format!("self-consistent MLE/WHIR deployment config: {error}")))?;
+        .map_err(|error| {
+            fail(format!(
+                "self-consistent MLE/WHIR deployment config: {error}"
+            ))
+        })?;
     if fixture.schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
         || fixture.schema_version != SCHEMA_VERSION_CURRENT
         || fixture.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
@@ -2023,12 +2028,24 @@ fn backing_attestation_identity(
     let statement = encode_sequence([
         (&domain_kind, &statement_domain, "statement.domain".into()),
         (&chain_kind, &chain_id, "statement.chainId".into()),
-        (&address_kind, &materializer, "statement.materializer".into()),
+        (
+            &address_kind,
+            &materializer,
+            "statement.materializer".into(),
+        ),
         (&address_kind, &rollup, "statement.rollup".into()),
         (&address_kind, &manager, "statement.manager".into()),
         (&channel_kind, &channel_id, "statement.channelId".into()),
-        (&digest_kind, &settled_chain, "statement.settledTxChain".into()),
-        (&digest_kind, &funds_digest, "statement.tokenFundsDigest".into()),
+        (
+            &digest_kind,
+            &settled_chain,
+            "statement.settledTxChain".into(),
+        ),
+        (
+            &digest_kind,
+            &funds_digest,
+            "statement.tokenFundsDigest".into(),
+        ),
     ])
     .map_err(|error| {
         PublicClosePublisherError::Bundle(format!("encode backing statement identity: {error}"))
@@ -2050,7 +2067,9 @@ fn backing_attestation_identity(
         .as_u64()
         .checked_add(1)
         .ok_or_else(|| {
-            PublicClosePublisherError::Bundle("backing processed-send block plus one overflowed u64".into())
+            PublicClosePublisherError::Bundle(
+                "backing processed-send block plus one overflowed u64".into(),
+            )
         })?;
     Ok(BackingAttestationIdentity {
         statement_key: keccak_hex(&statement),
@@ -2248,15 +2267,16 @@ fn prepare_bundle(
                     "inspect signed-head backing MLE fixture: {error}"
                 ))
             })?;
-    let backing_config_compact = crate::utils::mle_prover::validate_mle_v2_full_against_config_json(
-        backing_mle_json,
-        backing_mle_config_json,
-    )
-    .map_err(|error| {
-        PublicClosePublisherError::Bundle(format!(
-            "signed-head backing MLE fixture does not match backing_mle_config.json: {error}"
-        ))
-    })?;
+    let backing_config_compact =
+        crate::utils::mle_prover::validate_mle_v2_full_against_config_json(
+            backing_mle_json,
+            backing_mle_config_json,
+        )
+        .map_err(|error| {
+            PublicClosePublisherError::Bundle(format!(
+                "signed-head backing MLE fixture does not match backing_mle_config.json: {error}"
+            ))
+        })?;
     if backing_config_compact != backing_mle.compact_proof {
         return Err(PublicClosePublisherError::Bundle(
             "signed-head backing compact proof differs between its fixture and config views".into(),
@@ -2286,7 +2306,8 @@ fn prepare_bundle(
     let mle_json = std::str::from_utf8(&mle_bytes).map_err(|error| {
         PublicClosePublisherError::Bundle(format!("close MLE fixture is not UTF-8: {error}"))
     })?;
-    let mle_artifact = validated_compact_mle_v2_fixture(MleStatement::Close, mle_json, &raw_inputs)?;
+    let mle_artifact =
+        validated_compact_mle_v2_fixture(MleStatement::Close, mle_json, &raw_inputs)?;
     let (expected, intent_json) = compare_close_public_inputs(&descriptor, &full, &raw_inputs)?;
     if parsed_backing.channel_id.channel_id() != descriptor.channel_id {
         return Err(PublicClosePublisherError::Bundle(
@@ -2361,7 +2382,10 @@ fn prepare_bundle(
         ("close_intent_mle.json", mle_bytes.as_slice()),
         ("backing_proof.bin", backing_proof.as_slice()),
         ("backing_mle.json", backing_mle_bytes.as_slice()),
-        ("backing_mle_config.json", backing_mle_config_bytes.as_slice()),
+        (
+            "backing_mle_config.json",
+            backing_mle_config_bytes.as_slice(),
+        ),
         ("backing_public_inputs.json", backing_input_bytes.as_slice()),
         ("close_intent.json", intent_bytes.as_slice()),
         ("close_intent_full.json", full_bytes.as_slice()),
@@ -2418,8 +2442,9 @@ fn prepare_bundle(
 /// between `channel_member export-close-deployment-manifest` and this consumer fails at export
 /// time rather than at publication time.
 pub fn validate_deployment_manifest_shape(bytes: &[u8]) -> std::result::Result<(), String> {
-    let manifest: DeploymentManifest = serde_json::from_slice(bytes)
-        .map_err(|error| format!("deployment manifest does not match the publisher schema: {error}"))?;
+    let manifest: DeploymentManifest = serde_json::from_slice(bytes).map_err(|error| {
+        format!("deployment manifest does not match the publisher schema: {error}")
+    })?;
     if manifest.schema_version != DEPLOYMENT_MANIFEST_VERSION {
         return Err(format!(
             "deployment manifest schemaVersion {} != publisher schema {DEPLOYMENT_MANIFEST_VERSION}",
@@ -2732,11 +2757,17 @@ fn validate_deployment_observation(
     // processed by the backing's Balance proof: `processedSendBlockNumber >= lastPostedBlock`.
     // The anchor is a later finalized state and says nothing about processed sends.
     if observed.materializer_last_posted_block
-        > prepared.backing_public_inputs.processed_send_block_number.as_u64()
+        > prepared
+            .backing_public_inputs
+            .processed_send_block_number
+            .as_u64()
     {
         return Err(PublicClosePublisherError::Conflict(format!(
             "signed-head backing processed-send block {} (anchor {}) is older than the channel's reorg-aware last posted block {}",
-            prepared.backing_public_inputs.processed_send_block_number.as_u64(),
+            prepared
+                .backing_public_inputs
+                .processed_send_block_number
+                .as_u64(),
             prepared.backing_public_inputs.anchor_block_number.as_u64(),
             observed.materializer_last_posted_block
         )));
@@ -4383,8 +4414,8 @@ fn make_binding(
     signer_lock_root: &Path,
 ) -> Result<PublicationBinding> {
     let attest = attest_calldata(&deployment.manager, &prepared.backing_mle.compact_proof)?;
-    let attest_bytes = decode_hex(&attest, None, "attest calldata")
-        .map_err(PublicClosePublisherError::Bundle)?;
+    let attest_bytes =
+        decode_hex(&attest, None, "attest calldata").map_err(PublicClosePublisherError::Bundle)?;
     let submit_bytes = decode_hex(&prepared.submit_calldata, None, "submit calldata")
         .map_err(PublicClosePublisherError::Bundle)?;
     let materialize =
@@ -5639,8 +5670,7 @@ fn advance_materialization<B: ClosePublisherBackend>(
     journal: &mut PublicationJournal,
     signer: &str,
 ) -> Result<PublicCloseProgress> {
-    let calldata =
-        materialize_calldata(&deployment.manager, &prepared.backing_mle.compact_proof)?;
+    let calldata = materialize_calldata(&deployment.manager, &prepared.backing_mle.compact_proof)?;
     let calldata_bytes = decode_hex(&calldata, None, "materialize calldata")
         .map_err(PublicClosePublisherError::Bundle)?;
     if !same_hex(
@@ -8129,7 +8159,10 @@ fn check_readiness_with_backend<B: ClosePublisherBackend>(
         || manager.pending.is_some()
         || manager.finalized.is_some()
         || observed.materializer_frozen_generation != 0
-        || !same_hex(&observed.materialized_channel_exit, &format!("0x{}", "00".repeat(32)))
+        || !same_hex(
+            &observed.materialized_channel_exit,
+            &format!("0x{}", "00".repeat(32)),
+        )
     {
         return Err(PublicClosePublisherError::Conflict(
             "close readiness requires an Active, unfrozen, unmaterialized channel".into(),
@@ -8332,7 +8365,11 @@ mod tests {
     fn rewrite_backing_statement(bundle_dir: &Path, inputs: &[u64]) {
         let mle = mle_fixture_for(inputs);
         let mle_bytes = mle.to_canonical_json().unwrap().into_bytes();
-        let config_bytes = mle.config_fixture().to_canonical_json().unwrap().into_bytes();
+        let config_bytes = mle
+            .config_fixture()
+            .to_canonical_json()
+            .unwrap()
+            .into_bytes();
         let inputs_path = bundle_dir.join("backing_public_inputs.json");
         write_json(&inputs_path, &inputs);
         fs::write(bundle_dir.join("backing_mle.json"), &mle_bytes).expect("write backing MLE");
@@ -9292,7 +9329,9 @@ mod tests {
         assert_eq!(backend.sign_count, 0);
         let journal: PublicationJournal =
             serde_json::from_slice(&fs::read(&fixture.config.journal_path).unwrap()).unwrap();
-        let attested = journal.attest_observation.expect("durable attestation observation");
+        let attested = journal
+            .attest_observation
+            .expect("durable attestation observation");
         assert_eq!(attested.transaction_hash, repeated(0xbb));
         assert_eq!(
             (attested.block_number, attested.transaction_index),
@@ -9392,13 +9431,18 @@ mod tests {
 
     fn active_readiness_backend(fixture: &Fixture) -> FakeBackend {
         let mut backend = FakeBackend::new(fixture);
-        let active = backend.managers.get_mut(&backend.head).expect("current manager");
+        let active = backend
+            .managers
+            .get_mut(&backend.head)
+            .expect("current manager");
         active.status = 0;
         active.current_close_freeze_nonce = fixture.prepared.expected.close_freeze_nonce - 1;
         active.close_requested_at = 0;
         backend.deployment.materializer_frozen_generation = 0;
         // Readiness precedes attestation. It must not require or emit that L1 transaction.
-        backend.deployment.signed_head_backing_processed_send_plus_one = 0;
+        backend
+            .deployment
+            .signed_head_backing_processed_send_plus_one = 0;
         backend.deployment.exact_backing_proof_attested = false;
         backend.deployment.signed_head_backing_current = false;
         backend
@@ -9412,16 +9456,26 @@ mod tests {
         let manifest_before = fs::read(&config.deployment_manifest_path).expect("manifest");
         assert!(!fixture.config.journal_path.exists());
         assert!(!fixture.config.signer_lock_root.exists());
-        let ready = check_readiness_with_backend(&config, &mut backend).expect("ready before freeze");
+        let ready =
+            check_readiness_with_backend(&config, &mut backend).expect("ready before freeze");
         assert!(ready.ready);
-        assert_eq!(ready.signed_head_digest, config.expected_final_channel_state_digest);
+        assert_eq!(
+            ready.signed_head_digest,
+            config.expected_final_channel_state_digest
+        );
         assert_eq!(ready.finalized_checkpoint, backend.checkpoint());
-        assert_eq!(ready.current_close_freeze_nonce + 1, fixture.prepared.expected.close_freeze_nonce);
+        assert_eq!(
+            ready.current_close_freeze_nonce + 1,
+            fixture.prepared.expected.close_freeze_nonce
+        );
         assert_eq!(backend.sign_count, 0);
         assert!(backend.publish_attempts.is_empty());
         assert!(!fixture.config.journal_path.exists());
         assert!(!fixture.config.signer_lock_root.exists());
-        assert_eq!(fs::read(&config.deployment_manifest_path).expect("manifest"), manifest_before);
+        assert_eq!(
+            fs::read(&config.deployment_manifest_path).expect("manifest"),
+            manifest_before
+        );
         let wire = serde_json::to_value(&ready).expect("readiness receipt");
         assert_eq!(wire["schemaVersion"], 1);
         assert_eq!(wire["signedHeadDigest"], ready.signed_head_digest);
@@ -9436,12 +9490,36 @@ mod tests {
             let mut backend = active_readiness_backend(&fixture);
             match condition {
                 0 => backend.deployment.backing_root_finalized = false,
-                1 => backend.deployment.rollup_latest_finalized_block_number =
-                    fixture.prepared.backing_public_inputs.anchor_block_number.as_u64() - 1,
-                2 => backend.deployment.materializer_last_posted_block =
-                    fixture.prepared.backing_public_inputs.processed_send_block_number.as_u64() + 1,
-                3 => backend.managers.get_mut(&backend.head).expect("manager").status = 1,
-                4 => backend.managers.get_mut(&backend.head).expect("manager").current_close_freeze_nonce += 1,
+                1 => {
+                    backend.deployment.rollup_latest_finalized_block_number = fixture
+                        .prepared
+                        .backing_public_inputs
+                        .anchor_block_number
+                        .as_u64()
+                        - 1
+                }
+                2 => {
+                    backend.deployment.materializer_last_posted_block = fixture
+                        .prepared
+                        .backing_public_inputs
+                        .processed_send_block_number
+                        .as_u64()
+                        + 1
+                }
+                3 => {
+                    backend
+                        .managers
+                        .get_mut(&backend.head)
+                        .expect("manager")
+                        .status = 1
+                }
+                4 => {
+                    backend
+                        .managers
+                        .get_mut(&backend.head)
+                        .expect("manager")
+                        .current_close_freeze_nonce += 1
+                }
                 5 => backend.deployment.channel_fund_root_finalized = false,
                 _ => unreachable!(),
             }
@@ -9495,10 +9573,12 @@ mod tests {
             .unwrap()
         );
         assert_eq!(word_u64(&bytes[36..68], "generation").unwrap(), 1);
-        assert!(finalize_calldata(&fixture.prepared.expected, 0)
-            .unwrap_err()
-            .to_string()
-            .contains("zero closeRequestGeneration"));
+        assert!(
+            finalize_calldata(&fixture.prepared.expected, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("zero closeRequestGeneration")
+        );
     }
 
     #[test]
@@ -9695,17 +9775,19 @@ mod tests {
         backend
             .receipts
             .insert(transaction.transaction_hash.clone(), failed_receipt);
-        assert!(reconcile_semantic_winner(
-            &fixture.config,
-            &mut backend,
-            &mut journal,
-            ClosePhase::Submit,
-            &winner,
-            &reservation,
-            &signer,
-        )
-        .expect("canonical-finalized loser revert")
-        .is_none());
+        assert!(
+            reconcile_semantic_winner(
+                &fixture.config,
+                &mut backend,
+                &mut journal,
+                ClosePhase::Submit,
+                &winner,
+                &reservation,
+                &signer,
+            )
+            .expect("canonical-finalized loser revert")
+            .is_none()
+        );
         assert!(
             journal
                 .submit
@@ -9738,12 +9820,16 @@ mod tests {
             .finalize_authorization
             .expect("durable finalize authorization");
         assert_eq!(authorization.close_request_generation, 1);
-        assert!(authorization
-            .calldata
-            .starts_with(&selector(FINALIZE_CLOSE_GUARDED_SIGNATURE)));
-        assert!(!authorization
-            .calldata
-            .starts_with(&selector("finalizeClose()")));
+        assert!(
+            authorization
+                .calldata
+                .starts_with(&selector(FINALIZE_CLOSE_GUARDED_SIGNATURE))
+        );
+        assert!(
+            !authorization
+                .calldata
+                .starts_with(&selector("finalizeClose()"))
+        );
 
         let finalized_block = block(13, 1_102);
         let transaction = backend.transaction(1);
@@ -9830,9 +9916,11 @@ mod tests {
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
         assert!(error.to_string().contains("injected post-WAL"));
         assert_eq!(backend.sign_count, 3);
-        assert!(fs::read_to_string(&fixture.config.journal_path)
-            .unwrap()
-            .contains("0x03"));
+        assert!(
+            fs::read_to_string(&fixture.config.journal_path)
+                .unwrap()
+                .contains("0x03")
+        );
 
         assert!(matches!(
             advance_with_backend(&fixture.config, &mut backend)
@@ -9959,9 +10047,11 @@ mod tests {
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
         assert!(error.to_string().contains("injected post-WAL"));
         assert_eq!(backend.sign_count, 1);
-        assert!(fs::read_to_string(&fixture.config.journal_path)
-            .unwrap()
-            .contains("0x01"));
+        assert!(
+            fs::read_to_string(&fixture.config.journal_path)
+                .unwrap()
+                .contains("0x01")
+        );
         let journal: PublicationJournal =
             serde_json::from_slice(&fs::read(&fixture.config.journal_path).unwrap()).unwrap();
         assert_eq!(
@@ -10277,9 +10367,11 @@ mod tests {
         }
         backend.head = 11;
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("ambiguous latest transaction position"));
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous latest transaction position")
+        );
         assert_eq!(backend.sign_count, 0);
     }
 
@@ -10367,7 +10459,9 @@ mod tests {
         backend.receipts.remove(&external.transaction_hash);
         backend.deployment.exact_backing_proof_attested = false;
         backend.deployment.signed_head_backing_current = false;
-        backend.deployment.signed_head_backing_processed_send_plus_one = 0;
+        backend
+            .deployment
+            .signed_head_backing_processed_send_plus_one = 0;
         assert!(matches!(
             advance_with_backend(&fixture.config, &mut backend)
                 .expect("broadcast the local attestation"),
@@ -10377,7 +10471,10 @@ mod tests {
         assert_eq!(backend.publish_attempts, ["0x01"]);
         let local = backend.transaction(0);
         let journal = read_journal(&fixture);
-        assert!(journal.attest.is_some(), "raw attestation bytes are durable");
+        assert!(
+            journal.attest.is_some(),
+            "raw attestation bytes are durable"
+        );
         assert!(journal.attest_observation.is_none());
 
         // Another watchtower's attestation of the same exact statement is finalized first.
@@ -10428,11 +10525,13 @@ mod tests {
             PublicCloseProgress::SubmitBroadcast { .. }
         ));
         let journal = read_journal(&fixture);
-        assert!(journal
-            .attest
-            .as_ref()
-            .and_then(|step| step.superseded_confirmation.as_ref())
-            .is_some());
+        assert!(
+            journal
+                .attest
+                .as_ref()
+                .and_then(|step| step.superseded_confirmation.as_ref())
+                .is_some()
+        );
         assert_eq!(backend.sign_count, 2);
         assert_eq!(backend.publish_attempts, ["0x01", "0x02"]);
     }
@@ -10724,9 +10823,8 @@ mod tests {
             completed: None,
         };
         write_journal(&fixture.config.journal_path, &journal).expect("persist journal");
-        let error =
-            load_or_create_journal(&fixture.config.journal_path, binding.clone(), &signer)
-                .unwrap_err();
+        let error = load_or_create_journal(&fixture.config.journal_path, binding.clone(), &signer)
+            .unwrap_err();
         assert!(
             error.to_string().contains("not ordered strictly after"),
             "unexpected error: {error}"
@@ -10824,9 +10922,7 @@ mod tests {
         // both stop the publisher before any further signing.
         assert!(
             error.to_string().contains("receipt is orphaned")
-                || error
-                    .to_string()
-                    .contains("replaced at the same height"),
+                || error.to_string().contains("replaced at the same height"),
             "unexpected error: {error}"
         );
         assert_eq!(backend.sign_count, 0);
@@ -11044,9 +11140,11 @@ mod tests {
             &root_fixture.config.expected_final_channel_state_digest,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("finalizedExtendedStateCommitment differs from manifest"));
+        assert!(
+            error
+                .to_string()
+                .contains("finalizedExtendedStateCommitment differs from manifest")
+        );
 
         let anchor_fixture = fixture("backing-anchor");
         mutate_manifest(&anchor_fixture.config.bundle_dir, |manifest| {
@@ -11057,9 +11155,11 @@ mod tests {
             &anchor_fixture.config.expected_final_channel_state_digest,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("anchorBlockNumber differs from manifest"));
+        assert!(
+            error
+                .to_string()
+                .contains("anchorBlockNumber differs from manifest")
+        );
     }
 
     #[test]
@@ -11105,9 +11205,11 @@ mod tests {
             &type_fixture.config.expected_final_channel_state_digest,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("parse signed-head backing public inputs"));
+        assert!(
+            error
+                .to_string()
+                .contains("parse signed-head backing public inputs")
+        );
 
         let json_type_fixture = fixture("backing-pi-json-type");
         let path = json_type_fixture
@@ -11278,11 +11380,13 @@ mod tests {
             let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             descriptor[mutate.0] = mutate.1;
             write_json(&path, &descriptor);
-            assert!(prepare_bundle(
-                &fixture.config.bundle_dir,
-                &fixture.config.expected_final_channel_state_digest,
-            )
-            .is_err());
+            assert!(
+                prepare_bundle(
+                    &fixture.config.bundle_dir,
+                    &fixture.config.expected_final_channel_state_digest,
+                )
+                .is_err()
+            );
         }
 
         let fixture = fixture("fund-channel");
@@ -11290,11 +11394,13 @@ mod tests {
         let mut full: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         full["channelFundSnapshot"]["channelId"] = serde_json::json!(8);
         write_json(&path, &full);
-        assert!(prepare_bundle(
-            &fixture.config.bundle_dir,
-            &fixture.config.expected_final_channel_state_digest,
-        )
-        .is_err());
+        assert!(
+            prepare_bundle(
+                &fixture.config.bundle_dir,
+                &fixture.config.expected_final_channel_state_digest,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -11310,7 +11416,10 @@ mod tests {
         // (address manager, bytes backingProof): head = 2 words, then length-prefixed bytes.
         assert_eq!(abi_usize(&calldata_bytes[4 + 32..4 + 64]), 64);
         let proof_length = abi_usize(&calldata_bytes[4 + 64..4 + 96]);
-        assert_eq!(proof_length, fixture.prepared.backing_mle.compact_proof.len());
+        assert_eq!(
+            proof_length,
+            fixture.prepared.backing_mle.compact_proof.len()
+        );
         assert_eq!(
             &calldata_bytes[4 + 96..4 + 96 + proof_length],
             fixture.prepared.backing_mle.compact_proof.as_slice()
@@ -11350,35 +11459,22 @@ mod tests {
             raw_signed_transaction: "0x01".into(),
             transaction_hash: repeated(0x71),
         };
-        let attestation_receipt = receipt(
-            &transaction,
-            &address(0x55),
-            &block(9, 999),
-            event.clone(),
+        let attestation_receipt =
+            receipt(&transaction, &address(0x55), &block(9, 999), event.clone());
+        assert!(
+            exact_attested_event(&attestation_receipt, &fixture.deployment, &fixture.prepared,)
+                .expect("decode exact attestation")
+                .is_some()
         );
-        assert!(exact_attested_event(
-            &attestation_receipt,
-            &fixture.deployment,
-            &fixture.prepared,
-        )
-            .expect("decode exact attestation")
-            .is_some());
 
         let mut crossed = event;
         crossed["topics"][3] = Value::String(repeated(0xee));
-        let crossed_receipt = receipt(
-            &transaction,
-            &address(0x55),
-            &block(9, 999),
-            crossed,
+        let crossed_receipt = receipt(&transaction, &address(0x55), &block(9, 999), crossed);
+        assert!(
+            exact_attested_event(&crossed_receipt, &fixture.deployment, &fixture.prepared,)
+                .expect("decode crossed attestation")
+                .is_none()
         );
-        assert!(exact_attested_event(
-            &crossed_receipt,
-            &fixture.deployment,
-            &fixture.prepared,
-        )
-        .expect("decode crossed attestation")
-        .is_none());
 
         let ready = observed_deployment(&fixture);
         assert!(backing_attestation_ready(&ready, &fixture.prepared).unwrap());
@@ -11405,7 +11501,9 @@ mod tests {
             .compact_proof
             .decode_and_validate(std::str::from_utf8(&COMPACT_MAGIC_V2).unwrap())
             .unwrap();
-        let validated = validated_compact_mle_v2_fixture(MleStatement::Close, &canonical, &public_inputs).unwrap();
+        let validated =
+            validated_compact_mle_v2_fixture(MleStatement::Close, &canonical, &public_inputs)
+                .unwrap();
         assert_eq!(validated.compact_proof, expected_compact);
 
         let calldata = decode_hex(&fixture.prepared.submit_calldata, None, "submit calldata")
@@ -11447,8 +11545,22 @@ mod tests {
         assert_eq!(binding.mle_protocol_version, MLE_PROTOCOL_VERSION_CURRENT);
 
         let legacy_proof_only = format!("{}\n", serde_json::to_string_pretty(&mle.proof).unwrap());
-        assert!(validated_compact_mle_v2_fixture(MleStatement::Close, &legacy_proof_only, &public_inputs).is_err());
-        assert!(validated_compact_mle_v2_fixture(MleStatement::Close, canonical.trim_end(), &public_inputs).is_err());
+        assert!(
+            validated_compact_mle_v2_fixture(
+                MleStatement::Close,
+                &legacy_proof_only,
+                &public_inputs
+            )
+            .is_err()
+        );
+        assert!(
+            validated_compact_mle_v2_fixture(
+                MleStatement::Close,
+                canonical.trim_end(),
+                &public_inputs
+            )
+            .is_err()
+        );
 
         let mut wrong_layout = mle.clone();
         wrong_layout.proof_layout_hash = repeated(0x99);
@@ -11493,7 +11605,10 @@ mod tests {
         );
         let mut wrong_public_inputs = public_inputs;
         wrong_public_inputs[0] ^= 1;
-        assert!(validated_compact_mle_v2_fixture(MleStatement::Close, &canonical, &wrong_public_inputs).is_err());
+        assert!(
+            validated_compact_mle_v2_fixture(MleStatement::Close, &canonical, &wrong_public_inputs)
+                .is_err()
+        );
     }
 
     #[test]
@@ -11555,9 +11670,11 @@ mod tests {
         let mut wrong_pin = fixture.config.clone();
         wrong_pin.deployment_manifest_sha256 = repeated(0xfe);
         let error = advance_with_backend(&wrong_pin, &mut FakeBackend::new(&fixture)).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("independently configured SHA-256"));
+        assert!(
+            error
+                .to_string()
+                .contains("independently configured SHA-256")
+        );
 
         let mut deployment = fixture.deployment.clone();
         deployment.finalize_close_guarded_selector = selector("finalizeClose()");

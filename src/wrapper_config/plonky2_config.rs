@@ -102,7 +102,8 @@ impl<F: RichField> PoseidonBN128HashOut<F> {
             .map_err(|_| BN128HashDecodeError::WrongLength(bytes.len()))?;
         let fr_repr = FrRepr(sized_bytes);
         // `from_repr` yields an empty `CtOption` for a non-canonical representation (>= r).
-        let fr = Option::<Fr>::from(Fr::from_repr(fr_repr)).ok_or(BN128HashDecodeError::NonCanonical)?;
+        let fr =
+            Option::<Fr>::from(Fr::from_repr(fr_repr)).ok_or(BN128HashDecodeError::NonCanonical)?;
         Ok(Self {
             value: fr,
             _phantom: PhantomData,
@@ -111,7 +112,8 @@ impl<F: RichField> PoseidonBN128HashOut<F> {
 
     /// Fallible decoding of the base-10 string form `Serialize` emits (review C08).
     pub fn try_from_decimal_str(s: &str) -> Result<Self, BN128HashDecodeError> {
-        let big_int = BigUint::parse_bytes(s.as_bytes(), 10).ok_or(BN128HashDecodeError::NotDecimal)?;
+        let big_int =
+            BigUint::parse_bytes(s.as_bytes(), 10).ok_or(BN128HashDecodeError::NotDecimal)?;
         let mut bytes = big_int.to_bytes_le();
         if bytes.len() > 32 {
             return Err(BN128HashDecodeError::TooLarge);
@@ -280,7 +282,8 @@ pub mod tests {
         type H = PoseidonBN128HashOut<GoldilocksField>;
         // Valid boundary values round-trip through the decimal form.
         for s in ["0", BN254_SCALAR_MODULUS_MINUS_ONE] {
-            let hash: H = serde_json::from_str(&format!("\"{s}\"")).expect("canonical value decodes");
+            let hash: H =
+                serde_json::from_str(&format!("\"{s}\"")).expect("canonical value decodes");
             let again: H = serde_json::from_str(&serde_json::to_string(&hash).unwrap()).unwrap();
             assert_eq!(hash, again);
         }
@@ -300,8 +303,14 @@ pub mod tests {
             Err(BN128HashDecodeError::TooLarge)
         );
         // Binary: all-0xff is non-canonical; a short slice is the wrong length.
-        assert_eq!(H::try_from_bytes(&[0xffu8; 32]), Err(BN128HashDecodeError::NonCanonical));
-        assert_eq!(H::try_from_bytes(&[0u8; 31]), Err(BN128HashDecodeError::WrongLength(31)));
+        assert_eq!(
+            H::try_from_bytes(&[0xffu8; 32]),
+            Err(BN128HashDecodeError::NonCanonical)
+        );
+        assert_eq!(
+            H::try_from_bytes(&[0u8; 31]),
+            Err(BN128HashDecodeError::WrongLength(31))
+        );
         assert!(H::try_from_bytes(&[0u8; 32]).is_ok());
     }
 

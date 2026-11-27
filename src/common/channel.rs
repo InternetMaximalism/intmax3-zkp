@@ -295,11 +295,20 @@ impl TryFrom<ChannelRecordWire> for ChannelRecord {
             return Err("channel record exceeds MAX_CHANNEL_MEMBERS".to_string());
         }
         let mut member_pk_gs = w.member_pk_gs;
-        if member_pk_gs.iter().skip(active).any(|h| *h != Bytes32::default()) {
-            return Err(format!("memberPkGs carries a nonzero identity past the {active} active slots"));
+        if member_pk_gs
+            .iter()
+            .skip(active)
+            .any(|h| *h != Bytes32::default())
+        {
+            return Err(format!(
+                "memberPkGs carries a nonzero identity past the {active} active slots"
+            ));
         }
         if member_pk_gs.len() < active {
-            return Err(format!("memberPkGs has {} slots, fewer than the active {active}", member_pk_gs.len()));
+            return Err(format!(
+                "memberPkGs has {} slots, fewer than the active {active}",
+                member_pk_gs.len()
+            ));
         }
         member_pk_gs.truncate(active);
         Ok(Self {
@@ -397,7 +406,8 @@ impl ChannelRecord {
     ///
     /// PREIMAGE (exact): `[IMCR, channel_id(1), bp_member_slot(1), split_u64(close_freeze_nonce),
     /// split_u64(set_version), status(1), member_count(1), delegate_count(1),
-    /// member_pk_gs(active*8), member_pubkeys_root(8), special_close_penalty(8), regev_pk_root(8)]`.
+    /// member_pk_gs(active*8), member_pubkeys_root(8), special_close_penalty(8),
+    /// regev_pk_root(8)]`.
     ///
     /// INJECTIVITY: every field except `member_pk_gs` has a fixed width, so the preimage length
     /// fixes how many identities it holds, and both counts are in it; two different records never
@@ -1952,8 +1962,16 @@ mod tests {
             vec![record.bp_member_slot as u32],
             split_u64(record.close_freeze_nonce),
             split_u64(record.set_version),
-            vec![record.status as u32, record.member_count as u32, record.delegate_count as u32],
-            record.member_pk_gs.iter().flat_map(Bytes32::to_u32_vec).collect::<Vec<_>>(),
+            vec![
+                record.status as u32,
+                record.member_count as u32,
+                record.delegate_count as u32,
+            ],
+            record
+                .member_pk_gs
+                .iter()
+                .flat_map(Bytes32::to_u32_vec)
+                .collect::<Vec<_>>(),
             record.member_pubkeys_root.to_u32_vec(),
             record.special_close_penalty.to_u32_vec(),
             record.regev_pk_root.to_u32_vec(),

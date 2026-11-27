@@ -1155,7 +1155,8 @@ impl UpdateUserTreeTarget {
             block_tx_root.conditional_assert_eq(builder, bound_tx_root, should_update);
             // SECURITY (code review 2026-10-15, finding C1b): the nonce-checked TxV2 is the leaf at
             // the channel's OWN tx-tree index — the index the receivers' `tx_settlement` opens.
-            // Mirrors the native check above; pinned by `a_tx_opened_at_a_foreign_index_is_refused`.
+            // Mirrors the native check above; pinned by
+            // `a_tx_opened_at_a_foreign_index_is_refused`.
             builder.conditional_assert_eq(should_update.target, tx_v2_index, channel_id);
             // SECURITY (base-send replay): H2 authenticates this TxV2, including its nonce.  The
             // channel leaf's `index` is the persisted base-account send cursor, so binding the two

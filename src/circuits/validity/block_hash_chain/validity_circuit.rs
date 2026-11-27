@@ -526,7 +526,11 @@ mod tests {
         // test is about; the generator only needs a nonzero IMSB state commitment to sign).
         let pks: Vec<_> = keys.iter().map(|k| k.regev_pk.clone()).collect();
         let enc: Vec<_> = (0..3)
-            .map(|i| encrypt_amount(&mut crng, &pks[i], [45u64, 10, 30][i]).unwrap().0)
+            .map(|i| {
+                encrypt_amount(&mut crng, &pks[i], [45u64, 10, 30][i])
+                    .unwrap()
+                    .0
+            })
             .collect();
         let regev_pk_digests: Vec<Bytes32> = keys
             .iter()
@@ -593,7 +597,11 @@ mod tests {
         let mut prev_block_proof = None;
         for idx in 1..=g.block_number.as_u64() {
             let bn = BlockNumber::new(idx).unwrap();
-            let witness = g.block_chain_witness.get(&bn).cloned().expect("block witness");
+            let witness = g
+                .block_chain_witness
+                .get(&bn)
+                .cloned()
+                .expect("block witness");
             let init = if prev_block_proof.is_none() {
                 Some(initial_ext_state.clone())
             } else {
@@ -622,7 +630,9 @@ mod tests {
         let honest = validity_circuit
             .prove(&final_block_chain_proof, Some(&honest_list), prover)
             .expect("the honest list proves the span");
-        validity_circuit.verify(&honest).expect("honest validity proof verifies");
+        validity_circuit
+            .verify(&honest)
+            .expect("honest validity proof verifies");
 
         // The forgery: seed the chain at C_1 (the chain AFTER the first block's statement, which
         // anyone can compute from the public statements) with a dummy-circuit predecessor, and

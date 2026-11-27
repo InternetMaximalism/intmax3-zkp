@@ -37,8 +37,8 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 /// [0] channel_id | [1..9] prev Balance commitment | [9..17] next Balance commitment |
-/// [17..25] ExtendedPublicState commitment | [25] anchor block number | [26..34] deposit nullifier |
-/// [34..39] depositor (5 u32 limbs) | [39] token_index | [40..48] amount (8 u32 limbs, U256 limb
+/// [17..25] ExtendedPublicState commitment | [25] anchor block number | [26..34] deposit nullifier
+/// | [34..39] depositor (5 u32 limbs) | [39] token_index | [40..48] amount (8 u32 limbs, U256 limb
 /// order, limb 0 most significant) | [48] version = 1.
 pub const LATE_DEPOSIT_PUBLIC_INPUTS_LEN: usize = 49;
 pub const LATE_DEPOSIT_PI_CHANNEL_ID: usize = 0;
@@ -241,8 +241,14 @@ mod tests {
         assert_eq!(parsed.amount, U256::from((1u64 << 32) + 9));
         assert_eq!(
             parsed.depositor,
-            Address::from_u32_slice(&[0x1111_0000, 0x1111_0001, 0x1111_0002, 0x1111_0003, 0x1111_0004])
-                .unwrap()
+            Address::from_u32_slice(&[
+                0x1111_0000,
+                0x1111_0001,
+                0x1111_0002,
+                0x1111_0003,
+                0x1111_0004
+            ])
+            .unwrap()
         );
         // The upper amount limbs are carried verbatim; the contract, not the parser, bounds them.
         let mut wide = v.clone();
@@ -261,7 +267,10 @@ mod tests {
             );
             v[index] = old;
         }
-        assert!(LateDepositPublicInputs::from_u64_slice(&v[..LATE_DEPOSIT_PUBLIC_INPUTS_LEN - 1]).is_err());
+        assert!(
+            LateDepositPublicInputs::from_u64_slice(&v[..LATE_DEPOSIT_PUBLIC_INPUTS_LEN - 1])
+                .is_err()
+        );
         v[LATE_DEPOSIT_PI_VERSION] = 2;
         assert!(LateDepositPublicInputs::from_u64_slice(&v).is_err());
     }
@@ -347,7 +356,10 @@ mod composition_tests {
 
         // Last send at block 4 == prev_block_r: authenticated tail, no interval required.
         let mut send_tree = SendTree::new(SEND_TREE_HEIGHT);
-        let send_leaf = SendLeaf { cur: prev_block_r, ..SendLeaf::default() };
+        let send_leaf = SendLeaf {
+            cur: prev_block_r,
+            ..SendLeaf::default()
+        };
         send_tree.push(send_leaf.clone());
         let send_merkle_proof = send_tree.prove(0);
         let channel_leaf = ChannelLeaf {
@@ -422,7 +434,9 @@ mod composition_tests {
         let prev_fields = prev_full_pis
             .to_u64_vec(&balance_vd.common.config)
             .to_field_vec::<F>();
-        let prev_balance_proof = balance_circuit.prove(Some(prev_fields.as_slice()), None).unwrap();
+        let prev_balance_proof = balance_circuit
+            .prove(Some(prev_fields.as_slice()), None)
+            .unwrap();
         let witness = ReceiveDepositWitness {
             prev_balance_proof,
             update_public_state,
@@ -434,7 +448,10 @@ mod composition_tests {
         let next = witness.to_public_inputs(&balance_vd.common).unwrap();
 
         let late = LateDepositCircuit::<F, C, D>::new(&balance_vd);
-        let ext = ExtendedPublicState { inner: public_state.clone(), ..Default::default() };
+        let ext = ExtendedPublicState {
+            inner: public_state.clone(),
+            ..Default::default()
+        };
         let proof = late.prove(&witness, &ext).unwrap();
         late.data.verify(proof.clone()).unwrap();
         let statement =
@@ -444,21 +461,35 @@ mod composition_tests {
         assert_eq!(statement.token_index, token_index);
         assert_eq!(statement.amount, deposit_amount);
         assert_eq!(statement.deposit_nullifier, deposit_nullifier);
-        assert_eq!(statement.deposit_nullifier, witness.update_private_state.nullifier);
+        assert_eq!(
+            statement.deposit_nullifier,
+            witness.update_private_state.nullifier
+        );
         assert_eq!(statement.anchor_block_number, 9);
-        assert_eq!(statement.finalized_extended_state_commitment, ext.commitment());
+        assert_eq!(
+            statement.finalized_extended_state_commitment,
+            ext.commitment()
+        );
         assert_eq!(
             statement.previous_balance_commitment,
-            late.balance_commitment(&witness.prev_balance_proof).unwrap()
+            late.balance_commitment(&witness.prev_balance_proof)
+                .unwrap()
         );
         assert_eq!(
             statement.next_balance_commitment,
             Bytes32::from(next.commitment(&balance_vd.common.config))
         );
-        assert_ne!(statement.previous_balance_commitment, statement.next_balance_commitment);
+        assert_ne!(
+            statement.previous_balance_commitment,
+            statement.next_balance_commitment
+        );
         // Amount limb order: limb 6 is the high u32, limb 7 the low u32 of a u64 amount.
         let raw = proof.public_inputs.to_u64_vec();
-        assert!(raw[LATE_DEPOSIT_PI_AMOUNT..LATE_DEPOSIT_PI_AMOUNT + 6].iter().all(|x| *x == 0));
+        assert!(
+            raw[LATE_DEPOSIT_PI_AMOUNT..LATE_DEPOSIT_PI_AMOUNT + 6]
+                .iter()
+                .all(|x| *x == 0)
+        );
         assert_eq!(raw[LATE_DEPOSIT_PI_AMOUNT + 6], 1);
         assert_eq!(raw[LATE_DEPOSIT_PI_AMOUNT + 7], 5);
 
@@ -478,7 +509,10 @@ mod composition_tests {
         ] {
             let mut forged = proof.clone();
             forged.public_inputs[offset] += F::ONE;
-            assert!(late.data.verify(forged).is_err(), "modified public input {offset}");
+            assert!(
+                late.data.verify(forged).is_err(),
+                "modified public input {offset}"
+            );
         }
         let mut wrong_ext = ext.clone();
         wrong_ext.inner.timestamp += 1;

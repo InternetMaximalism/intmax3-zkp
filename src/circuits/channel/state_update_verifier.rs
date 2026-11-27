@@ -696,11 +696,14 @@ impl InterChannelSendUpdateWitness {
         let is_burn = self.inter_channel_tx.destination_channel_id.channel_id()
             == crate::constants::BURN_CHANNEL_ID as u32;
         if !is_burn {
-            receiver_delta.amount.reject_key_independent().map_err(|err| {
-                ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
-                    "receiver delta: {err}"
-                ))
-            })?;
+            receiver_delta
+                .amount
+                .reject_key_independent()
+                .map_err(|err| {
+                    ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                        "receiver delta: {err}"
+                    ))
+                })?;
         }
         // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
         // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
@@ -937,11 +940,15 @@ impl InterChannelFundImportUpdateWitness {
                 "transport proof bytes must match transport_proof".to_string(),
             ));
         }
-        let receiver_delta = self.inter_channel_tx.receiver_deltas.first().ok_or_else(|| {
-            ChannelStateUpdateError::InvalidReceiverDeltaBundle(
-                "fund import requires the receiver delta entry".to_string(),
-            )
-        })?;
+        let receiver_delta = self
+            .inter_channel_tx
+            .receiver_deltas
+            .first()
+            .ok_or_else(|| {
+                ChannelStateUpdateError::InvalidReceiverDeltaBundle(
+                    "fund import requires the receiver delta entry".to_string(),
+                )
+            })?;
         let receiver_user_id = receiver_delta.receiver_pk_g;
         // SECURITY (pass-3 H1): the addressed member (`receiver_pk_g`) and the key the delta is
         // encrypted to (`receiver_regev_pk_digest`, the tx-leaf receiver wing) must name the SAME
@@ -965,16 +972,21 @@ impl InterChannelFundImportUpdateWitness {
         if self.prev_state.balance_state.regev_pk_digests[recipient_index]
             != receiver_delta.receiver_regev_pk_digest
         {
-            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
-                "fund import: receiver delta key digest != this channel's committed key at slot \
+            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(
+                format!(
+                    "fund import: receiver delta key digest != this channel's committed key at slot \
                  {recipient_index}"
-            )));
+                ),
+            ));
         }
-        receiver_delta.amount.reject_key_independent().map_err(|err| {
-            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
-                "fund import: receiver delta: {err}"
-            ))
-        })?;
+        receiver_delta
+            .amount
+            .reject_key_independent()
+            .map_err(|err| {
+                ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                    "fund import: receiver delta: {err}"
+                ))
+            })?;
         let public_inputs = ChannelStateUpdatePublicInputs {
             kind: ChannelTransitionKind::InterChannelFundImport,
             channel_id: self.prev_state.channel_id,
@@ -1147,14 +1159,21 @@ impl ReceiverBundleApplyUpdateWitness {
         if receiver_delta.receiver_regev_pk_digest
             != Bytes32::from(self.regev_pks[self.recipient_index].poseidon_digest())
         {
-            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
-                "receiver delta key digest does not match the registered key at member index {}",
-                self.recipient_index
-            )));
+            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(
+                format!(
+                    "receiver delta key digest does not match the registered key at member index {}",
+                    self.recipient_index
+                ),
+            ));
         }
-        receiver_delta.amount.reject_key_independent().map_err(|err| {
-            ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!("receiver delta: {err}"))
-        })?;
+        receiver_delta
+            .amount
+            .reject_key_independent()
+            .map_err(|err| {
+                ChannelStateUpdateError::InvalidReceiverDeltaBundle(format!(
+                    "receiver delta: {err}"
+                ))
+            })?;
         // The preceding fund-import step already folded this one logical incoming transfer. The
         // bundle applies its ciphertext delta without advancing the base settle chain.
         // Its accumulator update consumes the matching unapplied entitlement.
@@ -3505,7 +3524,9 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 3]),
+                enc_balances: BalanceState::pad_enc_balances_token0(
+                    &vec![crate::common::balance_state::zero_ciphertext().clone(); 3],
+                ),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
@@ -3539,7 +3560,9 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances_token0(&vec![crate::common::balance_state::zero_ciphertext().clone(); 3]),
+                enc_balances: BalanceState::pad_enc_balances_token0(
+                    &vec![crate::common::balance_state::zero_ciphertext().clone(); 3],
+                ),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[Bytes32::default(); 3]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),

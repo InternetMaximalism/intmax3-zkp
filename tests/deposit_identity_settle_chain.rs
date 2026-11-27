@@ -3,8 +3,9 @@
 //! `settled_tx_chain` advances as `push(chain, deposit.nullifier())`, and `Deposit::nullifier()`
 //! hashes `deposit_index` and `block_number` along with the payment fields. Two provers that agree
 //! on depositor/recipient/token/amount/aux but disagree on either number therefore produce
-//! different settle chains for one on-chain deposit — and `LiveBalanceService::bind_signed_snapshot`
-//! compares exactly those chains, so the channel becomes permanently unbindable.
+//! different settle chains for one on-chain deposit — and
+//! `LiveBalanceService::bind_signed_snapshot` compares exactly those chains, so the channel becomes
+//! permanently unbindable.
 //!
 //! That is not hypothetical: `setup-backing` proves the genesis against a fresh
 //! `BlockWitnessGenerator` (deposit in block 1), while the producer stamps
@@ -19,7 +20,7 @@
 use intmax3_zkp::{
     common::{balance_state::settled_tx_chain_push, deposit::Deposit, u63::U63},
     ethereum_types::{
-        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
+        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
 };
 
@@ -77,12 +78,18 @@ fn the_deposit_index_alone_changes_the_settle_chain() {
         deposit_at(1, 1).nullifier(),
         "deposit_index must be part of the deposit's identity"
     );
-    assert_ne!(genesis_chain(&deposit_at(0, 1)), genesis_chain(&deposit_at(1, 1)));
+    assert_ne!(
+        genesis_chain(&deposit_at(0, 1)),
+        genesis_chain(&deposit_at(1, 1))
+    );
 }
 
 #[test]
 fn one_deposit_proved_twice_the_same_way_agrees() {
     // The positive case the bootstrap depends on: when both sides fold the deposit with the same
     // identity, the chains they hand `bind_signed_snapshot` are equal.
-    assert_eq!(genesis_chain(&deposit_at(0, 1)), genesis_chain(&deposit_at(0, 1)));
+    assert_eq!(
+        genesis_chain(&deposit_at(0, 1)),
+        genesis_chain(&deposit_at(0, 1))
+    );
 }

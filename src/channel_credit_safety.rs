@@ -210,14 +210,20 @@ impl ChannelCreditBounds {
                 // by their dedicated caller before reaching this module.
                 // A slot the predecessor did not hold (a join) is a changed cell; its prior
                 // bound is the canonical zero opening.
-                row[token_slot] = prev.balance_state.enc_balances.get(slot).map(|r| &r[token_slot])
+                row[token_slot] = prev
+                    .balance_state
+                    .enc_balances
+                    .get(slot)
+                    .map(|r| &r[token_slot])
                     != Some(&next.balance_state.enc_balances[slot][token_slot])
                     || prev.balance_state.regev_pk_digests.get(slot)
                         != Some(&next.balance_state.regev_pk_digests[slot]);
                 if row[token_slot] {
                     *pool = add_bounds(
                         *pool,
-                        self.upper_bounds.get(slot).map_or(Some(0), |r| r[token_slot]),
+                        self.upper_bounds
+                            .get(slot)
+                            .map_or(Some(0), |r| r[token_slot]),
                     );
                 }
             }
@@ -242,7 +248,9 @@ impl ChannelCreditBounds {
                 let carried = if is_changed {
                     pools[token_slot]
                 } else {
-                    self.upper_bounds.get(slot).map_or(Some(0), |r| r[token_slot])
+                    self.upper_bounds
+                        .get(slot)
+                        .map_or(Some(0), |r| r[token_slot])
                 };
                 let known = tighter_bound(carried, as_u64(next.channel_fund.amounts[token_slot]));
                 let bound = with_owned_plaintext(

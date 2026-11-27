@@ -204,8 +204,8 @@ impl FalconKeys {
 
     /// Reconstruct a keypair from [`insecure_ntru_basis_bytes`], skipping `ntru_gen`. The LDL tree
     /// is recomputed deterministically from the basis, so the result is byte-identical to the
-    /// original keypair (same `pk_g`, same signing behavior). See the security note there — insecure
-    /// test identities only.
+    /// original keypair (same `pk_g`, same signing behavior). See the security note there —
+    /// insecure test identities only.
     ///
     /// [`insecure_ntru_basis_bytes`]: FalconKeys::insecure_ntru_basis_bytes
     pub fn from_insecure_ntru_basis_bytes(bytes: &[u8]) -> Result<Self, FalconSigError> {
@@ -646,7 +646,11 @@ mod tests {
         let bytes = original.insecure_ntru_basis_bytes();
         let restored = FalconKeys::from_insecure_ntru_basis_bytes(&bytes)
             .expect("basis round-trip must decode");
-        assert_eq!(restored.pk_g(), original.pk_g(), "reconstructed identity must match");
+        assert_eq!(
+            restored.pk_g(),
+            original.pk_g(),
+            "reconstructed identity must match"
+        );
         assert_eq!(
             restored.pk_coefficients(),
             original.pk_coefficients(),

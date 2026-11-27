@@ -769,7 +769,9 @@ fn prepared_journal_metadata_and_semantic_result_tampering_fail_closed() {
                 // The journal action is externally tagged, so its fields live under the single
                 // variant key (e.g. `action.postCloseFunding.timestamp`), not directly on
                 // `action`. Reach the timestamp through whatever that one key is.
-                let action = disk["prepared"]["action"].as_object_mut().expect("action object");
+                let action = disk["prepared"]["action"]
+                    .as_object_mut()
+                    .expect("action object");
                 let variant = action.keys().next().expect("one variant key").clone();
                 action[&variant]["timestamp"] = serde_json::json!(0);
             }
@@ -1330,7 +1332,12 @@ fn journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate
             .register("register-32".to_string(), snapshot_b.clone())
             .expect("register B");
         a_block = service
-            .post_inter_channel("post-31-0".to_string(), a_head.clone(), a_debit, a_descriptor)
+            .post_inter_channel(
+                "post-31-0".to_string(),
+                a_head.clone(),
+                a_debit,
+                a_descriptor,
+            )
             .expect("A's debit head H is journaled before its sub-block is posted")
             .block_number;
         b_block = service
@@ -1350,7 +1357,10 @@ fn journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate
                 .public_block(BlockNumber::new(number).expect("block number"))
                 .unwrap_or_else(|| panic!("block {number} is exportable"));
             if number == a_block {
-                assert_eq!(block.channel_id as u64, snapshot_a.record.channel_id.as_u64());
+                assert_eq!(
+                    block.channel_id as u64,
+                    snapshot_a.record.channel_id.as_u64()
+                );
             }
         }
 
@@ -1384,7 +1394,10 @@ fn journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate
             sibling_debit,
             sibling_descriptor,
         );
-        assert!(refused.is_err(), "a sibling of H at H-1 must be refused: {refused:?}");
+        assert!(
+            refused.is_err(),
+            "a sibling of H at H-1 must be refused: {refused:?}"
+        );
         assert_eq!(service.status().expect("status").block_number, head_block);
     }
 
@@ -1396,5 +1409,8 @@ fn journaled_sub_block_of_a_frozen_channel_cannot_be_excluded_from_the_candidate
         .expect("producer")
         .public_block(BlockNumber::new(a_block).expect("block number"))
         .expect("A's block survives replay");
-    assert_eq!(replayed.channel_id as u64, snapshot_a.record.channel_id.as_u64());
+    assert_eq!(
+        replayed.channel_id as u64,
+        snapshot_a.record.channel_id.as_u64()
+    );
 }
