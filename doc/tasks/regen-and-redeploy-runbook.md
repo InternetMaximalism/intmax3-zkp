@@ -206,7 +206,7 @@ the retired config artifacts first, in a dedicated clean staging worktree with d
 publishers stopped).
 
 `MLE_ALLOW_WIRE_V3_CONFIG_CUTOVER=1` is the only cutover permission and applies solely to a
-canonical retired wire-v2/PoW-20 -> wire-v3/PoW-22 migration. Per-file atomicity is not cohort
+canonical retired wire-v2/PoW-20 -> wire-v3 (current `WHIR_POW_BITS_V2`) migration. Per-file atomicity is not cohort
 atomicity: do not deploy, copy, publish, or commit a partial config cohort. Even after the independent
 16-config gate passes, keep the config-only state as an unpublished checkpoint in this staging
 worktree. It must not be merged, pushed, tagged, released, or handed to an operator independently of
@@ -273,7 +273,7 @@ validity/withdrawal circuit identities as the base configs; they are not eighth 
 verifiers.
 
 Every config must be canonical schema `plonky2-mle-v3-solidity-config`, schema/protocol version 3,
-WHIR PoW 22, compact encoding `MLEWHIR3`, and must contain an exact three-byte-per-public-input
+WHIR PoW 28 (`WHIR_POW_BITS_V2`; 22 before 2026-11-26), compact encoding `MLEWHIR3`, and must contain an exact three-byte-per-public-input
 `verificationKey.publicInputWireMap` plus an exact
 `abi.encode(MleVerifierV2.VerificationConfig)` whose hash equals the pinned verification-config
 digest. Reject a missing field, unknown field, digest mismatch, non-canonical Goldilocks limb, or

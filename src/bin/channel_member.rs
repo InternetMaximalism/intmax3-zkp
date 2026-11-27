@@ -30,14 +30,14 @@ use std::{
 
 #[path = "channel_member/burn_recovery.rs"]
 mod burn_recovery;
-#[path = "channel_member/send_receipts.rs"]
-mod send_receipts;
 #[path = "channel_member/deposit_capacity.rs"]
 mod deposit_capacity;
 #[path = "channel_member/deposit_recovery.rs"]
 mod deposit_recovery;
 #[path = "channel_member/inter_transfer_recovery_codec.rs"]
 mod inter_transfer_recovery_codec;
+#[path = "channel_member/send_receipts.rs"]
+mod send_receipts;
 
 #[cfg(unix)]
 use std::os::{
@@ -57,8 +57,7 @@ use intmax3_zkp::{
     circuits::{
         balance::{
             balance_processor::BalanceProcessor,
-            common::recipient::calculate_recipient_from_user_id,
-            spend_circuit::SpendCircuit,
+            common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
         channel::{
             cancel_close_pis::{CANCEL_CLOSE_PUBLIC_INPUTS_LEN, CancelClosePublicInputs},
@@ -127,8 +126,8 @@ use intmax3_zkp::{
         verify_inter_channel_descriptor_matches_debit,
         verify_inter_channel_send_transition_with_lookup, verify_l1_deposit_import_transition,
         verify_refresh_transition, verify_send_transition, verify_send_transition_as_recipient,
-        verify_slim_send_tx, verify_slim_send_tx_as_recipient, verify_snapshot,
-        verify_state_sig, verify_token_register_state_transition,
+        verify_slim_send_tx, verify_slim_send_tx_as_recipient, verify_snapshot, verify_state_sig,
+        verify_token_register_state_transition,
     },
 };
 use plonky2::{
@@ -441,9 +440,8 @@ struct SignerExitKitReceipt {
     backing_root: Bytes32,
     #[serde(default)]
     backing_anchor_block_number: u64,
-    /// Sticky L1 observation: `isFinalizedStateRoot(backing_root)` answered true once. Finality
-    /// is permanent (N13), so the check is never repeated for this receipt. Never set by the
-    /// envelope verifier; only by the L1 read in `require_durable_head_backing_finalized`.
+    /// Written by the 2026-11-09 signing gate, removed 2026-11-25 (no signature waits for L1).
+    /// Never read; kept so receipts written in between still parse.
     #[serde(default)]
     backing_root_finalized: bool,
 }
@@ -700,22 +698,12 @@ fn enforce_exit_kit_before_signature_release(
     successor: &ChannelState,
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
-    // C25/G16 (2026-11-09): whatever the successor does — an in-channel send, a debit, a burn, a
-    // deposit import, a token registration or an inter-channel credit — it is stacked on the
-    // durable head, and if that head's own block never reaches L1 the successor rolls back with
-    // it at close (a deposit import stacked on an unposted debit strands the deposit exactly like
-    // review item A). So the durable head's installed kit must already be backable on L1 before
-    // ANY asset-bearing successor is signed on top of it. Genesis has no predecessor; a delegate
-    // join only adds an empty row. A head without a receipt (kit-pending) is handled by the
-    // purpose-specific gates below, which either refuse or carry a prepared kit.
-    if !matches!(
-        purpose,
-        StateSigningPurpose::Genesis | StateSigningPurpose::DelegateJoin
-    ) && cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
-        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
-    }) {
-        require_durable_head_backing_finalized(cli, purpose)?;
-    }
+    // No signature waits for L1 (owner decision 2026-11-25). The 2026-11-09 gate that refused
+    // every successor of a head whose block was not yet finalized ("HEAD BACKING NOT FINALIZED")
+    // is removed: a co-signed successor is final when the sig-cluster signs it. The block producer
+    // posts the head's block (wallet-l1 `publishLater`), the close picks the newest head whose
+    // backing L1 finalized (G16) and a strictly newer one may replace it during the challenge
+    // window; a deposit no closed head imported is refunded to its depositor (G23).
 
     if purpose.requires_prepared_exit_kit() {
         if purpose.is_terminal() {
@@ -794,122 +782,6 @@ fn enforce_exit_kit_before_signature_release(
     Ok(())
 }
 
-/// Stable stderr marker for the one refusal the relay resolves by publishing the pending validity
-/// candidate and retrying (see `hosting/wallet/wallet-relay.js`).
-const HEAD_BACKING_NOT_FINALIZED: &str = "HEAD BACKING NOT FINALIZED";
-
-/// The RPC the signing paths read L1 finality from (same default as every other CLI route).
-fn finality_rpc() -> String {
-    std::env::var("RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string())
-}
-
-/// In-channel successors are only as exitable as the kit they reuse (C25, G16). A debit or
-/// deposit-import head is N-of-N signed BEFORE its small block is posted: its kit's backing root
-/// is the rollup state AFTER that block, which is finalized on L1 only once the block is posted,
-/// proved and finalized. Until then every H2=0 successor signed on top of it shares the same
-/// unbackable statement, and if the block never posts (producer stall, or the sender freezing the
-/// channel right after its debit), `close` falls back to the pre-debit head and EVERY in-channel
-/// payment made since rolls back — the payees delivered against signatures that were never
-/// closable. So: before releasing an in-channel signature, require the durable head's kit root to
-/// be `isFinalizedStateRoot` on the rollup. The answer is cached in the receipt once true (finality
-/// is permanent), so a channel whose head is backed pays one `cast call` per asset-moving head,
-/// not per send.
-/// The proposal-only run (`--propose-exit-kit`) must refuse exactly where the signing run would:
-/// the API performs phase-1 work between the two (a deposit import consumes the L1 leaf into the
-/// live balance before the co-signers sign), so a refusal first raised in the signing run leaves
-/// the live balance ahead of every signed head ("signed snapshot settle chain differs from the
-/// pending live balance proof", measured 2026-11-11 on the rehearsal). Same gate as
-/// `enforce_exit_kit_before_signature_release`, evaluated before the proposal is emitted.
-fn refuse_proposal_on_unfinalized_head_backing(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-) {
-    if cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
-        validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state).is_ok()
-    }) {
-        require_durable_head_backing_finalized(cli, purpose).unwrap_or_else(|e| die(e));
-    }
-}
-
-fn require_durable_head_backing_finalized(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-) -> Result<(), String> {
-    require_durable_head_backing_finalized_with(cli, purpose, |rollup, root, anchor| {
-        let rpc = finality_rpc();
-        let rollup = rollup.to_string();
-        // `isFinalizedStateRoot` is set only for the root a validity candidate ENDS at (and
-        // genesis); a head whose block sits inside a candidate never gets its root marked, although
-        // its block is just as final. The gate's question is whether the head's BLOCK reached L1,
-        // so the finalized block number answers it too (measured 2026-11-11 on the rehearsal:
-        // candidates 0->3 and 3->8 left channel 8's block-4 head refused forever).
-        read_finalized_state_root(&rpc, &rollup, root)
-            || read_latest_finalized_block_number(&rpc, &rollup).is_some_and(|final_block| anchor <= final_block)
-    })
-}
-
-/// `finalized(rollup, root)` answers `IntmaxRollup.isFinalizedStateRoot(root)`. The sticky flag
-/// is written into the receipt here and persisted by the caller's `save_state` (every signing
-/// path saves after a released signature); a refusal changes nothing.
-fn require_durable_head_backing_finalized_with(
-    cli: &mut CliState,
-    purpose: StateSigningPurpose,
-    finalized: impl Fn(&Address, &Bytes32, u64) -> bool,
-) -> Result<(), String> {
-    let already = cli
-        .signer_exit_kit_receipt
-        .as_ref()
-        .map(|receipt| receipt.backing_root_finalized)
-        .ok_or_else(|| "SIGNER-INDEPENDENT EXIT REQUIRED: no signer exit-kit receipt".to_string())?;
-    if already {
-        return Ok(());
-    }
-    // The receipt's rollup was pinned against the settlement binding when the kit was installed
-    // (`signer_exit_kit_context`); it is this signer's own durable record, not a caller input.
-    let (rollup, recorded) = cli
-        .signer_exit_kit_receipt
-        .as_ref()
-        .map(|receipt| {
-            (
-                receipt.rollup,
-                (receipt.backing_root, receipt.backing_anchor_block_number),
-            )
-        })
-        .expect("checked above");
-    let (root, anchor) = if recorded.0 == Bytes32::default() {
-        // A receipt written before the backing root was recorded: read it from the envelope.
-        durable_head_kit_backing_root(cli, Path::new(".")).ok_or_else(|| {
-            "SIGNER-INDEPENDENT EXIT REQUIRED: the durable head's exit-kit envelope is not \
-             retained, so its backing root cannot be checked on L1 (run install-exit-kit)"
-                .to_string()
-        })?
-    } else {
-        recorded
-    };
-    if !finalized(&rollup, &root, anchor) {
-        let head = &cli.snapshot.state;
-        return Err(format!(
-            "{HEAD_BACKING_NOT_FINALIZED}: refusing {purpose:?} because channel {}'s durable head {} \
-             (epoch {}, state version {}) is backed by an exit kit anchored at rollup block {anchor} \
-             (root {root}) that rollup {rollup} has not finalized yet (neither the root nor block {anchor}). The head's own \
-             block (a debit, burn or deposit import) must be posted, proved and finalized on L1 before \
-             any in-channel payment is signed on top of it; otherwise, if that block never posts, \
-             every such payment rolls back at close (C25/G16). Publish the pending validity \
-             candidate and retry.",
-            head.channel_id.as_u64(),
-            head.digest,
-            head.epoch,
-            head.balance_state.state_version,
-        ));
-    }
-    if let Some(receipt) = cli.signer_exit_kit_receipt.as_mut() {
-        receipt.backing_root = root;
-        receipt.backing_anchor_block_number = anchor;
-        receipt.backing_root_finalized = true;
-    }
-    Ok(())
-}
-
 /// One crash-safe anti-equivocation decision. The map key repeats the first three fields in a
 /// canonical printable form so malformed/renamed state cannot alias two signing decisions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,7 +851,8 @@ struct SettlementDeploymentIntent {
     late_incoming_verifier: String,
     /// The late-deposit adapter (post-close refund of a deposit no signed state imported), the
     /// materializer's 4th constructor argument since 2026-11-10. Defaulted so an intent persisted
-    /// before the field still parses; `settlement_deploy_mode_for_intent` then refuses to resume it.
+    /// before the field still parses; `settlement_deploy_mode_for_intent` then refuses to resume
+    /// it.
     #[serde(default)]
     late_deposit_verifier: String,
     /// A sibling channel's registered manager whose close-funding materializer this deployment
@@ -2416,7 +2289,11 @@ fn cmd_slot_view(args: &[String]) {
         flag_value(args, "--slots")
             .unwrap_or_else(|| die(usage))
             .split(',')
-            .map(|t| t.trim().parse::<u32>().unwrap_or_else(|e| die(format!("slot {t}: {e}"))))
+            .map(|t| {
+                t.trim()
+                    .parse::<u32>()
+                    .unwrap_or_else(|e| die(format!("slot {t}: {e}")))
+            })
             .collect()
     };
     let mut views = serde_json::Map::new();
@@ -2446,7 +2323,11 @@ fn cmd_member_info(args: &[String]) {
         .members
         .iter()
         .find(|m| m.slot == slot)
-        .unwrap_or_else(|| die(format!("member-info: slot {slot} is not an active participant")));
+        .unwrap_or_else(|| {
+            die(format!(
+                "member-info: slot {slot} is not an active participant"
+            ))
+        });
     write_json(out_path, member);
 }
 
@@ -3190,8 +3071,9 @@ fn require_active_settlement_binding(
     //   * delegates keep joining after deployment, appended at the delegate boundary and never
     //     removed, so the live count may only be LARGER.
     // Hence: the first `participant_count` leaves (every cosigner plus every delegate registered at
-    // deployment) must reproduce the deployed root, and nothing registered may be changed or dropped.
-    // Any other local mutation is still detected before it can construct an L1 proof/call.
+    // deployment) must reproduce the deployed root, and nothing registered may be changed or
+    // dropped. Any other local mutation is still detected before it can construct an L1
+    // proof/call.
     let reg = build_live_settlement_reg_record(&state);
     let strings = |key: &str| -> Vec<String> {
         reg[key]
@@ -3199,9 +3081,11 @@ fn require_active_settlement_binding(
             .unwrap_or_else(|| die(format!("live settlement record has no `{key}` array")))
             .iter()
             .map(|v| {
-                v.as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| die(format!("live settlement record `{key}` is not a string array")))
+                v.as_str().map(str::to_owned).unwrap_or_else(|| {
+                    die(format!(
+                        "live settlement record `{key}` is not a string array"
+                    ))
+                })
             })
             .collect()
     };
@@ -4131,7 +4015,9 @@ fn verified_signer_exit_kit_receipt_at(
         channel_id: kit.backing_public_inputs.channel_id,
         settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
         token_funds_digest: kit.backing_public_inputs.token_funds_digest,
-        backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+        backing_root: kit
+            .backing_public_inputs
+            .finalized_extended_state_commitment,
         backing_anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
         backing_root_finalized: false,
     };
@@ -4182,7 +4068,9 @@ fn verified_prepared_exit_kit_receipt(
         channel_id: kit.backing_public_inputs.channel_id,
         settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
         token_funds_digest: kit.backing_public_inputs.token_funds_digest,
-        backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+        backing_root: kit
+            .backing_public_inputs
+            .finalized_extended_state_commitment,
         backing_anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
         backing_root_finalized: false,
     };
@@ -4256,13 +4144,16 @@ fn verify_persisted_signer_exit_kit_at(cli: &CliState, directory: &Path) -> Resu
 }
 
 /// A durable receipt agrees with its re-verified envelope when every statement field is equal.
-/// The L1 finality flag is this signer's own observation (never in the envelope), and a receipt
-/// written before the backing root was recorded carries a zero root; both are tolerated here and
-/// filled in by `require_durable_head_backing_finalized`.
-fn receipt_matches_reverified(stored: &SignerExitKitReceipt, recomputed: &SignerExitKitReceipt) -> bool {
+/// The retired L1 finality flag is never in the envelope, and a receipt written before the backing
+/// root was recorded carries a zero root; both are tolerated here.
+fn receipt_matches_reverified(
+    stored: &SignerExitKitReceipt,
+    recomputed: &SignerExitKitReceipt,
+) -> bool {
     let mut normalized = stored.clone();
     normalized.backing_root_finalized = false;
-    if normalized.backing_root == Bytes32::default() && normalized.backing_anchor_block_number == 0 {
+    if normalized.backing_root == Bytes32::default() && normalized.backing_anchor_block_number == 0
+    {
         normalized.backing_root = recomputed.backing_root;
         normalized.backing_anchor_block_number = recomputed.backing_anchor_block_number;
     }
@@ -5497,12 +5388,6 @@ fn choose_close_head(
     }
 }
 
-/// `IntmaxRollup.latestFinalizedBlockNumber()`, or None when the call fails.
-fn read_latest_finalized_block_number(rpc: &str, rollup: &str) -> Option<u64> {
-    let out = cast(&["call", rollup, "latestFinalizedBlockNumber()(uint64)", "--rpc-url", rpc]);
-    out.trim().split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
-}
-
 fn read_finalized_state_root(rpc: &str, rollup: &str, root: &Bytes32) -> bool {
     const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
     cast(&[
@@ -5582,7 +5467,9 @@ fn archived_signer_exit_kit_envelopes_at(
         envelopes.push(ArchivedExitKitEnvelope {
             path,
             bytes,
-            backing_root: kit.backing_public_inputs.finalized_extended_state_commitment,
+            backing_root: kit
+                .backing_public_inputs
+                .finalized_extended_state_commitment,
             anchor_block_number: kit.backing_public_inputs.anchor_block_number.as_u64(),
             head: envelope.backing.signed_head,
             record: envelope.backing.channel_record,
@@ -5662,7 +5549,11 @@ fn exit_kit_envelope_for<'a>(
     envelopes
         .iter()
         .find(|envelope| envelope.head.digest == state.digest)
-        .or_else(|| envelopes.iter().find(|envelope| envelope.statement_key() == key))
+        .or_else(|| {
+            envelopes
+                .iter()
+                .find(|envelope| envelope.statement_key() == key)
+        })
 }
 
 /// The backing root of the durable head's installed kit, read from the receipt's archived
@@ -5691,7 +5582,8 @@ fn durable_head_kit_backing_root(cli: &CliState, directory: &Path) -> Option<(By
         return None;
     }
     Some((
-        kit.backing_public_inputs.finalized_extended_state_commitment,
+        kit.backing_public_inputs
+            .finalized_extended_state_commitment,
         kit.backing_public_inputs.anchor_block_number.as_u64(),
     ))
 }
@@ -5757,8 +5649,9 @@ fn resolve_close_head(
         } => {
             let (record, state) = archived_state(&head)
                 .unwrap_or_else(|| die("[close] selected fallback head vanished from the archive"));
-            let envelope = exit_kit_envelope_for(&envelopes, &state)
-                .unwrap_or_else(|| die("[close] selected fallback head's kit vanished from the archive"));
+            let envelope = exit_kit_envelope_for(&envelopes, &state).unwrap_or_else(|| {
+                die("[close] selected fallback head's kit vanished from the archive")
+            });
             // Cryptographically re-verify the archived envelope (pinned Balance VD, Balance and
             // backing proofs) before a single byte of it enters the close witness, and the
             // fallback head's own N-of-N (the envelope may have been proved for an earlier head
@@ -7227,12 +7120,25 @@ fn rollup_bond_top_up(rpc: &str, rollup: &str, producer: &str) -> u64 {
             .and_then(|value| value.parse::<u128>().ok())
             .unwrap_or_else(|| die(format!("the rollup's {what} is unreadable: {raw:?}")))
     };
-    let base = word(&strip_cast_number_annotations(&String::from_utf8_lossy(&output.stdout)), "baseStake");
-    let per_post = word(&cast_call(rpc, rollup, "postStake()(uint256)", &[]), "postStake");
-    let bond = cast_call(rpc, rollup, "bonds(address)(uint96,uint48,uint48)", &[producer]);
+    let base = word(
+        &strip_cast_number_annotations(&String::from_utf8_lossy(&output.stdout)),
+        "baseStake",
+    );
+    let per_post = word(
+        &cast_call(rpc, rollup, "postStake()(uint256)", &[]),
+        "postStake",
+    );
+    let bond = cast_call(
+        rpc,
+        rollup,
+        "bonds(address)(uint96,uint48,uint48)",
+        &[producer],
+    );
     let fields: Vec<u128> = bond.lines().map(|line| word(line, "bond")).collect();
     let [balance, posted, released] = fields[..] else {
-        die(format!("the rollup's bond for {producer} is unreadable: {bond:?}"))
+        die(format!(
+            "the rollup's bond for {producer} is unreadable: {bond:?}"
+        ))
     };
     let required = base + (posted + 1 - released) * per_post;
     u64::try_from(required.saturating_sub(balance))
@@ -8119,6 +8025,105 @@ fn rpc_knows_transaction(rpc: &str, tx_hash: &str) -> bool {
             .is_ok_and(|value| !value.is_null())
 }
 
+/// Sign a call of `calldata` on `to` at `nonce` and broadcast it, the calldata never on a command
+/// line: a proof-carrying call is over Linux's 131,071-byte argument limit, where `cast send <to>
+/// <calldata>` fails with E2BIG. The signed bytes are checked against every requested field and
+/// the signer before they are sent. Returns the transaction hash.
+#[allow(clippy::too_many_arguments)]
+fn send_signed_call(
+    rpc: &str,
+    signer: &L1Signer,
+    chain_id: u64,
+    from: &str,
+    to: &str,
+    calldata: &str,
+    value: u128,
+    nonce: u64,
+    what: &str,
+) -> String {
+    use intmax3_zkp::l1_raw_transaction::{
+        CallTransaction, decode_hex, send_raw_transaction, sign_call,
+    };
+    let data = decode_hex(calldata).unwrap_or_else(|e| die(format!("{what} calldata: {e}")));
+    let signed = sign_call(
+        rpc,
+        &CallTransaction {
+            chain_id,
+            from,
+            to,
+            value,
+            data: &data,
+            nonce: Some(nonce),
+        },
+        &|command| signer.append_to_command(command),
+    )
+    .unwrap_or_else(|e| die(format!("sign {what} transaction: {e}")));
+    match send_raw_transaction(rpc, &signed.raw) {
+        Ok(published) if published.eq_ignore_ascii_case(&signed.hash) => {}
+        Ok(published) => die(format!(
+            "RPC reported {what} transaction {published}; signed {}",
+            signed.hash
+        )),
+        // A node may accept the transaction and then fail to answer.
+        Err(error) if rpc_knows_transaction(rpc, &signed.hash) => {
+            eprintln!("{what}: the RPC knows {} after: {error}", signed.hash);
+        }
+        Err(error) => die(format!("publish {what} transaction: {error}")),
+    }
+    signed.hash
+}
+
+/// `l1-call <rpc_url> <to>`: sign one call with the configured L1 signer, its calldata (hex) read
+/// from stdin, send it, wait for its receipt and print the receipt as `cast receipt --json` does.
+/// For proof-carrying calls made by the wallet server (a late-deposit claim): their calldata is
+/// over Linux's 131,071-byte argument limit, so `cast send <to> <calldata>` cannot start there.
+fn cmd_l1_call(args: &[String]) {
+    use std::io::Read as _;
+    let usage = "l1-call needs <rpc_url> <to>, with the calldata (hex) on stdin";
+    let rpc = args.get(1).unwrap_or_else(|| die(usage));
+    let to = args.get(2).unwrap_or_else(|| die(usage));
+    let mut calldata = String::new();
+    std::io::stdin()
+        .read_to_string(&mut calldata)
+        .unwrap_or_else(|e| die(format!("l1-call: read calldata from stdin: {e}")));
+    let calldata = calldata.trim();
+    if calldata.len() < 10 {
+        die("l1-call: stdin holds no calldata (0x + selector + arguments)");
+    }
+    let chain_id = rpc_chain_id(rpc);
+    let signer = L1Signer::for_chain_id(chain_id);
+    let from = signer.address();
+    let nonce = read_account_nonce(rpc, &from, "latest");
+    let tx_hash = send_signed_call(
+        rpc, &signer, chain_id, &from, to, calldata, 0, nonce, "l1-call",
+    );
+    wait_for_l1_receipt(rpc, &tx_hash, "l1-call");
+    println!(
+        "{}",
+        cast(&["receipt", &tx_hash, "--json", "--async", "--rpc-url", rpc]).trim()
+    );
+}
+
+/// Wait until the RPC has a receipt for `tx_hash` (as `cast send` does before it returns).
+fn wait_for_l1_receipt(rpc: &str, tx_hash: &str, what: &str) {
+    for _ in 0..300 {
+        let output = Command::new("cast")
+            .args(["receipt", tx_hash, "--json", "--async", "--rpc-url", rpc])
+            .output()
+            .unwrap_or_else(|e| die(format!("cast receipt failed to start: {e}")));
+        if output.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .is_ok_and(|value| value.is_object())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    die(format!(
+        "{what} transaction {tx_hash} has no receipt after 15 minutes; a retry reconciles it"
+    ));
+}
+
 fn full_withdrawal_intent_tx_hash_in_block(
     block: &serde_json::Value,
     intent: &FullWithdrawalCallIntent,
@@ -8351,32 +8356,21 @@ fn publish_full_withdrawal_call(
     signer: &L1Signer,
     intent: &FullWithdrawalCallIntent,
 ) -> String {
-    let nonce = intent.caller_nonce.to_string();
-    let value = intent.value.to_string();
-    let mut command = Command::new("cast");
-    command.args([
-        "send",
+    // A withdrawal or attestation step carries its proof in calldata, over Linux's 131,071-byte
+    // argument limit: `cast send <target> <calldata>` cannot start there. Sign here and send the
+    // raw transaction on stdin (without waiting for the receipt, as `cast send --async`).
+    let rpc_chain = rpc_chain_id(rpc);
+    let hash = send_signed_call(
+        rpc,
+        signer,
+        rpc_chain,
+        &intent.caller,
         &intent.target,
         &intent.calldata,
-        "--value",
-        &value,
-        "--nonce",
-        &nonce,
-        "--async",
-        "--rpc-url",
-        rpc,
-    ]);
-    signer.append_to_command(&mut command);
-    let output = command
-        .output()
-        .unwrap_or_else(|error| die(format!("broadcast full-withdrawal call: {error}")));
-    if !output.status.success() {
-        die(format!(
-            "full-withdrawal broadcast returned an error after its intent was safely journaled: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        u128::from(intent.value),
+        intent.caller_nonce,
+        "full-withdrawal call",
+    );
     if hex_body(&hash, 64, "full-withdrawal transaction hash").len() != 64 {
         unreachable!("hex_body either validates or terminates")
     }
@@ -9157,26 +9151,19 @@ fn publish_blob_transaction(rpc: &str, raw_transaction: &str, expected_hash: &st
         );
         return;
     }
-    let output = Command::new("cast")
-        .args(["publish", raw_transaction, "--async", "--rpc-url", rpc])
-        .output()
-        .unwrap_or_else(|error| {
-            die(format!(
-                "cast publish blob transaction failed to start: {error}"
-            ))
-        });
-    if !output.status.success() {
-        // The RPC may have accepted the transaction but disconnected before answering.  Adopt it
-        // only when an independent hash lookup sees the exact signed hash.
-        if rpc_knows_transaction(rpc, expected_hash) {
-            return;
-        }
-        die(format!(
-            "cast publish blob transaction failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let published = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // On stdin, not argv: a blob transaction is far over Linux's 131,071-byte argument limit.
+    let published =
+        match intmax3_zkp::l1_raw_transaction::send_raw_transaction(rpc, raw_transaction) {
+            Ok(published) => published,
+            Err(error) => {
+                // The RPC may have accepted the transaction but disconnected before answering.
+                // Adopt it only when an independent hash lookup sees the exact signed hash.
+                if rpc_knows_transaction(rpc, expected_hash) {
+                    return;
+                }
+                die(format!("publish blob transaction: {error}"));
+            }
+        };
     if !same_hex_value(&published, expected_hash) {
         die(format!(
             "RPC published blob transaction {published}, but signed transaction hash is {expected_hash}"
@@ -9370,129 +9357,129 @@ fn post_block_round(
     // a chain the proof does not cover — `finalize` would then fail SILENTLY and block every
     // withdrawal until the ~12 h timeout. With the pin the race is a clean revert and we retry.
     let existing = journal.rounds.get(i).cloned();
-    let (mut round, validated): (ProofDaPostRoundJournal, ValidatedBlobSidecars) =
-        if let Some(round) = existing {
-            if guarded != round.guarded_predecessor.is_some() {
-                die(format!(
-                    "persisted proof-DA round {i} was signed for the other post endpoint"
-                ));
-            }
-            let expected_calldata = blob_post_calldata(
-                &sub_block,
-                proof_hash,
-                proof_length,
-                state_root,
-                &round.pending_chains_pin,
-                round.guarded_predecessor.as_ref(),
-            );
-            if round.round_index != i || !same_hex_value(&round.calldata, &expected_calldata) {
-                die(format!(
-                    "persisted proof-DA round {i} has different calldata"
-                ));
-            }
-            let value = round.value_wei.unwrap_or_else(|| {
+    let (mut round, validated): (ProofDaPostRoundJournal, ValidatedBlobSidecars) = if let Some(
+        round,
+    ) = existing
+    {
+        if guarded != round.guarded_predecessor.is_some() {
+            die(format!(
+                "persisted proof-DA round {i} was signed for the other post endpoint"
+            ));
+        }
+        let expected_calldata = blob_post_calldata(
+            &sub_block,
+            proof_hash,
+            proof_length,
+            state_root,
+            &round.pending_chains_pin,
+            round.guarded_predecessor.as_ref(),
+        );
+        if round.round_index != i || !same_hex_value(&round.calldata, &expected_calldata) {
+            die(format!(
+                "persisted proof-DA round {i} has different calldata"
+            ));
+        }
+        let value = round.value_wei.unwrap_or_else(|| {
                 die(format!(
                     "persisted proof-DA round {i} was signed for a rollup without the prepaid posting bond"
                 ))
             });
-            let decoded = decode_signed_blob_transaction(&round.raw_signed_transaction);
-            let checked = validate_decoded_blob_transaction(
-                &decoded,
-                proof_payload,
-                journal.chain_id,
-                &journal.submitter,
-                rollup,
-                value,
-                &round.calldata,
-            )
-            .unwrap_or_else(|error| {
-                die(format!("revalidate persisted proof-DA round {i}: {error}"))
-            });
-            if !same_hex_value(&checked.transaction_hash, &round.transaction_hash)
-                || checked.blob_versioned_hashes != round.blob_versioned_hashes
-                || !same_hex_value(&checked.compact_sidecars, &round.compact_sidecars)
-            {
-                die(format!(
-                    "persisted proof-DA round {i} sidecar metadata was modified"
-                ));
-            }
-            (round, checked)
-        } else {
-            if journal.rounds.len() != i {
-                die("proof-DA round journal is not a contiguous 0,1,2 sequence");
-            }
-            let pending_pin = block["pending_chains_pin"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[])
-                        .trim()
-                        .to_string()
-                });
-            // A guarded post extends exactly the head it was signed against. The previous round
-            // is finalized before this one is signed, so the head read here is that round's.
-            let guarded_predecessor = guarded.then(|| GuardedPredecessor {
-                block_number: parse_u64_quantity(
-                    cast_call(rpc, rollup, "blockNumber()(uint64)", &[])
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or_default(),
-                    "rollup block number",
-                ),
-                block_hash_chain: cast_call(rpc, rollup, "blockHashChain()(bytes32)", &[])
+        let decoded = decode_signed_blob_transaction(&round.raw_signed_transaction);
+        let checked = validate_decoded_blob_transaction(
+            &decoded,
+            proof_payload,
+            journal.chain_id,
+            &journal.submitter,
+            rollup,
+            value,
+            &round.calldata,
+        )
+        .unwrap_or_else(|error| die(format!("revalidate persisted proof-DA round {i}: {error}")));
+        if !same_hex_value(&checked.transaction_hash, &round.transaction_hash)
+            || checked.blob_versioned_hashes != round.blob_versioned_hashes
+            || !same_hex_value(&checked.compact_sidecars, &round.compact_sidecars)
+        {
+            die(format!(
+                "persisted proof-DA round {i} sidecar metadata was modified"
+            ));
+        }
+        (round, checked)
+    } else {
+        if journal.rounds.len() != i {
+            die("proof-DA round journal is not a contiguous 0,1,2 sequence");
+        }
+        let pending_pin = block["pending_chains_pin"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[])
                     .trim()
-                    .to_string(),
+                    .to_string()
             });
-            // The previous round is finalized before this one is signed. Until this post mines, a
-            // finalization or release can only lower what the bond needs (the surplus stays in
-            // the bond); a truncation, the only way it can need more, also rewinds the head the
-            // guarded post is bound to, so that post reverts instead of landing underfunded.
-            let value = rollup_bond_top_up(rpc, rollup, &journal.submitter);
-            let (raw_signed_transaction, calldata) = sign_blob_post(
-                rollup,
-                signer,
-                rpc,
-                &sub_block,
-                proof_da_path,
-                proof_hash,
-                proof_length,
-                state_root,
-                &pending_pin,
-                guarded_predecessor.as_ref(),
-                value,
-            );
-            let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
-            let checked = validate_decoded_blob_transaction(
-                &decoded,
-                proof_payload,
-                journal.chain_id,
-                &journal.submitter,
-                rollup,
-                value,
-                &calldata,
-            )
-            .unwrap_or_else(|error| die(format!("validate signed proof-DA round {i}: {error}")));
-            let round = ProofDaPostRoundJournal {
-                round_index: i,
-                pending_chains_pin: pending_pin,
-                calldata,
-                raw_signed_transaction,
-                transaction_hash: checked.transaction_hash.clone(),
-                blob_versioned_hashes: checked.blob_versioned_hashes.clone(),
-                compact_sidecars: checked.compact_sidecars.clone(),
-                submission_id: None,
-                receipt_block_hash: None,
-                receipt_block_number: None,
-                finalized_checkpoint: None,
-                guarded_predecessor,
-                value_wei: Some(value),
-            };
-            // Irreversible ordering: signed raw tx + sidecars hit durable storage first.  Only the
-            // next line after this branch may publish it.
-            journal.rounds.push(round.clone());
-            write_private_json_at(journal_path, journal);
-            (round, checked)
+        // A guarded post extends exactly the head it was signed against. The previous round
+        // is finalized before this one is signed, so the head read here is that round's.
+        let guarded_predecessor = guarded.then(|| GuardedPredecessor {
+            block_number: parse_u64_quantity(
+                cast_call(rpc, rollup, "blockNumber()(uint64)", &[])
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default(),
+                "rollup block number",
+            ),
+            block_hash_chain: cast_call(rpc, rollup, "blockHashChain()(bytes32)", &[])
+                .trim()
+                .to_string(),
+        });
+        // The previous round is finalized before this one is signed. Until this post mines, a
+        // finalization or release can only lower what the bond needs (the surplus stays in
+        // the bond); a truncation, the only way it can need more, also rewinds the head the
+        // guarded post is bound to, so that post reverts instead of landing underfunded.
+        let value = rollup_bond_top_up(rpc, rollup, &journal.submitter);
+        let (raw_signed_transaction, calldata) = sign_blob_post(
+            rollup,
+            signer,
+            rpc,
+            &sub_block,
+            proof_da_path,
+            proof_hash,
+            proof_length,
+            state_root,
+            &pending_pin,
+            guarded_predecessor.as_ref(),
+            value,
+        );
+        let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
+        let checked = validate_decoded_blob_transaction(
+            &decoded,
+            proof_payload,
+            journal.chain_id,
+            &journal.submitter,
+            rollup,
+            value,
+            &calldata,
+        )
+        .unwrap_or_else(|error| die(format!("validate signed proof-DA round {i}: {error}")));
+        let round = ProofDaPostRoundJournal {
+            round_index: i,
+            pending_chains_pin: pending_pin,
+            calldata,
+            raw_signed_transaction,
+            transaction_hash: checked.transaction_hash.clone(),
+            blob_versioned_hashes: checked.blob_versioned_hashes.clone(),
+            compact_sidecars: checked.compact_sidecars.clone(),
+            submission_id: None,
+            receipt_block_hash: None,
+            receipt_block_number: None,
+            finalized_checkpoint: None,
+            guarded_predecessor,
+            value_wei: Some(value),
         };
+        // Irreversible ordering: signed raw tx + sidecars hit durable storage first.  Only the
+        // next line after this branch may publish it.
+        journal.rounds.push(round.clone());
+        write_private_json_at(journal_path, journal);
+        (round, checked)
+    };
 
     eprintln!(
         "[withdraw] postBlockAndSubmit round {i}: signed {} blob(s), tx {} (journaled before publish)…",
@@ -10347,7 +10334,9 @@ fn cmd_withdraw(args: &[String]) {
         );
         let fields: Vec<&str> = bond.lines().map(str::trim).collect();
         let [balance, posted, released] = fields[..] else {
-            die(format!("the rollup's bond for {depositor_hex} is unreadable: {bond:?}"))
+            die(format!(
+                "the rollup's bond for {depositor_hex} is unreadable: {bond:?}"
+            ))
         };
         if posted != released {
             die(format!(
@@ -10803,14 +10792,16 @@ fn build_reg_record() -> serde_json::Value {
 /// Design rule (item E, 2026-11-10): every sig-cluster holds at least one DAEMON signer — a
 /// cosigner slot (`< member_count`) whose key this `channel_member` derives itself. Browser
 /// sessions sign nothing but their own join contribution (they sit at delegate slots and
-/// `wallet_cosign` refuses delegate slots), hold no exit kit and consult no L1, so a cluster of
-/// browsers alone would have no backing-finality gate (`require_durable_head_backing_finalized`)
-/// and no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always seats
-/// the CLI's cosigners at `0..cli_cosigner_count()`; this makes the rule explicit and refuses a
-/// hand-built state (empty `controlled`, foreign `member_pk_gs`) before any signature or the
+/// `wallet_cosign` refuses delegate slots) and hold no exit kit, so a cluster of browsers alone
+/// would have no signer-independent exit. The shipped `create_channel`/`join_delegate` flow always
+/// seats the CLI's cosigners at `0..cli_cosigner_count()`; this makes the rule explicit and refuses
+/// a hand-built state (empty `controlled`, foreign `member_pk_gs`) before any signature or the
 /// immutable L1 member set is produced. Ownership evidence is the same the signing primitive
 /// uses: the derived `pk_g` must equal the record's entry for that slot.
-fn require_daemon_signer(record: &ChannelRecord, controlled: &[ControlledMember]) -> Result<(), String> {
+fn require_daemon_signer(
+    record: &ChannelRecord,
+    controlled: &[ControlledMember],
+) -> Result<(), String> {
     let member_count = usize::from(record.member_count);
     let held = controlled
         .iter()
@@ -10929,7 +10920,8 @@ fn main() {
     // only their own receipt and journal files (each journal under its own lock), and never read
     // or write `cli_state.json`. They wait minutes on L1 finality while the channel keeps
     // advancing, so they take neither the channel state lock nor run its state recovery.
-    let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize");
+    // `l1-call` signs and sends one L1 call and touches no channel file at all.
+    let l1_driver = matches!(cmd, "publish-wallet-validity" | "pw-finalize" | "l1-call");
     // Read-only projections of a published snapshot file: never queue behind a writer, never
     // run recoveries.
     let read_only_view = matches!(cmd, "slot-view" | "member-info");
@@ -10958,6 +10950,7 @@ fn main() {
         // delegate SENDING
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
+        "l1-call" => cmd_l1_call(&args),
         "install-exit-kit" => cmd_install_exit_kit(&args),
         "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
@@ -11162,7 +11155,10 @@ fn cmd_init(args: &[String]) {
         state_schema_version: STATE_SCHEMA_VERSION,
         controlled,
         snapshot,
-        accepted_send_receipts: previous.as_ref().map(|s| s.accepted_send_receipts.clone()).unwrap_or_default(),
+        accepted_send_receipts: previous
+            .as_ref()
+            .map(|s| s.accepted_send_receipts.clone())
+            .unwrap_or_default(),
         credit_safety_bounds: previous
             .as_ref()
             .map(|p| p.credit_safety_bounds.clone())
@@ -11932,7 +11928,12 @@ fn cosign_gate(state: &CliState, payload: &SendPayload) -> ChannelState {
 /// Advance this CLI's head to a FULLY co-signed successor and publish it (`channel_snapshot.json`
 /// is the browsers' re-import source; without the sync the next send fails "payload does not
 /// extend the current head").
-fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path: &str, request: &SendPayload) {
+fn adopt_cosigned_head(
+    state: &mut CliState,
+    next_state: ChannelState,
+    out_path: &str,
+    request: &SendPayload,
+) {
     verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
         .unwrap_or_else(|e| {
             die(format!(
@@ -11944,7 +11945,11 @@ fn adopt_cosigned_head(state: &mut CliState, next_state: ChannelState, out_path:
         .iter()
         .map(|s| s.member_slot)
         .collect();
-    send_receipts::record(state, &next_state, &[send_receipts::canonical_id(&request.to_slim())]);
+    send_receipts::record(
+        state,
+        &next_state,
+        &[send_receipts::canonical_id(&request.to_slim())],
+    );
     state.snapshot.state = next_state;
     save_state(state);
     write_json("channel_snapshot.json", &state.snapshot);
@@ -12238,7 +12243,13 @@ fn cmd_cosign_batch(args: &[String]) {
                 let slim = SlimSendPayload::from_wire_or_json(&bytes)
                     .map_err(|e| format!("{f}: parse: {e}"))?;
                 verify_one(f, &slim)?;
-                Ok((BatchTxApply::from(&slim), vec![send_receipts::canonical_id(&slim), hex::encode(Sha256::digest(&bytes))]))
+                Ok((
+                    BatchTxApply::from(&slim),
+                    vec![
+                        send_receipts::canonical_id(&slim),
+                        hex::encode(Sha256::digest(&bytes)),
+                    ],
+                ))
                 // the parsed SlimSendPayload (and its proofs) drops here; only the residue survives
             })
             .collect();
@@ -12262,7 +12273,10 @@ fn cmd_cosign_batch(args: &[String]) {
         if !errors.is_empty() {
             die(format!("cosign-batch rejected: {}", errors.join("; ")));
         }
-        receipt_ids = payloads.iter().map(|p| send_receipts::canonical_id(&p.to_slim())).collect();
+        receipt_ids = payloads
+            .iter()
+            .map(|p| send_receipts::canonical_id(&p.to_slim()))
+            .collect();
         applies = payloads
             .iter()
             .map(|p| BatchTxApply::from(&p.to_slim()))
@@ -12733,11 +12747,6 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::InterChannelDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13065,11 +13074,6 @@ fn cmd_cosign_burn_send(args: &[String]) {
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut a_state, StateSigningPurpose::BurnDebit);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "interChannelDebit",
             "proposedState": payload.proposed_next_state,
@@ -13278,11 +13282,6 @@ fn cmd_register_token(args: &[String]) {
         build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
             .unwrap_or_else(|e| die(format!("build token register: {e}")));
     if propose_exit_kit_requested(args) {
-        // The proposal stages a PREPARED producer block for this successor; refused only later,
-        // in the signing run, that unsigned block would sit in every next validity candidate
-        // (FalconAggCircuit: 0 active signers) and the head's own block could never be proved —
-        // the gate would then wait forever (measured rh1123, 2026-11-23, on a burn).
-        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::TokenRegister);
         verify_token_register_state_transition(
             &state.snapshot.state,
             &state.snapshot.record,
@@ -13724,13 +13723,27 @@ mod cast_number_annotation_tests {
 
     #[test]
     fn strips_the_scientific_annotation_of_large_integers() {
-        assert_eq!(strip_cast_number_annotations("11155111 [1.115e7]\n"), "11155111");
-        assert_eq!(strip_cast_number_annotations("7\n100000 [1e5]"), "7\n100000");
+        assert_eq!(
+            strip_cast_number_annotations("11155111 [1.115e7]\n"),
+            "11155111"
+        );
+        assert_eq!(
+            strip_cast_number_annotations("7\n100000 [1e5]"),
+            "7\n100000"
+        );
     }
 
     #[test]
     fn leaves_every_other_output_shape_unchanged() {
-        for value in ["3", "true", "0x3c9D21c388a0Ac5430c0cD9B1BACD19044BE9AE8", "0x", "[1, 2]", "(1, 2)", "\"a b\""] {
+        for value in [
+            "3",
+            "true",
+            "0x3c9D21c388a0Ac5430c0cD9B1BACD19044BE9AE8",
+            "0x",
+            "[1, 2]",
+            "(1, 2)",
+            "\"a b\"",
+        ] {
             assert_eq!(strip_cast_number_annotations(value), value);
         }
     }
@@ -13800,7 +13813,10 @@ mod deployed_participant_prefix_tests {
         let (root, count) = deployed();
         for live in [5u8, 9, 40] {
             let (pks, rs) = participants(live);
-            assert!(deployed_participants_are_prefix(root, count, &pks, &rs), "{live} participants");
+            assert!(
+                deployed_participants_are_prefix(root, count, &pks, &rs),
+                "{live} participants"
+            );
         }
     }
 
@@ -13819,11 +13835,17 @@ mod deployed_participant_prefix_tests {
     fn a_dropped_or_reordered_deployed_participant_is_rejected() {
         let (root, count) = deployed();
         let (pks, rs) = participants(3);
-        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs), "dropped");
+        assert!(
+            !deployed_participants_are_prefix(root, count, &pks, &rs),
+            "dropped"
+        );
         let (mut pks, mut rs) = participants(5);
         pks.swap(2, 4);
         rs.swap(2, 4);
-        assert!(!deployed_participants_are_prefix(root, count, &pks, &rs), "reordered");
+        assert!(
+            !deployed_participants_are_prefix(root, count, &pks, &rs),
+            "reordered"
+        );
     }
 
     #[test]
@@ -13940,8 +13962,9 @@ fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u32) {
 /// Phase 1: persist the PREPARED deployment identity BEFORE any deployment broadcast.  While it is
 /// PREPARED, delegate joins pause (the deployment registers exactly this participant snapshot); a
 /// failed or interrupted deployment keeps them paused until it is resumed and ACTIVE.  A retry may
-/// resume only this exact snapshot/root/count/rollup identity; it can never deploy a newer join set.
-/// After ACTIVE, delegates join again (the deployed set stays a prefix); the cosigner set does not.
+/// resume only this exact snapshot/root/count/rollup identity; it can never deploy a newer join
+/// set. After ACTIVE, delegates join again (the deployed set stays a prefix); the cosigner set does
+/// not.
 fn prepare_settlement_binding(state: &mut CliState, reg: &serde_json::Value, rollup: &str) {
     let (participant_root, participant_count) = staged_settlement_identity(reg);
     let expected_digest = state.snapshot.state.digest;
@@ -14008,7 +14031,9 @@ struct SettlementBroadcastAddresses {
     materializer: String,
     mle_v2_cores: [String; 4],
     mle_v2_adapters: [String; 4],
-    registration_tx_hash: Bytes32,
+    /// `None` while Foundry has not sent the final registration yet (its artifact entry carries
+    /// `"hash": null`): a run whose estimate failed mid-sequence must still be resumable.
+    registration_tx_hash: Option<Bytes32>,
     registration_calldata_hash: Bytes32,
     registration_nonce: u64,
 }
@@ -14546,7 +14571,8 @@ fn settlement_deployment_plan_digest(
     preimage.extend_from_slice(SETTLEMENT_PLAN_DOMAIN);
     let late_config_path = std::env::var("LATE_MLE_CONFIG_PATH")
         .map_err(|_| "LATE_MLE_CONFIG_PATH is required".to_string())?;
-    let late_config = fs::read(contracts_dir.join(late_config_path)).map_err(|e| format!("late verifier config: {e}"))?;
+    let late_config = fs::read(contracts_dir.join(late_config_path))
+        .map_err(|e| format!("late verifier config: {e}"))?;
     append_deployment_digest_field(&mut preimage, &late_config);
     let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
         .map_err(|_| "LATE_DEPOSIT_MLE_CONFIG_PATH is required".to_string())?;
@@ -14565,7 +14591,10 @@ fn settlement_deployment_plan_digest(
     // Appended only when set, so a first-stack plan keeps its historical digest.
     if !existing_settlement_manager.is_empty() {
         append_deployment_digest_field(&mut preimage, b"existing_settlement_manager");
-        append_deployment_digest_field(&mut preimage, strip0x(existing_settlement_manager).as_bytes());
+        append_deployment_digest_field(
+            &mut preimage,
+            strip0x(existing_settlement_manager).as_bytes(),
+        );
     }
     // The validity configuration the attached rollup is checked against, when it is the producer's
     // export rather than the fixture below (likewise appended only when set).
@@ -14615,10 +14644,18 @@ fn expected_settlement_deployment_intent(
     state_digest: Bytes32,
     reg: &serde_json::Value,
 ) -> Result<SettlementDeploymentIntent, String> {
-    let late_incoming_verifier = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
-        .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?, 20, "late incoming verifier")?;
-    let late_deposit_verifier = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
-        .map_err(|_| "LATE_DEPOSIT_VERIFIER is required".to_string())?, 20, "late deposit verifier")?;
+    let late_incoming_verifier = canonical_hex(
+        &std::env::var("LATE_INCOMING_VERIFIER")
+            .map_err(|_| "LATE_INCOMING_VERIFIER is required".to_string())?,
+        20,
+        "late incoming verifier",
+    )?;
+    let late_deposit_verifier = canonical_hex(
+        &std::env::var("LATE_DEPOSIT_VERIFIER")
+            .map_err(|_| "LATE_DEPOSIT_VERIFIER is required".to_string())?,
+        20,
+        "late deposit verifier",
+    )?;
     let existing_settlement_manager = existing_settlement_manager_env()?;
     Ok(SettlementDeploymentIntent {
         late_incoming_verifier,
@@ -14699,8 +14736,14 @@ fn reused_close_funding(
         &[],
     );
     let materializer_rollup = cast_call(rpc, &materializer, "rollup()(address)", &[]);
-    let materializer_late = cast_call(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[]);
-    let materializer_late_deposit = cast_call(rpc, &materializer, "lateDepositMleVerifier()(address)", &[]);
+    let materializer_late = cast_call(
+        rpc,
+        &materializer,
+        "lateIncomingMleVerifier()(address)",
+        &[],
+    );
+    let materializer_late_deposit =
+        cast_call(rpc, &materializer, "lateDepositMleVerifier()(address)", &[]);
     if !strip0x(&materializer_rollup).eq_ignore_ascii_case(&strip0x(rollup))
         || !strip0x(&materializer_late).eq_ignore_ascii_case(&strip0x(late_adapter))
         || !strip0x(&materializer_late_deposit).eq_ignore_ascii_case(&strip0x(late_deposit_adapter))
@@ -14746,11 +14789,12 @@ fn settlement_deploy_mode_for_intent(
 /// How a retry of a PREPARED deployment continues. A Forge run can fail before transaction zero
 /// (compiler, RPC, signer or script error): then no transaction of this attempt exists and there is
 /// no broadcast artifact to resume, and a --resume-only rule would wedge the channel in PREPARED
-/// for good, even after the failing script is fixed. The broadcaster's own nonce separates the cases: while both its mined and
-/// its pending nonce still equal the pinned start nonce, nothing at or after that nonce was sent,
-/// so a fresh run starts at the SAME nonce and creates the same addresses the intent pinned. Once
-/// the nonce has moved, transactions may belong to this attempt and only the validated --resume
-/// may continue. A nonce below the pin is inconsistent with the PREPARED write and fails closed.
+/// for good, even after the failing script is fixed. The broadcaster's own nonce separates the
+/// cases: while both its mined and its pending nonce still equal the pinned start nonce, nothing at
+/// or after that nonce was sent, so a fresh run starts at the SAME nonce and creates the same
+/// addresses the intent pinned. Once the nonce has moved, transactions may belong to this attempt
+/// and only the validated --resume may continue. A nonce below the pin is inconsistent with the
+/// PREPARED write and fails closed.
 fn prepared_retry_mode(
     latest_nonce: u64,
     pending_nonce: u64,
@@ -14769,8 +14813,8 @@ fn prepared_retry_mode(
 }
 
 /// Production phase 1.  The nonce/chain/signer/artifact identity is included in the SAME fsynced
-/// write that pauses delegate joins for the deployment, so there is no state in which transactions may have started but a
-/// retry is still allowed to invent a new Foundry run.
+/// write that pauses delegate joins for the deployment, so there is no state in which transactions
+/// may have started but a retry is still allowed to invent a new Foundry run.
 fn prepare_real_settlement_binding(
     rpc: &str,
     contracts_dir: &Path,
@@ -14832,7 +14876,9 @@ fn prepare_real_settlement_binding(
         // channel identity was already required to match above, and the chain/signer/late adapter
         // must still be the pinned ones.
         if expected.chain_id != persisted.chain_id
-            || !expected.broadcaster.eq_ignore_ascii_case(&persisted.broadcaster)
+            || !expected
+                .broadcaster
+                .eq_ignore_ascii_case(&persisted.broadcaster)
             || !expected
                 .late_incoming_verifier
                 .eq_ignore_ascii_case(&persisted.late_incoming_verifier)
@@ -15096,11 +15142,12 @@ fn parse_settlement_mle_v2_config_pin(
     if settlement_config_string(value, "/schema", &what)? != "plonky2-mle-v3-solidity-config"
         || settlement_config_u64(value, "/schemaVersion", &what)? != 3
         || settlement_config_u64(value, "/protocolVersion", &what)? != 3
-        || settlement_config_u64(value, "/whirPowBits", &what)? != 22
+        || settlement_config_u64(value, "/whirPowBits", &what)?
+            != plonky2_mle::protocol_schema_v2::WHIR_POW_BITS_V2 as u64
         || settlement_config_string(value, "/compactProofEncoding", &what)? != "MLEWHIR3"
     {
         return Err(format!(
-            "{what} is not the canonical PoW-22 protocol-v3 config schema"
+            "{what} is not the canonical current-PoW protocol-v3 config schema"
         ));
     }
 
@@ -15426,8 +15473,11 @@ fn validate_settlement_tx_shape(
     // stack attaches to) carries null. The CALL's target (`validate_settlement_call_target`) and
     // its re-encoded calldata (`validate_settlement_call_input`) are what bind it.
     let label_optional = expected_type == "CALL"
-        && tx.get("contractName").is_some_and(serde_json::Value::is_null);
-    if !label_optional && settlement_artifact_string(tx, "contractName", what)? != expected_contract {
+        && tx
+            .get("contractName")
+            .is_some_and(serde_json::Value::is_null);
+    if !label_optional && settlement_artifact_string(tx, "contractName", what)? != expected_contract
+    {
         return Err(format!("{what} is not for {expected_contract}"));
     }
     if let Some(prefix) = expected_function_prefix {
@@ -15567,8 +15617,12 @@ fn validate_created_materializer(
     // bytes by matching a compiled artifact, and it sliced this constructor two words early on a
     // real Sepolia deployment whose on-chain bindings were correct. For static-argument
     // constructors the initcode suffix is the complete, exact ABI encoding.
-    let encoded_materializer_constructor =
-        cast_encode_materializer_constructor(rollup, backing_mle_adapter, late_incoming_verifier, late_deposit_verifier)?;
+    let encoded_materializer_constructor = cast_encode_materializer_constructor(
+        rollup,
+        backing_mle_adapter,
+        late_incoming_verifier,
+        late_deposit_verifier,
+    )?;
     let materializer_input = tx
         .get("transaction")
         .and_then(|value| value.get("input"))
@@ -15712,12 +15766,8 @@ fn validate_settlement_broadcast_value(
             reused.materializer.clone(),
         ),
         None => {
-            let (backing_mle_core, backing_mle_adapter) = validate_settlement_mle_v2_pair(
-                &core[0],
-                &core[1],
-                intent.chain_id,
-                backing_pin,
-            )?;
+            let (backing_mle_core, backing_mle_adapter) =
+                validate_settlement_mle_v2_pair(&core[0], &core[1], intent.chain_id, backing_pin)?;
             let materializer = validate_created_materializer(
                 &core[2],
                 rollup,
@@ -15761,7 +15811,6 @@ fn validate_settlement_broadcast_value(
         &expected_settlement_verifier_constructor(&mle_v2_adapters)?,
         "settlement verifier deploy",
     )?;
-
 
     let member_count = reg["member_count"]
         .as_u64()
@@ -15937,13 +15986,25 @@ fn validate_settlement_broadcast_value(
     }
     validate_settlement_call_input(register_manager, "registerSettlementManager")?;
 
-    let registration_tx_hash =
-        settlement_artifact_string(register_manager, "hash", "registerSettlementManager")?
-            .parse::<Bytes32>()
-            .map_err(|error| format!("registerSettlementManager transaction hash: {error}"))?;
-    if registration_tx_hash == Bytes32::default() {
-        return Err("registerSettlementManager transaction hash is zero".to_string());
-    }
+    // Foundry writes the whole planned sequence before sending and fills each `hash` as it sends;
+    // an unsent final registration is `null` (Sepolia, 2026-11-26: an estimate reverted
+    // mid-sequence because the backend did not see the previous CREATE yet). That is exactly the
+    // state `--resume` exists for, so only a present hash is parsed; completion still requires one.
+    let registration_tx_hash = match register_manager.get("hash") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(_) => {
+            let hash =
+                settlement_artifact_string(register_manager, "hash", "registerSettlementManager")?
+                    .parse::<Bytes32>()
+                    .map_err(|error| {
+                        format!("registerSettlementManager transaction hash: {error}")
+                    })?;
+            if hash == Bytes32::default() {
+                return Err("registerSettlementManager transaction hash is zero".to_string());
+            }
+            Some(hash)
+        }
+    };
     let registration_transaction = register_manager
         .get("transaction")
         .ok_or_else(|| "registerSettlementManager has no transaction object".to_string())?;
@@ -16015,7 +16076,15 @@ fn validate_settlement_broadcast_artifact(
         fs::read(&path).map_err(|e| format!("read broadcast artifact {}: {e}", path.display()))?;
     let artifact: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("parse broadcast artifact {}: {e}", path.display()))?;
-    validate_settlement_broadcast_value(&artifact, intent, reg, rollup, mle_v2_pins, backing_pin, reused)
+    validate_settlement_broadcast_value(
+        &artifact,
+        intent,
+        reg,
+        rollup,
+        mle_v2_pins,
+        backing_pin,
+        reused,
+    )
 }
 
 /// Adopt the exact final transaction from the pinned Foundry artifact only after its receipt is
@@ -16032,7 +16101,7 @@ fn settlement_registration_receipt(
 
     let receipt = try_read_l1_receipt(
         rpc,
-        &addresses.registration_tx_hash.to_string(),
+        &addresses.registration_tx_hash?.to_string(),
         L1CallKind::RegisterSettlementManager,
     )?;
     let expected_from = Address::from_hex(&intent.broadcaster)
@@ -16252,8 +16321,13 @@ mod settlement_broadcast_recovery_tests {
         let manager_refs = manager_args.iter().map(String::as_str).collect::<Vec<_>>();
         let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
         let manager_input = format!("0x60006000{}", strip0x(&constructor));
-        let materializer_constructor =
-            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER).unwrap();
+        let materializer_constructor = cast_encode_materializer_constructor(
+            ROLLUP,
+            BACKING_MLE_ADAPTER,
+            LATE_MLE_ADAPTER,
+            LATE_DEPOSIT_MLE_ADAPTER,
+        )
+        .unwrap();
         let materializer_input = format!("0x6002{}", strip0x(&materializer_constructor));
 
         // One MleVerifierV2 core CREATE followed by its PinnedMleVerifierV2 adapter CREATE.
@@ -16317,7 +16391,12 @@ mod settlement_broadcast_recovery_tests {
             START_NONCE + 2,
             "CloseFundingMaterializer",
             MATERIALIZER,
-            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string(), LATE_MLE_ADAPTER.to_string(), LATE_DEPOSIT_MLE_ADAPTER.to_string()]),
+            Some(vec![
+                ROLLUP.to_string(),
+                BACKING_MLE_ADAPTER.to_string(),
+                LATE_MLE_ADAPTER.to_string(),
+                LATE_DEPOSIT_MLE_ADAPTER.to_string(),
+            ]),
             &materializer_input,
         ));
         for (index, pin) in pins.iter().enumerate() {
@@ -16685,11 +16764,15 @@ mod settlement_broadcast_recovery_tests {
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late), &expected).is_err());
         let mut wrong_late_deposit = expected.clone();
         wrong_late_deposit.late_deposit_verifier = BACKING_MLE_ADAPTER.to_string();
-        assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_late_deposit), &expected).is_err());
+        assert!(
+            settlement_deploy_mode_for_intent(true, Some(&wrong_late_deposit), &expected).is_err()
+        );
         // An intent persisted before the late-deposit adapter existed cannot be resumed.
         let mut pre_late_deposit = expected.clone();
         pre_late_deposit.late_deposit_verifier = String::new();
-        assert!(settlement_deploy_mode_for_intent(true, Some(&pre_late_deposit), &expected).is_err());
+        assert!(
+            settlement_deploy_mode_for_intent(true, Some(&pre_late_deposit), &expected).is_err()
+        );
         let mut wrong_chain = expected.clone();
         wrong_chain.chain_id = 10;
         assert!(settlement_deploy_mode_for_intent(true, Some(&wrong_chain), &expected).is_err());
@@ -16698,10 +16781,19 @@ mod settlement_broadcast_recovery_tests {
     #[test]
     fn prepared_retry_restarts_only_while_nothing_was_sent() {
         // Forge failed before transaction zero: nothing mined or pending past the pin.
-        assert_eq!(prepared_retry_mode(40, 40, 40), Ok(RealSettlementDeployMode::Fresh));
+        assert_eq!(
+            prepared_retry_mode(40, 40, 40),
+            Ok(RealSettlementDeployMode::Fresh)
+        );
         // Anything sent since the pin, mined or still pending, may belong to this attempt.
-        assert_eq!(prepared_retry_mode(41, 41, 40), Ok(RealSettlementDeployMode::Resume));
-        assert_eq!(prepared_retry_mode(40, 41, 40), Ok(RealSettlementDeployMode::Resume));
+        assert_eq!(
+            prepared_retry_mode(41, 41, 40),
+            Ok(RealSettlementDeployMode::Resume)
+        );
+        assert_eq!(
+            prepared_retry_mode(40, 41, 40),
+            Ok(RealSettlementDeployMode::Resume)
+        );
         // Inconsistent with the PREPARED write: fail closed.
         assert!(prepared_retry_mode(39, 39, 40).is_err());
         assert!(prepared_retry_mode(41, 40, 40).is_err());
@@ -16737,8 +16829,44 @@ mod settlement_broadcast_recovery_tests {
             MLE_ADAPTERS.map(ToOwned::to_owned)
         );
         assert_eq!(addresses.registration_nonce, START_NONCE + 14);
-        assert_ne!(addresses.registration_tx_hash, Bytes32::default());
+        assert!(
+            addresses
+                .registration_tx_hash
+                .is_some_and(|hash| hash != Bytes32::default())
+        );
         assert_ne!(addresses.registration_calldata_hash, Bytes32::default());
+
+        // A run whose estimate failed before the final registration was sent stays resumable:
+        // Foundry leaves `"hash": null` on the unsent entry. Every other binding is still checked.
+        let last = artifact["transactions"].as_array().unwrap().len() - 1;
+        let mut unsent_registration = artifact.clone();
+        unsent_registration["transactions"][last]["hash"] = serde_json::Value::Null;
+        let unsent = validate_settlement_broadcast_value(
+            &unsent_registration,
+            &intent(),
+            &reg,
+            ROLLUP,
+            &pins,
+            &backing,
+            None,
+        )
+        .expect("an unsent final registration must not block --resume");
+        assert_eq!(unsent.registration_tx_hash, None);
+        assert_eq!(strip0x(&unsent.manager), strip0x(MANAGER));
+        let mut malformed_hash = artifact.clone();
+        malformed_hash["transactions"][last]["hash"] = serde_json::json!("0xnot-a-hash");
+        assert!(
+            validate_settlement_broadcast_value(
+                &malformed_hash,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
 
         let mut backing_adapter_bound_to_other_core = artifact.clone();
         backing_adapter_bound_to_other_core["transactions"][1]["arguments"][0] =
@@ -16757,22 +16885,73 @@ mod settlement_broadcast_recovery_tests {
             "the backing adapter must bind the backing core created immediately before it"
         );
         // The materializer's bindings are read from the creation input that was sent.
-        let materializer_input = |rollup: &str, backing_adapter: &str, late: &str, late_deposit: &str| {
-            let encoded = cast_encode_materializer_constructor(rollup, backing_adapter, late, late_deposit).unwrap();
+        let materializer_input = |rollup: &str,
+                                  backing_adapter: &str,
+                                  late: &str,
+                                  late_deposit: &str| {
+            let encoded =
+                cast_encode_materializer_constructor(rollup, backing_adapter, late, late_deposit)
+                    .unwrap();
             serde_json::json!(format!("0x6002{}", strip0x(&encoded)))
         };
         let mut wrong_late_deposit_adapter = artifact.clone();
-        wrong_late_deposit_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, BACKING_MLE_ADAPTER);
-        assert!(validate_settlement_broadcast_value(&wrong_late_deposit_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
+        wrong_late_deposit_adapter["transactions"][2]["transaction"]["input"] = materializer_input(
+            ROLLUP,
+            BACKING_MLE_ADAPTER,
+            LATE_MLE_ADAPTER,
+            BACKING_MLE_ADAPTER,
+        );
+        assert!(
+            validate_settlement_broadcast_value(
+                &wrong_late_deposit_adapter,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
         let mut wrong_late_adapter = artifact.clone();
-        wrong_late_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, BACKING_MLE_ADAPTER, BACKING_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
-        assert!(validate_settlement_broadcast_value(&wrong_late_adapter, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
+        wrong_late_adapter["transactions"][2]["transaction"]["input"] = materializer_input(
+            ROLLUP,
+            BACKING_MLE_ADAPTER,
+            BACKING_MLE_ADAPTER,
+            LATE_DEPOSIT_MLE_ADAPTER,
+        );
+        assert!(
+            validate_settlement_broadcast_value(
+                &wrong_late_adapter,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
         let mut materializer_on_other_rollup = artifact.clone();
         materializer_on_other_rollup["transactions"][2]["transaction"]["input"] =
-            materializer_input(MANAGER, BACKING_MLE_ADAPTER, LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
-        assert!(validate_settlement_broadcast_value(&materializer_on_other_rollup, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
+            materializer_input(
+                MANAGER,
+                BACKING_MLE_ADAPTER,
+                LATE_MLE_ADAPTER,
+                LATE_DEPOSIT_MLE_ADAPTER,
+            );
+        assert!(
+            validate_settlement_broadcast_value(
+                &materializer_on_other_rollup,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
         // Foundry's `arguments` is a best-effort decode that has sliced a correct constructor two
         // words early on Sepolia; it is not the authority and must neither accept nor refuse.
         // A later channel on the same rollup reuses the materializer: the three close-funding
@@ -16789,36 +16968,130 @@ mod settlement_broadcast_recovery_tests {
             let transactions = reuse_artifact["transactions"].as_array_mut().unwrap();
             transactions.drain(0..3);
             for (i, tx) in transactions.iter_mut().enumerate() {
-                tx["transaction"]["nonce"] = serde_json::json!(format!("0x{:x}", START_NONCE + i as u64));
+                tx["transaction"]["nonce"] =
+                    serde_json::json!(format!("0x{:x}", START_NONCE + i as u64));
             }
         }
         let reused_addresses = validate_settlement_broadcast_value(
-            &reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&reused),
+            &reuse_artifact,
+            &reused_intent,
+            &reg,
+            ROLLUP,
+            &pins,
+            &backing,
+            Some(&reused),
         )
         .unwrap();
-        assert_eq!(strip0x(&reused_addresses.materializer), strip0x(MATERIALIZER));
-        assert_eq!(strip0x(&reused_addresses.backing_mle_adapter), strip0x(BACKING_MLE_ADAPTER));
+        assert_eq!(
+            strip0x(&reused_addresses.materializer),
+            strip0x(MATERIALIZER)
+        );
+        assert_eq!(
+            strip0x(&reused_addresses.backing_mle_adapter),
+            strip0x(BACKING_MLE_ADAPTER)
+        );
         assert_eq!(strip0x(&reused_addresses.manager), strip0x(MANAGER));
         assert_eq!(reused_addresses.registration_nonce, START_NONCE + 11);
         // The reuse must be the pinned plan, in both directions, and the layouts cannot be mixed.
-        assert!(validate_settlement_broadcast_value(&reuse_artifact, &intent(), &reg, ROLLUP, &pins, &backing, Some(&reused)).is_err());
-        assert!(validate_settlement_broadcast_value(&reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, None).is_err());
-        assert!(validate_settlement_broadcast_value(&artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&reused)).is_err());
+        assert!(
+            validate_settlement_broadcast_value(
+                &reuse_artifact,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                Some(&reused)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_settlement_broadcast_value(
+                &reuse_artifact,
+                &reused_intent,
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_settlement_broadcast_value(
+                &artifact,
+                &reused_intent,
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                Some(&reused)
+            )
+            .is_err()
+        );
         // The manager must be constructor-bound to the reused materializer, not another one.
-        let other_materializer = ReusedCloseFunding { materializer: MLE_ADAPTERS[0].to_string(), ..reused.clone() };
-        assert!(validate_settlement_broadcast_value(&reuse_artifact, &reused_intent, &reg, ROLLUP, &pins, &backing, Some(&other_materializer)).is_err());
+        let other_materializer = ReusedCloseFunding {
+            materializer: MLE_ADAPTERS[0].to_string(),
+            ..reused.clone()
+        };
+        assert!(
+            validate_settlement_broadcast_value(
+                &reuse_artifact,
+                &reused_intent,
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                Some(&other_materializer)
+            )
+            .is_err()
+        );
 
         // Attaching to an existing rollup: Foundry leaves the rollup CALLs unlabelled.
         let mut unlabelled_rollup_calls = artifact.clone();
         unlabelled_rollup_calls["transactions"][12]["contractName"] = serde_json::Value::Null;
         unlabelled_rollup_calls["transactions"][14]["contractName"] = serde_json::Value::Null;
-        assert!(validate_settlement_broadcast_value(&unlabelled_rollup_calls, &intent(), &reg, ROLLUP, &pins, &backing, None).is_ok());
+        assert!(
+            validate_settlement_broadcast_value(
+                &unlabelled_rollup_calls,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_ok()
+        );
         let mut mislabelled_call = artifact.clone();
-        mislabelled_call["transactions"][12]["contractName"] = serde_json::json!("ChannelSettlementManager");
-        assert!(validate_settlement_broadcast_value(&mislabelled_call, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
+        mislabelled_call["transactions"][12]["contractName"] =
+            serde_json::json!("ChannelSettlementManager");
+        assert!(
+            validate_settlement_broadcast_value(
+                &mislabelled_call,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
         let mut unlabelled_create = artifact.clone();
         unlabelled_create["transactions"][13]["contractName"] = serde_json::Value::Null;
-        assert!(validate_settlement_broadcast_value(&unlabelled_create, &intent(), &reg, ROLLUP, &pins, &backing, None).is_err());
+        assert!(
+            validate_settlement_broadcast_value(
+                &unlabelled_create,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_err()
+        );
         let mut misdecoded_arguments = artifact.clone();
         misdecoded_arguments["transactions"][2]["arguments"] = serde_json::json!([
             "0x815261296a610120826122b856fEa26469706673",
@@ -16827,12 +17100,26 @@ mod settlement_broadcast_recovery_tests {
         ]);
         misdecoded_arguments["transactions"][11]["arguments"] = serde_json::json!([]);
         assert!(
-            validate_settlement_broadcast_value(&misdecoded_arguments, &intent(), &reg, ROLLUP, &pins, &backing, None).is_ok(),
+            validate_settlement_broadcast_value(
+                &misdecoded_arguments,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+                None
+            )
+            .is_ok(),
             "a correct creation input is accepted whatever Foundry's decoded arguments say"
         );
         let mut materializer_bound_to_other_adapter = artifact.clone();
         materializer_bound_to_other_adapter["transactions"][2]["transaction"]["input"] =
-            materializer_input(ROLLUP, MLE_ADAPTERS[0], LATE_MLE_ADAPTER, LATE_DEPOSIT_MLE_ADAPTER);
+            materializer_input(
+                ROLLUP,
+                MLE_ADAPTERS[0],
+                LATE_MLE_ADAPTER,
+                LATE_DEPOSIT_MLE_ADAPTER,
+            );
         assert!(
             validate_settlement_broadcast_value(
                 &materializer_bound_to_other_adapter,
@@ -16876,7 +17163,9 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing, None)
+                &backing,
+                None
+            )
             .is_err()
         );
 
@@ -16890,7 +17179,9 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing, None)
+                &backing,
+                None
+            )
             .is_err()
         );
 
@@ -16904,7 +17195,9 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing, None)
+                &backing,
+                None
+            )
             .is_err()
         );
 
@@ -17000,7 +17293,9 @@ mod settlement_broadcast_recovery_tests {
                 &reg,
                 ROLLUP,
                 &pins,
-                &backing, None)
+                &backing,
+                None
+            )
             .is_err()
         );
 
@@ -17717,9 +18012,13 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         STAGED_CLOSE_BACKING_MLE_CONFIG,
     )
     .unwrap_or_else(|error| die(format!("staged CloseAssetBacking MLE v2 config: {error}")));
-    let late_adapter = canonical_hex(&std::env::var("LATE_INCOMING_VERIFIER")
-        .unwrap_or_else(|_| die("LATE_INCOMING_VERIFIER is required")), 20, "late incoming verifier")
-        .unwrap_or_else(|e| die(e));
+    let late_adapter = canonical_hex(
+        &std::env::var("LATE_INCOMING_VERIFIER")
+            .unwrap_or_else(|_| die("LATE_INCOMING_VERIFIER is required")),
+        20,
+        "late incoming verifier",
+    )
+    .unwrap_or_else(|e| die(e));
     let late_config_path = std::env::var("LATE_MLE_CONFIG_PATH")
         .unwrap_or_else(|_| die("LATE_MLE_CONFIG_PATH is required (use an absolute path)"));
     // load_mle_v2_config_pin resolves under test/data; canonicalize the explicit path first.
@@ -17728,22 +18027,44 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let late_config_text = fs::read_to_string(&late_config_path).unwrap_or_else(|e| die(e));
     MleVerifierV2ConfigFixture::from_canonical_json(&late_config_text).unwrap_or_else(|e| die(e));
     let late_config_value = serde_json::from_str(&late_config_text).unwrap_or_else(|e| die(e));
-    let late_pin = parse_settlement_mle_v2_config_pin(&late_config_value, "late incoming", "LATE_MLE_CONFIG_PATH")
-        .unwrap_or_else(|e| die(e));
+    let late_pin = parse_settlement_mle_v2_config_pin(
+        &late_config_value,
+        "late incoming",
+        "LATE_MLE_CONFIG_PATH",
+    )
+    .unwrap_or_else(|e| die(e));
     require_mle_v2_pair_pin(rpc, chain_id, &late_adapter, None, &late_pin, None);
-    let late_deposit_adapter = canonical_hex(&std::env::var("LATE_DEPOSIT_VERIFIER")
-        .unwrap_or_else(|_| die("LATE_DEPOSIT_VERIFIER is required")), 20, "late deposit verifier")
-        .unwrap_or_else(|e| die(e));
+    let late_deposit_adapter = canonical_hex(
+        &std::env::var("LATE_DEPOSIT_VERIFIER")
+            .unwrap_or_else(|_| die("LATE_DEPOSIT_VERIFIER is required")),
+        20,
+        "late deposit verifier",
+    )
+    .unwrap_or_else(|e| die(e));
     let late_deposit_config_path = std::env::var("LATE_DEPOSIT_MLE_CONFIG_PATH")
         .unwrap_or_else(|_| die("LATE_DEPOSIT_MLE_CONFIG_PATH is required (use an absolute path)"));
     let late_deposit_config_path = fs::canonicalize(contracts_dir.join(late_deposit_config_path))
         .unwrap_or_else(|e| die(format!("late deposit config: {e}")));
-    let late_deposit_config_text = fs::read_to_string(&late_deposit_config_path).unwrap_or_else(|e| die(e));
-    MleVerifierV2ConfigFixture::from_canonical_json(&late_deposit_config_text).unwrap_or_else(|e| die(e));
-    let late_deposit_config_value = serde_json::from_str(&late_deposit_config_text).unwrap_or_else(|e| die(e));
-    let late_deposit_pin = parse_settlement_mle_v2_config_pin(&late_deposit_config_value, "late deposit", "LATE_DEPOSIT_MLE_CONFIG_PATH")
+    let late_deposit_config_text =
+        fs::read_to_string(&late_deposit_config_path).unwrap_or_else(|e| die(e));
+    MleVerifierV2ConfigFixture::from_canonical_json(&late_deposit_config_text)
         .unwrap_or_else(|e| die(e));
-    require_mle_v2_pair_pin(rpc, chain_id, &late_deposit_adapter, None, &late_deposit_pin, None);
+    let late_deposit_config_value =
+        serde_json::from_str(&late_deposit_config_text).unwrap_or_else(|e| die(e));
+    let late_deposit_pin = parse_settlement_mle_v2_config_pin(
+        &late_deposit_config_value,
+        "late deposit",
+        "LATE_DEPOSIT_MLE_CONFIG_PATH",
+    )
+    .unwrap_or_else(|e| die(e));
+    require_mle_v2_pair_pin(
+        rpc,
+        chain_id,
+        &late_deposit_adapter,
+        None,
+        &late_deposit_pin,
+        None,
+    );
     let existing_settlement_manager = existing_settlement_manager_env().unwrap_or_else(|e| die(e));
     let reused = reused_close_funding(
         rpc,
@@ -17776,11 +18097,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         backing_rollup_hex
     );
 
-    // The PREPARED write below pauses delegate joins until this deployment is ACTIVE.  It includes the
-    // exact chain/signer/start nonce and local-input digest, and is fsynced before Forge can send
-    // transaction zero.  An existing PREPARED binding selects --resume, or a fresh run at the SAME
-    // pinned start nonce only while the broadcaster has sent nothing since (`prepared_retry_mode`);
-    // it never starts a run with shifted nonces and orphan CREATE addresses.
+    // The PREPARED write below pauses delegate joins until this deployment is ACTIVE.  It includes
+    // the exact chain/signer/start nonce and local-input digest, and is fsynced before Forge
+    // can send transaction zero.  An existing PREPARED binding selects --resume, or a fresh run
+    // at the SAME pinned start nonce only while the broadcaster has sent nothing since
+    // (`prepared_retry_mode`); it never starts a run with shifted nonces and orphan CREATE
+    // addresses.
     let deploy_mode = prepare_real_settlement_binding(
         rpc,
         &contracts_dir,
@@ -17859,11 +18181,16 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         // higher than max fee per gas"), and the node refuses a transaction whose gas limit x max
         // fee exceeds the balance, so a large fixed cap fails too.
         let fee_env = |name: &str| -> Option<u128> {
-            std::env::var(name).ok().filter(|value| !value.is_empty()).map(|value| {
-                value.parse::<u128>().unwrap_or_else(|_| {
-                    die(format!("{name} must be a decimal wei amount, got {value:?}"))
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    value.parse::<u128>().unwrap_or_else(|_| {
+                        die(format!(
+                            "{name} must be a decimal wei amount, got {value:?}"
+                        ))
+                    })
                 })
-            })
         };
         let tip = fee_env("FORGE_PRIORITY_FEE_WEI").unwrap_or(1_000_000);
         let max_fee = fee_env("FORGE_MAX_FEE_WEI").unwrap_or_else(|| {
@@ -17892,7 +18219,10 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         let forge_out = forge
             .env("EXISTING_ROLLUP", &backing_rollup_hex)
             .env("EXPECTED_BROADCASTER", &broadcaster)
-            .env(EXISTING_SETTLEMENT_MANAGER_ENV, &deployment_intent.existing_settlement_manager)
+            .env(
+                EXISTING_SETTLEMENT_MANAGER_ENV,
+                &deployment_intent.existing_settlement_manager,
+            )
             .output()
             .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
         if !forge_out.status.success() {
@@ -17921,6 +18251,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         reused.as_ref(),
     )
     .unwrap_or_else(|e| die(format!("post-broadcast artifact validation failed: {e}")));
+    if addresses.registration_tx_hash.is_none() {
+        die(
+            "post-broadcast artifact validation failed: Foundry reported success but the final \
+             registerSettlementManager entry has no transaction hash; cli_state remains PREPARED",
+        );
+    }
     let rollup = backing_rollup_hex;
     let registration_receipt = settlement_registration_receipt(
         rpc,
@@ -18031,16 +18367,46 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_mle_v2_pin,
         Some(activation_checkpoint.block_number),
     );
-    let deployed_late = cast_call_at(rpc, &materializer, "lateIncomingMleVerifier()(address)", &[], activation_checkpoint.block_number);
-    if !strip0x(&deployed_late).eq_ignore_ascii_case(&strip0x(&deployment_intent.late_incoming_verifier)) {
+    let deployed_late = cast_call_at(
+        rpc,
+        &materializer,
+        "lateIncomingMleVerifier()(address)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    if !strip0x(&deployed_late)
+        .eq_ignore_ascii_case(&strip0x(&deployment_intent.late_incoming_verifier))
+    {
         die("materializer late incoming verifier differs from prepared deployment intent");
     }
-    require_mle_v2_pair_pin(rpc, chain_id, &deployed_late, None, &late_pin, Some(activation_checkpoint.block_number));
-    let deployed_late_deposit = cast_call_at(rpc, &materializer, "lateDepositMleVerifier()(address)", &[], activation_checkpoint.block_number);
-    if !strip0x(&deployed_late_deposit).eq_ignore_ascii_case(&strip0x(&deployment_intent.late_deposit_verifier)) {
+    require_mle_v2_pair_pin(
+        rpc,
+        chain_id,
+        &deployed_late,
+        None,
+        &late_pin,
+        Some(activation_checkpoint.block_number),
+    );
+    let deployed_late_deposit = cast_call_at(
+        rpc,
+        &materializer,
+        "lateDepositMleVerifier()(address)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    if !strip0x(&deployed_late_deposit)
+        .eq_ignore_ascii_case(&strip0x(&deployment_intent.late_deposit_verifier))
+    {
         die("materializer late deposit verifier differs from prepared deployment intent");
     }
-    require_mle_v2_pair_pin(rpc, chain_id, &deployed_late_deposit, None, &late_deposit_pin, Some(activation_checkpoint.block_number));
+    require_mle_v2_pair_pin(
+        rpc,
+        chain_id,
+        &deployed_late_deposit,
+        None,
+        &late_deposit_pin,
+        Some(activation_checkpoint.block_number),
+    );
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -18294,9 +18660,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
 /// (fail-closed) — the faucet E2E's real ERC-20 deposit is the live proof that it is right.
 const DEPOSITED_TOPIC0: &str = "0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe";
 
-/// Reorg-safety default for a real (non-dev) chain, and the floor an explicit argument is clamped
-/// up to. Chain id 31337 (anvil) uses floor 0 — see `min_confirmations_for`.
+/// Reorg-safety default for a real (non-dev) chain. Chain id 31337 (anvil) uses 0 and Sepolia
+/// (11155111) uses [`SEPOLIA_MIN_CONFIRMATIONS`] — see `min_confirmations_for`.
 const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+/// Sepolia's depth: the owner asked for 3 confirmations on the testnet (2026-11-26) instead of
+/// waiting 12 blocks (~2.5 min) per deposit. Mainnet and every other chain keep 12.
+const SEPOLIA_MIN_CONFIRMATIONS: u64 = 3;
 
 /// ONE `Deposited` log, read back from L1. Every economically meaningful field of the imported
 /// `Deposit` comes from HERE — none of it is caller-supplied any more (threat model §1, A9).
@@ -18345,13 +18714,28 @@ fn min_confirmations_for(chain_id: u64, explicit: Option<u64>) -> u64 {
     let floor = if chain_id == 31337 { 0 } else { 1 };
     match explicit {
         Some(v) => v.max(floor),
-        None => {
-            if chain_id == 31337 {
-                0
-            } else {
-                DEFAULT_MIN_CONFIRMATIONS
-            }
-        }
+        None => match chain_id {
+            31337 => 0,
+            11155111 => SEPOLIA_MIN_CONFIRMATIONS,
+            _ => DEFAULT_MIN_CONFIRMATIONS,
+        },
+    }
+}
+
+#[cfg(test)]
+mod min_confirmations_tests {
+    use super::*;
+
+    #[test]
+    fn sepolia_defaults_to_three_and_every_other_public_chain_to_twelve() {
+        assert_eq!(min_confirmations_for(31337, None), 0);
+        assert_eq!(min_confirmations_for(11155111, None), 3);
+        assert_eq!(min_confirmations_for(1, None), 12);
+        assert_eq!(min_confirmations_for(31338, None), 12);
+        // An explicit value is honored but never below the public-chain floor of 1.
+        assert_eq!(min_confirmations_for(11155111, Some(0)), 1);
+        assert_eq!(min_confirmations_for(1, Some(0)), 1);
+        assert_eq!(min_confirmations_for(31337, Some(0)), 0);
     }
 }
 
@@ -18517,8 +18901,12 @@ fn fetch_onchain_deposit(
 /// indexed deposit index, so a transaction carrying several deposits is never ambiguous; the
 /// transaction must be successful, from this channel's rollup, and reorg-safe as for an import.
 fn inspect_l1_deposit_journal_only(args: &[String]) {
-    const USAGE: &str = "inspect-l1-deposit <tx_hash> <rpc_url> <out.json> --journal-only <deposit_index>";
-    let position = args.iter().position(|a| a == "--journal-only").unwrap_or_else(|| die(USAGE));
+    const USAGE: &str =
+        "inspect-l1-deposit <tx_hash> <rpc_url> <out.json> --journal-only <deposit_index>";
+    let position = args
+        .iter()
+        .position(|a| a == "--journal-only")
+        .unwrap_or_else(|| die(USAGE));
     let wanted: u64 = args
         .get(position + 1)
         .and_then(|v| v.parse().ok())
@@ -18535,12 +18923,18 @@ fn inspect_l1_deposit_journal_only(args: &[String]) {
     let (tx_hash, rpc, out_path) = (rest[1].as_str(), rest[2].as_str(), rest[3].as_str());
     let (_, _, backing) = load_backing();
     let tx = format!("0x{}", hex_body(tx_hash, 64, "tx_hash"));
-    let rollup_body = hex_body(&backing.rollup, 40, "rollup address from channel_backing.json");
+    let rollup_body = hex_body(
+        &backing.rollup,
+        40,
+        "rollup address from channel_backing.json",
+    );
     let receipt_raw = cast(&["receipt", &tx, "--rpc-url", rpc, "--json", "--async"]);
     let receipt: serde_json::Value = serde_json::from_str(&receipt_raw)
         .unwrap_or_else(|e| die(format!("parse `cast receipt` JSON: {e}\n{receipt_raw}")));
     if receipt["status"].as_str() != Some("0x1") {
-        die(format!("deposit tx {tx} did not succeed — refusing to journal it"));
+        die(format!(
+            "deposit tx {tx} did not succeed — refusing to journal it"
+        ));
     }
     let tx_block = receipt["blockNumber"]
         .as_str()
@@ -18569,9 +18963,20 @@ fn inspect_l1_deposit_journal_only(args: &[String]) {
         .iter()
         .filter(|log| {
             let topics = log["topics"].as_array().cloned().unwrap_or_default();
-            log["address"].as_str().unwrap_or("").eq_ignore_ascii_case(&format!("0x{rollup_body}"))
-                && topics.first().and_then(|t| t.as_str()).unwrap_or("").eq_ignore_ascii_case(DEPOSITED_TOPIC0)
-                && topics.get(1).and_then(|t| t.as_str()).map(|t| abi_word_u64(t, "Deposited.depositIndex")) == Some(wanted)
+            log["address"]
+                .as_str()
+                .unwrap_or("")
+                .eq_ignore_ascii_case(&format!("0x{rollup_body}"))
+                && topics
+                    .first()
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case(DEPOSITED_TOPIC0)
+                && topics
+                    .get(1)
+                    .and_then(|t| t.as_str())
+                    .map(|t| abi_word_u64(t, "Deposited.depositIndex"))
+                    == Some(wanted)
         })
         .collect();
     if matching.len() != 1 {
@@ -18605,7 +19010,10 @@ fn inspect_l1_deposit_journal_only(args: &[String]) {
         expected_deposit_hash_chain: word(5, "newDepositHashChain"),
     };
     write_json(out_path, &request);
-    println!("{}", serde_json::to_string(&request).unwrap_or_else(|e| die(e)));
+    println!(
+        "{}",
+        serde_json::to_string(&request).unwrap_or_else(|e| die(e))
+    );
 }
 
 fn cmd_inspect_l1_deposit(args: &[String]) {
@@ -19025,7 +19433,6 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|error| die(error));
 
     if propose_exit_kit_requested(args) {
-        refuse_proposal_on_unfinalized_head_backing(&mut state, StateSigningPurpose::L1DepositImport);
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "l1DepositImport",
             "record": state.snapshot.record,
@@ -19095,7 +19502,9 @@ fn l1_tx_gas_limit_cap() -> Option<u64> {
     match std::env::var("L1_TX_GAS_LIMIT_CAP") {
         Ok(value) if !value.is_empty() => {
             let cap = value.parse::<u64>().unwrap_or_else(|_| {
-                die(format!("L1_TX_GAS_LIMIT_CAP must be a decimal gas amount, got {value:?}"))
+                die(format!(
+                    "L1_TX_GAS_LIMIT_CAP must be a decimal gas amount, got {value:?}"
+                ))
             });
             (cap > 0).then_some(cap)
         }
@@ -19112,7 +19521,9 @@ fn max_simulated_gas(record: &serde_json::Value) -> u64 {
         .iter()
         .map(|tx| {
             parse_u64_quantity(
-                tx["transaction"]["gas"].as_str().unwrap_or_else(|| die("forge transaction without gas")),
+                tx["transaction"]["gas"]
+                    .as_str()
+                    .unwrap_or_else(|| die("forge transaction without gas")),
                 "simulated gas",
             )
         })
@@ -19127,13 +19538,14 @@ fn capped_gas_multiplier(max_simulated: u64, preferred: u64, cap: Option<u64>) -
     let (Some(cap), true) = (cap, max_simulated > 0) else {
         return Some(preferred);
     };
-    let fitting = u64::try_from(u128::from(cap) * 100 / u128::from(max_simulated)).unwrap_or(u64::MAX);
+    let fitting =
+        u64::try_from(u128::from(cap) * 100 / u128::from(max_simulated)).unwrap_or(u64::MAX);
     (fitting >= 100).then(|| fitting.min(preferred))
 }
 
 #[cfg(test)]
 mod tx_gas_limit_cap_tests {
-    use super::{capped_gas_multiplier, max_simulated_gas, EIP7825_TX_GAS_LIMIT_CAP};
+    use super::{EIP7825_TX_GAS_LIMIT_CAP, capped_gas_multiplier, max_simulated_gas};
 
     const CAP: Option<u64> = Some(EIP7825_TX_GAS_LIMIT_CAP);
 
@@ -19155,8 +19567,14 @@ mod tx_gas_limit_cap_tests {
 
     #[test]
     fn refuses_a_transaction_that_cannot_fit_at_all() {
-        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP + 1, 200, CAP), None);
-        assert_eq!(capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP, 200, CAP), Some(100));
+        assert_eq!(
+            capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP + 1, 200, CAP),
+            None
+        );
+        assert_eq!(
+            capped_gas_multiplier(EIP7825_TX_GAS_LIMIT_CAP, 200, CAP),
+            Some(100)
+        );
     }
 
     #[test]
@@ -19166,7 +19584,10 @@ mod tx_gas_limit_cap_tests {
             {"transaction": {"gas": "0x8f0d18"}},
         ]});
         assert_eq!(max_simulated_gas(&record), 0xeafec3);
-        assert_eq!(max_simulated_gas(&serde_json::json!({"transactions": []})), 0);
+        assert_eq!(
+            max_simulated_gas(&serde_json::json!({"transactions": []})),
+            0
+        );
     }
 }
 
@@ -19445,7 +19866,9 @@ fn cmd_pw_finalize(args: &[String]) {
     let rollup = if Path::new(BACKING_FILE).exists() {
         let backing: ChannelBacking = read_private_json(BACKING_FILE);
         if backing.rollup.trim().is_empty() {
-            die(format!("{BACKING_FILE} names no rollup; the burn cannot be paid without it"));
+            die(format!(
+                "{BACKING_FILE} names no rollup; the burn cannot be paid without it"
+            ));
         }
         backing.rollup.trim().to_string()
     } else {
@@ -19578,13 +20001,13 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
         })
         .checked_sub(1)
         .unwrap_or_else(|| die("live baseNonce 0 cannot follow a burn"));
-    let burn_base_nonce = u32::try_from(burn_base_nonce)
-        .unwrap_or_else(|_| die("burn base nonce exceeds u32"));
+    let burn_base_nonce =
+        u32::try_from(burn_base_nonce).unwrap_or_else(|_| die("burn base nonce exceeds u32"));
     let channel_id_u64 = cosigned_head["channelId"]
         .as_u64()
         .unwrap_or_else(|| die("burn_cosigned.json missing channelId"));
-    let channel_id = ChannelId::new(channel_id_u64)
-        .unwrap_or_else(|e| die(format!("channel id: {e:?}")));
+    let channel_id =
+        ChannelId::new(channel_id_u64).unwrap_or_else(|e| die(format!("channel id: {e:?}")));
     let signed_head_digest = require_payout_leaf_is_the_signed_burn(
         &cosigned_head,
         channel_id,
@@ -19649,8 +20072,14 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
     fs::create_dir_all(&stage_dir)
         .unwrap_or_else(|e| die(format!("create {}: {e}", stage_dir.display())));
     let payout_path = stage_dir.join("payout.json").to_string_lossy().to_string();
-    let mle_path = stage_dir.join("withdrawal_mle.json").to_string_lossy().to_string();
-    write_private_bytes_at(Path::new(&payout_path), candidate.artifacts.payout_json.as_bytes());
+    let mle_path = stage_dir
+        .join("withdrawal_mle.json")
+        .to_string_lossy()
+        .to_string();
+    write_private_bytes_at(
+        Path::new(&payout_path),
+        candidate.artifacts.payout_json.as_bytes(),
+    );
     write_private_bytes_at(
         Path::new(&mle_path),
         candidate.artifacts.withdrawal_mle_json.as_bytes(),
@@ -19765,19 +20194,27 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
                 (receipt, hash, intent)
             } else {
                 require_nonce_free_for_exact_rebroadcast(rpc, &caller_hex, intent.caller_nonce);
-                let nonce_arg = intent.caller_nonce.to_string();
-                let send_out = cast_signed(
+                // The calldata carries the withdrawal proof (261,130 hex characters measured), over
+                // Linux's 131,071-byte argument limit: `cast send <rollup> <calldata>` cannot start
+                // there. Sign here and send the raw transaction on stdin.
+                let tx_hash = send_signed_call(
                     rpc,
                     l1_signer.get(),
-                    &["send", rollup, &calldata, "--nonce", &nonce_arg, "--json"],
+                    chain_id,
+                    &caller_hex,
+                    rollup,
+                    &calldata,
+                    0,
+                    intent.caller_nonce,
+                    "payout",
                 );
-                let tx_hash = extract_tx_hash(&send_out);
                 let tx_hash_b32 = tx_hash
                     .parse::<Bytes32>()
                     .unwrap_or_else(|e| die(format!("parse payout tx hash: {e}")));
                 store
                     .record_payout_tx_hash(candidate_id, tx_hash_b32)
                     .unwrap_or_else(|e| die(format!("persist payout tx hash: {e}")));
+                wait_for_l1_receipt(rpc, &tx_hash, "payout");
                 (read_l1_receipt(rpc, &tx_hash, payout_kind), tx_hash, intent)
             }
         };
@@ -19861,8 +20298,8 @@ fn run_partial_withdrawal_payout(rpc: &str, l1_signer: &LazyL1Signer, rollup: &s
         ])
     };
     let pull_calldata = pull_calldata_owned.trim();
-    let calldata_hash = cast(&["keccak", pull_calldata])
-        .trim()
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(pull_calldata)
+        .unwrap_or_else(|e| die(format!("pull calldata: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak pull calldata: {e}")));
     let intent = if let Some(intent) = candidate.pull_broadcast.clone() {
@@ -20056,8 +20493,10 @@ fn build_partial_withdrawal_payout_calldata(
             "payout dry-run targets {dry_to}, expected the rollup {rollup}"
         ));
     }
-    let calldata_hash = cast(&["keccak", &calldata])
-        .trim()
+    // Hashed here: `cast keccak <calldata>` cannot start on Linux (the calldata is over the
+    // 131,071-byte argument limit).
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(&calldata)
+        .unwrap_or_else(|e| die(format!("payout calldata: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak payout calldata: {e}")));
     (calldata, calldata_hash)
@@ -20618,8 +21057,9 @@ fn parse_l1_receipt(
         .as_str()
         .unwrap_or_else(|| die("tx missing input"))
         .to_string();
-    let calldata_hash = cast(&["keccak", &input])
-        .trim()
+    // A payout's input is over Linux's argument limit, so it is hashed here, not by `cast keccak`.
+    let calldata_hash = intmax3_zkp::l1_raw_transaction::keccak256_hex(&input)
+        .unwrap_or_else(|e| die(format!("tx input: {e}")))
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak tx input: {e}")));
     let chain_id = if t["chainId"].is_null() {
@@ -20965,7 +21405,8 @@ mod daemon_signer_rule_tests {
     #[test]
     fn a_controlled_cosigner_slot_with_the_recorded_key_satisfies_the_rule() {
         let cli = signing_ledger_tests::fixture();
-        require_daemon_signer(&cli.snapshot.record, &cli.controlled).expect("daemon signer present");
+        require_daemon_signer(&cli.snapshot.record, &cli.controlled)
+            .expect("daemon signer present");
     }
 
     #[test]
@@ -20981,7 +21422,10 @@ mod daemon_signer_rule_tests {
         let foreign: Vec<ControlledMember> = cli
             .controlled
             .iter()
-            .map(|c| ControlledMember { keygen_seed: c.keygen_seed + 1000, ..c.clone() })
+            .map(|c| ControlledMember {
+                keygen_seed: c.keygen_seed + 1000,
+                ..c.clone()
+            })
             .collect();
         assert!(require_daemon_signer(&cli.snapshot.record, &foreign).is_err());
     }
@@ -20993,7 +21437,10 @@ mod daemon_signer_rule_tests {
         let delegate_only: Vec<ControlledMember> = cli
             .controlled
             .iter()
-            .map(|c| ControlledMember { slot: c.slot + u32::from(member_count), ..c.clone() })
+            .map(|c| ControlledMember {
+                slot: c.slot + u32::from(member_count),
+                ..c.clone()
+            })
             .collect();
         assert!(require_daemon_signer(&cli.snapshot.record, &delegate_only).is_err());
     }
@@ -21387,53 +21834,30 @@ mod signing_ledger_tests {
     }
 
     #[test]
-    fn in_channel_signing_waits_for_the_reused_kit_root_to_finalize_on_l1() {
-        // C25/G16: the durable head's kit root is not finalized → no in-channel signature, with the
-        // relay-visible marker; once L1 reports it finalized the receipt remembers that for good.
+    fn in_channel_signing_never_waits_for_l1_finality() {
+        // Owner decision 2026-11-25: a co-signed in-channel send is final when the sig-cluster
+        // signs it. The 2026-11-09 gate refused it ("HEAD BACKING NOT FINALIZED") until the durable
+        // head's block was posted, proved and finalized on L1; nothing consults L1 now.
         let mut cli = fixture();
-        let receipt = cli.signer_exit_kit_receipt.as_mut().unwrap();
-        receipt.backing_root_finalized = false;
-        let root = receipt.backing_root;
-
-        let refused = require_durable_head_backing_finalized_with(
+        cli.signer_exit_kit_receipt
+            .as_mut()
+            .unwrap()
+            .backing_root_finalized = false;
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let successor = child_of(&cli.snapshot.state, 1);
+        ledgered_state_signature_with(
             &mut cli,
+            &record,
+            &controlled,
+            &successor,
             StateSigningPurpose::InChannelSend,
-            |_, _, _| false,
+            None,
+            None,
+            |keys| sign_state(keys, controlled.slot as u8, &successor).map_err(|e| e.to_string()),
         )
-        .expect_err("unfinalized backing root must refuse");
-        assert!(refused.contains(HEAD_BACKING_NOT_FINALIZED), "{refused}");
-        assert!(!cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
-        // The gate is purpose-independent: a deposit import stacked on the same unfinalized head
-        // is refused before its own prepared-kit check runs (item A by stacking).
-        let stacked = require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::L1DepositImport,
-            |_, _, _| false,
-        )
-        .expect_err("asset-moving successor on an unfinalized head must refuse");
-        assert!(stacked.contains("L1DepositImport"), "{stacked}");
-        let asked = std::cell::RefCell::new(Vec::new());
-        require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::InChannelSend,
-            |rollup, asked_root, _anchor| {
-                asked.borrow_mut().push((*rollup, *asked_root));
-                true
-            },
-        )
-        .expect("finalized backing root releases the gate");
-        assert_eq!(
-            asked.into_inner(),
-            vec![(cli.signer_exit_kit_receipt.as_ref().unwrap().rollup, root)]
-        );
-        assert!(cli.signer_exit_kit_receipt.as_ref().unwrap().backing_root_finalized);
-        // Sticky: a second check never consults L1 again.
-        require_durable_head_backing_finalized_with(
-            &mut cli,
-            StateSigningPurpose::InChannelSend,
-            |_, _, _| panic!("finality is permanent; L1 must not be asked twice"),
-        )
-        .unwrap();
+        .expect("an unfinalized backing root does not hold an in-channel signature");
+        assert_eq!(cli.state_signing_ledger.len(), 1);
     }
 
     #[test]
@@ -21521,7 +21945,9 @@ mod signing_ledger_tests {
             None,
             |_| panic!("FAILING (stranded deposit): a fund-import leg must never be signed"),
         )
-        .expect_err("FAILING (stranded deposit): L1DepositFundImport must be refused before signing");
+        .expect_err(
+            "FAILING (stranded deposit): L1DepositFundImport must be refused before signing",
+        );
         assert!(refusal.contains("NOT A SIGNED HEAD"), "{refusal}");
         assert!(cli.state_signing_ledger.is_empty());
     }

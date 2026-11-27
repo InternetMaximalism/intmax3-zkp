@@ -1276,36 +1276,11 @@ app.post('/api/cosign', (req, res) => {
       console.error(error);
       // A KIT-PENDING head is a channel condition, not a relay failure: say which transition is
       // holding the channel (an inter-channel credit still pending on its source channel).
-      const kitPending = /KIT-PENDING/.test(error) ? kitPendingHint(ch)
-        : /HEAD BACKING NOT FINALIZED/.test(error) ? backingPendingHint(ch) : null;
+      const kitPending = /KIT-PENDING/.test(error) ? kitPendingHint(ch) : null;
       res.status(e.staleAnchor || kitPending ? 409 : 500).json(kitPending ? { error, ...kitPending } : { error });
     }
   );
 });
-
-// A signing route's failure: a head whose block is not finalized on L1 yet is a wait, not a
-// failure (C25/G16). Answer 409 with backingPendingHint, which publishes the pending candidate
-// (nothing else would retry a failed publication), so the wallet re-sends the same request.
-function sendSigningError(res, ch, e) {
-  const error = fullCliError(e);
-  if (!/HEAD BACKING NOT FINALIZED/.test(error)) return sendRouteError(res, e);
-  console.error(error);
-  res.status(409).json({ error, ...backingPendingHint(ch) });
-}
-
-// The channel's head is backed by an exit kit anchored after a block that is not finalized on L1
-// (a deposit import, debit or burn whose validity candidate has not been published yet). The CLI
-// refuses in-channel signatures until it is (C25/G16); publish now and tell the wallet to retry.
-function backingPendingHint(ch) {
-  const walletL1 = require('../../api/lib/wallet-l1');
-  const inFlight = !!walletL1.publishPending(ch);
-  walletL1.publishLater(ch, 'a refused in-channel signature');
-  return {
-    kitPending: true,
-    backingPending: true,
-    hint: `channel ${ch}'s head is not finalized on L1 yet (its deposit/debit/burn block is being published${inFlight ? '' : ' now'}); in-channel sends resume once the rollup finalizes it — retry shortly`,
-  };
-}
 
 // Inter-channel transfers still pending on any source channel whose destination is `ch`: these
 // are the transitions that advanced `ch`'s signed head without an exit kit yet.
@@ -1337,8 +1312,7 @@ app.post('/api/refresh-cosign', (req, res) => {
   }).catch((e) => {
     const error = fullCliError(e);
     console.error(error);
-    const pending = /HEAD BACKING NOT FINALIZED/.test(error) ? backingPendingHint(ch) : null;
-    res.status(pending ? 409 : 500).json(pending ? { error, ...pending } : { error });
+    res.status(500).json({ error });
   });
 });
 
@@ -1416,7 +1390,7 @@ app.post('/api/inter/send', (req, res) => {
   resumePendingInterTransferLocked(ch)
     .catch((e) => console.error(`[inter] channel ${ch}: pending transfer resume failed before a new send: ${String(e.stderr || e.message || e).slice(0, 300)}`))
     .then(() => withInterLocks(ch, destination, runLocked))
-    .catch((e) => sendSigningError(res, ch, e));
+    .catch((e) => sendRouteError(res, e));
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -1489,14 +1463,14 @@ app.post('/api/claim', (req, res) => {
 // The reorg depth `cosign-l1-deposit-import` will require for a deposit on `chainId`.
 //
 // SECURITY: DISPLAY ONLY, and deliberately a MIRROR rather than a control. The enforcing check is
-// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, floor 1 and
-// default 12 elsewhere), which reads the chain itself. This relay never passes a
+// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, default 3 on
+// Sepolia, floor 1 and default 12 elsewhere), which reads the chain itself. This relay never passes a
 // `min_confirmations` argument to the CLI, and the CLI clamps any explicit value UP to the floor —
 // so nothing served here can lower the depth actually enforced. It exists only so the wallet can
 // render "confirming (n/12)" instead of an error while a fresh deposit matures.
 // Keep in sync with wallet-relay-ec2.js.
 function minConfirmationsForDisplay(chainId) {
-  return chainId === 31337 ? 0 : 12;
+  return chainId === 31337 ? 0 : chainId === 11155111 ? 3 : 12;
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true, chainId: relayChainId(), channels: CHANNELS,
@@ -1629,10 +1603,7 @@ function importViaSequencer(ch, req, res) {
     delegateReply(ch, req, res);
   })().catch((e) => {
     const full = fullCliError(e); console.error(full);
-    // Not failures but waits: the chain's confirmation depth, the deposit queue, and the durable
-    // head's backing finality (C25/G16: the previous import's block must be finalized on L1 before
-    // the next asset-bearing head is signed; the publisher is kicked and the client retries).
-    if (/HEAD BACKING NOT FINALIZED/.test(full)) return res.status(409).json({ error: full, ...backingPendingHint(ch) });
+    // Not failures but waits: the chain's confirmation depth and the deposit queue.
     res.status(/confirmation\(s\), need|queued behind/.test(full) ? 409 : 500).json({ error: full });
   });
 }
@@ -1713,7 +1684,7 @@ app.post('/api/cosign-burn', (req, res) => {
     res.json(headAck(cosignedHead));
     // Public chain: settle it on L1 in the background, starting now; the channel stays open.
     pwSettlement.start(ch);
-  }).catch((e) => sendSigningError(res, ch, e));
+  }).catch((e) => sendRouteError(res, e));
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
@@ -1750,7 +1721,9 @@ app.post('/api/deploy-settlement', (req, res) => {
 //   before the close (it retained that pre-receive generation with them). The close cursor
 //   (close id, finalized H1, late Balance commitment) is read from the settlement contracts.
 //   Writes ch<N>/late_deposit_<nullifier>.json (0600: it carries the next private checkpoint) and
-//   returns the statement; then:
+//   returns the statement. The cursor is read at the FINALIZED block, and a claimed receipt whose
+//   next cursor that is gets adopted first, so a second stranded deposit starts where the first
+//   claim moved the cursor; then:
 // POST /api/late-deposit/claim?channel=N  body: { nullifier }
 //   sends CloseFundingMaterializer.claimLateDeposit(manager, compactProof) with the relay's L1 key.
 //   Any holder of the private base state can run both (every cluster host, see live-replica.js).
@@ -1760,17 +1733,36 @@ function lateDepositSettlement(ch) {
   if (!s.manager || !materializer) throw new Error('settlement.json lacks manager / close_funding_materializer');
   return { manager: s.manager, materializer };
 }
+// The ABI encoding of `(address, bytes)` arguments, without the selector, as hex without 0x.
+function abiEncodeAddressBytes(address, bytes) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error(`not an address: ${address}`);
+  const word = (hex) => hex.padStart(64, '0');
+  const data = bytes.toString('hex');
+  return word(address.slice(2).toLowerCase()) + word((64).toString(16)) + word(bytes.length.toString(16))
+    + data + '0'.repeat((64 - (data.length % 64)) % 64);
+}
 app.post('/api/late-deposit/prepare', (req, res) => {
   let ch;
   try { ch = reqChannel(req); } catch (e) { return sendRouteError(res, e); }
   withLock(ch, async () => {
     const { manager, materializer } = lateDepositSettlement(ch);
-    const call = (to, sig, ...args) => require('../../api/lib/cli').sh('cast', ['call', to, sig, ...args, '--rpc-url', RPC], { stdio: 'pipe' }).trim();
+    // Read at the finalized block: an adopted cursor must never be rolled back by a reorg.
+    const call = (to, sig, ...args) => require('../../api/lib/cli').sh('cast', ['call', to, sig, ...args,
+      '--block', 'finalized', '--rpc-url', RPC], { stdio: 'pipe' }).trim();
     const closeIntentDigest = call(materializer, 'materializedChannelExit(uint32)(bytes32)', String(ch));
     const finalBalanceStateH1 = call(manager, 'finalizedBalanceStateH1()(bytes32)');
     const confirmedCommitment = call(materializer, 'lateBalanceStateCommitment(uint32)(bytes32)', String(ch));
     if (/^0x0+$/.test(closeIntentDigest) || /^0x0+$/.test(confirmedCommitment)) {
-      throw new Error(`channel ${ch} has no materialized close on ${materializer}: nothing to refund against yet`);
+      throw new Error(`channel ${ch} has no finalized materialized close on ${materializer}: nothing to refund against yet`);
+    }
+    // A claimed receipt whose next cursor is the confirmed one moved the cursor: adopt its private
+    // continuation (idempotent) so this claim starts there.
+    for (const name of fs.readdirSync(wc(ch, '.')).filter((f) => /^late_deposit_0x[0-9a-fA-F]{64}\.json$/.test(f))) {
+      const saved = JSON.parse(fs.readFileSync(wc(ch, name), 'utf8'));
+      const next = saved.prepared && saved.prepared.statement && saved.prepared.statement.nextBalanceCommitment;
+      if (saved.claim && next && String(next).toLowerCase() === confirmedCommitment.toLowerCase()) {
+        await producer.liveAdoptLateDeposit(ch, { prepared: saved.prepared, confirmedCommitment });
+      }
     }
     const body = req.body || {};
     const out = await producer.livePrepareLateDeposit(ch, {
@@ -1797,10 +1789,14 @@ app.post('/api/late-deposit/claim', (req, res) => {
     const prepared = JSON.parse(fs.readFileSync(file, 'utf8'));
     const { manager, materializer } = lateDepositSettlement(ch);
     if (prepared.manager !== manager || prepared.materializer !== materializer) throw new Error('prepared late deposit names another settlement');
-    const proof = '0x' + Buffer.from(prepared.prepared.compactProof).toString('hex');
     const helper = require('../../api/lib/cli');
-    const out = helper.sh('cast', ['send', materializer, 'claimLateDeposit(address,bytes)', manager, proof,
-      ...helper.l1SignerArgs(), '--rpc-url', RPC, '--json'], { stdio: 'pipe' });
+    // The proof is ~130 KB (~260,000 hex characters), over Linux's 131,071-byte argument limit:
+    // `cast send <materializer> claimLateDeposit(address,bytes) <manager> <proof>` cannot start on
+    // the host (E2BIG). channel_member signs the call with the same L1 signer and reads the
+    // calldata from stdin.
+    const calldata = helper.sh('cast', ['sig', 'claimLateDeposit(address,bytes)'], { stdio: 'pipe' }).trim()
+      + abiEncodeAddressBytes(manager, Buffer.from(prepared.prepared.compactProof));
+    const out = helper.sh(helper.CLI, ['l1-call', RPC, materializer], { input: calldata, stdio: 'pipe' });
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
     const status = (out.match(/"status"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
     fs.writeFileSync(file, JSON.stringify({ ...prepared, claim: { txHash, status, sentAt: Date.now() } }), { mode: 0o600 });
@@ -1863,7 +1859,7 @@ app.post('/api/pw-finalize', (req, res) => {
 // The receiver pulls the credited amount through MetaMask; verify that exact mined call.
 app.post('/api/pw-claim-confirm', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     const hash = String(req.body && req.body.txHash || '');
     // A successful confirmation can lose its response. A retry must return that same completion,
@@ -1876,8 +1872,16 @@ app.post('/api/pw-claim-confirm', (req, res) => {
     if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error('invalid payout transaction hash');
     const { sh } = require('../../api/lib/cli');
     const rpc = (method, arg) => JSON.parse(sh('cast', ['rpc', method, arg, '--rpc-url', RPC]));
-    const tx = rpc('eth_getTransactionByHash', hash), receipt = rpc('eth_getTransactionReceipt', hash);
+    // The wallet reports the pull mined from ITS node; this relay's load-balanced RPC can answer from
+    // a backend a block or two behind (Sepolia, 2026-11-26: the confirm came back "not mined yet"
+    // for a pull already in block 12218788). Wait for this RPC to see it before refusing.
+    let receipt = rpc('eth_getTransactionReceipt', hash);
+    for (let attempt = 0; !receipt && attempt < 12; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      receipt = rpc('eth_getTransactionReceipt', hash);
+    }
     if (!receipt) throw new Error('wallet payout is not mined yet');
+    const tx = rpc('eth_getTransactionByHash', hash);
     const block = JSON.parse(sh('cast', ['rpc', 'eth_getBlockByNumber', receipt.blockNumber, 'false', '--rpc-url', RPC]));
     require('../../node/common/partial-withdrawal-pull').verifyPull(ticket.params.claim, tx, receipt, block);
     ticket.status = 'settle_done'; ticket.steps.claim = { completedAt: Date.now(), txHash: hash }; upsertTicket(ch, ticket);

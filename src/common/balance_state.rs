@@ -440,15 +440,23 @@ fn trim_to_active<T: PartialEq + Clone>(
     what: &str,
 ) -> Result<Vec<T>, String> {
     if rows.len() > MAX_CHANNEL_MEMBERS {
-        return Err(format!("{what} has {} slots (> MAX_CHANNEL_MEMBERS)", rows.len()));
+        return Err(format!(
+            "{what} has {} slots (> MAX_CHANNEL_MEMBERS)",
+            rows.len()
+        ));
     }
     if rows.iter().skip(active).any(|row| *row != padding) {
-        return Err(format!("{what} carries a nonzero value past the active slots ({active})"));
+        return Err(format!(
+            "{what} carries a nonzero value past the active slots ({active})"
+        ));
     }
     rows.truncate(active);
     if rows.len() < active {
         if !pad_short {
-            return Err(format!("{what} has {} slots, fewer than the active {active}", rows.len()));
+            return Err(format!(
+                "{what} has {} slots, fewer than the active {active}",
+                rows.len()
+            ));
         }
         rows.resize(active, padding);
     }
@@ -509,7 +517,13 @@ impl TryFrom<BalanceStateWire> for BalanceState {
                 false,
                 "regevPkDigests",
             )?,
-            recipients: trim_to_active(w.recipients, active, Address::default(), false, "recipients")?,
+            recipients: trim_to_active(
+                w.recipients,
+                active,
+                Address::default(),
+                false,
+                "recipients",
+            )?,
             settled_tx_chain: w.settled_tx_chain,
             settled_tx_accumulator_root: w.settled_tx_accumulator_root,
             state_version: w.state_version,
@@ -557,14 +571,19 @@ pub struct SlotTree {
 
 impl SlotTree {
     pub fn from_leaves(leaves: Vec<PoseidonHashOut>) -> Self {
-        assert!(leaves.len() <= MAX_CHANNEL_MEMBERS, "more leaves than balance slots");
+        assert!(
+            leaves.len() <= MAX_CHANNEL_MEMBERS,
+            "more leaves than balance slots"
+        );
         let ladder = slot_padding_ladder();
         let mut levels = vec![leaves];
         for k in 0..BALANCE_SLOT_TREE_HEIGHT {
             let below = &levels[k];
             let next: Vec<PoseidonHashOut> = below
                 .chunks(2)
-                .map(|pair| PoseidonLeafableHasher::two_to_one(pair[0], *pair.get(1).unwrap_or(&ladder[k])))
+                .map(|pair| {
+                    PoseidonLeafableHasher::two_to_one(pair[0], *pair.get(1).unwrap_or(&ladder[k]))
+                })
                 .collect();
             levels.push(next);
         }
@@ -654,7 +673,10 @@ impl BalanceState {
     /// each `Bytes32::from(RegevPk::poseidon_digest())`) to a full `MAX_CHANNEL_MEMBERS`-sized
     /// array, filling padding slots with `Bytes32::default()`.
     pub fn pad_regev_pk_digests(active: &[Bytes32]) -> Vec<Bytes32> {
-        assert!(active.len() <= MAX_CHANNEL_MEMBERS, "active slot prefix exceeds MAX_CHANNEL_MEMBERS");
+        assert!(
+            active.len() <= MAX_CHANNEL_MEMBERS,
+            "active slot prefix exceeds MAX_CHANNEL_MEMBERS"
+        );
         active.to_vec()
     }
 
@@ -663,7 +685,10 @@ impl BalanceState {
     /// `Address::default()` (zero). Mirrors the other `pad_*` helpers; [`Self::validate`] enforces
     /// the nonzero-active / zero-padding split fail-closed.
     pub fn pad_recipients(active: &[Address]) -> Vec<Address> {
-        assert!(active.len() <= MAX_CHANNEL_MEMBERS, "active slot prefix exceeds MAX_CHANNEL_MEMBERS");
+        assert!(
+            active.len() <= MAX_CHANNEL_MEMBERS,
+            "active slot prefix exceeds MAX_CHANNEL_MEMBERS"
+        );
         active.to_vec()
     }
 
@@ -1258,8 +1283,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree;
-    use crate::regev::{REGEV_N, REGEV_Q};
+    use crate::{
+        regev::{REGEV_N, REGEV_Q},
+        utils::trees::incremental_merkle_tree::IncrementalMerkleTree,
+    };
 
     /// Deterministic canonical ciphertext (raw seed-derived coefficients < q). These are not
     /// decryptable — digest/H1 tests only need canonical, distinct ring elements.
@@ -1333,7 +1360,10 @@ mod tests {
     fn sparse_token_rows_round_trip_through_both_codecs() {
         let state = sample_state();
         assert!(
-            state.enc_balances.iter().any(|row| row.iter().any(|ct| *ct != *zero_ciphertext())),
+            state
+                .enc_balances
+                .iter()
+                .any(|row| row.iter().any(|ct| *ct != *zero_ciphertext())),
             "the fixture must exercise a non-empty sparse row, or this test proves nothing"
         );
 
@@ -1433,7 +1463,10 @@ mod tests {
             member_count: count,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances_token0(&active),
-            regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); count as usize]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![
+                Bytes32::default();
+                count as usize
+            ]),
             recipients: BalanceState::pad_recipients(&recipients),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -1655,7 +1688,11 @@ mod tests {
         assert_eq!(state.slot_tree_root(), full.get_root());
         let sparse = state.slot_tree();
         for i in 0..state.active_slots() as u64 {
-            assert_eq!(sparse.prove(i).0.siblings, full.prove(i).0.siblings, "path of slot {i}");
+            assert_eq!(
+                sparse.prove(i).0.siblings,
+                full.prove(i).0.siblings,
+                "path of slot {i}"
+            );
         }
 
         // Explicit per-slot recompute (no padding memoization) — same leaves, same root.
@@ -1700,7 +1737,11 @@ mod tests {
         for index in [0u64, 65_535, 65_536, 65_537, (OCCUPIED - 1) as u64] {
             let path = sparse.prove(index);
             assert_eq!(path.0.siblings.len(), BALANCE_SLOT_TREE_HEIGHT);
-            assert_eq!(path.0.siblings, full.prove(index).0.siblings, "path of slot {index}");
+            assert_eq!(
+                path.0.siblings,
+                full.prove(index).0.siblings,
+                "path of slot {index}"
+            );
             assert_eq!(
                 path.get_root(&leaves[index as usize], index),
                 sparse.get_root(),
@@ -1721,8 +1762,14 @@ mod tests {
             v.resize(MAX_CHANNEL_MEMBERS, padding);
             v
         };
-        let digests = pad("regevPkDigests", serde_json::to_value(Bytes32::default()).unwrap());
-        let recipients = pad("recipients", serde_json::to_value(Address::default()).unwrap());
+        let digests = pad(
+            "regevPkDigests",
+            serde_json::to_value(Bytes32::default()).unwrap(),
+        );
+        let recipients = pad(
+            "recipients",
+            serde_json::to_value(Address::default()).unwrap(),
+        );
         value["regevPkDigests"] = serde_json::Value::Array(digests);
         value["recipients"] = serde_json::Value::Array(recipients);
         let decoded: BalanceState = serde_json::from_value(value.clone()).unwrap();
@@ -1990,9 +2037,15 @@ mod tests {
             tx_leaf_hash(pubkey_hash(11), d_send, receiver, k_recv, d_recv)
         );
         assert_ne!(leaf, tx_leaf_hash(sender, d_recv, receiver, k_recv, d_recv));
-        assert_ne!(leaf, tx_leaf_hash(sender, d_send, pubkey_hash(22), k_recv, d_recv));
+        assert_ne!(
+            leaf,
+            tx_leaf_hash(sender, d_send, pubkey_hash(22), k_recv, d_recv)
+        );
         // The receiver's Regev key digest is binding (pass-3 H1).
-        assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, pubkey_hash(32), d_recv));
+        assert_ne!(
+            leaf,
+            tx_leaf_hash(sender, d_send, receiver, pubkey_hash(32), d_recv)
+        );
         assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, k_recv, d_send));
     }
 

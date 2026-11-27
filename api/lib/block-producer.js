@@ -410,6 +410,12 @@ function livePrepareLateDeposit(channelId, body) {
   return execute({ command: 'livePrepareLateDeposit', channelId, ...body });
 }
 
+/// Adopt a finalized late-deposit claim's next cursor (`{ prepared, confirmedCommitment }`): the
+/// following late claim starts there. Idempotent.
+function liveAdoptLateDeposit(channelId, body) {
+  return execute({ command: 'liveAdoptLateDeposit', channelId, ...body });
+}
+
 /// Terminate the resident daemon (server shutdown / test teardown). In-flight waiters are
 /// rejected by the child's exit handler; a later command restarts the daemon, which recovers
 /// from its durable journal + live snapshots.
@@ -459,6 +465,7 @@ module.exports = {
   authoritativeBaseNonceEnv,
   liveReceiveInterChannel,
   livePrepareLateDeposit,
+  liveAdoptLateDeposit,
   liveBurnPayoutArtifacts,
   liveSnapshotExists,
   liveSnapshotPath,

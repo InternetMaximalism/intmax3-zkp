@@ -43,8 +43,8 @@ use crate::{
     ethereum_types::{address::Address, bytes32::Bytes32},
     regev::{
         AmountWitness, MAX_HOMO_ADDS_BEFORE_REFRESH, RegevCiphertext, RegevPk, RegevSecurityLevel,
-        decrypt_amount, encrypt_amount, prove_balance_refresh_witnessed, prove_channel_tx_decrypted,
-        prove_channel_update_decrypted,
+        decrypt_amount, encrypt_amount, prove_balance_refresh_witnessed,
+        prove_channel_tx_decrypted, prove_channel_update_decrypted,
     },
     utils::{
         poseidon_hash_out::PoseidonHashOut,
@@ -203,9 +203,7 @@ impl SlotView {
             return err("slot view: co-signer identity list does not match member_count");
         }
         for (i, pk_g) in self.record.cosigner_pk_gs.iter().enumerate() {
-            if *pk_g == Bytes32::default()
-                || self.record.cosigner_pk_gs[..i].contains(pk_g)
-            {
+            if *pk_g == Bytes32::default() || self.record.cosigner_pk_gs[..i].contains(pk_g) {
                 return err("slot view: co-signer identities must be nonzero and distinct");
             }
         }
@@ -255,9 +253,13 @@ impl SlotView {
                 .member_signatures
                 .iter()
                 .find(|s| s.member_slot as usize == slot)
-                .ok_or_else(|| WalletError(format!("slot view: missing signature for slot {slot}")))?;
+                .ok_or_else(|| {
+                    WalletError(format!("slot view: missing signature for slot {slot}"))
+                })?;
             if sig.pk_g != expected {
-                return err(format!("slot view: slot {slot} signature identity mismatch"));
+                return err(format!(
+                    "slot view: slot {slot} signature identity mismatch"
+                ));
             }
             verify_state_sig(expected, &digest, &sig.signature)?;
         }
@@ -298,7 +300,9 @@ impl SlotView {
         }
         for t in 0..self.state.balance_state.token_count as usize {
             decrypt_amount(&keys.regev_sk, &self.row.enc_balances[t]).map_err(|e| {
-                WalletError(format!("slot view: own balance at token {t} does not decrypt: {e:?}"))
+                WalletError(format!(
+                    "slot view: own balance at token {t} does not decrypt: {e:?}"
+                ))
             })?;
         }
         Ok(())
@@ -309,7 +313,11 @@ impl SlotView {
         header.token_registry[..header.token_count as usize]
             .iter()
             .position(|&t| t == token_index)
-            .ok_or_else(|| WalletError(format!("token {token_index} is not registered in this channel")))
+            .ok_or_else(|| {
+                WalletError(format!(
+                    "token {token_index} is not registered in this channel"
+                ))
+            })
     }
 
     fn check_token_slot(&self, token_slot: u8) -> WResult<usize> {
@@ -368,8 +376,8 @@ pub fn build_view_send(
         .map_err(|e| WalletError(format!("recipient Regev key: {e}")))?;
     let ts = view.check_token_slot(token_slot)?;
     let before_ct = &view.row.enc_balances[ts];
-    let before_amount = decrypt_amount(&keys.regev_sk, before_ct)
-        .map_err(|e| WalletError(format!("{e:?}")))?;
+    let before_amount =
+        decrypt_amount(&keys.regev_sk, before_ct).map_err(|e| WalletError(format!("{e:?}")))?;
     if before_amount < amount {
         return err("insufficient balance");
     }
@@ -582,8 +590,8 @@ pub fn build_view_inter_channel_send(
     let prev = &view.state;
     let token_slot = view.local_token_slot(token_index)?;
     let before_ct = view.row.enc_balances[token_slot].clone();
-    let before_amount = decrypt_amount(&keys.regev_sk, &before_ct)
-        .map_err(|e| WalletError(format!("{e:?}")))?;
+    let before_amount =
+        decrypt_amount(&keys.regev_sk, &before_ct).map_err(|e| WalletError(format!("{e:?}")))?;
     if before_amount < amount {
         return err("insufficient balance");
     }
@@ -599,7 +607,8 @@ pub fn build_view_inter_channel_send(
     let sender_pk = keys.regev_pk.clone();
     let sender_pk_g = keys.pk_g();
     let map = |e: crate::regev::RegevError| WalletError(format!("{e:?}"));
-    let (after_ct, after_w) = encrypt_amount(rng, &sender_pk, before_amount - amount).map_err(map)?;
+    let (after_ct, after_w) =
+        encrypt_amount(rng, &sender_pk, before_amount - amount).map_err(map)?;
     let (sender_delta_ct, sender_delta_w) = encrypt_amount(rng, &sender_pk, amount).map_err(map)?;
     let (receiver_delta_ct, receiver_delta_w) =
         encrypt_amount(rng, &destination_recipient_pk, amount).map_err(map)?;
@@ -657,7 +666,8 @@ pub fn build_view_inter_channel_send(
     let mut transfer_tree = TransferTree::init();
     transfer_tree.push(base_transfer.clone());
     let src_id = view.record.channel_id.as_u64();
-    let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(view.record.channel_id, &base_transfer, base_nonce);
+    let (tx_v2, tx_v2_tree) =
+        inter_channel_tx_v2(view.record.channel_id, &base_transfer, base_nonce);
     debug_assert_eq!(tx_v2.transfer_tree_root, transfer_tree.get_root());
     let tx_tree_root: Bytes32 = tx_v2_tree.get_root().into();
     let tx_v2_merkle_proof = tx_v2_tree.prove(src_id);
@@ -832,7 +842,8 @@ pub fn inflate_inter_channel_debit(
         return err("inter-channel debit sender is not an active slot");
     }
     let tx = &slim.inter_channel_tx;
-    let token_slot = crate::wallet_core::resolve_local_token_slot(&prev.balance_state, tx.token_index)?;
+    let token_slot =
+        crate::wallet_core::resolve_local_token_slot(&prev.balance_state, tx.token_index)?;
     if prev.channel_fund.amounts[token_slot] < u64_to_u256(slim.amount) {
         return err("channel fund below the debit amount");
     }
@@ -855,7 +866,10 @@ pub fn inflate_inter_channel_debit(
         balance_state: BalanceState {
             enc_balances,
             pending_adds,
-            settled_tx_chain: settled_tx_chain_push(prev.balance_state.settled_tx_chain, chain_leaf),
+            settled_tx_chain: settled_tx_chain_push(
+                prev.balance_state.settled_tx_chain,
+                chain_leaf,
+            ),
             settled_tx_accumulator_root: Bytes32::from(accumulator.get_root()),
             state_version: prev.balance_state.state_version + 1,
             ..prev.balance_state.clone()
@@ -898,10 +912,11 @@ mod tests {
         ethereum_types::u32limb_trait::U32LimbTrait as _,
         regev::encrypt_amount,
         wallet_core::{
-            add_signature, assemble_genesis_state, build_inter_channel_send_token_at_base_nonce_decrypted,
-            build_record, build_send_token_decrypted, default_settled_tx_accumulator,
-            regev_pks_array, sign_state, verify_inter_channel_send_transition,
-            verify_refresh_transition, verify_slim_send_tx,
+            add_signature, assemble_genesis_state,
+            build_inter_channel_send_token_at_base_nonce_decrypted, build_record,
+            build_send_token_decrypted, default_settled_tx_accumulator, regev_pks_array,
+            sign_state, verify_inter_channel_send_transition, verify_refresh_transition,
+            verify_slim_send_tx,
         },
     };
 
@@ -955,15 +970,24 @@ mod tests {
         let (snapshot, keys) = channel(&mut rng, [5, 6, 7, 8]);
         for slot in 0..4u32 {
             let view = SlotView::from_snapshot(&snapshot, slot).unwrap();
-            assert_eq!(view.state.balance_state.h1(), snapshot.state.balance_state.h1());
+            assert_eq!(
+                view.state.balance_state.h1(),
+                snapshot.state.balance_state.h1()
+            );
             assert_eq!(view.state.signing_digest(), snapshot.state.digest);
-            view.verify_for(&keys[slot as usize]).expect("own view verifies");
+            view.verify_for(&keys[slot as usize])
+                .expect("own view verifies");
             assert!(view.verify_for(&keys[(slot as usize + 1) % 4]).is_err());
         }
         // The view carries one row, never the other participants' rows.
         let json = serde_json::to_string(&SlotView::from_snapshot(&snapshot, 2).unwrap()).unwrap();
         let full = serde_json::to_string(&snapshot).unwrap();
-        assert!(json.len() * 3 < full.len(), "view {} B vs snapshot {} B", json.len(), full.len());
+        assert!(
+            json.len() * 3 < full.len(),
+            "view {} B vs snapshot {} B",
+            json.len(),
+            full.len()
+        );
     }
 
     #[test]
@@ -991,7 +1015,10 @@ mod tests {
 
         let mut bad = view.clone();
         bad.state.epoch += 1;
-        assert!(bad.verify().is_err(), "a header field not under the signatures");
+        assert!(
+            bad.verify().is_err(),
+            "a header field not under the signatures"
+        );
 
         let mut bad = view.clone();
         bad.record.cosigner_pk_gs[1] = keys[3].pk_g();
@@ -999,7 +1026,10 @@ mod tests {
 
         let mut bad = view.clone();
         bad.accumulator_next_siblings[0] = PoseidonHashOut::hash_inputs_u64(&[2]);
-        assert!(bad.verify().is_err(), "an accumulator tail not under the signed root");
+        assert!(
+            bad.verify().is_err(),
+            "an accumulator tail not under the signed root"
+        );
         // The tail proves only that `accumulator_len` is an EMPTY position under the signed root;
         // a later empty position verifies too. That is liveness-only: a debit appended at the
         // wrong position yields a successor the co-signer's rebuild refuses
@@ -1013,22 +1043,46 @@ mod tests {
         let view = SlotView::from_snapshot(&snapshot, 2).unwrap();
         let recipient = snapshot.members[3].clone();
         let from_view = build_view_send(
-            &keys[2], &view, &recipient, 0, 3, nonce, LEVEL, &mut StdRng::seed_from_u64(77),
+            &keys[2],
+            &view,
+            &recipient,
+            0,
+            3,
+            nonce,
+            LEVEL,
+            &mut StdRng::seed_from_u64(77),
         )
         .unwrap();
         let from_full = build_send_token_decrypted(
-            &keys[2], &snapshot, 2, 3, 0, 3, nonce, LEVEL, &mut StdRng::seed_from_u64(77),
+            &keys[2],
+            &snapshot,
+            2,
+            3,
+            0,
+            3,
+            nonce,
+            LEVEL,
+            &mut StdRng::seed_from_u64(77),
         )
         .unwrap();
         let full_slim = from_full.payload.to_slim();
         assert_eq!(from_view.payload.anchor_digest, full_slim.anchor_digest);
         assert_eq!(from_view.payload.after_ct, full_slim.after_ct);
-        assert_eq!(from_view.payload.channel_tx.enc_amount, full_slim.channel_tx.enc_amount);
+        assert_eq!(
+            from_view.payload.channel_tx.enc_amount,
+            full_slim.channel_tx.enc_amount
+        );
         assert_eq!(from_view.new_balance, 7 - 3);
         let pks = regev_pks_array(&snapshot.members);
         verify_slim_send_tx(
-            &snapshot.state, &snapshot.record, &snapshot.members, &pks, &from_view.payload, LEVEL,
-            None, None,
+            &snapshot.state,
+            &snapshot.record,
+            &snapshot.members,
+            &pks,
+            &from_view.payload,
+            LEVEL,
+            None,
+            None,
         )
         .expect("the co-signer accepts the view-built send");
     }
@@ -1057,27 +1111,58 @@ mod tests {
         let nullifier = Bytes32::from_u32_slice(&[0xAB; 8]).unwrap();
         let salt = Salt::default();
         let built = build_view_inter_channel_send(
-            &keys[2], &view, dest, 1, dest_keys.regev_pk.clone(), dest_keys.pk_g(), salt, token, 0,
-            4, nullifier, LEVEL, &mut StdRng::seed_from_u64(91),
+            &keys[2],
+            &view,
+            dest,
+            1,
+            dest_keys.regev_pk.clone(),
+            dest_keys.pk_g(),
+            salt,
+            token,
+            0,
+            4,
+            nullifier,
+            LEVEL,
+            &mut StdRng::seed_from_u64(91),
         )
         .unwrap();
         let (fat, accumulator) = inflate_inter_channel_debit(&snapshot, &built.debit_payload)
             .expect("the co-signer rebuilds the sender's successor");
-        assert_eq!(fat.proposed_next_state.digest, built.debit_payload.proposed_digest);
+        assert_eq!(
+            fat.proposed_next_state.digest,
+            built.debit_payload.proposed_digest
+        );
         assert_eq!(
             Bytes32::from(accumulator.get_root()),
-            fat.proposed_next_state.balance_state.settled_tx_accumulator_root
+            fat.proposed_next_state
+                .balance_state
+                .settled_tx_accumulator_root
         );
         verify_inter_channel_send_transition(&snapshot.state, &snapshot.record, &fat, LEVEL)
             .expect("the unchanged full-state verifier accepts it");
 
         // Same randomness through the full-state builder gives the same successor.
         let full = build_inter_channel_send_token_at_base_nonce_decrypted(
-            &keys[2], &snapshot, 2, dest, 1, dest_keys.regev_pk.clone(), dest_keys.pk_g(), salt,
-            token, 0, 4, nullifier, LEVEL, &mut StdRng::seed_from_u64(91),
+            &keys[2],
+            &snapshot,
+            2,
+            dest,
+            1,
+            dest_keys.regev_pk.clone(),
+            dest_keys.pk_g(),
+            salt,
+            token,
+            0,
+            4,
+            nullifier,
+            LEVEL,
+            &mut StdRng::seed_from_u64(91),
         )
         .unwrap();
-        assert_eq!(full.debit_payload.proposed_next_state.digest, built.debit_payload.proposed_digest);
+        assert_eq!(
+            full.debit_payload.proposed_next_state.digest,
+            built.debit_payload.proposed_digest
+        );
 
         let mut tampered = built.debit_payload.clone();
         tampered.amount = 3;
@@ -1092,7 +1177,15 @@ mod tests {
         let to = Address::from_u32_slice(&[0x1234_5678; 5]).unwrap();
         let nullifier = Bytes32::from_u32_slice(&[0xCD; 8]).unwrap();
         let built = build_view_burn_send(
-            &keys[3], &view, to, token, 0, 2, nullifier, LEVEL, &mut StdRng::seed_from_u64(5),
+            &keys[3],
+            &view,
+            to,
+            token,
+            0,
+            2,
+            nullifier,
+            LEVEL,
+            &mut StdRng::seed_from_u64(5),
         )
         .unwrap();
         let (fat, _acc) = inflate_inter_channel_debit(&snapshot, &built.debit_payload).unwrap();
@@ -1120,10 +1213,20 @@ mod tests {
         };
         let intent = CloseIntent::new(state, &close_tx).unwrap();
         let view = SlotView::from_snapshot(&snapshot, 3).unwrap();
-        assert_eq!(CloseIntent::from_header(&view.state, &close_tx).unwrap(), intent);
+        assert_eq!(
+            CloseIntent::from_header(&view.state, &close_tx).unwrap(),
+            intent
+        );
         let k = &keys[3];
         let w = WithdrawalClaimProver::full_witness_from_view(
-            &view, 0, k.pk_g(), &k.regev_pk, &k.regev_sk, &intent, &close_tx, LEVEL,
+            &view,
+            0,
+            k.pk_g(),
+            &k.regev_pk,
+            &k.regev_sk,
+            &intent,
+            &close_tx,
+            LEVEL,
         )
         .unwrap();
 
@@ -1156,7 +1259,9 @@ mod tests {
             user_pk: k.regev_pk.clone(),
             amount: 8,
         };
-        let native_pis = native.to_public_inputs_for_in_circuit_decryption(LEVEL).unwrap();
+        let native_pis = native
+            .to_public_inputs_for_in_circuit_decryption(LEVEL)
+            .unwrap();
         assert_eq!(w.public_inputs, native_pis);
         let tree = state.balance_state.slot_tree();
         assert_eq!(w.slot_tree_root, tree.get_root());

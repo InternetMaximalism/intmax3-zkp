@@ -141,7 +141,11 @@ rsync -a --delete --exclude 'test/data/' --exclude 'broadcast/' --exclude 'cache
 # Compile from scratch, as the rehearsal does: an incremental Foundry cache kept across source
 # updates once left a stale CloseFundingMaterializer artifact that the deploy script's creation
 # code no longer matched, and forge refused the settlement deploy ("ABI decoding failed").
-rm -rf contracts-tail/out contracts-tail/cache
+# Only the COMPILE cache goes: cache/<Script>.s.sol/<chain>/ holds the sensitive half of each
+# broadcast that `forge script --resume` needs next to broadcast/. Wiping it (2026-11-26) left a
+# PREPARED settlement deploy that had sent 1 of 15 transactions unresumable ("Deployment not found
+# for chain").
+rm -rf contracts-tail/out contracts-tail/cache/solidity-files-cache.json
 cp hosting/wallet/wallet-live.html hosting/wallet/public/index.html
 cp hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs \
   hosting/wallet/wallet-outbox.js hosting/wallet/wallet-transactions.js hosting/wallet/public/

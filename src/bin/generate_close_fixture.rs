@@ -18,20 +18,19 @@
 //!      (`close_intent_mle_config.json`, `close_asset_backing_mle_config.json`,
 //!      `close_lifecycle_validity_mle_config.json`, `close_withdrawal_mle_config.json`), each
 //!      create-once/compare-later (`persist_or_validate_mle_v2_config_json`). With
-//!      `--mle-config-only` the binary stops here: no witness or proof is constructed, which is
-//!      how the Manager CREATE2 address printer gets its inputs BEFORE any proof exists.
+//!      `--mle-config-only` the binary stops here: no witness or proof is constructed, which is how
+//!      the Manager CREATE2 address printer gets its inputs BEFORE any proof exists.
 //!   1. `wallet_core::build_channel_withdrawal` (channel 1, deposit 6 / withdraw 3, withdrawal
 //!      recipient = the close manager's CREATE2 address from `WD_RECIPIENT`) → the four `close_`
 //!      lifecycle files (`close_lifecycle.json`, `close_lifecycle_validity_mle.json`,
 //!      `close_withdrawal_mle.json`, `close_withdrawal_payout.json`), exactly what
 //!      `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` used to write, PLUS its private
 //!      internals (final balance proof, full private state, final `ExtendedPublicState`).
-//!   2. A close witness over THAT balance proof: `intmax_state_root = final ext commitment`
-//!      (== `close_lifecycle.json.final_state_root`), `settled_tx_chain` = the balance PI, fund
-//!      vector = the private asset tree (`{ETH -> 3}`, single lane) →
-//!      `close_intent_mle.json` (strict canonical full wire-v3 fixture whose `.compactProof.bytes`
-//!      is the exact `submitCloseIntent` calldata, validated against its config) +
-//!      `close_intent.json`.
+//!   2. A close witness over THAT balance proof: `intmax_state_root = final ext commitment` (==
+//!      `close_lifecycle.json.final_state_root`), `settled_tx_chain` = the balance PI, fund vector
+//!      = the private asset tree (`{ETH -> 3}`, single lane) → `close_intent_mle.json` (strict
+//!      canonical full wire-v3 fixture whose `.compactProof.bytes` is the exact `submitCloseIntent`
+//!      calldata, validated against its config) + `close_intent.json`.
 //!   3. The backing proof over the same balance proof / private state / ext state →
 //!      `close_asset_backing_mle.json` (full wire-v3 fixture, validated against
 //!      `close_asset_backing_mle_config.json`), `close_asset_backing_public_inputs.json` (the bare
@@ -46,18 +45,18 @@
 //! between the two proofs) so a broken co-generation fails HERE, not at `submitCloseIntent`.
 //!
 //! Usage:
-//!   cargo run --release --features close-fixture-bin --bin generate_close_fixture -- --mle-config-only
-//!   forge test --match-test test_printCloseManagerAddress -vv   # in contracts/, needs the configs
-//!   WD_RECIPIENT=0x<CLOSE_MANAGER_ADDRESS> \
+//!   cargo run --release --features close-fixture-bin --bin generate_close_fixture --
+//! --mle-config-only   forge test --match-test test_printCloseManagerAddress -vv   # in contracts/,
+//! needs the configs   WD_RECIPIENT=0x<CLOSE_MANAGER_ADDRESS> \
 //!     cargo run --release --features close-fixture-bin --bin generate_close_fixture
 //!
 //! Env:
 //!   - WD_RECIPIENT=0x<20 bytes>        REQUIRED. The manager CREATE2 address baked as the L1
-//!                                      withdrawal recipient (a wrong one is a hard E2E failure).
+//!     withdrawal recipient (a wrong one is a hard E2E failure).
 //!   - WD_DEPOSITOR=0x<20 bytes>        optional; default = deterministic RNG address.
 //!   - CLOSE_BACKING_ROLLUP=0x<20 bytes> optional manifest `rollup` field (the CREATE2 rollup is
-//!                                      not knowable here; default 0x00..00 — `DeployGuards`
-//!                                      synthesizes its own manifest with the live address).
+//!     not knowable here; default 0x00..00 — `DeployGuards` synthesizes its own manifest with the
+//!     live address).
 //!
 //! HEAVY COMPUTE: a full 3-block lifecycle (balance / validity / withdrawal proving + two
 //! wrap+MLE passes), a close-circuit proof + wrap + MLE, and a backing proof + wrap + MLE
@@ -80,9 +79,7 @@ use intmax3_zkp::{
         },
     },
     common::{balance_state::BalanceState, channel::ChannelFund, channel_id::ChannelId},
-    ethereum_types::{
-        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
-    },
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     public_close_prover::{
         PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION, export_backing_mle_config, mle_v2_public_inputs,
         sha256_hex, wrap_and_export_backing_mle,
@@ -525,7 +522,8 @@ fn main() -> anyhow::Result<()> {
     let close_mle = prove_with_mle_v2::<F, C, D>(&close_wrapper.data, pw)?;
     verify_mle_proof_v2(&close_wrapper.data, &close_vk, &close_mle.proof)?;
     let close_mle_json = export_mle_v2_json(&close_mle.proof, &close_vk, &close_wrapper.data)?;
-    let close_compact = validate_mle_v2_full_against_config_json(&close_mle_json, &close_mle_config_json)?;
+    let close_compact =
+        validate_mle_v2_full_against_config_json(&close_mle_json, &close_mle_config_json)?;
     assert_mle_public_inputs("close", &close_mle_json, &pi_limbs)?;
     eprintln!(
         "[close] close compactProof = {} bytes (the exact submitCloseIntent calldata payload)",
@@ -594,13 +592,14 @@ fn main() -> anyhow::Result<()> {
     // settled chain / channel id vs the signed state, asset tree root == the fund vector).
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 4: build + prove the CloseAssetBacking circuit (HEAVY)");
-    let backing_witness = CloseAssetBackingWitness::<F, C, D>::from_full_private_state_and_channel_state(
-        &artifacts.full_private_state,
-        final_state,
-        artifacts.final_balance_proof.clone(),
-        ext.clone(),
-        &artifacts.balance_vd,
-    )?;
+    let backing_witness =
+        CloseAssetBackingWitness::<F, C, D>::from_full_private_state_and_channel_state(
+            &artifacts.full_private_state,
+            final_state,
+            artifacts.final_balance_proof.clone(),
+            ext.clone(),
+            &artifacts.balance_vd,
+        )?;
     let backing_proof = backing_circuit.prove(&backing_witness)?;
     backing_circuit.data.verify(backing_proof.clone())?;
     eprintln!(

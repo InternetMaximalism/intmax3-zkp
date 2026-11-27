@@ -7,6 +7,13 @@ const { createBatchWindow, projectToSlim, partitionByAnchor } =
 
 const tick = () => new Promise((r) => setImmediate(r));
 
+// The window timer is unref()'d so an idle relay can exit. On Node 22 (CI) an unref'd timer alone
+// does not keep node:test's event loop alive: the timer-closed tests below were CANCELLED ("Promise
+// resolution is still pending but the event loop has already resolved") instead of run. Hold the
+// loop open for this file only.
+const keepAlive = setInterval(() => {}, 60_000);
+test.after(() => clearInterval(keepAlive));
+
 test('window closes on the cap: maxK payloads drain as ONE window', async () => {
   const drained = [];
   const bw = createBatchWindow({

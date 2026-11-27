@@ -997,7 +997,7 @@ const MLE_PROOF_ABI_SIGNATURE_V2 = '(uint256,uint256,uint256[],uint256[],bytes32
 const MAX_COMPACT_PROOF_BYTES_V2 = 253921;
 const GOLDILOCKS_MODULUS_V2 = 0xffffffff00000001n;
 const MAX_WHIR_NARG_BYTES_V2 = 1904;
-const MAX_WHIR_HINT_BYTES_V2 = 112408;
+const MAX_WHIR_HINT_BYTES_V2 = 104888;
 
 function requireExactBrowserKeys(value, expected, label) {
   if (!isPlainObject(value)) throw new Error(label + ' must be an object');
@@ -1868,7 +1868,7 @@ async function sendDepositViaWallet(amountBase, token, infoPromise = fetchDeposi
 
 // ---- Deposit import, confirmation-aware -----------------------------------------------------
 // `cosign-l1-deposit-import` requires the deposit to be REORG-SAFE before it credits anything:
-// 12 confirmations on a real chain (0 on anvil, which has no reorg model). A mined-but-young
+// 12 confirmations on a real chain (3 on Sepolia, 0 on anvil, which has no reorg model). A mined-but-young
 // deposit therefore gets REFUSED, which is correct — and used to surface as "deposit failed".
 //
 // SECURITY: this waits; it does NOT relax anything. The page never passes a `min_confirmations`
@@ -2130,37 +2130,15 @@ async function api(pathname, body, method='POST') {
   return text;
 }
 
-// A relay refusal, keeping what the wallet acts on: the code and whether the channel's head is
-// still waiting for L1 finality (`backingPending`, see untilBacked).
+// A relay refusal, keeping what the wallet acts on: the HTTP status and the relay's error code.
+// No signature waits for L1 (the 2026-11-09 wait was removed on 2026-11-25), so no refusal here
+// means "retry later".
 function relayError(status, text, message) {
   let detail; try { detail = JSON.parse(text); } catch (_) {}
   const error = new Error(message(detail));
   error.status = status;
   error.code = detail && detail.code;
-  error.backingPending = !!(detail && detail.backingPending);
   return error;
-}
-
-// C25/G16: after an asset-moving head (a deposit import, an inter-channel debit or a burn) the
-// co-signers sign nothing on top of it until that head's block is finalized on L1; the relay
-// answers 409 `backingPending` and publishes the block meanwhile. Nothing was signed, so the wallet
-// waits and re-sends the SAME request (seconds on the devnet, minutes on a public chain).
-const BACKING_WAIT_MS = 40 * 60 * 1000, BACKING_RETRY_MS = 10 * 1000;
-async function untilBacked(attempt, what) {
-  const t0 = Date.now();
-  let told = false;
-  for (;;) {
-    try { return await attempt(); }
-    catch (e) {
-      if (!e.backingPending || Date.now() - t0 > BACKING_WAIT_MS) throw e;
-      if (!told) {
-        log('  ' + what + ' waits until the previous deposit or transfer is finalized on L1 (nothing was signed yet); it continues by itself...');
-        told = true;
-      }
-      sendPhase = 'Waiting for L1 finality';
-      await new Promise(resolve => setTimeout(resolve, BACKING_RETRY_MS));
-    }
-  }
 }
 
 // ---- UI updates ----------------------------------------------------------------------------
@@ -2859,7 +2837,7 @@ async function validateSavedSend(pending) {
 
 async function resumeSoloSend(pending, fresh = false) {
   await validateSavedSend(pending);
-  const accepted = await untilBacked(async () => {
+  const accepted = await (async () => {
     const response = await fetch('/api/cosign2?channel=' + pending.channel, {
       method:'POST',headers:{'Content-Type':'application/vnd.intmax.slim+binary'},body:pending.slim,
     });
@@ -2867,7 +2845,7 @@ async function resumeSoloSend(pending, fresh = false) {
     const text = await response.text();
     if (!response.ok) throw relayError(response.status, text, () => 'The saved send is still unresolved: ' + text);
     return JSON.parse(text);
-  }, 'This send');
+  })();
   // The relay acknowledges the co-signed head ({stateVersion, digest}); we then fetch OUR slot view
   // of a head at least that new and let WASM verify it before anything is shown.
   const version = accepted.stateVersion ?? accepted.balanceState?.stateVersion;
@@ -2927,14 +2905,14 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
 async function resumeInterSend(pending) {
   await validateSavedSend(pending);
   log('Checking the saved transfer; no new transfer will be created.');
-  const sendTxt = await untilBacked(async () => {
+  const sendTxt = await (async () => {
     const sendRes = await fetch('/api/inter/send?channel=' + pending.channel, {
       method:'POST', headers:{'Content-Type':'application/json'}, body:pending.body,
     });
     const text = await sendRes.text();
     if (!sendRes.ok) throw relayError(sendRes.status, text, () => 'inter-channel transfer failed: ' + text);
     return text;
-  }, 'This transfer');
+  })();
   const transfer = JSON.parse(sendTxt);
   // The relay (api/lib/inter-channel-send.js) answers with `sourceHead`; older builds said `aHead`.
   if (!(transfer.sourceHead || transfer.aHead)) throw new Error('Transfer completion is incomplete; retry Send.');
@@ -3261,7 +3239,7 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     if (ticketLoadFailed) throw new Error('Cannot verify withdrawal status. Retry when the relay is available; no new burn was made.');
     const existing = ticketOfType('partial_withdrawal');
     if (existing?.status === 'burn_pending') {
-      await untilBacked(() => api('/api/cosign-burn', '{}'), 'The saved burn');
+      await api('/api/cosign-burn', '{}');
       const report = await importMyView();
       showBalance(report);
       await fetchTickets(); applyTicketState();
@@ -3299,7 +3277,7 @@ $('btnBurnSend').onclick = guard('burn', async () => {
       amount: toBase(amt),
       recipient: addr,
     });
-    const cosigned = JSON.parse(await untilBacked(() => api('/api/cosign-burn', burnBody), 'This burn'));
+    const cosigned = JSON.parse(await api('/api/cosign-burn', burnBody));
     let burnView = null;
     for (let i = 0; !burnView && i < 120; i++) {
       const v = await fetchMyView();

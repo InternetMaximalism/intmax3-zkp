@@ -346,17 +346,23 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new() -> Self { Self::build(false) }
+    pub fn new() -> Self {
+        Self::build(false)
+    }
 
     /// Recipient/delta binding only, for composition with a real late ReceiveTransfer proof.
     /// Version 3 plus tx_leaf (66 PIs) cannot be submitted to the residual-claim verifier.
-    pub fn new_late_binding() -> Self { Self::build(true) }
+    pub fn new_late_binding() -> Self {
+        Self::build(true)
+    }
 
     fn build(late: bool) -> Self {
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let mut public_inputs = PostCloseClaimPublicInputsTarget::new(&mut builder);
-        if late { public_inputs.statement_version = builder.constant(F::from_canonical_u32(3)); }
+        if late {
+            public_inputs.statement_version = builder.constant(F::from_canonical_u32(3));
+        }
         let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
             let t = builder.add_virtual_target();
             builder.range_check(t, 32);
@@ -393,8 +399,9 @@ where
         ]
         .concat();
         let sender_wing = Bytes32Target::from_slice(&builder.keccak256::<C>(&sender_wing_inputs));
-        // receiver_wing = keccak([IMTL, receiver_pk_g, receiver_regev_pk_digest, receiver_delta_digest])
-        // where receiver_regev_pk_digest is the OPENED slot's key digest (not a free witness).
+        // receiver_wing = keccak([IMTL, receiver_pk_g, receiver_regev_pk_digest,
+        // receiver_delta_digest]) where receiver_regev_pk_digest is the OPENED slot's key
+        // digest (not a free witness).
         let receiver_wing_inputs = [
             vec![tx_leaf_domain],
             public_inputs.receiver_pk_g.to_vec(),
@@ -444,12 +451,14 @@ where
             &mut builder,
             public_inputs.incoming_tx_hash,
         );
-        if !late { incoming_tx_inclusion.verify::<F, C, D>(
-            &mut builder,
-            &pending_leaf,
-            incoming_tx_index,
-            accumulator_root_hash,
-        ); }
+        if !late {
+            incoming_tx_inclusion.verify::<F, C, D>(
+                &mut builder,
+                &pending_leaf,
+                incoming_tx_index,
+                accumulator_root_hash,
+            );
+        }
 
         // ── Stage 3: H1 header recompute (SHARED gadget; Poseidon-root form) + receiver-pk
         // slot-leaf bind. ──
@@ -605,7 +614,9 @@ where
         };
 
         builder.register_public_inputs(&public_inputs.to_vec());
-        if late { builder.register_public_inputs(&tx_leaf.to_vec()); }
+        if late {
+            builder.register_public_inputs(&tx_leaf.to_vec());
+        }
         let data = builder.build::<C>();
         Self {
             data,
@@ -827,8 +838,8 @@ pub mod test_fixture {
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
         },
         regev::{
-            REGEV_N, REGEV_Q, RegevCiphertext, RegevSecurityLevel, channel_keygen,
-            decrypt_amount, encrypt_amount, prove_withdraw_claim,
+            REGEV_N, REGEV_Q, RegevCiphertext, RegevSecurityLevel, channel_keygen, decrypt_amount,
+            encrypt_amount, prove_withdraw_claim,
         },
         utils::trees::incremental_merkle_tree::IncrementalMerkleTree,
         wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
@@ -1203,9 +1214,13 @@ mod tests {
         let circuit = circuit();
         let mut witness = build_full_witness();
         let header = |w: &super::PostCloseClaimFullWitness, root: Bytes32| {
-            let mut fields = vec![BALANCE_STATE_DOMAIN_V2 as u64,
-                w.public_inputs.receiver_channel_id.as_u64(), w.member_count as u64,
-                w.delegate_count as u64, w.token_count as u64];
+            let mut fields = vec![
+                BALANCE_STATE_DOMAIN_V2 as u64,
+                w.public_inputs.receiver_channel_id.as_u64(),
+                w.member_count as u64,
+                w.delegate_count as u64,
+                w.token_count as u64,
+            ];
             fields.extend(w.token_registry.iter().map(|&x| x as u64));
             fields.extend(w.slot_tree_root.elements);
             fields.extend(w.settled_tx_chain.to_u32_vec().into_iter().map(u64::from));
@@ -1213,17 +1228,32 @@ mod tests {
             fields.extend([w.state_version >> 32, w.state_version & 0xffff_ffff]);
             Bytes32::from(PoseidonHashOut::hash_inputs_u64(&fields))
         };
-        assert_eq!(header(&witness, witness.public_inputs.final_settled_tx_accumulator_root),
-            witness.public_inputs.final_balance_state_h1);
+        assert_eq!(
+            header(
+                &witness,
+                witness.public_inputs.final_settled_tx_accumulator_root
+            ),
+            witness.public_inputs.final_balance_state_h1
+        );
         let raw_root = witness.incoming_tx_inclusion.get_root(
-            &witness.public_inputs.incoming_tx_hash, witness.incoming_tx_index);
-        witness.incoming_tx_inclusion.verify(&witness.public_inputs.incoming_tx_hash,
-            witness.incoming_tx_index, raw_root).unwrap();
+            &witness.public_inputs.incoming_tx_hash,
+            witness.incoming_tx_index,
+        );
+        witness
+            .incoming_tx_inclusion
+            .verify(
+                &witness.public_inputs.incoming_tx_hash,
+                witness.incoming_tx_index,
+                raw_root,
+            )
+            .unwrap();
         witness.public_inputs.final_settled_tx_accumulator_root = Bytes32::from(raw_root);
         witness.public_inputs.final_balance_state_h1 = header(&witness, Bytes32::from(raw_root));
         let result = catch_unwind(AssertUnwindSafe(|| circuit.prove(&witness)));
-        assert!(result.is_err() || result.unwrap().is_err(),
-            "an applied/raw incoming entry must never create residual credit");
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "an applied/raw incoming entry must never create residual credit"
+        );
     }
 
     /// Negative (TM-16 obligation 4) — tampered token limb: a `token_index` PI different from
@@ -1265,8 +1295,11 @@ mod tests {
         let mut witness = build_full_witness();
         let other_token = 7u32;
         let receiver_key_digest = crate::ethereum_types::bytes32::Bytes32::from(
-            crate::regev::RegevPk { a: witness.regev_a.clone(), b: witness.regev_b.clone() }
-                .poseidon_digest(),
+            crate::regev::RegevPk {
+                a: witness.regev_a.clone(),
+                b: witness.regev_b.clone(),
+            }
+            .poseidon_digest(),
         );
         let tx_leaf = tx_leaf_hash(
             witness.source_pk_g,
@@ -1478,7 +1511,9 @@ mod tests {
         let mut table = EvidenceTable::new("PostCloseClaimCircuit");
 
         table.check(
-            "build standard_recursion_zk_config", "post_close_claim_circuit.rs:308", "config",
+            "build standard_recursion_zk_config",
+            "post_close_claim_circuit.rs:308",
+            "config",
             c.data.common.config == CircuitConfig::standard_recursion_zk_config(),
             "the built circuit carries standard_recursion_zk_config",
         );
@@ -1493,12 +1528,18 @@ mod tests {
             ("nullifier", pi.shared_native_nullifier.to_vec(), 8),
             ("amount.hi,lo", pi.amount.to_vec(), 2),
             ("finalH1", pi.final_balance_state_h1.to_vec(), 8),
-            ("finalAccumulator", pi.final_settled_tx_accumulator_root.to_vec(), 8),
+            (
+                "finalAccumulator",
+                pi.final_settled_tx_accumulator_root.to_vec(),
+                8,
+            ),
             ("tokenIndex", pi.token_index.to_vec(), 1),
         ];
         for (name, wires, width) in &groups {
             table.check(
-                &format!("range {name}"), "post_close_claim_circuit.rs:113-131", "range",
+                &format!("range {name}"),
+                "post_close_claim_circuit.rs:113-131",
+                "range",
                 wires.len() == *width && view.all_range_checked(wires, 32),
                 "range_check(limb, 32) on every limb of the group",
             );
@@ -1513,12 +1554,15 @@ mod tests {
         stage3.extend(c.tx_tree_root.to_vec());
         table.check(
             "range sourcePk,senderDigest,receiverDigest,txRoot",
-            "post_close_claim_circuit.rs:323-326", "range",
+            "post_close_claim_circuit.rs:323-326",
+            "range",
             stage3.len() == 32 && view.all_range_checked(&stage3, 32),
             "four Bytes32Target::new(_, true) => 32 range-checked limbs",
         );
         table.check(
-            "range sourceChannel", "post_close_claim_circuit.rs:327", "range",
+            "range sourceChannel",
+            "post_close_claim_circuit.rs:327",
+            "range",
             view.range_bits(c.source_channel_id).contains(&32),
             "range_check(source_channel_id, 32)",
         );
@@ -1537,14 +1581,21 @@ mod tests {
             ("hash IMRC", "post_close_claim_circuit.rs:482"),
             ("hash IMCK", "post_close_claim_circuit.rs:505-509"),
         ] {
-            table.note(op, src, "gadget", NOT_STATIC,
-                "the hash relation is an Environment callback; only its preimage width is fixed");
+            table.note(
+                op,
+                src,
+                "gadget",
+                NOT_STATIC,
+                "the hash relation is an Environment callback; only its preimage width is fixed",
+            );
         }
 
         // TM-16 `ids` layout, :396-400 — the ONLY structural content of the ids word.
         let ids = p.ids.to_vec();
         table.check(
-            "ids layout (TM-16)", "post_close_claim_circuit.rs:396-400", "connect",
+            "ids layout (TM-16)",
+            "post_close_claim_circuit.rs:396-400",
+            "connect",
             ids.len() == BYTES32_LEN
                 && view.all_zero(&ids[0..BYTES32_LEN - 3])
                 && view.same(ids[BYTES32_LEN - 3], pi.token_index[0])
@@ -1555,24 +1606,37 @@ mod tests {
 
         // `.connect "incomingTxHash"` — :365
         table.check(
-            "connect incomingTxHash", "post_close_claim_circuit.rs:365", "connect",
-            view.same_slices(&p.recomputed_tx_hash.to_vec(), &pi.incoming_tx_hash.to_vec()),
+            "connect incomingTxHash",
+            "post_close_claim_circuit.rs:365",
+            "connect",
+            view.same_slices(
+                &p.recomputed_tx_hash.to_vec(),
+                &pi.incoming_tx_hash.to_vec(),
+            ),
             "recomputed_tx_hash.connect(incoming_tx_hash)",
         );
         // `.virtual "incomingTxIndex" 1` — :369
         table.check(
-            "virtual incomingTxIndex", "post_close_claim_circuit.rs:369", "range",
-            view.range_bits(c.incoming_tx_index).contains(&SETTLED_TX_ACCUMULATOR_HEIGHT),
+            "virtual incomingTxIndex",
+            "post_close_claim_circuit.rs:369",
+            "range",
+            view.range_bits(c.incoming_tx_index)
+                .contains(&SETTLED_TX_ACCUMULATOR_HEIGHT),
             "a bare add_virtual_target whose only bound is the inclusion verify's split_le",
         );
         // `.merkle "incoming: ..." accumulatorHeight` — :368-386
         table.check(
-            "merkle incoming", "post_close_claim_circuit.rs:368-386", "width",
+            "merkle incoming",
+            "post_close_claim_circuit.rs:368-386",
+            "width",
             c.incoming_tx_inclusion.0.siblings.len() == SETTLED_TX_ACCUMULATOR_HEIGHT,
             "IncrementalMerkleProofTarget::new(builder, SETTLED_TX_ACCUMULATOR_HEIGHT)",
         );
         table.note(
-            "merkle incoming", "merkle_tree.rs:228-248", "gadget", NOT_STATIC,
+            "merkle incoming",
+            "merkle_tree.rs:228-248",
+            "gadget",
+            NOT_STATIC,
             "the canonical-root round-trip connect and the fold live inside the gadget",
         );
 
@@ -1581,36 +1645,50 @@ mod tests {
         header.extend(c.token_registry.iter().copied());
         table.check(
             "range memberCount,delegateCount,tokenCount + registry",
-            "post_close_claim_circuit.rs:389-395", "range",
+            "post_close_claim_circuit.rs:389-395",
+            "range",
             header.len() == 3 + MAX_CHANNEL_TOKENS && view.all_range_checked(&header, 32),
             "13 range-checked u32 header limbs",
         );
         table.check(
-            "virtual slotRoot", "post_close_claim_circuit.rs:397", "range",
+            "virtual slotRoot",
+            "post_close_claim_circuit.rs:397",
+            "range",
             view.none_range_checked(&c.slot_tree_root.elements),
             "PoseidonHashOutTarget::new allocates 4 RAW elements with no range check",
         );
         table.check(
-            "range settledChain", "post_close_claim_circuit.rs:398", "range",
+            "range settledChain",
+            "post_close_claim_circuit.rs:398",
+            "range",
             view.all_range_checked(&c.settled_tx_chain.to_vec(), 32),
             "Bytes32Target::new(_, true)",
         );
         table.check(
-            "range stateVersion", "post_close_claim_circuit.rs:399", "range",
+            "range stateVersion",
+            "post_close_claim_circuit.rs:399",
+            "range",
             view.all_range_checked(&c.state_version.to_vec(), 32),
             "U64Target::new(_, true)",
         );
         table.check(
-            "virtual receiverMemberIndex", "post_close_claim_circuit.rs:403", "range",
-            view.range_bits(c.receiver_member_index).contains(&BALANCE_SLOT_TREE_HEIGHT),
+            "virtual receiverMemberIndex",
+            "post_close_claim_circuit.rs:403",
+            "range",
+            view.range_bits(c.receiver_member_index)
+                .contains(&BALANCE_SLOT_TREE_HEIGHT),
             "bare add_virtual_target; bounded only by the slot inclusion verify's split_le",
         );
-        let mut slot_row: Vec<Target> =
-            c.slot_enc_balance_digests.iter().flat_map(|d| d.to_vec()).collect();
+        let mut slot_row: Vec<Target> = c
+            .slot_enc_balance_digests
+            .iter()
+            .flat_map(|d| d.to_vec())
+            .collect();
         slot_row.extend(c.slot_pending_adds.iter().copied());
         table.check(
             "range slot ciphertext digests + pending adds",
-            "post_close_claim_circuit.rs:404-408", "range",
+            "post_close_claim_circuit.rs:404-408",
+            "range",
             slot_row.len() == MAX_CHANNEL_TOKENS * 8 + MAX_CHANNEL_TOKENS
                 && view.all_range_checked(&slot_row, 32),
             "80 enc-digest limbs + 10 counters, all 32-bit range-checked",
@@ -1618,30 +1696,44 @@ mod tests {
 
         // `.connect "finalH1"` — :426
         table.check(
-            "connect finalH1", "post_close_claim_circuit.rs:426", "connect",
-            view.same_slices(&p.recomputed_h1.to_vec(), &pi.final_balance_state_h1.to_vec()),
+            "connect finalH1",
+            "post_close_claim_circuit.rs:426",
+            "connect",
+            view.same_slices(
+                &p.recomputed_h1.to_vec(),
+                &pi.final_balance_state_h1.to_vec(),
+            ),
             "recomputed_h1.connect(final_balance_state_h1)",
         );
         // `.range "active sum" 1 11` — :439
         table.check(
-            "range active sum", "post_close_claim_circuit.rs:439", "range",
-            view.range_bits(p.active).contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
+            "range active sum",
+            "post_close_claim_circuit.rs:439",
+            "range",
+            view.range_bits(p.active)
+                .contains(&(BALANCE_SLOT_TREE_HEIGHT + 1)),
             "range_check(active, BALANCE_SLOT_TREE_HEIGHT + 1)",
         );
         // `.connect "active<1025"` / `"receiverMemberIndex<active"` — :439-443
         table.check(
-            "connect active<1025", "post_close_claim_circuit.rs:440", "constant",
+            "connect active<1025",
+            "post_close_claim_circuit.rs:440",
+            "constant",
             view.is_one(p.active_le_max),
             "assert_one(less_than_u32(active, MAX_CHANNEL_MEMBERS + 1))",
         );
         table.check(
-            "connect receiverMemberIndex<active", "post_close_claim_circuit.rs:442-443", "constant",
+            "connect receiverMemberIndex<active",
+            "post_close_claim_circuit.rs:442-443",
+            "constant",
             view.is_one(p.is_active) && view.same(p.is_active, p.one),
             "connect(less_than_u32(receiver_member_index, active), one)",
         );
         // `.virtual "a,b,c1,c2" (4*regevN)` — :446-449
         table.check(
-            "virtual a,b,c1,c2", "post_close_claim_circuit.rs:446-449", "width",
+            "virtual a,b,c1,c2",
+            "post_close_claim_circuit.rs:446-449",
+            "width",
             c.regev_a.len() == REGEV_N
                 && c.regev_b.len() == REGEV_N
                 && c.delta_c1.len() == REGEV_N
@@ -1650,31 +1742,42 @@ mod tests {
         );
         // `.merkle "slot: Hash4 leaf identity" slotHeight` — :468-477
         table.check(
-            "merkle slot", "post_close_claim_circuit.rs:468-477", "width",
+            "merkle slot",
+            "post_close_claim_circuit.rs:468-477",
+            "width",
             c.slot_inclusion.0.siblings.len() == BALANCE_SLOT_TREE_HEIGHT,
             "IncrementalMerkleProofTarget::new(builder, BALANCE_SLOT_TREE_HEIGHT)",
         );
         // `.connect "receiverDeltaDigest"` — :483
         table.check(
-            "connect receiverDeltaDigest", "post_close_claim_circuit.rs:483", "connect",
+            "connect receiverDeltaDigest",
+            "post_close_claim_circuit.rs:483",
+            "connect",
             view.same_slices(&p.ct_digest.to_vec(), &c.receiver_delta_digest.to_vec()),
             "ct_digest.connect(receiver_delta_digest) — the SAME wire the tx_leaf wing hashes",
         );
         // `.decryption true` — :486-494
         table.note(
-            "decryption true", "post_close_claim_circuit.rs:486-494", "gadget", NOT_STATIC,
+            "decryption true",
+            "post_close_claim_circuit.rs:486-494",
+            "gadget",
+            NOT_STATIC,
             "decryption_core pins the polynomial lengths, canonicity and non-degeneracy internally",
         );
         // `.connect "amount.hi,lo"` — :496-497
         table.check(
-            "connect amount.hi,lo", "post_close_claim_circuit.rs:496-497", "connect",
+            "connect amount.hi,lo",
+            "post_close_claim_circuit.rs:496-497",
+            "connect",
             view.same(pi.amount.to_vec()[0], p.amount_hi)
                 && view.same(pi.amount.to_vec()[1], p.amount_lo),
             "amount PI to_vec is [hi, lo], each connected to the matching core output",
         );
         // `.connect "sharedNativeNullifier"` — :510
         table.check(
-            "connect sharedNativeNullifier", "post_close_claim_circuit.rs:510", "connect",
+            "connect sharedNativeNullifier",
+            "post_close_claim_circuit.rs:510",
+            "connect",
             view.same_slices(
                 &p.shared_native_nullifier.to_vec(),
                 &pi.shared_native_nullifier.to_vec(),
@@ -1686,7 +1789,9 @@ mod tests {
             groups.iter().flat_map(|(_, w, _)| w.clone()).collect();
         expected_pi_order.push(pi.statement_version);
         table.check(
-            "register 58", "post_close_claim_circuit.rs:512 / :137-153", "public-inputs",
+            "register 58",
+            "post_close_claim_circuit.rs:512 / :137-153",
+            "public-inputs",
             expected_pi_order.len() == POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN
                 && POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN == 58
                 && view.public_inputs_are(&expected_pi_order)
@@ -1695,14 +1800,19 @@ mod tests {
             "the 58 wires are the ten groups followed by the version-2 constant",
         );
         table.note(
-            "build standard_recursion_zk_config", "post_close_claim_circuit.rs:513", "no-gate",
-            TRIVIAL, "builder.build emits no constraint; Lean holds = True",
+            "build standard_recursion_zk_config",
+            "post_close_claim_circuit.rs:513",
+            "no-gate",
+            TRIVIAL,
+            "builder.build emits no constraint; Lean holds = True",
         );
 
         // Documented chain wiring the Lean model reads through `hashPreimage`: each stage's
         // output feeds the next stage's preimage as the SAME wires.
         table.check(
-            "tx recompute chain wiring", "post_close_claim_circuit.rs:330-401", "aliasing",
+            "tx recompute chain wiring",
+            "post_close_claim_circuit.rs:330-401",
+            "aliasing",
             p.sender_wing.to_vec().len() == BYTES32_LEN
                 && p.receiver_wing.to_vec().len() == BYTES32_LEN
                 && p.tx_leaf.to_vec().len() == BYTES32_LEN
@@ -1710,7 +1820,9 @@ mod tests {
             "sender/receiver wing -> tx_leaf -> push(tx_tree_root, ·) -> push(ids, ·)",
         );
         table.check(
-            "accumulator root is the PI root", "post_close_claim_circuit.rs:414-418", "aliasing",
+            "accumulator root is the PI root",
+            "post_close_claim_circuit.rs:414-418",
+            "aliasing",
             p.accumulator_root_hash.elements.len() == 4,
             "the inclusion root is `final_settled_tx_accumulator_root.to_hash_out`, the SAME PI \
              that rides in the recomputed H1",

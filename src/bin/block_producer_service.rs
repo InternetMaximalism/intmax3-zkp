@@ -292,6 +292,15 @@ enum LiveCommand {
         #[serde(default)]
         deposit_salt: Option<intmax3_zkp::common::salt::Salt>,
     },
+    /// After `claimLateDeposit` is finalized on L1 and the materializer's confirmed late cursor
+    /// equals the receipt's next commitment, adopt the receipt's next cursor: the following late
+    /// claim starts there (`LiveBalanceService::adopt_late_continuation`). `prepared` is the
+    /// `PreparedLateDeposit` that `livePrepareLateDeposit` returned. Idempotent.
+    LiveAdoptLateDeposit {
+        channel_id: ChannelId,
+        prepared: serde_json::Value,
+        confirmed_commitment: Bytes32,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -321,7 +330,6 @@ enum BoundedLine {
     Line(Vec<u8>),
     TooLarge,
 }
-
 
 /// Materialize a live-command payload that traveled as `serde_json::Value`. The daemon accepts
 /// these payloads as `Value` and deserializes them HERE, with `serde_json::from_value`, because an
@@ -858,11 +866,20 @@ fn execute_live_command(
             let (request, deposit_salt) = match (request, deposit_salt, checkpoint.retained_deposit) {
                 (Some(request), Some(salt), _) => (request, salt),
                 (None, None, Some(kept)) => (kept.request, kept.deposit_salt),
-                (Some(request), None, Some(kept)) if kept.request == request => (request, kept.deposit_salt),
+                // A deposit received here keeps its salt in its retained pre-receive generation, so
+                // it can be claimed from any cursor (a continuation, or a generation it does not own).
+                (Some(request), None, _) => match service.retained_deposit_salt(&request) {
+                    Some(salt) => (request, salt),
+                    None => {
+                        return Err(LiveBalanceServiceError::InvalidRequest(
+                            "late deposit: this deposit was never received here; pass its `depositSalt` too".into(),
+                        ))
+                    }
+                },
                 _ => {
                     return Err(LiveBalanceServiceError::InvalidRequest(
-                        "late deposit: pass both `request` and `depositSalt` (the deposit was never received \
-                         here), or neither (its pre-receive generation is retained with them)"
+                        "late deposit: pass `request` (and `depositSalt` when the deposit was never received \
+                         here), or neither when the cursor is the deposit's own retained pre-receive generation"
                             .into(),
                     ))
                 }
@@ -875,6 +892,16 @@ fn execute_live_command(
                 "request": request,
                 "prepared": prepared,
             })))
+        }
+        LiveCommand::LiveAdoptLateDeposit { channel_id, prepared, confirmed_commitment } => {
+            let invalid = |e: anyhow::Error| {
+                LiveBalanceServiceError::InvalidRequest(format!("late deposit continuation: {e:#}"))
+            };
+            let prepared: intmax3_zkp::late_deposit::PreparedLateDeposit =
+                serde_json::from_value(prepared).map_err(|e| invalid(e.into()))?;
+            let next = prepared.confirmed_checkpoint(confirmed_commitment).map_err(invalid)?;
+            live.service(channel_id, producer)?.adopt_late_continuation(next)?;
+            to_value(Ok(serde_json::json!({ "adopted": confirmed_commitment })))
         }
     }
 }
@@ -933,7 +960,12 @@ fn execute_command(
                 // `signed_state`/`plan` travel as `serde_json::Value` (see `BlockProducerCommand`);
                 // materialize them with serde_json's own key coercion before the typed calls.
                 let signed_state: ChannelState = serde_json::from_value(signed_state.clone())
-                    .map_err(|e| ("invalid_json", format!("invalid close-funding signed state: {e}")))?;
+                    .map_err(|e| {
+                        (
+                            "invalid_json",
+                            format!("invalid close-funding signed state: {e}"),
+                        )
+                    })?;
                 let plan: CloseFundingPlan = serde_json::from_value(plan.clone())
                     .map_err(|e| ("invalid_json", format!("invalid close-funding plan: {e}")))?;
                 let committed = producer

@@ -31,7 +31,11 @@ fn backing_codec_rejects_wrong_width_and_noncanonical_words() {
     }
     for index in 0..35 {
         let mut overflow = words.clone();
-        overflow[index] = if index == 25 || index == 26 { 1u64 << 63 } else { 1u64 << 32 };
+        overflow[index] = if index == 25 || index == 26 {
+            1u64 << 63
+        } else {
+            1u64 << 32
+        };
         assert!(
             CloseAssetBackingPublicInputs::from_u64_slice(&overflow).is_err(),
             "noncanonical public input at index {index} was accepted"

@@ -38,8 +38,9 @@ citations are `path:line` in the tree named above; line numbers drift with later
   balance proof and the rollup stores only a chain of block hashes and a few checkpoints.
 - **N05** A *block* is a bundle of *sub-blocks*. Each sub-block belongs to one channel and carries
   that channel's single transaction commitment (a transaction tree root) for that round.
-- **N06** Anyone allowed by the operator may act as *block producer*; the allow-list starts empty, so
-  nothing can be posted until the operator names a producer.
+- **N06** Anyone on the rollup's block-producer allow-list may act as *block producer*; the list
+  (`isBlockProducer`, set through `setBlockProducer` by the deployer or the `blockProducerAdmin`)
+  starts empty, so nothing can be posted until a producer is named.
 - **N07** A producer prepays a *bond* on Ethereum: a base amount plus a per-block amount for every
   block of theirs that is not yet finalized. A post is accepted only while the bond covers all of them.
 - **N08** Posting a block writes the new block-hash chain head on Ethereum and publishes the
@@ -156,11 +157,10 @@ citations are `path:line` in the tree named above; line numbers drift with later
   its last fully signed state. A proposal that a host's own check refuses is dropped at once.
 - **C14** Before any signature that moves assets is released, the signer must hold a prepared *exit
   kit* for exactly that successor (see G-lines): a head without an exit kit is "kit-pending" and
-  blocks further in-channel signatures until the kit is installed. A head whose kit is anchored at a
-  rollup state that is not yet finalized on Ethereum (a debit, burn or deposit import whose block has
-  not been posted, proved and finalized) is "post-pending" and likewise blocks in-channel
-  signatures: a payment signed on top of it would roll back with the head if the block never posts
-  (C25). The relay publishes the pending validity candidate right after each such head.
+  blocks further in-channel signatures until the kit is installed. No signature waits for
+  Ethereum: a successor is final for the channel once the sig-cluster has signed it. The block
+  producer posts the block of every debit, burn or deposit import right away, so its head's backing
+  finalizes and a close can use it (G16).
 - **C15** *Inter-channel payment:* the sending channel debits the sender's ciphertext and its fund
   vector, builds one base-layer transfer to the destination channel, and signs a state whose H2 is
   the root of the one-transaction tree. Authorizing the payment and agreeing to the debit are one
@@ -184,8 +184,9 @@ citations are `path:line` in the tree named above; line numbers drift with later
   delegates are never removed. The sig-cluster itself never changes after settlement deployment.
 - **C22** A *burn* (partial withdrawal) is an inter-channel payment to the reserved burn channel with
   an Ethereum address as recipient. The rollup pays it from the ordinary withdrawal proof.
-- **C23** The relay offers a burn only while the operator can afford to post the blocks that settle
-  it (bond top-up plus a gas reserve), and settles it in the background without holding the channel.
+- **C23** A burn is accepted only while the block producer can afford to post the blocks that
+  settle it (bond top-up plus a gas reserve); the block producer settles it in the background without
+  holding the channel.
 - **C24** Every signed state carries a per-row *exit address* (20-byte Ethereum address) chosen when
   the row was created. No transition can change it; it is what a close pays to.
 - **C25** A payment that was signed but whose block never reaches Ethereum cannot be settled, cannot
@@ -193,7 +194,7 @@ citations are `path:line` in the tree named above; line numbers drift with later
   finalized (see G-lines).
 - **C26** Nothing in a channel is proved with the heavy rollup proof systems on the client: browsers
   prove only the small lattice STARKs and sign; balance proofs, close proofs and their compact
-  wrappers are produced server-side.
+  wrappers are produced natively, outside the browser.
 - **C27** The exit address, the sender-authorization key and the lattice key of a row are three
   different keys; the signer identity (Falcon) is a fourth. None is a synonym for another.
 - **C28** Channel operations are refused while a settlement close is pending or finished; a channel
@@ -210,8 +211,8 @@ citations are `path:line` in the tree named above; line numbers drift with later
 - **C33** The whole sig-cluster holds the channel's private Balance state. The host whose daemon
   advances it (deposit import, inter-channel send, burn) ships the sealed live snapshot, the producer
   journal and the burn/close sidecars to every cluster peer, authenticated under the cluster secret;
-  a peer keeps them as a passive replica it never opens while the driver lives, and an operator
-  promotes one on failover. A deposit recipient is handed out only once a peer holds its salt, and a
+  a peer keeps them as a passive replica it never opens while the driver lives, and a sig-cluster
+  member promotes one on failover. A deposit recipient is handed out only once a peer holds its salt, and a
   burn is reported live only once a peer holds the state its payout proof needs.
 - **C31** A channel snapshot presented to a wallet or a service is trusted only after four structural
   checks, before any signature is counted: the unsigned registration record agrees with the signed
@@ -283,7 +284,7 @@ citations are `path:line` in the tree named above; line numbers drift with later
 - **G18** The old cooperative close-funding path, the special-close penalty game and the late
   outgoing-debit correction are retired entry points that always revert.
 - **G19** A validity candidate that still contains a sub-block of a frozen or exited channel is
-  refused by the publisher before any Ethereum transaction, with an operator-readable error.
+  refused by the block producer before any Ethereum transaction, with a readable error.
 - **G20** Devnet exceptions (chain 31337) shorten the challenge period and allow unguarded posting;
   they are not available on public chains.
 - **G21** When a co-signer approves a deposit import it rebuilds the whole import head from its own
@@ -307,7 +308,7 @@ citations are `path:line` in the tree named above; line numbers drift with later
 ```mermaid
 flowchart LR
   subgraph CH["Channel (2-8 signers + delegates)"]
-    W["Wallets / relay<br/>encrypted balances, STARKs, Falcon N-of-N"]
+    W["Sig-cluster and delegate wallets<br/>encrypted balances, STARKs, Falcon N-of-N"]
     K["Exit kit per signed head<br/>(balance proof + backing proof)"]
   end
   BP["Block producer + validity prover<br/>(bonded; keyless prover)"]
@@ -331,19 +332,19 @@ flowchart LR
 ```mermaid
 sequenceDiagram
   participant S as Sender wallet
-  participant H1 as Host 1 (slots 0,1)
-  participant H2 as Host 2 (slot 2)
+  participant G1 as Signer 1 (receives the proposal)
+  participant GK as Each other signer
   S->>S: decrypt own balance, prove STARK, sign sender authorization
-  S->>H1: unsigned proposal (successor state + proof)
-  H1->>H1: verify gate (predecessor, counters, STARK, auth, H2=0, budget)
-  H1->>H1: sign slots 0,1 (ledger: one successor per predecessor)
-  H1->>H2: propose + own signatures
-  H2->>H2: same gate, sign slot 2 (ledger)
-  H2->>H1: signature(slot 2)
-  H1->>H1: merge: verify every pooled signature, adopt N-of-N head
-  H2->>H2: merge independently, adopt head
-  H1-->>S: N-of-N signed state
-  Note over H1,H2: incomplete round: warn 1 min, halt 5 min, auto-close 24 h
+  S->>G1: unsigned proposal (successor state + proof)
+  G1->>G1: verify gate (predecessor, counters, STARK, auth, H2=0, budget)
+  G1->>G1: sign its own slot (ledger: one successor per predecessor)
+  G1->>GK: propose + own signature
+  GK->>GK: same gate, each signs its own slot with its own key (ledger)
+  GK->>G1: signatures
+  G1->>G1: merge: verify every pooled signature, adopt N-of-N head
+  GK->>GK: merge independently, adopt head
+  G1-->>S: N-of-N signed state
+  Note over G1,GK: incomplete round: warn 1 min, halt 5 min, auto-close 24 h
 ```
 
 #### Inter-channel payment A → B → C15–C19
@@ -375,20 +376,20 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant U as Depositor wallet
-  participant API as Relay / API
-  participant CLI as channel_member
+  participant D as Daemon signer (sig-cluster member)
+  participant P as Block producer
   participant L1 as Ethereum
   participant SC as Sig-cluster
-  U->>API: deposit request (amount, token, row)
-  API->>CLI: preflight + reserve capacity (u64 room, credit budget)
-  API->>API: sign raw tx, fsync, broadcast (retry = same bytes)
-  API->>L1: deposit(recipient tag, amount)
-  L1-->>API: finalized receipt
-  API->>CLI: producer deposit block, live receive
-  CLI->>CLI: prepare exit kit for the ONE import state
-  CLI->>SC: sign import state (fund += amount, ciphertext credited)
-  SC-->>CLI: N-of-N import head
-  CLI->>CLI: install head exit kit, mark reservation completed (tombstone)
+  U->>D: deposit request (amount, token, row)
+  D->>D: preflight + reserve capacity (u64 room, credit budget)
+  U->>U: sign raw tx, fsync, broadcast (retry = same bytes)
+  U->>L1: deposit(recipient tag, amount)
+  L1-->>D: finalized receipt
+  D->>P: deposit into the channel's producer block
+  D->>D: live receive, prepare exit kit for the ONE import state
+  D->>SC: sign import state (fund += amount, ciphertext credited)
+  SC-->>D: N-of-N import head
+  D->>D: install head exit kit, mark reservation completed (tombstone)
 ```
 
 #### Non-cooperative close and exit → G06–G17
@@ -558,10 +559,10 @@ finality uses the RPC `finalized` tag bound to `latestFinalizedBlockNumber` / `i
 
 **Services.** `ValidityProverService::prove_candidate` proves the span from the finalized anchor to
 the producer head and exports `posting_artifact` / `finalize_artifact`; the keyless prover advances
-its cursor only after an L1 acknowledgement (`acknowledge_candidate_from_l1`). The operator's
+its cursor only after an L1 acknowledgement (`acknowledge_candidate_from_l1`). The block producer's
 `public_validity_publisher` signs exactly `postBlockAndSubmitGuarded`, `attestProofData`,
 `finalize` (`src/public_validity_publisher.rs:1-7, 67-70`) → N06, N11, N12. Before the post, the
-relay's publish step (`api/lib/wallet-l1.js:110-133`) refuses a candidate containing a sub-block of a
+block producer's publish step (`api/lib/wallet-l1.js:110-133`) refuses a candidate containing a sub-block of a
 frozen or exited bound channel with `VALIDITY_CANDIDATE_CONTAINS_FROZEN_CHANNEL_BLOCK` → G19.
 
 **Constants** (`src/constants.rs`): block number u63 (`:13`), channel id 32 bits (`:16`), token
@@ -683,19 +684,19 @@ amount under every slot key, which is also why the receive-side verifiers now re
 `InterChannelFundImport` + `InterChannelBundleApply` in one process after checking spent and replay
 ledgers (`channel_member.rs:12006, ~12092-12185`); both post-states are fsynced into the
 `.inter-transfer-journal` PREPARED record before either head is replaced, recovery is an idempotent
-roll-forward (`:1501-1522, 2578-2600`), and the relay runs `recover-inter-transfers` before signing
-anew (`api/lib/inter-channel-send.js:161`) → C19. The sequence in `api/lib/inter-channel-send.js`
+roll-forward (`:1501-1522, 2578-2600`), and the signing member runs `recover-inter-transfers` before
+signing anew (`api/lib/inter-channel-send.js:161`) → C19. The sequence in `api/lib/inter-channel-send.js`
 is: journal commit → `producer.postInterChannel` → live settle A → `installHeadExitKit(A)` → live
 receive B → `installHeadExitKit(B)` (`:237-267`) → C17.
 
 **Burn.** `build_burn_send` (`wallet_core.rs:3168-3192, 2938-2949`) is an inter-channel send to
 `BURN_CHANNEL_ID` with a padding Regev key as phantom receiver and an `ADDRESS_TAG` recipient;
 `burn_withdrawal_leaf` (`:4474`) rebuilds the withdrawal leaf; the rollup pays it on the withdrawal
-proof plus the nullifier guard (`:4510-4520`, `IntmaxRollup.sol:886, 1856`) → C22. The relay runs
-proving → publishing → paying in the background without holding the channel
-(`hosting/wallet/pw-settlement.js:4-31`) and offers a burn only while the operator's balance covers
-`baseStake + postStake × (unfinalized + posts)` plus 0.2 ETH, re-checked before signing
-(`hosting/wallet/wallet-relay.js:111-159, 1523-1526`) → C23.
+proof plus the nullifier guard (`:4510-4520`, `IntmaxRollup.sol:886, 1856`) → C22. The block
+producer runs proving → publishing → paying in the background without holding the channel
+(`hosting/wallet/pw-settlement.js:4-31`); a burn is accepted only while the block producer's L1
+account covers `baseStake + postStake × (unfinalized + posts)` plus 0.2 ETH, re-checked before
+signing (`settlementFunding`, `hosting/wallet/`) → C23.
 
 **L1 deposit import (one signed head).** `build_l1_deposit_import` returns one signable
 `import_state` linked to the pre-deposit head (`epoch+1`, `state_version+1`,
@@ -740,19 +741,22 @@ successor (`require_prepared_exit_kit`, `channel_member.rs:684-701, 376-389`); d
 are the exception: they need only the predecessor head's receipt and leave the credited head
 kit-pending until `install-exit-kit` (`:396-401, 632-640, 735-751`) → C14.
 
-**Single host vs cluster.** `cosign` signs every controlled slot in one process
-(`wallet-relay.js:1053-1060`). In cluster mode (`api/lib/cluster.js`, `/api/cluster/*`) the batch
-window is forced to one proposal (`wallet-relay.js:1016`); `cosign-partial` runs `cosign_gate` and
-signs only `INTMAX_CLUSTER_SIGN_SLOTS` (default: every controlled slot, `cluster_sign_slots`);
-`cosign-merge` re-verifies each pooled signature with `verify_member_signature` and adopts the head,
-exit code 3 while signatures are missing (`channel_member.rs:11383-11448`, `wallet-relay.js:296-311`)
-→ C11. Only `InChannelSend` goes through the cluster round; refresh, inter-channel, burn, deposit
-import and token registration sign every slot on the receiving host (`:11392-11409`). Timers:
-warn 60 s (repeated), halt 300 s (mutating routes answer 503), auto-close 86 400 s at the last fully
-signed head via `onAutoClose` → CLI `close` with `CLOSE_SV` (`cluster.js:13-34`,
-`wallet-relay.js:284-287, 326-341, 605-616`); a proposal refused by this host's own gate aborts the
-round immediately (`cluster.js:135-145`) → C13. Each slot must be held by exactly one host; the
-duplicate check covers only the declared slot lists (`cluster.js:64-72`).
+**Every signer signs only its own slot.** Each sig-cluster member holds its own key and signs only
+its own slot, and every signing purpose goes through the cluster round (`api/lib/cluster.js`,
+`/api/cluster/*`, one proposal per round): `cosign-partial` runs `cosign_gate` and signs the
+member's own slot; `cosign-merge` re-verifies each pooled signature with `verify_member_signature`
+and adopts the head, exit code 3 while signatures are missing (`channel_member.rs:11383-11448`) →
+C11. Timers: warn 60 s (repeated), halt 300 s (mutating routes answer 503), auto-close 86 400 s at
+the last fully signed head via `onAutoClose` → CLI `close` with `CLOSE_SV` (`cluster.js:13-34`); a
+proposal refused by a member's own gate aborts the round immediately (`cluster.js:135-145`) → C13.
+
+*Deviation of the current code from this rule (to be removed):* `cosign` signs every slot the
+process controls, `INTMAX_CLUSTER_SIGN_SLOTS` defaults to every controlled slot
+(`cluster_sign_slots`), and only `InChannelSend` goes through the cluster round — refresh,
+inter-channel, burn, deposit import and token registration sign every slot on the receiving host
+(`channel_member.rs:11392-11409`); the duplicate check covers only the declared slot lists
+(`cluster.js:64-72`). On the testnet deployment (measured 2026-11-25, channel 7) all three
+sig-cluster keys are derived from one key file on one host (`cli_members`, `keys_for`).
 
 ### 2.5 Exit kit and the backing statement
 
@@ -800,13 +804,11 @@ fabricated (`resolve_close_head`, `choose_close_head`). Before the fix the selec
 fallback never triggered. The delegate does the same from its vaults before
 `requestCloseAsParticipant` and pins the chosen head (`node/delegate/branches/exit.js`) → G16, C25.
 
-**Backing finality before in-channel signatures** (2026-11-09): the H2=0 reuse path of
-`enforce_exit_kit_before_signature_release` additionally requires the durable head's kit root to be
-`isFinalizedStateRoot` on the rollup (`require_durable_head_backing_finalized`; the receipt caches
-the answer once true, finality being permanent); the refusal carries the marker
-`HEAD BACKING NOT FINALIZED`, which the relay maps to a 409 and answers by publishing the pending
-validity candidate (`wallet-l1.publishLater`, called after every deposit import, inter-channel
-debit and burn) → C14, C25.
+**No signature waits for Ethereum** (2026-11-25): `enforce_exit_kit_before_signature_release`
+consults no L1. The block producer publishes the pending validity candidate after every deposit
+import, inter-channel debit and burn (`wallet-l1.publishLater`) → C14. The 2026-11-09 gate that
+refused every successor of a head whose block was not finalized (`HEAD BACKING NOT FINALIZED`) is
+removed; see §2.12.
 
 ### 2.6 Settlement contracts: Manager and Materializer
 
@@ -952,8 +954,8 @@ manager and freeze nonce passes (`node/delegate/participant-close.js:413-425`) �
 - Whether to add a second on-chain layer refusing a close whose unallocated residue is not covered
   by IMUI leaves (the Manager cannot distinguish the heads by statement key; the structural fix
   removed the head instead).
-- The frozen-channel sub-block refusal in the publisher is an operator-readable stop, not an
-  automatic rebuild of the candidate; the journal format makes rebuilding unsafe today.
+- The frozen-channel sub-block refusal in the publisher is a manual stop for the block producer, not
+  an automatic rebuild of the candidate; the journal format makes rebuilding unsafe today.
 - The late-incoming adapter is checked at deployment only for pinning, not for its configuration
   digests; cross-lane (residual + late) real-proof tests do not exist yet.
 - Consolidated cryptographic review of 2026-10-16 (reviewed commit `0a2f5a28`): C01 was closed by
@@ -1048,7 +1050,7 @@ Grouped by the Overview lines they realise; commit ids are on `claude/abstract-d
 
 A code review of `main` (`6820a636`) reported five findings; A–D were confirmed by reading the code
 and D, C and B were fixed minimally (E, the browser co-signers' lack of exit kits, is unverified and
-untouched). Unit tests: `cargo test --bin channel_member` 94 passed; no devnet, relay or browser run
+untouched). Unit tests: `cargo test --bin channel_member` 94 passed; no devnet, end-to-end or browser run
 was performed for these changes.
 
 - **D — G16 fallback never triggered (fixed).** `choose_close_head` tested
@@ -1059,39 +1061,40 @@ was performed for these changes.
   (`CloseHeadLink.backing_root: Option<Bytes32>`); `save_state` archives every N-of-N head in
   `.signed-heads/<digest>.json`; the walk resolves each head's kit by statement key and re-verifies
   the chosen head's N-of-N and envelope (`resolve_close_head`, §2.5) → G16, C25.
-- **C — payments on an unposted debit (fixed for daemon signers).** No signing path consulted L1, and the relay
-  published validity candidates only from the burn settle route, so a channel kept signing
+- **C — payments on an unposted debit (fixed for daemon signers).** No signing path consulted L1, and the
+  block producer published validity candidates only from the burn settle route, so a channel kept signing
   in-channel sends on top of a debit/import head whose block was not on Ethereum; had that block
   never posted, `close` would fall back and every such payment would roll back. The H2=0 reuse path
   now requires the durable head's kit root to be `isFinalizedStateRoot`
   (`require_durable_head_backing_finalized`, cached in `SignerExitKitReceipt.backing_root_finalized`
-  once true), refusing with `HEAD BACKING NOT FINALIZED`; the relay publishes the pending candidate
-  after every deposit import, inter-channel debit and burn (`wallet-l1.publishLater`) and maps the
-  refusal to a 409 (`backingPendingHint`) → C14, C25. Second pass (same day): the gate runs for
+  once true), refusing with `HEAD BACKING NOT FINALIZED`; the block producer publishes the pending
+  candidate after every deposit import, inter-channel debit and burn (`wallet-l1.publishLater`) and
+  the signing member maps the refusal to a 409 (`backingPendingHint`) → C14, C25. Second pass (same day): the gate runs for
   EVERY purpose except genesis and delegate join whenever the durable head has an installed
   receipt, so a deposit import, debit, burn, token registration or inter-channel credit cannot be
   stacked on an unfinalized head either (a deposit stacked on an unposted debit would otherwise be
   stranded at close like item A). Consequence, for the owner: in-channel sends pause after each
-  asset-moving head until its block is proved and finalized on L1 (not measured). Not covered: the
+  asset-moving head until its block is proved and finalized on L1 (not measured). **Removed on
+  2026-11-25 by owner decision (§2.12): no signature waits for L1.** Not covered: the
   browser signer (`wallet_cosign`, `src/wasm_wallet.rs`) consults no L1 and holds no kit, so a
-  sig-cluster made only of browser signers has no gate — this is item E (below). A relay without
-  `producer/wallet-l1.json` cannot publish and its channels stay refused after the first
+  sig-cluster made only of browser signers has no gate — this is item E (below). A block producer
+  without `producer/wallet-l1.json` cannot publish and its channels stay refused after the first
   asset-moving head.
-- **B — burn payout depends on the relay (mitigated).** The withdrawal proof needs the channel's
+- **B — burn payout depends on the Balance-state holder (mitigated).** The withdrawal proof needs the channel's
   Balance proof (`SingleWithdawalWitness`), so only its holder can produce it. Once produced, the
   burner can finish alone: `GET /api/v1/channel/:ch/partial-withdrawal/payout-receipt`
-  (`api/server.js` routes) and `GET /api/pw-payout-receipt?channel=N` (`wallet-relay.js`) return
+  (`api/server.js` routes) and `GET /api/pw-payout-receipt?channel=N` (`hosting/wallet/`) return
   `pw_artifacts.json`, `pw_producer.json` and `burn_cosigned.json`; the wallet's withdrawal panel
   links to it from the burn on; `pw-finalize` accepts `ROLLUP` in place of `channel_backing.json`.
   Finishing still needs forge, `contracts/script/RunPartialWithdrawalPayout.s.sol` and an L1 key.
-  Not covered: `wallet-relay-ec2.js` (a co-sign-only demo host without forge) and the window in
-  which the relay stops before proving; the redesign is an owner decision (§2.8).
+  Not covered: the EC2 co-sign-only demo host without forge (`hosting/wallet/`) and the window in
+  which the Balance-state holder stops before proving; the redesign is an owner decision (§2.8).
 - **A — stranded L1 deposit (not fixed).** Confirmed: `CloseFundingMaterializer` has no deposit
   lane, so a deposit that one co-signer never imports is paid by nothing after close. The proposed
   `claimLateDeposit` lane and the decisions it needs are in §2.8; it needs a new pinned adapter and
   the Materializer constructor to change, so it is not a minimal fix.
 - **E — exit kits live only with the daemon (not fixed).** Browser co-signers receive no kit and
-  verify none; a unilateral exit (G17) therefore depends on the operator's or a delegate's daemon.
+  verify none; a unilateral exit (G17) therefore depends on a daemon signer or a delegate's daemon.
   Options are listed in §2.8.
 - The spec text that said an L1 deposit import re-pins `intmax_state_root` was wrong (nothing
   re-pins it) and is corrected in §2.9.
@@ -1099,7 +1102,7 @@ was performed for these changes.
 ### 2.11 Changes of 2026-11-10 (items A, B, E closed: late deposit, cluster-held state, daemon signer)
 
 Owner decisions of 2026-11-10: refund the depositor; refuse deposits above u64; the whole
-sig-cluster holds the private Balance state (no single "relay" role); rule (a) for item E; a rollup
+sig-cluster holds the private Balance state (no single host holds it); rule (a) for item E; a rollup
 redeploy is acceptable.
 
 - **G23 late-deposit lane.** Circuit `src/circuits/channel/late_deposit_circuit.rs`
@@ -1114,10 +1117,10 @@ redeploy is acceptable.
   `receive_deposit_unbound` now keeps (snapshot v5, `retained_pre_receive`, at most 64, with the
   deposit request and salt) — and `prepare_late_deposit` reconciles the deposit leaf against the
   producer, checks the recipient derives from the salt, anchors at the producer head and proves.
-  Daemon command `livePrepareLateDeposit`; relay routes `POST /api/late-deposit/prepare` (reads the
+  Daemon command `livePrepareLateDeposit`; the sig-cluster member's routes `POST /api/late-deposit/prepare` (reads the
   close id, finalized H1 and late cursor from the settlement contracts, writes
   `ch<N>/late_deposit_<nullifier>.json` 0600) and `POST /api/late-deposit/claim` (sends
-  `claimLateDeposit(manager, compactProof)` with the relay's L1 key). Contract:
+  `claimLateDeposit(manager, compactProof)` from any L1 account; the credit goes to the depositor). Contract:
   `CloseFundingMaterializer.claimLateDeposit` with the 4th constructor adapter
   `lateDepositMleVerifier` (env `LATE_DEPOSIT_VERIFIER`, `LATE_DEPOSIT_MLE_CONFIG_PATH`; scripts
   `DeployLateDepositVerifier.s.sol`, `PrepareLateDeposit.s.sol`); same `lateBalanceStateCommitment` /
@@ -1136,8 +1139,9 @@ redeploy is acceptable.
   the burn waits for one acknowledgement before it is reported live, `GET /api/deposit-info` is
   withheld (503) until a peer holds the recipient's salt, `GET /api/cluster/replica-status` lists
   what a host holds, `verify_live_replica` (new binary) opens a replica with the daemon's own
-  checks, and `node api/lib/live-replica.js promote <channel> <host-key>` is the operator failover.
-  Without the secret nothing is shipped and the relay says so at start and per channel. Known
+  checks, and `node api/lib/live-replica.js promote <channel> <host-key>` is the failover a
+  sig-cluster member runs. Without the secret nothing is shipped and the daemon says so at start and
+  per channel. Known
   limits: the replica is not re-shipped by the in-channel cluster round (the private state does not
   change there); a peer's public CLI head is not advanced by the driver's deposit/burn/inter-channel
   operations (pre-existing cluster behaviour, 未確認 by run); the validity snapshot is not shipped
@@ -1148,7 +1152,7 @@ redeploy is acceptable.
 - **Tests run in this session** (exact lines in the commit message): `daemon_signer_rule_tests` 4
   passed; `hosting/wallet/test/live-replica.test.js` 3 passed; late-deposit circuit parse +
   composition tests, `retained_pre_receive_tests`, `late_incoming::tests` 6 passed (implementer
-  runs); forge suite — see §2.11 addendum once measured. Not run: any devnet, relay, browser or
+  runs); forge suite — see §2.11 addendum once measured. Not run: any devnet, end-to-end, browser or
   public-chain flow of the new lane or of replication; `prepare_late_deposit` against a real
   producer; the export binary.
 
@@ -1191,14 +1195,55 @@ redeploy is acceptable.
   consumed-but-uncredited deposits in order and treats `HEAD BACKING NOT FINALIZED` as a wait that
   kicks the publisher. A deposit import retried for the same deposit and block reuses its pre-sign
   operation whatever else changed in the arguments (the RPC endpoint).
-- Measured on the rehearsal after the fixes: deposits #2 (channel 8), #4 (channel 7, operator
-  custody) and #5 (channel 7) credited in order once the backing finalized; an inter-channel send
+- Measured on the rehearsal after the fixes: deposits #2 (channel 8), #4 (channel 7, to the
+  first delegate slot) and #5 (channel 7) credited in order once the backing finalized; an inter-channel send
   refused for backing finality completed 74.1 s later; balances A 0.01 / B 0.011 / C 0.005 ETH as
   the E2E expects.
 - Not on `main`: the EIP-7825 finalize gas-limit fix and the cap-enforcing rehearsal proxy live
   on `claude/bold-hertz-0f2708` (worktree funny-cannon); `main`'s publisher still sends
   `finalize`/`attestProofData` at twice the simulated gas (32.7M / 35.8M here), which a 2^24 cap
   refuses. Sepolia does not enforce the cap today; mainnet does.
+
+### 2.12 Changes of 2026-11-25 (no signature waits for Ethereum; late refunds chain)
+
+Owner decisions of 2026-11-25: a co-signed state is final for the channel when the sig-cluster
+signs it, and nothing waits for the block producer's post (a deposit only raises the channel's
+total; confirming it by a block post is not the channel's concern); the spec names only protocol
+roles (sig-cluster signers, delegates, the block producer, depositors, anyone).
+
+- **Signing gate removed** (`src/bin/channel_member.rs`). The 2026-11-09 gate of §2.10 item C
+  (`require_durable_head_backing_finalized`, its proposal-run twin and the
+  `HEAD BACKING NOT FINALIZED` marker) is gone; `SignerExitKitReceipt.backing_root_finalized` stays
+  only so receipts written in between parse. The wallet no longer waits for "L1 finality" before a
+  send, and the 409 `backingPending` answers, the deposit queue's wait and the burn's staged-block
+  release that served the gate are removed. The block producer still publishes after every deposit
+  import, debit and burn (`wallet-l1.publishLater`), so the newest head's backing finalizes and a
+  close can use it (G16); a strictly newer head may replace a pending close during the challenge
+  window (`ChannelSettlementManager.submitCloseIntent`, floor 86,400 s).
+- **Late cursors from any fallen-back head** (`src/live_balance_service.rs`, snapshot v6). The
+  materializer's late cursor is the Balance commitment of the head the channel closed on. Besides
+  the current generation and the deposit-import archive (`retained_pre_receive`), the service now
+  keeps the generation every send (debit, burn) and inter-channel receive replaces
+  (`retained_prior`, newest 64), so a close that falls back across such a transition still finds its
+  cursor (`late_cursor`, shared by the late-deposit and late-incoming lanes).
+- **Late refunds chain** (G23). A claim moves the materializer's cursor to the receipt's next
+  commitment. That next cursor (`Prepared*::confirmed_checkpoint`) had no consumer, so a second
+  stranded deposit could not be proved. The daemon command `liveAdoptLateDeposit` adopts it once
+  the claim is final (`late_continuations`, newest 8; idempotent), the prepare route reads the
+  cursor at the `finalized` block and adopts the matching claimed receipt first, and a deposit
+  received here can be claimed from any cursor with its retained salt (`retained_deposit_salt`).
+- **Measured** (this change, release builds with `authenticated-tail-receive`):
+  `late_deposits_chain_after_close_from_retained_and_continued_cursors` (real Balance and
+  late-deposit proofs, `tests/live_balance_service.rs`) passed in 217 s at 16.9 GB peak RSS: the
+  pre-burn cursor is found after a burn, deposit #1 (imported, never signed) is proved from its
+  pre-receive generation, its continuation is adopted and survives a restart, and deposit #2 (never
+  received) is proved from that continuation. `retained_pre_receive_tests` 2/2 (v5 → v6 migration,
+  bounds), `live_balance_service::` lib tests 12/12, `channel_member` 103 passed / 1 ignored
+  (pre-existing), `block_producer_service` 3/3, Node 804 tests: 796 pass, 0 fail, 8 skipped.
+- **Not verified**: a claim of `claimLateDeposit` on a chain with a real proof (the forge test uses a
+  mock verifier); the prepare route's adoption against a chain; any public-chain or browser run of
+  the removed wait. A late refund still needs a finalized block after the deposit, so it depends on
+  the block producer posting (unchanged by this change).
 
 ### Appendix A — Code comments known to be stale at `039e9e63`
 
@@ -1233,6 +1278,6 @@ says, the comments do not.
 - `small_block_message.rs:6-7` shows the IMSB preimage without `bp_pk_g`; `channel.rs:420` hashes it.
 - `channel_member.rs:367-372, 438-439` describe the pre-receipt fail-closed rule and a "two-state
   import chain", both superseded.
-- `wallet-relay.js:116-117` says an unsettleable burn holds its channel; nothing holds it since
-  `5382bebd`.
+- The burn-funding comment above `settlementFunding` (`hosting/wallet/`) says an unsettleable burn
+  holds its channel; nothing holds it since `5382bebd`.
 - `src/common/block.rs:36-38` calls the channel id "5-byte"; it is u32.

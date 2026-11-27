@@ -2,10 +2,12 @@
 // paths; this makes the `alloc` crate name resolvable in this (std) crate.
 extern crate alloc;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blob_sidecar;
 pub mod block_producer;
-pub mod channel_credit_safety;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod block_producer_service;
+pub mod channel_credit_safety;
 pub mod circuits;
 pub mod close_funding;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,13 +28,15 @@ pub mod falcon_sig;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod l1_finality;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod l1_signer_reservation;
+pub mod l1_raw_transaction;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod live_balance_service;
+pub(crate) mod l1_signer_reservation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod late_deposit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod late_incoming;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod live_balance_service;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod partial_withdrawal_payout;
 pub mod poseidon_sig;

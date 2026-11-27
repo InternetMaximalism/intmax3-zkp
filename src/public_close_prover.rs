@@ -23,19 +23,19 @@ use crate::{
         balance::balance_pis::BalanceFullPublicInputs,
         channel::{
             close_asset_backing_circuit::{
-                CloseAssetBackingCircuit, CloseAssetBackingPublicInputs,
-                CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN,
+                CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN, CloseAssetBackingCircuit,
+                CloseAssetBackingPublicInputs,
             },
-            close_pis::{ChannelClosePublicInputs, CHANNEL_CLOSE_PUBLIC_INPUTS_LEN},
+            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
         },
     },
     common::{
-        channel::{token_funds_digest, CloseIntent, CloseWithdrawal},
+        channel::{CloseIntent, CloseWithdrawal, token_funds_digest},
         channel_id::ChannelId,
     },
     ethereum_types::{address::Address, bytes32::Bytes32},
     live_balance_service::{
-        LiveChannelBackingArtifact, LIVE_BALANCE_SNAPSHOT_VERSION,
+        LIVE_BASE_HEAD_ARTIFACT_VERSION, LiveChannelBackingArtifact,
         SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
     },
     utils::{
@@ -46,7 +46,7 @@ use crate::{
         serialize::{deserialize_verifier_data, serialize_verifier_data},
         wrapper::WrapperCircuit,
     },
-    wallet_core::{verify_all_signatures, verify_channel_backing, CloseProver},
+    wallet_core::{CloseProver, verify_all_signatures, verify_channel_backing},
 };
 
 type F = GoldilocksField;
@@ -243,10 +243,10 @@ impl PublicBackingBindings {
     }
 
     fn validate(&self, expected_channel: ChannelId) -> PublicCloseResult<()> {
-        if self.snapshot_version != LIVE_BALANCE_SNAPSHOT_VERSION {
+        if self.snapshot_version != LIVE_BASE_HEAD_ARTIFACT_VERSION {
             return Err(PublicCloseError::Backing(format!(
                 "live snapshot version {} is not supported version {}",
-                self.snapshot_version, LIVE_BALANCE_SNAPSHOT_VERSION
+                self.snapshot_version, LIVE_BASE_HEAD_ARTIFACT_VERSION
             )));
         }
         if self.awaiting_channel_binding {
@@ -374,11 +374,11 @@ pub fn parse_public_close_backing_envelope(
     // enum — routes the flattened fields through serde's buffered `Content` tree, whose map keys
     // are strings. That makes `u8::deserialize` reject the `"0"` token keys of the sparse
     // `encBalances`/`pendingAdds` rows inside `signed_head` ("invalid type: string \"0\", expected
-    // u8"), even though the exact same bytes parse fine when the backing is deserialized on its own.
-    // Pulling the four transport scalars out and `from_value`-ing the rest into the (plain,
-    // non-flattened) `LiveChannelBackingArtifact` restores serde_json's own key coercion. The wire
-    // shape is unchanged: the backing fields stay flat beside the transport metadata, exactly as
-    // the daemon/API writes them.
+    // u8"), even though the exact same bytes parse fine when the backing is deserialized on its
+    // own. Pulling the four transport scalars out and `from_value`-ing the rest into the
+    // (plain, non-flattened) `LiveChannelBackingArtifact` restores serde_json's own key
+    // coercion. The wire shape is unchanged: the backing fields stay flat beside the transport
+    // metadata, exactly as the daemon/API writes them.
     let value: serde_json::Value = serde_json::from_slice(json)
         .map_err(|error| PublicCloseError::InvalidEnvelope(error.to_string()))?;
     let take_u64 = |key: &str| -> PublicCloseResult<u64> {
@@ -764,9 +764,9 @@ fn decode_mle_v2_public_input_limb(value: &str, index: usize) -> PublicCloseResu
     })
 }
 
-/// The raw public-input limbs a strict canonical wire-v3 full fixture carries (`proof.publicInputs`).
-/// The JSON is re-parsed by the strict canonical parser, so a hand-edited or re-serialized file is
-/// refused here rather than at submission time.
+/// The raw public-input limbs a strict canonical wire-v3 full fixture carries
+/// (`proof.publicInputs`). The JSON is re-parsed by the strict canonical parser, so a hand-edited
+/// or re-serialized file is refused here rather than at submission time.
 pub fn mle_v2_public_inputs(mle_json: &str) -> PublicCloseResult<Vec<u64>> {
     let fixture = MleVerifierV2Fixture::from_canonical_json(mle_json).map_err(|error| {
         PublicCloseError::Proving(format!(
@@ -1088,7 +1088,7 @@ mod tests {
 
     fn bindings() -> PublicBackingBindings {
         PublicBackingBindings {
-            snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
+            snapshot_version: LIVE_BASE_HEAD_ARTIFACT_VERSION,
             base_channel_id: channel(7),
             record_channel_id: channel(7),
             state_channel_id: channel(7),
@@ -1179,31 +1179,37 @@ mod tests {
 
         let mut substituted = inputs;
         substituted.channel_id = channel(8);
-        assert!(validate_signed_head_backing_composition(
-            &substituted,
-            inputs.channel_id,
-            inputs.settled_tx_chain,
-            inputs.token_funds_digest,
-        )
-        .is_err());
+        assert!(
+            validate_signed_head_backing_composition(
+                &substituted,
+                inputs.channel_id,
+                inputs.settled_tx_chain,
+                inputs.token_funds_digest,
+            )
+            .is_err()
+        );
         substituted = inputs;
         substituted.settled_tx_chain = Bytes32::default();
-        assert!(validate_signed_head_backing_composition(
-            &substituted,
-            inputs.channel_id,
-            inputs.settled_tx_chain,
-            inputs.token_funds_digest,
-        )
-        .is_err());
+        assert!(
+            validate_signed_head_backing_composition(
+                &substituted,
+                inputs.channel_id,
+                inputs.settled_tx_chain,
+                inputs.token_funds_digest,
+            )
+            .is_err()
+        );
         substituted = inputs;
         substituted.token_funds_digest = Bytes32::default();
-        assert!(validate_signed_head_backing_composition(
-            &substituted,
-            inputs.channel_id,
-            inputs.settled_tx_chain,
-            inputs.token_funds_digest,
-        )
-        .is_err());
+        assert!(
+            validate_signed_head_backing_composition(
+                &substituted,
+                inputs.channel_id,
+                inputs.settled_tx_chain,
+                inputs.token_funds_digest,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1215,22 +1221,26 @@ mod tests {
             rollup: address(1),
             balance_verifier_data_sha256: None,
         };
-        assert!(validate_transport_values(
-            PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
-            "liveBalanceService",
-            1,
-            address(1),
-            &expected,
-        )
-        .is_err());
-        assert!(validate_transport_values(
-            PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION + 1,
-            "liveBalanceService",
-            1,
-            address(1),
-            &expected,
-        )
-        .is_err());
+        assert!(
+            validate_transport_values(
+                PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
+                "liveBalanceService",
+                1,
+                address(1),
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transport_values(
+                PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION + 1,
+                "liveBalanceService",
+                1,
+                address(1),
+                &expected,
+            )
+            .is_err()
+        );
 
         expected.balance_verifier_data_sha256 = Some(pin);
         validate_transport_values(
@@ -1243,30 +1253,36 @@ mod tests {
         .expect("pinned production context");
         validate_vd_pin(&expected, pin).expect("exact pin");
         assert!(validate_vd_pin(&expected, sha256(b"substituted-vd")).is_err());
-        assert!(validate_transport_values(
-            PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
-            "liveBalanceService",
-            2,
-            address(1),
-            &expected,
-        )
-        .is_err());
-        assert!(validate_transport_values(
-            PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
-            "liveBalanceService",
-            1,
-            address(2),
-            &expected,
-        )
-        .is_err());
-        assert!(validate_transport_values(
-            PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
-            "setupTimeFile",
-            1,
-            address(1),
-            &expected,
-        )
-        .is_err());
+        assert!(
+            validate_transport_values(
+                PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
+                "liveBalanceService",
+                2,
+                address(1),
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transport_values(
+                PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
+                "liveBalanceService",
+                1,
+                address(2),
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transport_values(
+                PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
+                "setupTimeFile",
+                1,
+                address(1),
+                &expected,
+            )
+            .is_err()
+        );
 
         let parsed = parse_sha256_pin(&format!("0x{}", hex::encode(pin))).expect("pin");
         assert_eq!(parsed, pin);
@@ -1288,20 +1304,31 @@ mod tests {
             decode_mle_v2_public_input_limb("0x00000000ffffffff", 0).expect("canonical limb"),
             u64::from(u32::MAX)
         );
-        for malformed in ["7", "0x7", "0x0000000000000007 ", "0X0000000000000007", "0x00000000000000G7"] {
-            assert!(decode_mle_v2_public_input_limb(malformed, 0).is_err(), "{malformed}");
+        for malformed in [
+            "7",
+            "0x7",
+            "0x0000000000000007 ",
+            "0X0000000000000007",
+            "0x00000000000000G7",
+        ] {
+            assert!(
+                decode_mle_v2_public_input_limb(malformed, 0).is_err(),
+                "{malformed}"
+            );
         }
         assert!(mle_v2_public_inputs(r#"{"publicInputs":["1","2"]}"#).is_err());
     }
 
     #[test]
     fn all_untrusted_binary_components_have_finite_caps() {
-        assert!(enforce_size(
-            "vd",
-            MAX_BALANCE_VERIFIER_DATA_BYTES,
-            MAX_BALANCE_VERIFIER_DATA_BYTES
-        )
-        .is_ok());
+        assert!(
+            enforce_size(
+                "vd",
+                MAX_BALANCE_VERIFIER_DATA_BYTES,
+                MAX_BALANCE_VERIFIER_DATA_BYTES
+            )
+            .is_ok()
+        );
         assert!(matches!(
             enforce_size(
                 "vd",

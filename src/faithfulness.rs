@@ -385,8 +385,7 @@ mod self_tests {
     use plonky2::{
         field::{goldilocks_field::GoldilocksField, types::Field},
         plonk::{
-            circuit_builder::CircuitBuilder,
-            circuit_data::CircuitConfig,
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
             config::PoseidonGoldilocksConfig,
         },
     };

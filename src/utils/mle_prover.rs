@@ -31,7 +31,7 @@ use plonky2_mle::{
         try_export_mle_v2_config_fixture, try_export_mle_v2_fixture,
     },
     proof_v2::{MleProofV2, MleVerificationKeyV2},
-    protocol_schema_v2::{COMPACT_MAGIC_V2, MAX_COMPACT_PROOF_BYTES_V2},
+    protocol_schema_v2::{COMPACT_MAGIC_V2, MAX_COMPACT_PROOF_BYTES_V2, WHIR_POW_BITS_V2},
     prover_v2::{mle_prove_v2, mle_setup_v2},
     verifier_v2::mle_verify_v2,
 };
@@ -684,8 +684,8 @@ fn validate_protocol_v2_config_cutover(
             && generated
                 .pointer("/whirPowBits")
                 .and_then(serde_json::Value::as_u64)
-                == Some(22),
-        "generated artifact is not the reviewed wire-v3/PoW-22 identity"
+                == Some(WHIR_POW_BITS_V2 as u64),
+        "generated artifact is not the current wire-v3 WHIR PoW identity"
     );
 
     for pointer in [

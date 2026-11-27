@@ -3,7 +3,8 @@
 //! pay the first one's circuit build again (on the 4-core testnet host that build was ~190 s per
 //! channel, and each daemon restart paid it once per channel).
 //!
-//! Run: `cargo test --release --features authenticated-tail-receive --test live_balance_two_channels -- --ignored --nocapture`
+//! Run: `cargo test --release --features authenticated-tail-receive --test
+//! live_balance_two_channels -- --ignored --nocapture`
 
 use std::{
     fs,
@@ -17,8 +18,14 @@ use intmax3_zkp::{
 };
 
 fn scratch_dir() -> PathBuf {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("live-balance-two-channels-{}-{nanos}", std::process::id()));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "live-balance-two-channels-{}-{nanos}",
+        std::process::id()
+    ));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -47,10 +54,18 @@ fn second_channel_reuses_the_first_channels_circuits() {
     .unwrap();
     let second_elapsed = started.elapsed();
 
-    eprintln!("first channel initialize: {first_elapsed:?}; second channel initialize: {second_elapsed:?}");
+    eprintln!(
+        "first channel initialize: {first_elapsed:?}; second channel initialize: {second_elapsed:?}"
+    );
     // Each service still decodes and checks its own channel's proof through the shared circuits.
-    assert_eq!(first.base_head_artifact().unwrap().channel_id, ChannelId::new(7).unwrap());
-    assert_eq!(second.base_head_artifact().unwrap().channel_id, ChannelId::new(8).unwrap());
+    assert_eq!(
+        first.base_head_artifact().unwrap().channel_id,
+        ChannelId::new(7).unwrap()
+    );
+    assert_eq!(
+        second.base_head_artifact().unwrap().channel_id,
+        ChannelId::new(8).unwrap()
+    );
     drop((first, second));
     let _ = fs::remove_dir_all(dir);
 }

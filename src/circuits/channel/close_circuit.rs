@@ -1381,7 +1381,10 @@ pub mod test_fixture {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![
+                    Bytes32::default();
+                    member_count as usize
+                ]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)
@@ -1568,7 +1571,10 @@ pub mod test_fixture {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![
+                    Bytes32::default();
+                    member_count as usize
+                ]),
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)
                         .map(|i| {
@@ -1688,7 +1694,10 @@ mod tests {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances_token0(&enc),
-                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![Bytes32::default(); member_count as usize]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&vec![
+                    Bytes32::default();
+                    member_count as usize
+                ]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
                     &(0..member_count)
@@ -2518,14 +2527,18 @@ mod tests {
 
         // .requireAggregateWidth73 — :476-479
         table.check(
-            "requireAggregateWidth73", "close_circuit.rs:476-479", "public-inputs",
+            "requireAggregateWidth73",
+            "close_circuit.rs:476-479",
+            "public-inputs",
             c.agg_proof.public_inputs.len() == FALCON_AGG_PUBLIC_INPUTS_LEN
                 && FALCON_AGG_PUBLIC_INPUTS_LEN == 73,
             "the consumed aggregate statement is pinned to 73 limbs",
         );
         // .standardRecursionZkConfig — :480-481
         table.check(
-            "standardRecursionZkConfig", "close_circuit.rs:480-481", "config",
+            "standardRecursionZkConfig",
+            "close_circuit.rs:480-481",
+            "config",
             c.data.common.config == CircuitConfig::standard_recursion_zk_config(),
             "the built circuit carries standard_recursion_zk_config",
         );
@@ -2548,17 +2561,23 @@ mod tests {
             ("snapshot", pi.snapshot_medium_block_number.to_vec()),
             ("stateVersion", pi.final_state_version.to_vec()),
             ("settledChain", pi.final_settled_tx_chain.to_vec()),
-            ("accumulatorRoot", pi.final_settled_tx_accumulator_root.to_vec()),
+            (
+                "accumulatorRoot",
+                pi.final_settled_tx_accumulator_root.to_vec(),
+            ),
             ("memberSet", pi.member_set_commitment.to_vec()),
             ("memberCount", vec![pi.member_count]),
             ("delegateCount", vec![pi.delegate_count]),
             ("tokenFundsDigest", pi.token_funds_digest.to_vec()),
         ];
-        let expected_widths = [1usize, 2, 2, 2, 2, 8, 8, 8, 8, 8, 8, 8, 2, 2, 8, 8, 8, 1, 1, 8];
+        let expected_widths = [
+            1usize, 2, 2, 2, 2, 8, 8, 8, 8, 8, 8, 8, 2, 2, 8, 8, 8, 1, 1, 8,
+        ];
         for ((name, wires), width) in public_fields.iter().zip(expected_widths) {
             table.check(
                 &format!("checkedPublicField {name}"),
-                "close_circuit.rs:142-171", "range",
+                "close_circuit.rs:142-171",
+                "range",
                 wires.len() == width && view.all_range_checked(wires, 32),
                 "every allocated limb carries range_check(limb, 32)",
             );
@@ -2566,16 +2585,29 @@ mod tests {
 
         // .checkedPrivateField name width — :483-487
         let private_fields: Vec<(&str, Vec<Target>, usize)> = vec![
-            ("stateFreezeNonce", c.final_state_close_freeze_nonce.to_vec(), 2),
-            ("sharedNullifierRoot", c.final_state_shared_native_nullifier_root.to_vec(), 8),
-            ("unallocatedIncoming", c.final_state_unallocated_confirmed_incoming.to_vec(), 8),
+            (
+                "stateFreezeNonce",
+                c.final_state_close_freeze_nonce.to_vec(),
+                2,
+            ),
+            (
+                "sharedNullifierRoot",
+                c.final_state_shared_native_nullifier_root.to_vec(),
+                8,
+            ),
+            (
+                "unallocatedIncoming",
+                c.final_state_unallocated_confirmed_incoming.to_vec(),
+                8,
+            ),
             ("previousDigest", c.final_state_prev_digest.to_vec(), 8),
             ("h2", c.final_state_h2_tag.to_vec(), 8),
         ];
         for (name, wires, width) in &private_fields {
             table.check(
                 &format!("checkedPrivateField {name}"),
-                "close_circuit.rs:483-487", "range",
+                "close_circuit.rs:483-487",
+                "range",
                 wires.len() == *width && view.all_range_checked(wires, 32),
                 "every allocated limb carries range_check(limb, 32)",
             );
@@ -2584,7 +2616,9 @@ mod tests {
         // .rawSlotRoot4 — :490. The Lean op constrains NOTHING; the evidence is that the four
         // Goldilocks elements really are UNCHECKED.
         table.check(
-            "rawSlotRoot4", "close_circuit.rs:490", "range",
+            "rawSlotRoot4",
+            "close_circuit.rs:490",
+            "range",
             c.slot_tree_root.elements.len() == 4
                 && view.none_range_checked(&c.slot_tree_root.elements),
             "PoseidonHashOutTarget::new allocates 4 RAW elements with no range check",
@@ -2592,20 +2626,29 @@ mod tests {
 
         // .checkedTokenCount / .checkedRegistry slot / .checkedFundU256 slot — :496-504
         table.check(
-            "checkedTokenCount", "close_circuit.rs:496-504", "range",
+            "checkedTokenCount",
+            "close_circuit.rs:496-504",
+            "range",
             view.range_bits(c.token_count).contains(&32),
             "range_check(token_count, 32)",
         );
         table.check(
-            "checkedRegistry[0..10)", "close_circuit.rs:496-504", "range",
+            "checkedRegistry[0..10)",
+            "close_circuit.rs:496-504",
+            "range",
             c.token_registry.len() == MAX_CHANNEL_TOKENS
                 && view.all_range_checked(&c.token_registry, 32),
             "range_check(registry[t], 32) for every slot",
         );
-        let fund_limbs: Vec<Target> =
-            c.channel_fund_amounts.iter().flat_map(|a| a.to_vec()).collect();
+        let fund_limbs: Vec<Target> = c
+            .channel_fund_amounts
+            .iter()
+            .flat_map(|a| a.to_vec())
+            .collect();
         table.check(
-            "checkedFundU256[0..10)", "close_circuit.rs:496-504", "range",
+            "checkedFundU256[0..10)",
+            "close_circuit.rs:496-504",
+            "range",
             fund_limbs.len() == MAX_CHANNEL_TOKENS * 8 && view.all_range_checked(&fund_limbs, 32),
             "U256Target::new(_, true): 8 range-checked limbs per token slot",
         );
@@ -2613,73 +2656,110 @@ mod tests {
         // .safeMemberBoolean / .memberMonotone / .safeTokenBoolean / .tokenMonotone /
         // .noDuplicateActiveToken — arithmetic gates, invisible to the copy-constraint partition.
         table.note(
-            "safeMemberBoolean[0..8)", "close_circuit.rs:519-521", "arith", NOT_STATIC,
+            "safeMemberBoolean[0..8)",
+            "close_circuit.rs:519-521",
+            "arith",
+            NOT_STATIC,
             "add_virtual_bool_target_safe is mul_sub(b,b,b) connected to zero on an internal wire",
         );
         table.note(
-            "memberMonotone[0..7)", "close_circuit.rs:526-531", "arith", NOT_STATIC,
+            "memberMonotone[0..7)",
+            "close_circuit.rs:526-531",
+            "arith",
+            NOT_STATIC,
             "connect(mul(bit[i+1], sub(one, bit[i])), zero) on internal wires",
         );
         table.note(
-            "safeTokenBoolean[0..10)", "close_circuit.rs:571-573", "arith", NOT_STATIC,
+            "safeTokenBoolean[0..10)",
+            "close_circuit.rs:571-573",
+            "arith",
+            NOT_STATIC,
             "add_virtual_bool_target_safe is mul_sub(b,b,b) connected to zero on an internal wire",
         );
         table.note(
-            "tokenMonotone[0..9)", "close_circuit.rs:575-578", "arith", NOT_STATIC,
+            "tokenMonotone[0..9)",
+            "close_circuit.rs:575-578",
+            "arith",
+            NOT_STATIC,
             "connect(mul(bit[t+1], sub(one, bit[t])), zero) on internal wires",
         );
         table.note(
-            "noDuplicateActiveToken[45 pairs]", "close_circuit.rs:594-599", "arith", NOT_STATIC,
+            "noDuplicateActiveToken[45 pairs]",
+            "close_circuit.rs:594-599",
+            "arith",
+            NOT_STATIC,
             "connect(and(is_equal(reg[i], reg[j]), token_active[j]), zero) on internal wires",
         );
 
         // .connectMemberSum / .connectTokenSum — :533-537 / :579-583
         table.check(
-            "connectMemberSum", "close_circuit.rs:533-537", "connect",
+            "connectMemberSum",
+            "close_circuit.rs:533-537",
+            "connect",
             view.same(p.member_count_sum, pi.member_count),
             "the MAX_SIG_CLUSTER-bit add chain is connected to the member_count PI limb",
         );
         table.check(
-            "connectTokenSum", "close_circuit.rs:579-583", "connect",
+            "connectTokenSum",
+            "close_circuit.rs:579-583",
+            "connect",
             view.same(p.token_count_sum, c.token_count),
             "the MAX_CHANNEL_TOKENS-bit add chain is connected to the token_count witness limb",
         );
         // .requireMemberFlag slot — :547, :559; .requireTokenFlag0 — :584
         table.check(
-            "requireMemberFlag 0", "close_circuit.rs:547", "constant",
+            "requireMemberFlag 0",
+            "close_circuit.rs:547",
+            "constant",
             view.is_one(c.active_bits[0].target),
             "assert_one(active_bits[0]): member_count >= 1",
         );
         table.check(
-            "requireMemberFlag 1", "close_circuit.rs:559", "constant",
+            "requireMemberFlag 1",
+            "close_circuit.rs:559",
+            "constant",
             view.is_one(c.active_bits[1].target),
             "assert_one(active_bits[1]): member_count >= 2 (M-6)",
         );
         table.check(
-            "requireTokenFlag0", "close_circuit.rs:584", "constant",
+            "requireTokenFlag0",
+            "close_circuit.rs:584",
+            "constant",
             view.is_one(c.token_active_bits[0].target),
             "assert_one(token_active_bits[0]): token_count >= 1 (TM-8)",
         );
 
         // .connectGenesisAmount — :606
         table.check(
-            "connectGenesisAmount", "close_circuit.rs:606", "connect",
-            view.same_slices(&c.channel_fund_amounts[0].to_vec(), &pi.channel_fund_amount.to_vec()),
+            "connectGenesisAmount",
+            "close_circuit.rs:606",
+            "connect",
+            view.same_slices(
+                &c.channel_fund_amounts[0].to_vec(),
+                &pi.channel_fund_amount.to_vec(),
+            ),
             "amounts[0].connect(channel_fund_amount): 8 limbs share a representative",
         );
         // .addFreezeU64OneFinalCarryZero — :608-609 via ethereum_types/u64.rs:182-197
         table.check(
-            "addFreezeU64OneFinalCarryZero", "ethereum_types/u64.rs:182-197", "range",
+            "addFreezeU64OneFinalCarryZero",
+            "ethereum_types/u64.rs:182-197",
+            "range",
             view.all_range_checked(&p.incremented_close_freeze_nonce.to_vec(), 32),
             "both output limbs of U64Target::add are 32-bit range-checked",
         );
         table.note(
-            "addFreezeU64OneFinalCarryZero", "ethereum_types/u64.rs:182-197", "arith", NOT_STATIC,
+            "addFreezeU64OneFinalCarryZero",
+            "ethereum_types/u64.rs:182-197",
+            "arith",
+            NOT_STATIC,
             "the carry equations and the final-carry-zero connect are on internal wires",
         );
         // .connectFreezeSuccessor — :610; .connectCloseNonceToFreeze — :618-620
         table.check(
-            "connectFreezeSuccessor", "close_circuit.rs:610", "connect",
+            "connectFreezeSuccessor",
+            "close_circuit.rs:610",
+            "connect",
             view.same_slices(
                 &p.incremented_close_freeze_nonce.to_vec(),
                 &pi.close_freeze_nonce.to_vec(),
@@ -2687,18 +2767,24 @@ mod tests {
             "the incremented nonce is connected to the close_freeze_nonce PI",
         );
         table.check(
-            "connectCloseNonceToFreeze", "close_circuit.rs:618-620", "connect",
+            "connectCloseNonceToFreeze",
+            "close_circuit.rs:618-620",
+            "connect",
             view.same_slices(&pi.close_nonce.to_vec(), &pi.close_freeze_nonce.to_vec()),
             "close_nonce.connect(close_freeze_nonce)",
         );
         // Snapshot/burn remain zero; residual incoming is authenticated in IMCH.
         table.check(
-            "zeroSnapshot2", "close_circuit.rs:621-623", "constant",
+            "zeroSnapshot2",
+            "close_circuit.rs:621-623",
+            "constant",
             view.all_zero(&pi.snapshot_medium_block_number.to_vec()),
             "every snapshot limb is connected to the constant 0",
         );
         table.check(
-            "zeroBurnHash8", "close_circuit.rs:624-626", "constant",
+            "zeroBurnHash8",
+            "close_circuit.rs:624-626",
+            "constant",
             view.all_zero(&pi.burn_tx_hash.to_vec()),
             "every burn_tx_hash limb is connected to the constant 0",
         );
@@ -2710,17 +2796,29 @@ mod tests {
 
         // .recompute*AndConnect — the `connect` half of each gadget op.
         table.check(
-            "recomputeH1AndConnect", "close_circuit.rs:644-656", "connect",
-            view.same_slices(&p.recomputed_h1.to_vec(), &pi.final_balance_state_h1.to_vec()),
+            "recomputeH1AndConnect",
+            "close_circuit.rs:644-656",
+            "connect",
+            view.same_slices(
+                &p.recomputed_h1.to_vec(),
+                &pi.final_balance_state_h1.to_vec(),
+            ),
             "recomputed_h1.connect(final_balance_state_h1)",
         );
         table.check(
-            "recomputeImchAndConnect", "close_circuit.rs:665-687", "connect",
-            view.same_slices(&p.state_digest.to_vec(), &pi.final_channel_state_digest.to_vec()),
+            "recomputeImchAndConnect",
+            "close_circuit.rs:665-687",
+            "connect",
+            view.same_slices(
+                &p.state_digest.to_vec(),
+                &pi.final_channel_state_digest.to_vec(),
+            ),
             "state_digest.connect(final_channel_state_digest)",
         );
         table.check(
-            "recomputeImclAndConnect", "close_circuit.rs:689-701", "connect",
+            "recomputeImclAndConnect",
+            "close_circuit.rs:689-701",
+            "connect",
             view.same_slices(
                 &p.close_withdrawal_digest.to_vec(),
                 &pi.close_withdrawal_digest.to_vec(),
@@ -2728,12 +2826,16 @@ mod tests {
             "close_withdrawal_digest.connect(close_withdrawal_digest PI)",
         );
         table.check(
-            "recomputeImcsAndConnect", "close_circuit.rs:712-721", "connect",
+            "recomputeImcsAndConnect",
+            "close_circuit.rs:712-721",
+            "connect",
             view.same_slices(&p.close_state_id.to_vec(), &pi.close_intent_digest.to_vec()),
             "close_state_id.connect(close_intent_digest)",
         );
         table.check(
-            "recomputeTokenFundsAndConnect", "close_circuit.rs:731-741", "connect",
+            "recomputeTokenFundsAndConnect",
+            "close_circuit.rs:731-741",
+            "connect",
             view.same_slices(
                 &p.recomputed_token_funds_digest.to_vec(),
                 &pi.token_funds_digest.to_vec(),
@@ -2755,27 +2857,40 @@ mod tests {
 
         // Balance recursion — :744-753.
         table.note(
-            "allocateBalanceProofAndConstantKey", "close_circuit.rs:744", "gadget", NOT_STATIC,
+            "allocateBalanceProofAndConstantKey",
+            "close_circuit.rs:744",
+            "gadget",
+            NOT_STATIC,
             "add_proof_target_and_verify_cyclic bakes balance_vd in as constants",
         );
         table.note(
-            "connectBalanceEmbeddedCyclicKey", "close_circuit.rs:744", "gadget", NOT_STATIC,
+            "connectBalanceEmbeddedCyclicKey",
+            "close_circuit.rs:744",
+            "gadget",
+            NOT_STATIC,
             "the cyclic self-reference connect lives inside the recursion helper",
         );
         table.note(
-            "verifyBalanceAtConstantKey", "close_circuit.rs:744", "gadget", NOT_STATIC,
+            "verifyBalanceAtConstantKey",
+            "close_circuit.rs:744",
+            "gadget",
+            NOT_STATIC,
             "recursive verification is the pinned-circuit dependency, not a copy constraint",
         );
         let balance_pis = BalancePublicInputsTarget::from_pis(
             &c.final_balance_proof.public_inputs[0..BALANCE_PUBLIC_INPUTS_LEN],
         );
         table.check(
-            "connectBalanceChannel", "close_circuit.rs:750", "connect",
+            "connectBalanceChannel",
+            "close_circuit.rs:750",
+            "connect",
             view.same(balance_pis.channel_id.value, pi.channel_id[0]),
             "balance_pis.channel_id is connected to the channel_id PI limb",
         );
         table.check(
-            "connectBalanceSettledChain", "close_circuit.rs:751-753", "connect",
+            "connectBalanceSettledChain",
+            "close_circuit.rs:751-753",
+            "connect",
             view.same_slices(
                 &balance_pis.settled_tx_chain.to_vec(),
                 &pi.final_settled_tx_chain.to_vec(),
@@ -2785,15 +2900,23 @@ mod tests {
 
         // Aggregate recursion — :806-826.
         table.note(
-            "allocateAggregateProofAndConstantKey", "close_circuit.rs:806", "gadget", NOT_STATIC,
+            "allocateAggregateProofAndConstantKey",
+            "close_circuit.rs:806",
+            "gadget",
+            NOT_STATIC,
             "add_proof_target_and_verify bakes agg_vd in as constants",
         );
         table.note(
-            "verifyAggregateAtConstantKey", "close_circuit.rs:806", "gadget", NOT_STATIC,
+            "verifyAggregateAtConstantKey",
+            "close_circuit.rs:806",
+            "gadget",
+            NOT_STATIC,
             "recursive verification is the pinned-circuit dependency, not a copy constraint",
         );
         table.check(
-            "connectAggregateMessage", "close_circuit.rs:809-812", "connect",
+            "connectAggregateMessage",
+            "close_circuit.rs:809-812",
+            "connect",
             view.same_slices(&p.agg_message.to_vec(), &p.state_digest.to_vec())
                 && view.same_slices(
                     &p.agg_message.to_vec(),
@@ -2802,8 +2925,13 @@ mod tests {
             "agg_message.connect(state_digest), transitively the final_channel_state_digest PI",
         );
         table.check(
-            "connectAggregateCount", "close_circuit.rs:815-818", "connect",
-            view.same(c.agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET], pi.member_count),
+            "connectAggregateCount",
+            "close_circuit.rs:815-818",
+            "connect",
+            view.same(
+                c.agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET],
+                pi.member_count,
+            ),
             "agg signer_count is connected to the member_count PI limb",
         );
         // .sliceAggregateKey slot — :821-826. The Lean op states pure ALIASING: the key vector
@@ -2814,7 +2942,9 @@ mod tests {
                 == c.agg_proof.public_inputs[start..start + BYTES32_LEN].to_vec()
         });
         table.check(
-            "sliceAggregateKey[0..8)", "close_circuit.rs:821-826", "aliasing",
+            "sliceAggregateKey[0..8)",
+            "close_circuit.rs:821-826",
+            "aliasing",
             p.member_pk_g_targets.len() == MAX_SIG_CLUSTER && aliased,
             "member key slot i IS agg_proof.public_inputs[9 + 8i .. 17 + 8i] (same Targets)",
         );
@@ -2822,11 +2952,16 @@ mod tests {
         // .selectImcmKeyWords slot — :836-841 (arithmetic) — but the IMCM preimage LAYOUT is
         // structural and is what `computeMemberSetAndConnect` hashes.
         table.note(
-            "selectImcmKeyWords[0..8)", "close_circuit.rs:836-841", "arith", NOT_STATIC,
+            "selectImcmKeyWords[0..8)",
+            "close_circuit.rs:836-841",
+            "arith",
+            NOT_STATIC,
             "select(is_active, limb, zero) outputs are arithmetic wires",
         );
         table.check(
-            "selectImcmKeyWords[0..8)", "close_circuit.rs:830-841", "preimage",
+            "selectImcmKeyWords[0..8)",
+            "close_circuit.rs:830-841",
+            "preimage",
             p.member_set_inputs.len() == 2 + MAX_SIG_CLUSTER * BYTES32_LEN
                 && view.is_const(p.member_set_inputs[0], u64::from(CLOSE_MEMBER_SET_DOMAIN))
                 && view.same(p.member_set_inputs[1], pi.member_count),
@@ -2836,36 +2971,56 @@ mod tests {
         // .allocateCheckedInsertionPath4 / .constantInsertionValueOne / .constantEmptyDistinctRoot
         // / .conditionalIndexedInsert — :873-895.
         table.check(
-            "allocateCheckedInsertionPath4[0..8)", "close_circuit.rs:873-879", "width",
+            "allocateCheckedInsertionPath4[0..8)",
+            "close_circuit.rs:873-879",
+            "width",
             c.member_insertion_proofs.len() == MAX_SIG_CLUSTER,
             "one height-4 indexed insertion proof per cosigner slot; Lean holds = True",
         );
         table.check(
-            "constantInsertionValueOne", "close_circuit.rs:881", "constant",
+            "constantInsertionValueOne",
+            "close_circuit.rs:881",
+            "constant",
             view.is_one(p.distinctness_value),
             "builder.one() is the inserted leaf value",
         );
         let empty_root = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT).get_root();
         table.check(
-            "constantEmptyDistinctRoot", "close_circuit.rs:882-885", "constant",
+            "constantEmptyDistinctRoot",
+            "close_circuit.rs:882-885",
+            "constant",
             (0..4).all(|i| {
-                view.is_const(p.empty_distinctness_root.elements[i], empty_root.elements[i])
+                view.is_const(
+                    p.empty_distinctness_root.elements[i],
+                    empty_root.elements[i],
+                )
             }),
             "the chain starts at the canonical empty IndexedMerkleTree root, as 4 constants",
         );
         table.note(
-            "conditionalIndexedInsert[0..8)", "close_circuit.rs:886-895", "gadget", NOT_STATIC,
+            "conditionalIndexedInsert[0..8)",
+            "close_circuit.rs:886-895",
+            "gadget",
+            NOT_STATIC,
             "conditional_get_new_root is the audited insertion gadget, not a copy constraint",
         );
 
         // .computeMemberSetAndConnect — :897-899
         table.check(
-            "computeMemberSetAndConnect", "close_circuit.rs:897-899", "connect",
-            view.same_slices(&p.member_set_commitment.to_vec(), &pi.member_set_commitment.to_vec()),
+            "computeMemberSetAndConnect",
+            "close_circuit.rs:897-899",
+            "connect",
+            view.same_slices(
+                &p.member_set_commitment.to_vec(),
+                &pi.member_set_commitment.to_vec(),
+            ),
             "member_set_commitment.connect(member_set_commitment PI)",
         );
         table.note(
-            "computeMemberSetAndConnect", "plonky2_keccak", "gadget", NOT_STATIC,
+            "computeMemberSetAndConnect",
+            "plonky2_keccak",
+            "gadget",
+            NOT_STATIC,
             "the keccak relation itself is Environment.keccak",
         );
 
@@ -2873,7 +3028,9 @@ mod tests {
         let expected_pi_order: Vec<Target> =
             public_fields.iter().flat_map(|(_, w)| w.clone()).collect();
         table.check(
-            "registerPublicInputs103", "close_circuit.rs:901 / :174-199", "public-inputs",
+            "registerPublicInputs103",
+            "close_circuit.rs:901 / :174-199",
+            "public-inputs",
             expected_pi_order.len() == CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
                 && CHANNEL_CLOSE_PUBLIC_INPUTS_LEN == 103
                 && view.public_inputs_are(&expected_pi_order)
@@ -2881,7 +3038,10 @@ mod tests {
             "the 103 registered wires are exactly the 20 fields in `PublicInputs.words` order",
         );
         table.note(
-            "build", "close_circuit.rs:902", "no-gate", TRIVIAL,
+            "build",
+            "close_circuit.rs:902",
+            "no-gate",
+            TRIVIAL,
             "builder.build emits no constraint; Lean holds = True",
         );
 

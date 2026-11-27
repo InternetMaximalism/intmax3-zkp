@@ -44,7 +44,7 @@ context. Immediately before every signature request, the connected wallet provid
 revert therefore never reaches `eth_sendTransaction`.
 
 The claim path accepts exactly the full `plonky2-mle-v3-solidity` schema/protocol version 3,
-WHIR PoW 22 artifact and the compact `MLEWHIR3` encoding. Its sole Manager selector is `0x0b0f2d14` for
+WHIR PoW 28 artifact and the compact `MLEWHIR3` encoding. Its sole Manager selector is `0x0b0f2d14` for
 `submitWithdrawalClaim(WithdrawalClaim,bytes)`. V1, partially versioned, flattened, unknown-field,
 non-canonical-hex, over-cap, mismatched full/compact, and mixed-schema artifacts are rejected before
 calldata preparation. The Node decoder reconstructs the entire 16-field proof from the compact

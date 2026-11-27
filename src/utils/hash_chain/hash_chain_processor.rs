@@ -68,12 +68,13 @@ where
                     ))
                     .into());
                 }
-                Bytes32::from_u64_slice(&prev.public_inputs[0..BYTES32_LEN].to_u64_vec())
-                    .map_err(|e| {
+                Bytes32::from_u64_slice(&prev.public_inputs[0..BYTES32_LEN].to_u64_vec()).map_err(
+                    |e| {
                         HashChainError::InvalidData(format!(
                             "previous proof hash limbs are not u32: {e}"
                         ))
-                    })?
+                    },
+                )?
             }
             None => Bytes32::default(),
         };
