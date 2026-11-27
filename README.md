@@ -8,6 +8,17 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 > **Specification: start by reading the Overview (chapter 1) of [`doc/design_spec.md`](doc/design_spec.md).**
 > It is the official design specification of the current implementation. 
 
+> [!IMPORTANT]
+> **After every `git clone`, `git pull` or `git checkout`, run:**
+>
+> ```bash
+> git submodule update --init --recursive
+> ```
+>
+> The prover and the on-chain verifier come from the pinned `contracts/lib/polygon-plonky2`
+> submodule, and `git pull` / `git checkout` do not update it. A stale submodule makes `cargo` and
+> `forge` stop with this same command in the error message. See [Setup](#setup).
+
 ---
 
 ## Why INTMAX3
